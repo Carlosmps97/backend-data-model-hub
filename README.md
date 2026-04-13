@@ -19,44 +19,49 @@ Sistema multi-agente experto en modelamiento de datos construido con el **Micros
 
 ## Arquitectura
 
-```
- ┌──────────────────────┐
- │   Usuario (CLI)       │
- │   Texto / .xlsx       │
- └──────────┬───────────┘
-            │
-            ▼
- ┌──────────────────────┐          ┌──────────────────────────┐
- │ ConversationalAgent   │          │ KnowledgeBaseAgent        │
- │  • Parseo de input    │          │ (implementado como Tools) │
- │  • Detección motor BD │          │  • query_guidelines       │
- │  • Formateo Rich      │          │  • get_all_guidelines     │
- └──────────┬───────────┘          └────────────┬─────────────┘
-            │                                    │ consultado por
-            ▼                                    │ ExecutorAgent
- ╔══════════════════════════════════════════════════════════════╗
- ║               WORKFLOW  (Grafo Dirigido)                     ║
- ║                                                              ║
- ║  ┌───────────────┐    ┌────────────────┐    ┌─────────────┐ ║
- ║  │ prepare_input  │───▶│ ExecutorAgent   │───▶│extract_model│ ║
- ║  │ (formatea      │    │ (modelo + DDL)  │    │ (limpia JSON│ ║
- ║  │  prompt)       │    │                 │    │  prepara QA)│ ║
- ║  └───────────────┘    └────────────────┘    └──────┬──────┘ ║
- ║                                                     │        ║
- ║                       ┌────────────────┐    ┌──────▼──────┐ ║
- ║                       │ format_output   │◀──│QAValidator   │ ║
- ║                       │ (resultado      │    │ Agent        │ ║
- ║                       │  final JSON)    │    │ (valida +    │ ║
- ║                       └────────────────┘    │  estandariza)│ ║
- ║                                              └─────────────┘ ║
- ╚══════════════════════════════════════════════════════════════╝
-            │
-            ▼
- ┌──────────────────────┐          ┌──────────────────────────┐
- │  Modelo de datos      │          │  Catálogo corporativo     │
- │  + DDL ejecutable     │          │  column_catalog.json      │
- │  + Reporte QA         │          │  (actualizado en runtime) │
- └──────────────────────┘          └──────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Entrada["📥 Entrada"]
+        U[Usuario<br/>Texto / .xlsx]
+    end
+
+    subgraph CapaUI["💻 Capa de Presentación"]
+        CA[ConversationalAgent<br/>• Parseo input<br/>• Detección motor BD<br/>• Formateo Rich]
+    end
+
+    subgraph Knowledge["📚 KnowledgeBase"]
+        KB[Tools compartidas<br/>query_guidelines<br/>get_all_guidelines]
+    end
+
+    subgraph Workflow["⚙️ Workflow Pipeline"]
+        PI[prepare_input]
+        EA[ExecutorAgent]
+        EM[extract_model]
+        QA[QAValidatorAgent]
+        FO[format_output]
+    end
+
+    subgraph Salida["📤 Salida"]
+        DM[(Modelo de datos<br/>+ DDL ejecutable)]
+        CAT[(Catálogo corporativo<br/>actualizado)]
+    end
+
+    U --> CA
+    CA --> PI
+    PI --> EA
+    EA -.->|consulta| KB
+    EA --> EM
+    EM --> QA
+    QA -.->|consulta| KB
+    QA -.->|actualiza| CAT
+    QA --> FO
+    FO --> DM
+
+    style Entrada fill:#e1f5fe
+    style CapaUI fill:#fff3e0
+    style Knowledge fill:#f3e5f5
+    style Workflow fill:#e8f5e9
+    style Salida fill:#ffebee
 ```
 
 ---

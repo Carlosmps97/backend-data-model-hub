@@ -15,59 +15,72 @@ El diseño sigue los principios de:
 
 ## Diagrama de componentes
 
-```
- ┌─────────────────────────────────────────────────────────────────┐
- │                        CAPA DE PRESENTACIÓN                     │
- │                                                                 │
- │  src/main.py                                                    │
- │  ┌─────────────────────────────────────────────────────────┐   │
- │  │  CLI Multi-turno (Rich Console)                          │   │
- │  │  • Banner + ayuda interactiva                            │   │
- │  │  • Detección automática de motor BD y rutas .xlsx        │   │
- │  │  • Display estructurado: tablas, DDL, QA report          │   │
- │  └─────────────────────────────────────────────────────────┘   │
- └────────────────────────────┬────────────────────────────────────┘
-                              │
-                              ▼
- ┌─────────────────────────────────────────────────────────────────┐
- │                     CAPA DE ORQUESTACIÓN                        │
- │                                                                 │
- │  src/workflow/graph.py                                          │
- │  ┌─────────────────────────────────────────────────────────┐   │
- │  │  WorkflowBuilder (Grafo Dirigido)                        │   │
- │  │                                                          │   │
- │  │  prepare_input ──▶ ExecutorAgent ──▶ extract_model       │   │
- │  │                                          │               │   │
- │  │                    format_output ◀── QAValidatorAgent    │   │
- │  │                                                          │   │
- │  │  Utilidades: _extract_json_from_text, _fix_trailing_commas│  │
- │  └─────────────────────────────────────────────────────────┘   │
- └────────────────────────────┬────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
- ┌────────────────┐ ┌────────────────┐ ┌────────────────────┐
- │  AGENTES        │ │  TOOLS          │ │  DATOS             │
- │                 │ │                 │ │                    │
- │  factory.py     │ │  excel_tools    │ │  column_catalog    │
- │  instructions.py│ │  catalog_tools  │ │    .json           │
- │                 │ │  knowledge_base │ │  modeling_guidelines│
- │  • Executor     │ │    _tools       │ │    .json           │
- │  • QAValidator  │ │                 │ │  sample_input      │
- │  • Conversational│ │                │ │    .xlsx           │
- └────────────────┘ └────────────────┘ └────────────────────┘
-              │               │               │
-              ▼               ▼               ▼
- ┌─────────────────────────────────────────────────────────────────┐
- │                    CAPA DE INFRAESTRUCTURA                       │
- │                                                                 │
- │  src/config.py           Azure AI Foundry                       │
- │  ┌──────────────┐       ┌──────────────────────────────┐       │
- │  │ Settings      │       │ FoundryChatClient             │       │
- │  │ (singleton)   │──────▶│ + ClientSecretCredential      │       │
- │  │ .env loader   │       │ → GPT-4o (o modelo config.)   │       │
- │  └──────────────┘       └──────────────────────────────┘       │
- └─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Presentation["💻 Capa de Presentación - src/main.py"]
+        CLI[CLI Multi-turno<br/>Banner + ayuda<br/>Detección motor BD / .xlsx<br/>Display estructurado]
+    end
+
+    subgraph Orchestration["⚙️ Capa de Orquestación - src/workflow/graph.py"]
+        direction LR
+        PI[prepare_input]
+        EA[ExecutorAgent]
+        EM[extract_model]
+        QA[QAValidatorAgent]
+        FO[format_output]
+        UTIL[Utils:<br/>_extract_json_from_text<br/>_fix_trailing_commas]
+
+        PI --> EA --> EM --> QA --> FO
+        UTIL -.-> EA
+        UTIL -.-> QA
+    end
+
+    subgraph Agents["🤖 Agentes - src/agents/"]
+        AF[factory.py<br/>instructions.py]
+        EX[ExecutorAgent]
+        QAA[QAValidatorAgent]
+        CONV[ConversationalAgent]
+    end
+
+    subgraph Tools["🔧 Tools - src/tools/"]
+        ET[excel_tools<br/>parse_excel_file]
+        CT[catalog_tools<br/>search/add/get]
+        KBT[knowledge_base_tools<br/>query/get_all]
+    end
+
+    subgraph Data["💾 Datos - data/"]
+        CAT[column_catalog.json<br/>Catálogo corporativo]
+        GL[modeling_guidelines.json<br/>Lineamientos]
+        SI[sample_input.xlsx<br/>Ejemplo]
+    end
+
+    subgraph Infra["🔌 Infraestructura"]
+        CFG[src/config.py<br/>Settings singleton]
+        AZ[Azure AI Foundry<br/>FoundryChatClient<br/>GPT-4o]
+    end
+
+    CLI --> Orchestration
+    EA -.->|usa| KBT
+    QA -.->|usa| CT
+    QA -.->|usa| KBT
+    CONV -.->|usa| ET
+
+    KBT -.->|lee| GL
+    CT -.->|lee/escribe| CAT
+    ET -.->|lee| SI
+
+    AF --> EX
+    AF --> QAA
+    AF --> CONV
+
+    CFG --> AZ
+
+    style Presentation fill:#e3f2fd
+    style Orchestration fill:#e8f5e9
+    style Agents fill:#fff3e0
+    style Tools fill:#fce4ec
+    style Data fill:#f3e5f5
+    style Infra fill:#fff8e1
 ```
 
 ---

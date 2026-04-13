@@ -183,29 +183,81 @@ Resultado final que se presenta al usuario.
 
 ## Relaciones entre schemas
 
-```
-UserInput
-  └── RawTableInput[]
-       └── RawColumnInput[]
+```mermaid
+classDiagram
+    class UserInput {
+        +List~RawTableInput~ tables
+        +str user_text
+        +str target_engine
+        +List~str~ relationships
+    }
 
-        ┌── ExecutorAgent genera ──┐
-        ▼                          │
-DataModelOutput                    │
-  └── TableModel[]                 │
-       └── ColumnDefinition[]      │
-                                   │
-        ┌── QAValidatorAgent ──────┘
-        ▼
-QAValidationOutput
-  ├── TableModel[]  (corregidas)
-  └── QAReport
-       ├── ColumnStandardization[]
-       ├── GuidelineViolation[]
-       └── NewCatalogEntry[]
+    class RawTableInput {
+        +str table_name
+        +List~RawColumnInput~ columns
+    }
 
-WorkflowResult (combina ambos)
-  ├── DataModelOutput
-  ├── QAValidationOutput
-  ├── final_ddls
-  └── relationship_diagram
+    class RawColumnInput {
+        +str column_name
+        +str functional_definition
+        +str data_type_hint
+        +bool is_nullable
+        +str notes
+    }
+
+    class DataModelOutput {
+        +List~TableModel~ tables
+        +List~str~ relationships
+        +str engine
+        +str summary
+    }
+
+    class TableModel {
+        +str table_name
+        +List~ColumnDefinition~ columns
+        +str ddl
+        +str notes
+    }
+
+    class ColumnDefinition {
+        +str column_name
+        +str functional_definition
+        +str data_type
+        +bool is_nullable
+        +bool is_primary_key
+        +bool is_foreign_key
+        +str fk_reference
+    }
+
+    class QAValidationOutput {
+        +List~TableModel~ tables
+        +QAReport qa_report
+    }
+
+    class QAReport {
+        +List~ColumnStandardization~ standardized_columns
+        +List~GuidelineViolation~ guideline_violations
+        +List~NewCatalogEntry~ new_catalog_entries
+        +int quality_score
+        +str summary
+    }
+
+    class WorkflowResult {
+        +DataModelOutput data_model
+        +QAValidationOutput qa_validation
+        +Dict~str,str~ final_ddls
+        +str relationship_diagram
+    }
+
+    UserInput --> RawTableInput : contains
+    RawTableInput --> RawColumnInput : contains
+    DataModelOutput --> TableModel : contains
+    TableModel --> ColumnDefinition : contains
+    QAValidationOutput --> TableModel : contains (corrected)
+    QAValidationOutput --> QAReport : contains
+    QAReport --> ColumnStandardization : contains
+    QAReport --> GuidelineViolation : contains
+    QAReport --> NewCatalogEntry : contains
+    WorkflowResult --> DataModelOutput : combines
+    WorkflowResult --> QAValidationOutput : combines
 ```

@@ -10,52 +10,45 @@ El pipeline de modelamiento se implementa como un **grafo dirigido** usando `Wor
 
 ## Grafo del pipeline
 
-```
- ┌───────────────┐
- │ prepare_input  │  ← Executor custom
- │                │     Recibe JSON del usuario
- │ Construye      │     Extrae tablas, engine, relaciones
- │ prompt para    │     Guarda estado en WorkflowContext
- │ ExecutorAgent  │
- └───────┬───────┘
-         │ AgentExecutorRequest (prompt)
-         ▼
- ┌───────────────┐
- │ ExecutorAgent  │  ← Agent del framework
- │                │     Llama a query_guidelines
- │ Genera modelo  │     Genera JSON con tablas + DDL
- │ de datos + DDL │     Responde con modelo completo
- └───────┬───────┘
-         │ AgentExecutorResponse (modelo JSON)
-         ▼
- ┌───────────────┐
- │ extract_model  │  ← Executor custom
- │                │     Almacena modelo en ctx.state
- │ Extrae JSON    │     Construye prompt de validación
- │ Prepara prompt │     para QAValidatorAgent
- │ para QA Agent  │
- └───────┬───────┘
-         │ AgentExecutorRequest (prompt QA)
-         ▼
- ┌───────────────┐
- │ QAValidator    │  ← Agent del framework
- │ Agent          │     Llama a search_column_catalog
- │                │     Llama a add_column_to_catalog
- │ Valida +       │     Llama a query_guidelines
- │ estandariza    │     Responde con QA report
- └───────┬───────┘
-         │ AgentExecutorResponse (QA JSON)
-         ▼
- ┌───────────────┐
- │ format_output  │  ← Executor custom
- │                │     Combina modelo + QA
- │ Limpia JSON    │     Aplica _extract_json_from_text
- │ Combina        │     Emite resultado final
- │ resultado      │
- └───────────────┘
-         │
-         ▼
-    JSON resultado final
+```mermaid
+flowchart LR
+    subgraph Input["📥 Input"]
+        JSON["JSON Input<br/>{tables, engine, relaciones}"]
+    end
+
+    subgraph Node1["⚙️ prepare_input<br/><i>Executor custom</i>"]
+        N1["• Parsea JSON<br/>• Extrae datos<br/>• Guarda en Context<br/>• Construye prompt"]
+    end
+
+    subgraph Node2["🤖 ExecutorAgent<br/><i>Agent del framework</i>"]
+        N2["• Llama query_guidelines<br/>• Genera modelo<br/>• Genera DDL<br/>• Responde JSON"]
+    end
+
+    subgraph Node3["⚙️ extract_model<br/><i>Executor custom</i>"]
+        N3["• Almacena en ctx.state<br/>• Extrae JSON<br/>• Prepara prompt QA"]
+    end
+
+    subgraph Node4["🤖 QAValidatorAgent<br/><i>Agent del framework</i>"]
+        N4["• search_column_catalog<br/>• add_column_to_catalog<br/>• Valida lineamientos<br/>• Regenera DDL<br/>• Calcula quality_score"]
+    end
+
+    subgraph Node5["⚙️ format_output<br/><i>Executor custom</i>"]
+        N5["• Limpia JSON<br/>• Combina modelo + QA<br/>• yield_output"]
+    end
+
+    subgraph Output["📤 Output"]
+        OUT["JSON Final<br/>{engine, generated_model, qa_validation}"]
+    end
+
+    JSON --> N1 --> N2 --> N3 --> N4 --> N5 --> OUT
+
+    style Node1 fill:#e3f2fd
+    style Node2 fill:#e8f5e9
+    style Node3 fill:#e3f2fd
+    style Node4 fill:#fff3e0
+    style Node5 fill:#e3f2fd
+    style Input fill:#e1f5fe
+    style Output fill:#ffebee
 ```
 
 ---
@@ -264,42 +257,40 @@ La función `run_modeling_pipeline`:
 
 ## Flujo de datos completo
 
+```mermaid
+flowchart TB
+    U[👤 Usuario<br/>"Crea tabla productos para postgresql"] --> M[src/main.py]
+
+    M -->|Extrae: engine, tables, relationships| P[run_modeling_pipeline]
+
+    subgraph Pipeline["⚙️ Pipeline de Modelamiento"]
+        direction TB
+        PI[prepare_input] -->|Prompt| EA[ExecutorAgent]
+        EA -->|Tool calls<br/>query_guidelines| EA_OUT[Response JSON<br/>modelo + DDL]
+        EA_OUT --> EM[extract_model]
+        EM -->|Prompt QA| QA[QAValidatorAgent]
+        QA -->|Tool calls<br/>search/add column_catalog| QA_OUT[Response JSON<br/>QA report]
+        QA_OUT --> FO[format_output]
+        FO -->|Clean JSON| OUT[Output Final<br/>JSON combinado]
+    end
+
+    P --> Pipeline
+    OUT --> D[_display_results]
+    D --> CLI[💻 Console Output<br/>Rich tables + DDL panels + QA score]
+
+    style U fill:#e1f5fe
+    style Pipeline fill:#e8f5e9
+    style CLI fill:#f3e5f5
 ```
- Usuario
-   │
-   │  "Crea tabla productos para postgresql"
-   │
-   ▼
- main.py
-   │  Extrae: engine="postgresql", tables=[], relationships=[]
-   │  Construye: input_data = {user_text, tables, target_engine, relationships}
-   │
-   ▼
- run_modeling_pipeline(client, input_data)
-   │
-   ├─ prepare_input
-   │    Prompt: "## SOLICITUD DE MODELAMIENTO\nMotor: postgresql\n..."
-   │    State: input_data={...}, target_engine="postgresql"
-   │
-   ├─ ExecutorAgent
-   │    Tool calls: query_guidelines("naming_conventions"), query_guidelines("postgresql")
-   │    Response: {"tables": [...], "ddl": "CREATE TABLE...", ...}
-   │
-   ├─ extract_model
-   │    State: generated_model="{ respuesta del executor }"
-   │    Prompt QA: "## VALIDACIÓN\n{modelo}\n## INSTRUCCIONES\n..."
-   │
-   ├─ QAValidatorAgent
-   │    Tool calls: search_column_catalog("Nombre del producto"), add_column_to_catalog(...)
-   │    Response: {"tables": [...], "qa_report": {...}}
-   │
-   └─ format_output
-        Clean: _extract_json_from_text(modelo), _extract_json_from_text(qa)
-        Output: {"engine": "postgresql", "generated_model": "...", "qa_validation": "..."}
-   │
-   ▼
- main.py → _display_results(result)
-   │  Rich tables, DDL panels, QA score panel
-   ▼
- Console output
-```
+
+**Detalle del flujo paso a paso:**
+
+| Paso | Componente | Acción |
+|------|------------|--------|
+| 1 | `main.py` | Extrae `engine="postgresql"`, construye `input_data` |
+| 2 | `prepare_input` | Construye prompt: "## SOLICITUD DE MODELAMIENTO\nMotor: postgresql\n..." |
+| 3 | `ExecutorAgent` | Llama `query_guidelines`, genera modelo + DDL |
+| 4 | `extract_model` | Almacena en `ctx.state`, prepara prompt QA |
+| 5 | `QAValidatorAgent` | Llama `search_column_catalog`, valida, estandariza |
+| 6 | `format_output` | Limpia JSON con `_extract_json_from_text`, combina resultados |
+| 7 | `_display_results` | Rich tables, DDL panels, QA score panel |

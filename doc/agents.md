@@ -4,23 +4,28 @@
 
 El sistema cuenta con **4 agentes**, cada uno con un rol especializado. Tres de ellos son instancias de `Agent` del Microsoft Agent Framework; el cuarto (KnowledgeBaseAgent) se implementa como tools compartidas.
 
-```
-┌─────────────────────┐     ┌─────────────────────┐
-│ ConversationalAgent  │     │ KnowledgeBaseAgent   │
-│ (UI + orquestación)  │     │ (tools compartidas)  │
-└──────────┬──────────┘     └──────────┬──────────┘
-           │                           │
-           ▼                           │ consultado por
-┌─────────────────────┐               │
-│ ExecutorAgent        │◀──────────────┘
-│ (modelo + DDL)       │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ QAValidatorAgent     │◀── también consulta KnowledgeBase
-│ (validación + QA)    │
-└─────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Agents["🤖 Agentes"]
+        CA[ConversationalAgent<br/>UI + Orquestación]
+        EA[ExecutorAgent<br/>Generador de modelo + DDL]
+        QA[QAValidatorAgent<br/>Validación + Gobierno]
+    end
+
+    subgraph KB["📚 KnowledgeBaseAgent<br/>(Tools compartidas)"]
+        QG[query_guidelines]
+        GAG[get_all_guidelines]
+    end
+
+    CA -.->|parse_excel_file| Excel[(Archivo .xlsx)]
+    EA -.->|consulta| KB
+    QA -.->|consulta| KB
+    QA -.->|search_column_catalog<br/>add_column_to_catalog| Catalog[(Catálogo)]
+
+    style CA fill:#e3f2fd
+    style EA fill:#e8f5e9
+    style QA fill:#fff3e0
+    style KB fill:#f3e5f5
 ```
 
 ---
@@ -252,23 +257,27 @@ Características:
 
 Los agentes **no se comunican directamente** entre sí. La comunicación ocurre a través del **workflow graph**:
 
-```
-prepare_input
-    │  (construye prompt con datos del usuario)
-    ▼
-ExecutorAgent
-    │  (genera modelo + DDL, usa query_guidelines)
-    ▼
-extract_model
-    │  (extrae JSON, construye prompt de validación)
-    ▼
-QAValidatorAgent
-    │  (valida vs lineamientos y catálogo, estandariza)
-    ▼
-format_output
-    │  (combina resultados en JSON final)
-    ▼
-resultado → CLI
+```mermaid
+sequenceDiagram
+    participant PI as prepare_input
+    participant EA as ExecutorAgent
+    participant EM as extract_model
+    participant QA as QAValidatorAgent
+    participant FO as format_output
+    participant CLI as CLI
+
+    PI->>EA: AgentExecutorRequest<br/>(prompt con datos usuario)
+    Note over EA: Llama query_guidelines<br/>Genera modelo + DDL
+    EA->>EM: AgentExecutorResponse<br/>(modelo JSON)
+
+    Note over EM: Almacena en ctx.state<br/>Extrae JSON limpio
+    EM->>QA: AgentExecutorRequest<br/>(prompt de validación)
+
+    Note over QA: search_column_catalog<br/>add_column_to_catalog<br/>Valida lineamientos<br/>Estandariza nombres<br/>Regenera DDL
+    QA->>FO: AgentExecutorResponse<br/>(QA report JSON)
+
+    Note over FO: Limpia JSON<br/>Combina modelo + QA<br/>yield_output
+    FO->>CLI: Resultado final
 ```
 
 El estado compartido (`WorkflowContext`) transporta `input_data`, `target_engine` y `generated_model` entre los nodos del grafo.
