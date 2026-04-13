@@ -1,0 +1,169 @@
+{
+  "version": "1.0",
+  "area": "default",
+  "naming_conventions": {
+    "table_prefix": "tbl_",
+    "column_case": "snake_case",
+    "column_prefixes": {
+      "identifier": "id_",
+      "name": "name_",
+      "date": "date_",
+      "amount": "amount_",
+      "quantity": "quantity_",
+      "flag": "flag_",
+      "code": "code_",
+      "description": "desc_",
+      "percentage": "pct_",
+      "count": "cnt_",
+      "number": "num_",
+      "price": "price_",
+      "email": "email_",
+      "phone": "phone_",
+      "address": "address_",
+      "url": "url_",
+      "text": "text_"
+    },
+    "reserved_words_to_avoid": ["user", "table", "order", "group", "select", "index", "key", "value", "type", "status"],
+    "max_column_name_length": 64,
+    "max_table_name_length": 64
+  },
+  "audit_columns": {
+    "required": true,
+    "columns": [
+      {
+        "column_name": "date_created",
+        "data_type": "TIMESTAMP",
+        "is_nullable": false,
+        "default_value": "CURRENT_TIMESTAMP",
+        "description": "Fecha y hora de creación del registro"
+      },
+      {
+        "column_name": "date_updated",
+        "data_type": "TIMESTAMP",
+        "is_nullable": true,
+        "default_value": null,
+        "description": "Fecha y hora de última actualización"
+      },
+      {
+        "column_name": "user_created",
+        "data_type": "VARCHAR(100)",
+        "is_nullable": false,
+        "default_value": null,
+        "description": "Usuario que creó el registro"
+      },
+      {
+        "column_name": "user_updated",
+        "data_type": "VARCHAR(100)",
+        "is_nullable": true,
+        "default_value": null,
+        "description": "Usuario que actualizó el registro"
+      }
+    ]
+  },
+  "primary_key_conventions": {
+    "naming_pattern": "id_{entity}",
+    "auto_increment": true,
+    "preferred_type": "BIGINT",
+    "description": "Toda tabla debe tener una clave primaria con prefijo id_"
+  },
+  "foreign_key_conventions": {
+    "naming_pattern": "id_{referenced_entity}",
+    "suffix_constraint": "_fk",
+    "description": "Las FK deben usar el mismo nombre que la PK referenciada"
+  },
+  "data_type_mappings": {
+    "databricks_sql": {
+      "BIGINT": "BIGINT",
+      "INT": "INT",
+      "SMALLINT": "SMALLINT",
+      "DECIMAL": "DECIMAL",
+      "FLOAT": "FLOAT",
+      "DOUBLE": "DOUBLE",
+      "VARCHAR": "STRING",
+      "TEXT": "STRING",
+      "CHAR": "STRING",
+      "BOOLEAN": "BOOLEAN",
+      "DATE": "DATE",
+      "TIMESTAMP": "TIMESTAMP",
+      "BLOB": "BINARY",
+      "JSON": "STRING"
+    },
+    "sqlserver": {
+      "BIGINT": "BIGINT",
+      "INT": "INT",
+      "SMALLINT": "SMALLINT",
+      "DECIMAL": "DECIMAL",
+      "FLOAT": "FLOAT",
+      "DOUBLE": "FLOAT",
+      "VARCHAR": "NVARCHAR",
+      "TEXT": "NVARCHAR(MAX)",
+      "CHAR": "NCHAR",
+      "BOOLEAN": "BIT",
+      "DATE": "DATE",
+      "TIMESTAMP": "DATETIME2",
+      "BLOB": "VARBINARY(MAX)",
+      "JSON": "NVARCHAR(MAX)"
+    },
+    "postgresql": {
+      "BIGINT": "BIGINT",
+      "INT": "INTEGER",
+      "SMALLINT": "SMALLINT",
+      "DECIMAL": "NUMERIC",
+      "FLOAT": "REAL",
+      "DOUBLE": "DOUBLE PRECISION",
+      "VARCHAR": "VARCHAR",
+      "TEXT": "TEXT",
+      "CHAR": "CHAR",
+      "BOOLEAN": "BOOLEAN",
+      "DATE": "DATE",
+      "TIMESTAMP": "TIMESTAMP WITH TIME ZONE",
+      "BLOB": "BYTEA",
+      "JSON": "JSONB"
+    },
+    "mysql": {
+      "BIGINT": "BIGINT",
+      "INT": "INT",
+      "SMALLINT": "SMALLINT",
+      "DECIMAL": "DECIMAL",
+      "FLOAT": "FLOAT",
+      "DOUBLE": "DOUBLE",
+      "VARCHAR": "VARCHAR",
+      "TEXT": "TEXT",
+      "CHAR": "CHAR",
+      "BOOLEAN": "TINYINT(1)",
+      "DATE": "DATE",
+      "TIMESTAMP": "DATETIME",
+      "BLOB": "LONGBLOB",
+      "JSON": "JSON"
+    },
+    "cosmosdb": {
+      "BIGINT": "number",
+      "INT": "number",
+      "SMALLINT": "number",
+      "DECIMAL": "number",
+      "FLOAT": "number",
+      "DOUBLE": "number",
+      "VARCHAR": "string",
+      "TEXT": "string",
+      "CHAR": "string",
+      "BOOLEAN": "boolean",
+      "DATE": "string (ISO 8601)",
+      "TIMESTAMP": "string (ISO 8601)",
+      "BLOB": "string (base64)",
+      "JSON": "object"
+    }
+  },
+  "general_rules": [
+    "Todas las tablas deben tener columnas de auditoría (date_created, date_updated, user_created, user_updated)",
+    "Los nombres de columnas deben estar en snake_case y en inglés",
+    "Se deben usar los prefijos definidos según el tipo semántico de la columna",
+    "Los campos que almacenan montos deben ser de tipo DECIMAL(18,2)",
+    "Los identificadores deben ser de tipo BIGINT con auto-incremento",
+    "Las columnas de tipo texto libre deben ser VARCHAR con longitud definida",
+    "Evitar uso de palabras reservadas de SQL como nombres de columna",
+    "Toda tabla debe tener al menos una clave primaria",
+    "Los campos de fecha deben diferenciar entre DATE (solo fecha) y TIMESTAMP (fecha+hora)",
+    "Las columnas booleanas deben usar prefijo flag_",
+    "No se permiten columnas con nombres genéricos como 'data', 'value', 'info'"
+  ]
+}

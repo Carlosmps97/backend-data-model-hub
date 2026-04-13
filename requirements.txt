@@ -1,0 +1,10 @@
+agent-framework
+azure-identity
+azure-core
+openpyxl
+python-docx
+pdfplumber
+pyyaml
+pydantic>=2.0
+rich
+python-dotenv

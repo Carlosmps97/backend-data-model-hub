@@ -1,0 +1,223 @@
+{
+  "columns": [
+    {
+      "column_name": "date_routine",
+      "functional_definition": "Fecha de ejecución de un proceso o rutina",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "tbl_process_log",
+        "tbl_batch_execution"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "id_customer",
+      "functional_definition": "Identificador único del cliente",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_orders"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "name_customer",
+      "functional_definition": "Nombre completo del cliente",
+      "data_type": "VARCHAR(255)",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "email_customer",
+      "functional_definition": "Dirección de correo electrónico del cliente",
+      "data_type": "VARCHAR(320)",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "amount_total",
+      "functional_definition": "Monto total de una transacción u orden",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_orders",
+        "tbl_invoices"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "date_created",
+      "functional_definition": "Fecha y hora de creación del registro",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_orders",
+        "tbl_products"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "date_updated",
+      "functional_definition": "Fecha y hora de la última actualización del registro",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_orders",
+        "tbl_products"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "user_created",
+      "functional_definition": "Usuario que creó el registro",
+      "data_type": "VARCHAR(100)",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_orders"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "user_updated",
+      "functional_definition": "Usuario que realizó la última actualización del registro",
+      "data_type": "VARCHAR(100)",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_orders"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "flag_active",
+      "functional_definition": "Indicador booleano de si el registro está activo",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "tbl_customers",
+        "tbl_products"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "code_status",
+      "functional_definition": "Código de estado del registro o transacción",
+      "data_type": "VARCHAR(20)",
+      "used_in_tables": [
+        "tbl_orders"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "id_product",
+      "functional_definition": "Identificador único del producto",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "tbl_products",
+        "tbl_order_details"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "name_product",
+      "functional_definition": "Nombre del producto",
+      "data_type": "VARCHAR(255)",
+      "used_in_tables": [
+        "tbl_products"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "quantity_ordered",
+      "functional_definition": "Cantidad de unidades ordenadas de un producto",
+      "data_type": "INT",
+      "used_in_tables": [
+        "tbl_order_details"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "price_unit",
+      "functional_definition": "Precio unitario de un producto",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_products",
+        "tbl_order_details"
+      ],
+      "is_new": false
+    },
+    {
+      "column_name": "phone_customer",
+      "functional_definition": "Número de teléfono de contacto del cliente",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "address_customer",
+      "functional_definition": "Dirección física del cliente",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "segment_customer",
+      "functional_definition": "Segmento o categoría comercial del cliente",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "desc_order",
+      "functional_definition": "Descripción o detalle de la orden",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_orders"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "method_payment",
+      "functional_definition": "Método de pago utilizado",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_orders"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "address_shipping",
+      "functional_definition": "Dirección de envío de la orden",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_orders"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "date_birth",
+      "functional_definition": "Fecha de nacimiento del cliente",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "tbl_customers"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "date_order",
+      "functional_definition": "Fecha en que se realizó la orden",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_orders"
+      ],
+      "is_new": true
+    }
+  ]
+}
