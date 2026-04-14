@@ -90,6 +90,32 @@ python scripts/create_sample_xlsx.py
 python -m src.main
 ```
 
+### Ejecutar API REST
+
+```bash
+# Iniciar servidor API (desarrollo)
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+
+# O ejecutar directamente
+python api/main.py
+```
+
+Endpoints disponibles:
+- `GET /health` — Health check
+- `POST /model` — Generar modelo de datos
+- `POST /parse-excel` — Parsear archivo Excel
+- `GET /engines` — Listar motores soportados
+
+### Usar script standalone chat.py
+
+```bash
+# Chat interactivo
+python chat.py
+
+# Solicitud única (no interactivo)
+python chat.py -m "Crea tabla de productos con id, nombre, precio" -e postgresql
+```
+
 ### Ejemplos de input
 
 ```
@@ -134,35 +160,43 @@ agent-modeler/
 ├── .env.example                      # Template de configuración
 ├── requirements.txt                  # Dependencias Python
 ├── README.md
+├── chat.py                           # �️ Script standalone para chat
+├── api/                              # 🌐 API REST async
+│   ├── __init__.py
+│   └── main.py                       #   FastAPI endpoints
+├── prompts/                          # 📝 System prompts (.prompty)
+│   ├── executor.prompty
+│   ├── qa_validator.prompty
+│   └── conversational.prompty
 ├── doc/                              # 📚 Documentación detallada
-│   ├── architecture.md               #   Arquitectura del sistema
-│   ├── agents.md                     #   Agentes: roles, prompts, tools
-│   ├── tools.md                      #   Referencia de tools
-│   ├── workflow.md                   #   Pipeline y flujos de datos
-│   ├── schemas.md                    #   Modelos Pydantic
-│   ├── configuration.md             #   Guía de configuración
-│   └── usage.md                      #   Guía de uso y ejemplos
+│   ├── architecture.md
+│   ├── agents.md
+│   ├── tools.md
+│   ├── workflow.md
+│   ├── schemas.md
+│   ├── configuration.md
+│   └── usage.md
 ├── data/
-│   ├── column_catalog.json           # Catálogo corporativo de columnas
-│   ├── sample_input.xlsx             # Archivo de ejemplo
+│   ├── column_catalog.json
+│   ├── sample_input.xlsx
 │   └── guidelines/
-│       └── modeling_guidelines.json  # Lineamientos de modelamiento
+│       └── modeling_guidelines.json
 ├── src/
-│   ├── config.py                     # Configuración centralizada (Settings)
-│   ├── schemas.py                    # Modelos Pydantic
-│   ├── main.py                       # Entry point CLI multi-turno
+│   ├── config.py
+│   ├── schemas.py
+│   ├── main.py
 │   ├── tools/
-│   │   ├── knowledge_base_tools.py   # Carga/consulta de lineamientos
-│   │   ├── excel_tools.py            # Parser robusto de Excel
-│   │   └── catalog_tools.py          # CRUD catálogo + similitud
+│   │   ├── knowledge_base_tools.py
+│   │   ├── excel_tools.py
+│   │   └── catalog_tools.py
 │   ├── agents/
-│   │   ├── factory.py                # Factoría de agentes
-│   │   └── instructions.py           # System prompts detallados
+│   │   ├── factory.py
+│   │   └── instructions.py         # Carga prompts desde .prompty
 │   └── workflow/
-│       └── graph.py                  # Workflow (grafo dirigido)
+│       └── graph.py
 └── scripts/
-    ├── create_sample_xlsx.py         # Generador de datos de ejemplo
-    └── test_pipeline_v2.py           # Test end-to-end del pipeline
+    ├── create_sample_xlsx.py
+    └── test_pipeline_v2.py
 ```
 
 ---

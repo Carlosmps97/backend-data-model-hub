@@ -259,24 +259,24 @@ La función `run_modeling_pipeline`:
 
 ```mermaid
 flowchart TB
-    U[👤 Usuario<br/>"Crea tabla productos para postgresql"] --> M[src/main.py]
+    U[👤 Usuario<br/>'Crea tabla productos'] --> M[src/main.py]
 
-    M -->|Extrae: engine, tables, relationships| P[run_modeling_pipeline]
+    M -->|Extrae engine, tables| P[run_modeling_pipeline]
 
     subgraph Pipeline["⚙️ Pipeline de Modelamiento"]
         direction TB
         PI[prepare_input] -->|Prompt| EA[ExecutorAgent]
-        EA -->|Tool calls<br/>query_guidelines| EA_OUT[Response JSON<br/>modelo + DDL]
+        EA -->|Tool calls| EA_OUT[Response JSON<br/>modelo + DDL]
         EA_OUT --> EM[extract_model]
         EM -->|Prompt QA| QA[QAValidatorAgent]
-        QA -->|Tool calls<br/>search/add column_catalog| QA_OUT[Response JSON<br/>QA report]
+        QA -->|Tool calls| QA_OUT[Response JSON<br/>QA report]
         QA_OUT --> FO[format_output]
         FO -->|Clean JSON| OUT[Output Final<br/>JSON combinado]
     end
 
     P --> Pipeline
     OUT --> D[_display_results]
-    D --> CLI[💻 Console Output<br/>Rich tables + DDL panels + QA score]
+    D --> CLI[💻 Console Output]
 
     style U fill:#e1f5fe
     style Pipeline fill:#e8f5e9

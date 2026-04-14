@@ -86,7 +86,8 @@
       "data_type": "VARCHAR(100)",
       "used_in_tables": [
         "tbl_customers",
-        "tbl_orders"
+        "tbl_orders",
+        "tbl_agent_telemetry"
       ],
       "is_new": false
     },
@@ -216,6 +217,204 @@
       "data_type": "TIMESTAMP",
       "used_in_tables": [
         "tbl_orders"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_trace",
+      "functional_definition": "Identificador principal de la transacción.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_conversation",
+      "functional_definition": "Hilo lógico que agrupa trazas.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_agent",
+      "functional_definition": "Código identificador único de un agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_identity_sk",
+      "functional_definition": "Código único autogenerado a partir de grupo de datos de identificación.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "ts_start",
+      "functional_definition": "Fecha y hora de inicio de la interacción del agente con el usuario.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "duration_ms",
+      "functional_definition": "Tiempo total en milisegundos que tardó en completarse la interacción.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "qty_total_spans",
+      "functional_definition": "Cantidad total de spans generados en la interacción.",
+      "data_type": "INT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "qty_tokens_in",
+      "functional_definition": "Volumen de tokens procesados.",
+      "data_type": "INT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "qty_tokens_out",
+      "functional_definition": "Cantidad de tokens de salida.",
+      "data_type": "INT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "qty_tokens_total",
+      "functional_definition": "Cantidad total de tokens generados (in + out).",
+      "data_type": "INT",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amnt_price_input",
+      "functional_definition": "El precio referencial de tokens input por 1000 para un determinado modelo.",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amnt_price_output",
+      "functional_definition": "El precio referencial de tokens output por 1000 para un determinado modelo.",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_currency",
+      "functional_definition": "El tipo de moneda que representa el precio referencial de los tokens (usd/pen/yen/<etc>).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amnt_cost_input",
+      "functional_definition": "Costo estimado de los tokens de entrada.",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amnt_cost_output",
+      "functional_definition": "Costo estimado de los tokens de salida.",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amnt_cost_total",
+      "functional_definition": "Sumatoria total financiera de la traza por el consumo de tokens.",
+      "data_type": "DECIMAL(18,2)",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_solution",
+      "functional_definition": "Nombre de la solución asociada a la información procesada.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_app",
+      "functional_definition": "Código de aplicativo de 4 dígitos asociado a la información procesada.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dt_routine",
+      "functional_definition": "Fecha en formato YYYY-MM-DD en el cual ha sido procesada la información.",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "ts_created",
+      "functional_definition": "Timestamp de creación del registro.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "ts_updated",
+      "functional_definition": "Timestamp de última actualización del registro.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "usr_created_by",
+      "functional_definition": "Usuario o proceso que creó el registro.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "tbl_agent_telemetry"
       ],
       "is_new": true
     }
