@@ -68,6 +68,24 @@ Acepta: `true`, `1`, `si`, `sí`, `yes`, `y`, `s` como verdadero.
 
 ---
 
+## convert_to_markdown
+
+**Archivo**: `src/tools/convert_tools.py`
+**Usada por**: ExecutorAgent, QAValidatorAgent
+
+### Descripción
+Convierte documentos (PDF o DOCX) a formato Markdown estructurado de manera eficiente, apoyando a la interpretación de los LLMs. Utiliza la librería `docling` por debajo. Implementa un sistema de caché en disco (`.md` cacheado) para evitar el retrabajo si el original no ha sido modificado.
+
+### Parámetros
+| Parámetro | Tipo | Descripción |
+|-----------|------|-------------|
+| `file_path` | `str` | Ruta al archivo DOCX o PDF a convertir |
+
+### Retorno
+Cadena de texto con el Markdown generado, o un mensaje de error si hay un problema en la conversión. El archivo Markdown resultante también es guardado físicamente en disco junto al original.
+
+---
+
 ## query_guidelines
 
 **Archivo**: `src/tools/knowledge_base_tools.py`
@@ -106,7 +124,8 @@ Retorna:
 ### Formatos de lineamientos soportados
 - **JSON**: búsqueda por claves estructuradas.
 - **XLSX**: cada pestaña como sección.
-- **DOCX/PDF/TXT**: búsqueda por texto (grep por líneas que contengan el topic).
+- **MD / Markdown**: búsqueda pura a través de texto estructurado.
+- **DOCX / PDF**: se convierten transparente y automáticamente a Markdown usando `convert_to_markdown` en la capa base.
 
 ---
 
@@ -232,11 +251,13 @@ ConversationalAgent
 
 ExecutorAgent
   ├── query_guidelines
-  └── get_all_guidelines
+  ├── get_all_guidelines
+  └── convert_to_markdown
 
 QAValidatorAgent
   ├── query_guidelines
   ├── search_column_catalog
   ├── add_column_to_catalog
-  └── get_full_column_catalog
+  ├── get_full_column_catalog
+  └── convert_to_markdown
 ```

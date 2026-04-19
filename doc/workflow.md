@@ -65,9 +65,9 @@ flowchart LR
 3. Construye un prompt Markdown estructurado con secciones:
    - `## SOLICITUD DE MODELAMIENTO DE DATOS` — motor destino
    - `## CONTEXTO DEL USUARIO` — texto libre
-   - `## TABLAS A MODELAR` — columnas con nombre sugerido, definición, tipo, nullable, notas
+   - `## TABLAS A MODELAR` — tablas, conteos totales y resumen de columnas (nombre, definición, tipo, nullable, notas)
    - `## RELACIONES ENTRE TABLAS` — FK declaradas por el usuario
-   - `## INSTRUCCIONES` — pasos para el ExecutorAgent
+   - `## INSTRUCCIONES` — pasos para el ExecutorAgent con métricas de Fidelidad a cumplir
 4. Guarda `input_data` y `target_engine` en `WorkflowContext`.
 5. Envía `AgentExecutorRequest` con el prompt.
 
@@ -99,14 +99,14 @@ flowchart LR
 **Entrada**: prompt Markdown del paso anterior.
 
 **Proceso**:
-1. Lee el prompt con la solicitud de modelamiento.
-2. Invoca `query_guidelines` y/o `get_all_guidelines` para obtener lineamientos.
-3. Genera el modelo de datos completo:
-   - Nombres de tablas con prefijo `tbl_`.
-   - Nombres de columnas en snake_case con prefijos semánticos.
-   - Tipos de dato mapeados al motor destino.
-   - Columnas de auditoría.
-   - Claves primarias y foráneas.
+1. Lee el prompt con la solicitud de modelamiento y el conteo de tablas/columnas.
+2. Invoca obligatoriamente `get_all_guidelines` para obtener lineamientos corporativos, convirtiendo (de ser necesario) los DOCX/PDF nativos.
+3. Genera el modelo de datos completo mediante análisis de reglas extraídas:
+   - Aplica nomenclaturas de tablas dinámicamente según indique la KB.
+   - Aplica prefijos estándar de columnas y tipado según las guías.
+   - Preserva absolutamente el 100% de las columnas requeridas garantizando **Fidelidad Estricta**.
+   - Agrega columnas de auditoría establecidas obligatoriamente por los lineamientos.
+   - Claves primarias y foráneas inferidas y tipadas.
    - DDL ejecutable.
 4. Responde con JSON estructurado.
 
@@ -288,8 +288,8 @@ flowchart TB
 | Paso | Componente | Acción |
 |------|------------|--------|
 | 1 | `main.py` | Extrae `engine="postgresql"`, construye `input_data` |
-| 2 | `prepare_input` | Construye prompt: "## SOLICITUD DE MODELAMIENTO\nMotor: postgresql\n..." |
-| 3 | `ExecutorAgent` | Llama `query_guidelines`, genera modelo + DDL |
+| 2 | `prepare_input` | Construye prompt enriquecido exigiendo métricas de *Fidelidad*: "## TABLAS A MODELAR (1 tablas, 19 columnas)\n..." |
+| 3 | `ExecutorAgent` | Convierte y Llama `get_all_guidelines`, analiza la DB y genera modelo + DDL íntegro |
 | 4 | `extract_model` | Almacena en `ctx.state`, prepara prompt QA |
 | 5 | `QAValidatorAgent` | Llama `search_column_catalog`, valida, estandariza |
 | 6 | `format_output` | Limpia JSON con `_extract_json_from_text`, combina resultados |

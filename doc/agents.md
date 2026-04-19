@@ -71,13 +71,14 @@ Genera modelos de datos completos con DDL a partir de definiciones funcionales. 
 |------|-------------|
 | `query_guidelines` | Consulta lineamientos por tema específico |
 | `get_all_guidelines` | Obtiene todos los lineamientos completos |
+| `convert_to_markdown` | Convierte y procesa transparentemente lineamientos PDF o DOCX a texto estructurado (Markdown) |
 
 ### Proceso interno
-1. **Naming**: aplica prefijo `tbl_` a tablas, snake_case a columnas.
-2. **Prefijos semánticos**: `id_` para identificadores, `date_` para fechas, `amount_` para montos, etc.
-3. **Tipos de dato**: mapea al dialecto del motor destino consultando lineamientos.
-4. **Auditoría**: agrega columnas obligatorias (`date_created`, `date_updated`, `user_created`, `user_updated`).
-5. **Claves**: PK con formato `id_{entidad}` (BIGINT), FK según relaciones indicadas.
+1. **Recuperación de lineamientos**: llama OBLIGATORIAMENTE a `get_all_guidelines()`.
+2. **Naming**: aplica prefijos y nomenclaturas dinámicas *estrictamente según lo consultado* de los lineamientos (ej., prefijos para entidades lógicas/físicas).
+3. **Tipos de dato**: mapea el tipo sugerido funcional al dialecto del motor destino consultando la KB.
+4. **Auditoría**: agrega columnas obligatorias (e.g. tipo `ts` para fechas de modificación o banderas logicas).  
+5. **Fidelidad Estricta**: No se omite, une o borra NINGUNA columna del input del usuario.
 6. **DDL**: genera SQL sintácticamente correcto para el motor.
 
 ### Formato de respuesta (JSON)
@@ -135,6 +136,7 @@ Valida el modelo generado contra lineamientos corporativos y catálogo de column
 | `search_column_catalog` | Busca columnas similares en el catálogo corporativo |
 | `add_column_to_catalog` | Registra columnas nuevas en el catálogo |
 | `get_full_column_catalog` | Obtiene el catálogo completo para validación integral |
+| `convert_to_markdown` | Convierte lineamientos PDF o DOCX a Markdown para su lectura |
 
 ### Proceso de validación
 
@@ -146,11 +148,13 @@ Valida el modelo generado contra lineamientos corporativos y catálogo de column
 - Presencia de clave primaria.
 - Longitud de nombres dentro de límites (64 caracteres).
 
-#### B) Estandarización de nombres (crítico)
+#### B) Estandarización de nombres y Jerarquía de Prioridad (crítico)
 Para **cada columna** del modelo:
 1. Llama a `search_column_catalog` con la definición funcional.
-2. Si similitud ≥ 0.5 → **reemplaza** el nombre por el estandarizado del catálogo.
-3. Si no hay match → acepta el nombre y llama a `add_column_to_catalog`.
+2. Jerarquía de resolución de conflictos:
+   - **Prioridad 1**: Los lineamientos corporativos son la máxima autoridad. Si un nombre del catálogo contradice los lineamientos vigentes, se respetan los lineamientos.
+   - **Prioridad 2**: Si hay un match del catálogo (similitud ≥ 0.5) y además CUMPLE los lineamientos, reemplaza con el nombre estandarizado encontrado en el catálogo.
+3. Si no hay match (o no cumple) → acepta el nombre re-estructurado bajo las guías y llama a `add_column_to_catalog`.
 
 #### C) Regenerar DDL
 Si hubo correcciones de nombres, regenera el DDL completo con los nombres corregidos.
@@ -217,8 +221,9 @@ Definido en `src/tools/knowledge_base_tools.py`. Soporta múltiples formatos de 
 |---------|-----------|-----------------|
 | JSON | `.json` | `json.load()` — búsqueda por claves |
 | Excel | `.xlsx` | `openpyxl` — cada pestaña como sección |
-| Word | `.docx` | `python-docx` — búsqueda por texto |
-| PDF | `.pdf` | `pdfplumber` — búsqueda por texto |
+| Markdown | `.md` | Interpretación y búsqueda nativa de texto estructurado por el LLM |
+| Word | `.docx` | Conversión a `.md` mediante `Docling` / `convert_to_markdown` |
+| PDF | `.pdf` | Conversión a `.md` mediante `Docling` / `convert_to_markdown` |
 | Texto | `.txt` | `Path.read_text()` — búsqueda por texto |
 
 ### Cache

@@ -46,11 +46,12 @@ flowchart TB
         ET[excel_tools<br/>parse_excel_file]
         CT[catalog_tools<br/>search/add/get]
         KBT[knowledge_base_tools<br/>query/get_all]
+        CVT[convert_tools<br/>convert_to_markdown]
     end
 
     subgraph Data["💾 Datos - data/"]
         CAT[column_catalog.json<br/>Catálogo corporativo]
-        GL[modeling_guidelines.json<br/>Lineamientos]
+        GL[databricks_guidelines_v3.docx/.md<br/>Lineamientos]
         SI[sample_input.xlsx<br/>Ejemplo]
     end
 
@@ -128,14 +129,15 @@ Cada agente recibe un subconjunto de tools según su responsabilidad.
 
 Funciones decoradas con `@tool` del Agent Framework:
 
-- **knowledge_base_tools**: carga y consulta lineamientos (multi-formato).
+- **knowledge_base_tools**: carga y consulta lineamientos corporativos.
+- **convert_tools**: convierte transparentemente archivos PDF/DOCX a Markdown estructurado usando Docling con caché local.
 - **excel_tools**: parser robusto de `.xlsx` con header matching flexible.
 - **catalog_tools**: CRUD thread-safe sobre catálogo + similitud por keywords.
 
 ### 5. Capa de datos (`data/`)
 
 - **column_catalog.json**: catálogo corporativo de columnas estandarizadas (mutable en runtime).
-- **modeling_guidelines.json**: reglas de naming, tipos de dato, auditoría (inmutable en runtime).
+- **databricks_guidelines_v3.docx**: reglas de naming, tipos de dato, auditoría (inmutable en runtime, convertido a `.md` tras bambalinas).
 - **sample_input.xlsx**: archivo de ejemplo para pruebas.
 
 ### 6. Capa de infraestructura (`src/config.py`)
@@ -204,7 +206,4 @@ Input usuario          Prompt estructurado       JSON modelo
 | `openpyxl` | ≥3.1 | Lectura de archivos Excel |
 | `rich` | ≥13.0 | Formateo de consola CLI |
 | `python-dotenv` | ≥1.0 | Carga de variables de entorno |
-
-Paquetes opcionales para formatos de lineamientos alternativos:
-- `python-docx` — archivos `.docx`
-- `pdfplumber` — archivos `.pdf`
+| `docling` | `~=2.90.0` | Conversión robusta de PDF/DOCX a Markdown estructurado |
