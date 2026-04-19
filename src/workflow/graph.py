@@ -124,20 +124,28 @@ async def prepare_input(
         prompt_parts.append(f"\n## CONTEXTO DEL USUARIO\n{user_text}")
 
     if tables:
-        prompt_parts.append("\n## TABLAS A MODELAR")
+        total_columns = sum(len(t.get("columns", [])) for t in tables)
+        prompt_parts.append(f"\n## TABLAS A MODELAR ({len(tables)} tabla(s), {total_columns} columna(s) en total)")
         for table in tables:
             tname = table.get("table_name", "sin_nombre")
-            prompt_parts.append(f"\n### Tabla: {tname}")
-            for col in table.get("columns", []):
+            cols = table.get("columns", [])
+            prompt_parts.append(f"\n### Tabla: {tname} ({len(cols)} columnas)")
+            for idx, col in enumerate(cols, 1):
                 col_name = col.get("column_name", "(sin nombre)")
                 func_def = col.get("functional_definition", "")
                 dtype = col.get("data_type_hint", "")
                 nullable = col.get("is_nullable", "")
                 notes = col.get("notes", "")
-                prompt_parts.append(
-                    f"- Nombre sugerido: {col_name} | Definición: {func_def} | "
-                    f"Tipo sugerido: {dtype} | Nullable: {nullable} | Notas: {notes}"
-                )
+                parts = [f"{idx}. **{col_name}**"]
+                if func_def:
+                    parts.append(f"Definición: {func_def}")
+                if dtype:
+                    parts.append(f"Tipo sugerido: {dtype}")
+                if nullable != "":
+                    parts.append(f"Nullable: {nullable}")
+                if notes:
+                    parts.append(f"Notas: {notes}")
+                prompt_parts.append("   " + " | ".join(parts))
 
     if relationships:
         prompt_parts.append("\n## RELACIONES ENTRE TABLAS")
@@ -146,9 +154,12 @@ async def prepare_input(
 
     prompt_parts.append(
         "\n## INSTRUCCIONES"
-        "\n1. Consulta los lineamientos corporativos con la tool query_guidelines."
-        "\n2. Genera el modelo de datos completo con DDL para cada tabla."
-        "\n3. Responde EXCLUSIVAMENTE en formato JSON válido según tu formato de respuesta."
+        "\n1. Llama a `get_all_guidelines()` para obtener los lineamientos corporativos COMPLETOS."
+        "\n2. Analiza los lineamientos: nomenclatura de tablas, prefijos de columnas, tipos de dato, columnas obligatorias."
+        "\n3. Genera el modelo de datos aplicando estrictamente los lineamientos obtenidos."
+        f"\n4. **FIDELIDAD**: El modelo DEBE incluir TODAS las {total_columns if tables else 0} columna(s) solicitadas por el usuario, más las columnas obligatorias de los lineamientos. No omitas ninguna."
+        "\n5. Genera DDL ejecutable para el motor destino."
+        "\n6. Responde EXCLUSIVAMENTE en formato JSON válido según tu formato de respuesta."
     )
 
     prompt = "\n".join(prompt_parts)

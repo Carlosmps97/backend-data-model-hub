@@ -20,6 +20,7 @@ from src.tools.catalog_tools import (
     search_column_catalog,
 )
 from src.tools.excel_tools import parse_excel_file
+from src.tools.convert_tools import convert_to_markdown
 from src.tools.knowledge_base_tools import get_all_guidelines, query_guidelines
 
 
@@ -54,7 +55,7 @@ def create_executor_agent(client: FoundryChatClient | None = None) -> Agent:
         client=client,
         name="ExecutorAgent",
         instructions=EXECUTOR_AGENT_INSTRUCTIONS,
-        tools=[query_guidelines, get_all_guidelines],
+        tools=[query_guidelines, get_all_guidelines, convert_to_markdown],
     )
 
 
@@ -76,6 +77,7 @@ def create_qa_agent(client: FoundryChatClient | None = None) -> Agent:
             search_column_catalog,
             add_column_to_catalog,
             get_full_column_catalog,
+            convert_to_markdown,
         ],
     )
 

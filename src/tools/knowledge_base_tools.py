@@ -51,23 +51,21 @@ def _load_guidelines() -> dict:
         wb.close()
         _guidelines_cache = {"format": "xlsx", "sheets": data}
 
-    elif suffix == ".docx":
-        from docx import Document
+    elif suffix in (".docx", ".pdf"):
+        # Convertir a Markdown con Docling para preservar estructura
+        from src.tools.convert_tools import _convert_document
 
-        doc = Document(str(path))
-        text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        _guidelines_cache = {"format": "docx", "content": text}
+        try:
+            md_path = _convert_document(path)
+            text = md_path.read_text(encoding="utf-8")
+            _guidelines_cache = {"format": "markdown", "content": text}
+        except Exception as e:
+            _guidelines_cache = {"error": f"Error al convertir {suffix} a Markdown: {e}"}
 
-    elif suffix == ".pdf":
-        import pdfplumber
-
-        with pdfplumber.open(path) as pdf:
-            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        _guidelines_cache = {"format": "pdf", "content": text}
-
-    elif suffix in (".txt", ".text"):
+    elif suffix in (".md", ".txt", ".text"):
         text = path.read_text(encoding="utf-8")
-        _guidelines_cache = {"format": "text", "content": text}
+        fmt = "markdown" if suffix == ".md" else "text"
+        _guidelines_cache = {"format": fmt, "content": text}
 
     else:
         _guidelines_cache = {"error": f"Formato no soportado: {suffix}"}

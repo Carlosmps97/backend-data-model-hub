@@ -9,6 +9,7 @@ from src.tools.catalog_tools import (
     get_full_column_catalog,
     search_column_catalog,
 )
+from src.tools.convert_tools import convert_to_markdown
 from src.tools.excel_tools import parse_excel_file
 from src.tools.knowledge_base_tools import (
     get_all_guidelines,
@@ -22,4 +23,6 @@ __all__ = [
     "search_column_catalog",
     "add_column_to_catalog",
     "get_full_column_catalog",
+    "convert_to_markdown",
 ]
+

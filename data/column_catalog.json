@@ -97,7 +97,8 @@
       "data_type": "BOOLEAN",
       "used_in_tables": [
         "tbl_customers",
-        "tbl_products"
+        "tbl_products",
+        "lrt_agent_telemetry"
       ],
       "is_new": false
     },
@@ -225,7 +226,8 @@
       "functional_definition": "Identificador principal de la transacción.",
       "data_type": "BIGINT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -234,7 +236,8 @@
       "functional_definition": "Hilo lógico que agrupa trazas.",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -243,7 +246,8 @@
       "functional_definition": "Código identificador único de un agente desplegado.",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -252,7 +256,8 @@
       "functional_definition": "Código único autogenerado a partir de grupo de datos de identificación.",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -261,7 +266,8 @@
       "functional_definition": "Fecha y hora de inicio de la interacción del agente con el usuario.",
       "data_type": "TIMESTAMP",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -270,7 +276,8 @@
       "functional_definition": "Tiempo total en milisegundos que tardó en completarse la interacción.",
       "data_type": "BIGINT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -279,7 +286,8 @@
       "functional_definition": "Cantidad total de spans generados en la interacción.",
       "data_type": "INT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -288,7 +296,8 @@
       "functional_definition": "Volumen de tokens procesados.",
       "data_type": "INT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -297,7 +306,8 @@
       "functional_definition": "Cantidad de tokens de salida.",
       "data_type": "INT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -306,7 +316,8 @@
       "functional_definition": "Cantidad total de tokens generados (in + out).",
       "data_type": "INT",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -315,7 +326,8 @@
       "functional_definition": "El precio referencial de tokens input por 1000 para un determinado modelo.",
       "data_type": "DECIMAL(18,2)",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -324,7 +336,8 @@
       "functional_definition": "El precio referencial de tokens output por 1000 para un determinado modelo.",
       "data_type": "DECIMAL(18,2)",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -333,7 +346,8 @@
       "functional_definition": "El tipo de moneda que representa el precio referencial de los tokens (usd/pen/yen/<etc>).",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -342,7 +356,8 @@
       "functional_definition": "Costo estimado de los tokens de entrada.",
       "data_type": "DECIMAL(18,2)",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -351,7 +366,8 @@
       "functional_definition": "Costo estimado de los tokens de salida.",
       "data_type": "DECIMAL(18,2)",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -360,7 +376,8 @@
       "functional_definition": "Sumatoria total financiera de la traza por el consumo de tokens.",
       "data_type": "DECIMAL(18,2)",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -369,7 +386,8 @@
       "functional_definition": "Nombre de la solución asociada a la información procesada.",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -378,7 +396,8 @@
       "functional_definition": "Código de aplicativo de 4 dígitos asociado a la información procesada.",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -387,7 +406,8 @@
       "functional_definition": "Fecha en formato YYYY-MM-DD en el cual ha sido procesada la información.",
       "data_type": "DATE",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
@@ -405,7 +425,8 @@
       "functional_definition": "Timestamp de última actualización del registro.",
       "data_type": "TIMESTAMP",
       "used_in_tables": [
-        "tbl_agent_telemetry"
+        "tbl_agent_telemetry",
+        "lrt_agent_telemetry"
       ],
       "is_new": true
     },
