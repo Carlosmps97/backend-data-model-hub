@@ -95,14 +95,50 @@ def _extract_json_from_text(text: str) -> str:
     return t
 
 
+def _format_history_block(history: list[dict[str, str]]) -> str:
+    """Formatea el historial de mensajes para incluirlo en el prompt.
+
+    El historial es una lista de dicts {role, content}. Cada turno se rotula
+    como "Usuario:" o "Agente:" para que el ExecutorAgent reconozca el flujo.
+    """
+    if not history:
+        return ""
+
+    lines: list[str] = []
+    for msg in history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        label = "Usuario" if role == "user" else "Agente"
+        lines.append(f"**{label}:** {content}")
+    return "\n\n".join(lines)
+
+
+def _format_last_model_block(last_model: dict) -> str:
+    """Serializa el último modelo generado para inyectarlo como contexto.
+
+    Se entrega en JSON compacto pero legible para que el agente lo tome como
+    estado base. NO se inventan reglas: solo se transmite el contenido.
+    """
+    if not last_model:
+        return ""
+    try:
+        return json.dumps(last_model, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(last_model)
+
+
 @executor(id="prepare_input")
 async def prepare_input(
     input_json: str, ctx: WorkflowContext[AgentExecutorRequest]
 ) -> None:
     """Prepara el input del usuario para el ExecutorAgent.
 
-    Recibe un JSON con las tablas parseadas, texto del usuario, motor destino
-    y relaciones. Construye un prompt comprehensivo para el agente generador.
+    Recibe un JSON con las tablas parseadas, texto del usuario, motor destino,
+    relaciones y opcionalmente `history` (lista de mensajes previos) y
+    `last_model` (último modelo generado en la conversación). Construye un
+    prompt comprehensivo para el agente generador.
     """
     try:
         data = json.loads(input_json)
@@ -113,12 +149,41 @@ async def prepare_input(
     user_text = data.get("user_text", "")
     engine = data.get("target_engine", "databricks_sql")
     relationships = data.get("relationships", [])
+    history = data.get("history", []) or []
+    last_model = data.get("last_model") or {}
 
     # Construir prompt para el ExecutorAgent
-    prompt_parts = [
-        f"## SOLICITUD DE MODELAMIENTO DE DATOS",
-        f"Motor de base de datos destino: **{engine}**",
-    ]
+    prompt_parts: list[str] = []
+
+    # ── Contexto previo de la conversación (si existe) ──────────────────
+    history_block = _format_history_block(history)
+    if history_block:
+        prompt_parts.append("## HISTORIAL DE CONVERSACIÓN PREVIA")
+        prompt_parts.append(
+            "Mensajes intercambiados antes de la solicitud actual. "
+            "Úsalos para mantener continuidad y aplicar refinamientos sobre "
+            "lo ya modelado, no para regenerar desde cero."
+        )
+        prompt_parts.append(history_block)
+        prompt_parts.append("")
+
+    last_model_block = _format_last_model_block(last_model)
+    if last_model_block:
+        prompt_parts.append("## MODELO ACTUAL")
+        prompt_parts.append(
+            "Este es el último modelo generado en esta conversación. "
+            "Tómalo como base. Aplica únicamente los cambios o refinamientos "
+            "que pida la solicitud actual sin descartar tablas o columnas "
+            "previas, salvo que el usuario lo solicite explícitamente."
+        )
+        prompt_parts.append("```json")
+        prompt_parts.append(last_model_block)
+        prompt_parts.append("```")
+        prompt_parts.append("")
+
+    # ── Solicitud actual ────────────────────────────────────────────────
+    prompt_parts.append("## SOLICITUD DE MODELAMIENTO DE DATOS")
+    prompt_parts.append(f"Motor de base de datos destino: **{engine}**")
 
     if user_text:
         prompt_parts.append(f"\n## CONTEXTO DEL USUARIO\n{user_text}")
@@ -158,8 +223,9 @@ async def prepare_input(
         "\n2. Analiza los lineamientos: nomenclatura de tablas, prefijos de columnas, tipos de dato, columnas obligatorias."
         "\n3. Genera el modelo de datos aplicando estrictamente los lineamientos obtenidos."
         f"\n4. **FIDELIDAD**: El modelo DEBE incluir TODAS las {total_columns if tables else 0} columna(s) solicitadas por el usuario, más las columnas obligatorias de los lineamientos. No omitas ninguna."
-        "\n5. Genera DDL ejecutable para el motor destino."
-        "\n6. Responde EXCLUSIVAMENTE en formato JSON válido según tu formato de respuesta."
+        "\n5. Si existe MODELO ACTUAL, parte de él y aplica solo los cambios pedidos; no elimines tablas ni columnas previas salvo que el usuario lo pida explícitamente."
+        "\n6. Genera DDL ejecutable para el motor destino."
+        "\n7. Responde EXCLUSIVAMENTE en formato JSON válido según tu formato de respuesta."
     )
 
     prompt = "\n".join(prompt_parts)
@@ -280,16 +346,28 @@ async def run_modeling_pipeline(
 
     Args:
         client: FoundryChatClient configurado.
-        input_data: Dict con tables, user_text, target_engine, relationships.
+        input_data: Dict con tables, user_text, target_engine, relationships y,
+            opcionalmente, history (lista de mensajes previos), last_model
+            (último modelo generado en la conversación) y session_id (id de
+            la conversación, usado para resolver guidelines por sesión).
 
     Returns:
         Dict con el resultado completo del pipeline.
     """
-    workflow = create_modeling_workflow(client)
-    input_json = json.dumps(input_data, ensure_ascii=False)
+    from src.tools.knowledge_base_tools import session_scope
 
-    events = await workflow.run(input_json)
-    outputs = events.get_outputs()
+    workflow = create_modeling_workflow(client)
+
+    # No serializamos session_id al prompt; solo se usa para fijar el cache
+    # de guidelines aplicable durante esta ejecución.
+    payload = {k: v for k, v in input_data.items() if k != "session_id"}
+    input_json = json.dumps(payload, ensure_ascii=False)
+
+    session_id = input_data.get("session_id")
+
+    with session_scope(session_id):
+        events = await workflow.run(input_json)
+        outputs = events.get_outputs()
 
     if outputs:
         try:

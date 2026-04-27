@@ -61,15 +61,19 @@ flowchart LR
 
 **Proceso**:
 1. Parsea el JSON de entrada.
-2. Extrae: `tables`, `user_text`, `target_engine`, `relationships`.
-3. Construye un prompt Markdown estructurado con secciones:
-   - `## SOLICITUD DE MODELAMIENTO DE DATOS` — motor destino
-   - `## CONTEXTO DEL USUARIO` — texto libre
-   - `## TABLAS A MODELAR` — tablas, conteos totales y resumen de columnas (nombre, definición, tipo, nullable, notas)
-   - `## RELACIONES ENTRE TABLAS` — FK declaradas por el usuario
-   - `## INSTRUCCIONES` — pasos para el ExecutorAgent con métricas de Fidelidad a cumplir
+2. Extrae: `tables`, `user_text`, `target_engine`, `relationships`, `history` (opcional), `last_model` (opcional).
+3. Construye un prompt Markdown estructurado con secciones (cada sección solo aparece si tiene contenido):
+   - `## HISTORIAL DE CONVERSACIÓN PREVIA` — mensajes previos del usuario y del agente, formateados como `**Usuario:** ...` / `**Agente:** ...`. Solo aparece si la API pasó `history` no vacío.
+   - `## MODELO ACTUAL` — el último `last_model` serializado en JSON dentro de un fence ` ```json ... ``` `. Solo aparece si la API pasó `last_model` no vacío. Indica al agente que parta de ese estado y aplique solo los cambios de la solicitud actual.
+   - `## SOLICITUD DE MODELAMIENTO DE DATOS` — motor destino.
+   - `## CONTEXTO DEL USUARIO` — texto libre.
+   - `## TABLAS A MODELAR` — tablas, conteos totales y resumen de columnas (nombre, definición, tipo, nullable, notas).
+   - `## RELACIONES ENTRE TABLAS` — FK declaradas por el usuario.
+   - `## INSTRUCCIONES` — pasos para el ExecutorAgent, incluyendo: respetar el `MODELO ACTUAL` cuando exista y no eliminar tablas/columnas previas salvo que el usuario lo pida.
 4. Guarda `input_data` y `target_engine` en `WorkflowContext`.
 5. Envía `AgentExecutorRequest` con el prompt.
+
+**`session_id` (campo opcional fuera del prompt)**: si el caller (la API) pasa `session_id` dentro de `input_data`, `run_modeling_pipeline` envuelve la ejecución en `session_scope(session_id)` para que las tools `query_guidelines` y `get_all_guidelines` resuelvan al cache de esa sesión. El `session_id` **no se serializa en el prompt** — el LLM no lo ve.
 
 **Formato del input JSON**:
 ```json
@@ -294,3 +298,55 @@ flowchart TB
 | 5 | `QAValidatorAgent` | Llama `search_column_catalog`, valida, estandariza |
 | 6 | `format_output` | Limpia JSON con `_extract_json_from_text`, combina resultados |
 | 7 | `_display_results` | Rich tables, DDL panels, QA score panel |
+
+---
+
+## Integración con la API REST (multi-turno)
+
+La función `run_modeling_pipeline` recibe un dict con campos adicionales cuando es llamada desde la API:
+
+```python
+input_data = {
+    # Campos base (también usados por CLI)
+    "user_text": str,
+    "tables": list[dict],
+    "target_engine": str,
+    "relationships": list[str],
+
+    # Campos adicionales inyectados por la API
+    "history": list[{"role": str, "content": str}],  # historial de la sesión
+    "last_model": dict | None,   # último modelo generado (si hubo turno previo)
+    "session_id": str,           # UUID de la sesión (para ContextVar de guidelines)
+}
+```
+
+**`session_id`** se saca del dict antes de serializar a JSON para el prompt:
+```python
+payload = {k: v for k, v in input_data.items() if k != "session_id"}
+input_json = json.dumps(payload, ensure_ascii=False)
+
+with session_scope(session_id):  # ContextVar activo durante toda la ejecución
+    events = await workflow.run(input_json)
+```
+
+Esto garantiza que el LLM nunca reciba el `session_id` en su contexto, mientras las tools de guidelines lo resuelven transparentemente.
+
+---
+
+## Normalización de Relaciones
+
+El `QAValidatorAgent` a veces devuelve `relationships` como lista de dicts en lugar de strings. El `response_builder.py` normaliza defensivamente:
+
+```python
+def _normalize_relationship(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        from_t = item.get("from_table") or item.get("source_table") or ""
+        to_t   = item.get("to_table")   or item.get("target_table") or ""
+        # ... construye "tabla_a.col → tabla_b.col [tipo] — descripción"
+    return str(item)
+
+# Aplicado en todos los puntos de lectura:
+relationships = [_normalize_relationship(r) for r in (raw.get("relationships") or [])]
+```

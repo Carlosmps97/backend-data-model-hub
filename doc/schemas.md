@@ -261,3 +261,69 @@ classDiagram
     WorkflowResult --> DataModelOutput : combines
     WorkflowResult --> QAValidationOutput : combines
 ```
+
+---
+
+## Schemas de la API REST
+
+Los modelos consumidos por el frontend Next.js viven en el mismo `src/schemas.py` con sufijo `API` para distinguirlos. Son **Pydantic v2** y se serializan a JSON puro (sin strings JSON anidados).
+
+### Validación de `conversation_id`
+
+Tipo alias `UUIDv4`: `Annotated[str, StringConstraints(pattern=...)]`. Acepta solo UUIDs versión 4 estrictos. Se valida tanto en el body de POST como en el path.
+
+### Request / Response de conversaciones
+
+| Schema | Endpoint | Notas |
+|---|---|---|
+| `CreateConversationRequest` | `POST /api/conversations` (body) | Campos: `conversation_id: UUIDv4`, `engine: str = "databricks_sql"`. |
+| `CreateConversationResponse` | idem (response) | `created: bool` indica si la conversación se creó o ya existía. |
+| `GuidelinesUploadResponse` | `POST /api/conversations/{id}/guidelines` | Incluye `preview` con los primeros 500 caracteres del contenido procesado. |
+| `DeleteConversationResponse` | `DELETE /api/conversations/{id}` | Confirma `deleted: True`. |
+
+### Request / Response del modelo
+
+`POST /api/conversations/{id}/model` recibe **multipart/form-data**:
+
+- `excel_file: UploadFile | None` (opcional).
+- `context_text: str | None` (opcional).
+- `engine: str | None` (opcional, sobreescribe el de la sesión solo para este turno).
+
+Al menos uno de `excel_file` o `context_text` es obligatorio (400 si ninguno).
+
+**Response: `ModelingResponseAPI`**
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `conversation_id` | `UUIDv4` | Eco del id de la sesión. |
+| `engine` | `str` | Motor efectivamente usado para este turno. |
+| `turn_number` | `int ≥ 1` | Número de turno tras este request. |
+| `tables` | `list[TableAPI]` | Tablas del modelo (ver más abajo). |
+| `relationships` | `list[str]` | Relaciones entre tablas. |
+| `export_sql` | `str` | DDL completo concatenado de todas las tablas. |
+| `export_markdown` | `str` | Modelo completo en Markdown. |
+| `qa_report` | `QAReportAPI` | Reporte de calidad. |
+| `guidelines_applied` | `str` | Resumen de los lineamientos aplicados (sesión vs. globales). |
+| `summary` | `str` | Resumen en lenguaje natural del modelo. |
+
+**`TableAPI`**: `table_name`, `table_description`, `columns: list[ColumnAPI]`, `ddl`.
+
+**`ColumnAPI`**: `column_name`, `data_type`, `nullable`, `is_pk`, `is_fk`, `fk_references` (string `"tabla.columna"` o `null`), `functional_definition`, `observations`.
+
+**`QAReportAPI`**: `quality_score (0–100)`, `standardized_columns`, `guideline_violations`, `new_catalog_entries`, `summary`.
+
+### Mapeo agente → API
+
+`src/api/response_builder.py` traduce los nombres internos del agente a los del contrato API:
+
+| Interno (agente) | API |
+|---|---|
+| `is_nullable` | `nullable` |
+| `is_primary_key` | `is_pk` |
+| `is_foreign_key` | `is_fk` |
+| `fk_reference` | `fk_references` |
+| `notes` (de columna) | parte de `observations` |
+| `default_value` y `constraints` | concatenados en `observations` |
+| `notes` (de tabla) | `table_description` |
+
+Cuando QA y Executor producen ambos un `tables`, se prefiere el del QA porque puede traer nombres estandarizados y DDL regenerado.

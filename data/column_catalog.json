@@ -6,7 +6,8 @@
       "data_type": "DATE",
       "used_in_tables": [
         "tbl_process_log",
-        "tbl_batch_execution"
+        "tbl_batch_execution",
+        "hd_orders"
       ],
       "is_new": false
     },
@@ -163,7 +164,8 @@
       "functional_definition": "Dirección física del cliente",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_customers"
+        "tbl_customers",
+        "ms_customers"
       ],
       "is_new": true
     },
@@ -181,7 +183,8 @@
       "functional_definition": "Descripción o detalle de la orden",
       "data_type": "STRING",
       "used_in_tables": [
-        "tbl_orders"
+        "tbl_orders",
+        "hd_orders"
       ],
       "is_new": true
     },

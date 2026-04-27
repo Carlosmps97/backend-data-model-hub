@@ -46,6 +46,22 @@ La configuración del sistema se gestiona a través de un archivo `.env` en la r
 
 Motores válidos: `databricks_sql`, `cosmosdb`, `sqlserver`, `postgresql`, `mysql`.
 
+### API REST
+
+Aplican solo cuando se ejecuta la API (`uvicorn api.main:app`). El CLI las ignora.
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `MAX_CONCURRENT_PIPELINES` | Máximo de pipelines `POST .../model` ejecutándose en paralelo. Implementado como `asyncio.Semaphore` que envuelve únicamente al endpoint del modelo (no afecta health, engines, GET del modelo). | `5` |
+| `CORS_ORIGINS` | Lista separada por comas de orígenes permitidos por CORS. | `http://localhost:3000,http://127.0.0.1:3000` |
+
+### Logging
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `LOG_FORMAT` | `pretty` (legible) o `json` (un objeto por línea). | `pretty` |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. | `INFO` |
+
 ---
 
 ## Archivo `.env.example`
@@ -71,6 +87,14 @@ COLUMN_CATALOG_PATH=data/column_catalog.json
 
 # Motor de BD por defecto
 DEFAULT_DB_ENGINE=databricks_sql
+
+# API REST
+MAX_CONCURRENT_PIPELINES=5
+# CORS_ORIGINS=http://localhost:3000
+
+# Logging
+LOG_FORMAT=pretty
+LOG_LEVEL=INFO
 ```
 
 ---

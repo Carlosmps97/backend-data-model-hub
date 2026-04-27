@@ -1,306 +1,184 @@
 """API REST async para el Data Modeler Agent.
 
-Endpoints para interactuar con el sistema desde aplicaciones externas.
+Punto de entrada de FastAPI. Responsabilidades acotadas:
+- Configurar logging.
+- Lifespan: crear singletons (FoundryChatClient, ConversationStore,
+  asyncio.Semaphore) y guardarlos en `app.state`.
+- Middleware: logueo estructurado de cada request.
+- CORS para el frontend Next.js.
+- Montar los routers `health`, `conversations`, `modeling`.
+
+Sin lógica de negocio.
 """
 
-import json
+from __future__ import annotations
+
+import asyncio
+import os
 import sys
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
-# Agregar raíz del proyecto al path
+# Agregar raíz del proyecto al path para que `src.*` y `api.*` sean importables.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 
+from api.routes import conversations_router, health_router, modeling_router
 from src.agents.factory import get_chat_client
-from src.config import settings
-from src.tools.excel_tools import parse_excel_file
-from src.workflow.graph import run_modeling_pipeline
+from src.conversation import ConversationStore
+from src.logger import configure_logging, get_logger
 
-# Cliente compartido de AI Foundry
-_chat_client = None
+configure_logging()
+log = get_logger("api.main")
+
+
+# ─── Lifespan ───────────────────────────────────────────────────────────
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestiona el ciclo de vida de la aplicación."""
-    global _chat_client
-    # Startup
+    """Inicializa los singletons del proceso al arrancar."""
+    # ConversationStore: en memoria, sin persistencia (por consigna).
+    app.state.store = ConversationStore()
+
+    # Cliente de AI Foundry: opcional al arranque (puede fallar por
+    # credenciales). Los endpoints que lo requieren responderán 503 si es None.
     try:
-        _chat_client = get_chat_client()
-        print("✓ Conexión con Azure AI Foundry establecida")
+        app.state.chat_client = get_chat_client()
+        log.info("foundry connected")
     except Exception as e:
-        print(f"⚠ Error al conectar con Azure AI Foundry: {e}")
-        _chat_client = None
-    yield
-    # Shutdown
-    print("✓ API detenida")
+        app.state.chat_client = None
+        log.error("foundry connection failed", extra={"error": str(e)})
+
+    # Semaphore que limita ejecuciones concurrentes del pipeline.
+    try:
+        max_concurrent = int(os.getenv("MAX_CONCURRENT_PIPELINES", "5"))
+    except ValueError:
+        max_concurrent = 5
+    max_concurrent = max(1, max_concurrent)
+    app.state.pipeline_semaphore = asyncio.Semaphore(max_concurrent)
+    log.info(
+        "pipeline semaphore initialized",
+        extra={"max_concurrent": max_concurrent},
+    )
+
+    log.info("api started")
+    try:
+        yield
+    finally:
+        log.info("api stopping")
+
+
+# ─── Aplicación ─────────────────────────────────────────────────────────
 
 
 app = FastAPI(
     title="Data Modeler Agent API",
-    description="API REST para generación de modelos de datos con validación QA",
-    version="1.0.0",
+    description=(
+        "API REST para generación de modelos de datos con validación QA. "
+        "Soporta conversaciones multi-turno con memoria por `conversation_id`."
+    ),
+    version="2.0.0",
     lifespan=lifespan,
 )
 
 
-# ─── Schemas de Request/Response ───────────────────────────────────────────
+# ─── CORS ───────────────────────────────────────────────────────────────
+
+_cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+else:
+    _cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-class ColumnInput(BaseModel):
-    """Columna para modelar."""
-    column_name: str | None = Field(None, description="Nombre sugerido")
-    functional_definition: str = Field(..., description="Definición funcional obligatoria")
-    data_type_hint: str | None = Field(None, description="Sugerencia de tipo de dato")
-    is_nullable: bool | None = Field(None, description="¿Permite nulos?")
-    notes: str | None = Field(None, description="Notas adicionales")
+# ─── Middleware: logueo de requests ─────────────────────────────────────
 
 
-class TableInput(BaseModel):
-    """Tabla para modelar."""
-    table_name: str = Field(..., description="Nombre de la tabla")
-    columns: list[ColumnInput] = Field(default_factory=list)
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next) -> Response:
+    """Loguea inicio/fin de cada request con conv id (si está) y duración."""
+    request_id = uuid.uuid4().hex[:12]
+    started = time.monotonic()
+    conv_id = _extract_conversation_id(request.url.path)
 
-
-class ModelingRequest(BaseModel):
-    """Request para generar modelo de datos."""
-    user_text: str = Field(default="", description="Texto libre del usuario")
-    tables: list[TableInput] = Field(default_factory=list)
-    target_engine: str = Field(default="databricks_sql", description="Motor de BD destino")
-    relationships: list[str] = Field(default_factory=list, description="Relaciones entre tablas")
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "user_text": "Crea tabla de productos",
-                "tables": [
-                    {
-                        "table_name": "productos",
-                        "columns": [
-                            {
-                                "column_name": "nombre",
-                                "functional_definition": "Nombre del producto",
-                                "data_type_hint": "VARCHAR",
-                                "is_nullable": False,
-                            }
-                        ],
-                    }
-                ],
-                "target_engine": "postgresql",
-                "relationships": [],
-            }
-        }
-    }
-
-
-class ColumnOutput(BaseModel):
-    """Columna generada."""
-    column_name: str
-    functional_definition: str
-    data_type: str
-    is_nullable: bool
-    is_primary_key: bool
-    is_foreign_key: bool
-    fk_reference: str | None
-    default_value: str | None
-    constraints: list[str]
-
-
-class TableOutput(BaseModel):
-    """Tabla generada."""
-    table_name: str
-    columns: list[ColumnOutput]
-    ddl: str
-    notes: str
-
-
-class StandardizedColumn(BaseModel):
-    """Columna estandarizada por QA."""
-    table_name: str
-    original_name: str
-    standardized_name: str
-    reason: str
-
-
-class GuidelineViolation(BaseModel):
-    """Violación de lineamiento detectada."""
-    table_name: str
-    column_name: str
-    violation: str
-    correction_applied: str
-
-
-class NewCatalogEntry(BaseModel):
-    """Nueva entrada en catálogo."""
-    column_name: str
-    functional_definition: str
-    data_type: str
-    table_name: str
-
-
-class QAReportOutput(BaseModel):
-    """Reporte de QA."""
-    standardized_columns: list[StandardizedColumn]
-    guideline_violations: list[GuidelineViolation]
-    new_catalog_entries: list[NewCatalogEntry]
-    quality_score: int
-    summary: str
-
-
-class ModelingResponse(BaseModel):
-    """Response completo del modelamiento."""
-    engine: str
-    tables: list[TableOutput]
-    relationships: list[str]
-    summary: str
-    qa_report: QAReportOutput
-
-
-class ExcelParseRequest(BaseModel):
-    """Request para parsear archivo Excel."""
-    file_path: str = Field(..., description="Ruta absoluta al archivo .xlsx")
-
-
-class HealthResponse(BaseModel):
-    """Response de health check."""
-    status: str
-    version: str
-    foundry_connected: bool
-    default_engine: str
-
-
-# ─── Endpoints ─────────────────────────────────────────────────────────────
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Verifica el estado de la API y la conexión con Azure AI Foundry."""
-    return HealthResponse(
-        status="ok",
-        version="1.0.0",
-        foundry_connected=_chat_client is not None,
-        default_engine=settings.DEFAULT_DB_ENGINE,
+    log.info(
+        "request started",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "conversation_id": conv_id,
+        },
     )
-
-
-@app.post("/model", response_model=ModelingResponse)
-async def create_model(request: ModelingRequest):
-    """
-    Genera un modelo de datos completo con validación QA.
-    
-    - Recibe definiciones de tablas/columnas y motor de BD
-    - Ejecuta pipeline: ExecutorAgent → QAValidatorAgent
-    - Retorna modelo generado + reporte de calidad
-    """
-    if _chat_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Azure AI Foundry no está conectado. Verificar configuración.",
-        )
-    
     try:
-        # Convertir request a dict para el pipeline
-        input_data = request.model_dump()
-        
-        # Ejecutar pipeline
-        result = await run_modeling_pipeline(_chat_client, input_data)
-        
-        if "error" in result:
-            raise HTTPException(status_code=500, detail=result["error"])
-        
-        # Parsear resultado
-        try:
-            generated_model = json.loads(result.get("generated_model", "{}"))
-            qa_validation = json.loads(result.get("qa_validation", "{}"))
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error al parsear JSON del resultado: {e}",
-            )
-        
-        # Construir response
-        qa_report_data = qa_validation.get("qa_report", {})
-        qa_report = QAReportOutput(
-            standardized_columns=[
-                StandardizedColumn(**item)
-                for item in qa_report_data.get("standardized_columns", [])
-            ],
-            guideline_violations=[
-                GuidelineViolation(**item)
-                for item in qa_report_data.get("guideline_violations", [])
-            ],
-            new_catalog_entries=[
-                NewCatalogEntry(**item)
-                for item in qa_report_data.get("new_catalog_entries", [])
-            ],
-            quality_score=qa_report_data.get("quality_score", 0),
-            summary=qa_report_data.get("summary", ""),
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        log.exception(
+            "request crashed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "conversation_id": conv_id,
+                "ms": elapsed_ms,
+            },
         )
-        
-        tables = [
-            TableOutput(
-                table_name=t["table_name"],
-                columns=[
-                    ColumnOutput(**c) for c in t.get("columns", [])
-                ],
-                ddl=t.get("ddl", ""),
-                notes=t.get("notes", ""),
-            )
-            for t in generated_model.get("tables", [])
-        ]
-        
-        return ModelingResponse(
-            engine=result.get("engine", request.target_engine),
-            tables=tables,
-            relationships=generated_model.get("relationships", []),
-            summary=generated_model.get("summary", ""),
-            qa_report=qa_report,
-        )
-        
-    except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error interno del servidor: {str(e)}",
-        )
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    log.info(
+        "request completed",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "conversation_id": conv_id,
+            "status": response.status_code,
+            "ms": elapsed_ms,
+        },
+    )
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
-@app.post("/parse-excel")
-async def parse_excel(request: ExcelParseRequest) -> dict:
-    """
-    Parsea un archivo Excel y extrae las tablas/columnas.
-    
-    Útil para pre-procesar archivos antes de enviarlos a /model.
-    """
-    try:
-        result = parse_excel_file.func(request.file_path)
-        return json.loads(result)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Error al parsear Excel: {str(e)}",
-        )
+def _extract_conversation_id(path: str) -> str | None:
+    """Extrae el `conversation_id` del path si está presente."""
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 3 and parts[0] == "api" and parts[1] == "conversations":
+        return parts[2]
+    return None
 
 
-@app.get("/engines")
-async def list_engines() -> dict:
-    """Lista los motores de BD soportados."""
-    return {
-        "engines": settings.SUPPORTED_ENGINES,
-        "default": settings.DEFAULT_DB_ENGINE,
-    }
+# ─── Montaje de routers ─────────────────────────────────────────────────
+
+app.include_router(health_router)
+app.include_router(conversations_router)
+app.include_router(modeling_router)
 
 
-# ─── Ejecución directa (para desarrollo) ────────────────────────────────────
+# ─── Ejecución directa (desarrollo) ─────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",
