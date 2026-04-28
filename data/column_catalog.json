@@ -240,7 +240,10 @@
       "data_type": "STRING",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_conversations_rt",
+        "hd_conversations",
+        "hd_rt_conversations"
       ],
       "is_new": true
     },
@@ -270,7 +273,11 @@
       "data_type": "TIMESTAMP",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_conversations_rt",
+        "hd_rt_tool_executions",
+        "hd_conversations",
+        "hd_rt_traces"
       ],
       "is_new": true
     },
@@ -280,7 +287,9 @@
       "data_type": "BIGINT",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_rt_tool_executions",
+        "hd_rt_traces"
       ],
       "is_new": true
     },
@@ -300,7 +309,9 @@
       "data_type": "INT",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_conversations",
+        "hd_rt_conversations"
       ],
       "is_new": true
     },
@@ -310,7 +321,9 @@
       "data_type": "INT",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_conversations",
+        "hd_rt_conversations"
       ],
       "is_new": true
     },
@@ -320,7 +333,9 @@
       "data_type": "INT",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_conversations",
+        "hd_rt_conversations"
       ],
       "is_new": true
     },
@@ -410,7 +425,8 @@
       "data_type": "DATE",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_rt_traces"
       ],
       "is_new": true
     },
@@ -429,7 +445,8 @@
       "data_type": "TIMESTAMP",
       "used_in_tables": [
         "tbl_agent_telemetry",
-        "lrt_agent_telemetry"
+        "lrt_agent_telemetry",
+        "hd_rt_traces"
       ],
       "is_new": true
     },
@@ -439,6 +456,722 @@
       "data_type": "STRING",
       "used_in_tables": [
         "tbl_agent_telemetry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dt_modified",
+      "functional_definition": "Fecha y hora de la última modificación asociada al registro.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "md_agents_registry_daily"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "agent_framework",
+      "functional_definition": "Nombre del Framework en el que se basa el agente para su construcción.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "agent_name",
+      "functional_definition": "Nombre del agente (registrado por el consumidor).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_tech_lead",
+      "functional_definition": "Nombre completo del lider tecnico del agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_tech_leads_daily"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "email_tech_lead",
+      "functional_definition": "Correo del lider tecnico asociado al agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_tech_leads_daily"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flg_active",
+      "functional_definition": "Flag (true/false) que identifica si el lider tecnico esta activo.",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "md_tech_leads_daily",
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "ts_end",
+      "functional_definition": "Fecha y hora fin en el que hilo de conversacion acaba.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "hd_conversations_rt",
+        "hd_rt_tool_executions",
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dur_ms",
+      "functional_definition": "Duración de la conversación en milisegundos.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_conversations_rt"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnt_total_traces",
+      "functional_definition": "Cantidad total de trazas/operaciones en la conversación.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_conversations_rt"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "desc_solution",
+      "functional_definition": "Descripcion de la solucion de negocio al que pertenece el agente.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_conversations_rt",
+        "hd_rt_tool_executions",
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_application",
+      "functional_definition": "Código de la aplicación.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_conversations_rt",
+        "md_agents_catalog",
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_parent_span",
+      "functional_definition": "Identificador del span padre asociado al span.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_tool",
+      "functional_definition": "Nombre de la herramienta/función ejecutada.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_tool_type",
+      "functional_definition": "Tipo de herramienta (extension, function, etc.).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_tool_input",
+      "functional_definition": "Entrada/parámetros de la herramienta en formato JSON.",
+      "data_type": "VARIANT",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_tool_output",
+      "functional_definition": "Salida resultante de la ejecución de la herramienta en formato JSON.",
+      "data_type": "VARIANT",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_tool_status",
+      "functional_definition": "Estado de la llamada al tool.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_tool_executions"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "tsupdated",
+      "functional_definition": "Timestamp de última actualización.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nmprovider",
+      "functional_definition": "Nombre del proveedor del modelo.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dteffective_start",
+      "functional_definition": "Fecha efectiva desde que aplica el precio.",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dteffective_end",
+      "functional_definition": "Fecha efectiva hasta la cual aplica el precio.",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amntprice_input",
+      "functional_definition": "Precio por 1 millón de tokens de entrada.",
+      "data_type": "DECIMAL(18,6)",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "amntprice_output",
+      "functional_definition": "Precio por 1 millón de tokens de salida.",
+      "data_type": "DECIMAL(18,6)",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "codcurrency",
+      "functional_definition": "Código del tipo de moneda empleado (PEN / USD / YEN / etc).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "mm_model_pricing"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flgactive",
+      "functional_definition": "Indica si el registro está activo.",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "mm_model_pricing",
+        "md_agents_owner"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nmagtype",
+      "functional_definition": "Nombre del tipo de agente asociado (reactivo, basado en modelos, basado en objetivos, etc.).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_version",
+      "functional_definition": "Código de versionamiento del agente.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_registry",
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "idparentagent",
+      "functional_definition": "Código del agente asociado como padre.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "urlapiendpoint",
+      "functional_definition": "URL del endpoint de interacción principal.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flgaudit",
+      "functional_definition": "Flag que indica si el agente tiene activada la auditoría.",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "md_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_agent_version",
+      "functional_definition": "Código de versionamiento del agente basado en x / Y / Z.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog",
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "desc_autonomy_actions",
+      "functional_definition": "Descripción de acciones de autonomía habilitadas en el agente.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_autonomy_level",
+      "functional_definition": "Nivel de autonomía aplicado (L0: No Autonomy; L1: Assisted; etc.).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "desc_capabilities",
+      "functional_definition": "Descripción de capacidades habilitadas en este despliegue.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "url_code_repository",
+      "functional_definition": "URL del repositorio de código del despliegue (Github / Bitbucket).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_criticality_level",
+      "functional_definition": "Nivel de criticidad asociado al agente en contexto de negocio (Alta / Media / Baja).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_data_classification",
+      "functional_definition": "Clasificación de los datos que maneja el agente (Confidencial, Interno, Externo).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_owner",
+      "functional_definition": "Nombre completo del owner del agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_owners"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_owner_email",
+      "functional_definition": "Correo del owner asociado al agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_owners"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_squad",
+      "functional_definition": "Nombre del Squad responsable del desarrollo del agente.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_owners"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "idconversation",
+      "functional_definition": "Identificador único que representa una conversacion o hilo de contexto.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnttokensin",
+      "functional_definition": "Cantidad de tokens de entrada utilizados.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnttokensout",
+      "functional_definition": "Cantidad de tokens de salida generados.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnttokenstotal",
+      "functional_definition": "Cantidad total de tokens utilizados (entrada + salida).",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "descsolution",
+      "functional_definition": "Descripción de la solución de negocio al que pertenece el agente.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_conversations"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "idspan",
+      "functional_definition": "Identificador único del span asociado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_span_attributes",
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "descattribute",
+      "functional_definition": "Nombre descriptivo del span.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_span_attributes"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "jsonattributevalue",
+      "functional_definition": "Valor del atributo en formato variant, el cual puede contener una serie de datos en JSON con la información resultante.",
+      "data_type": "VARIANT",
+      "used_in_tables": [
+        "hd_rt_span_attributes"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "idtrace",
+      "functional_definition": "Identificador de la traza/operacion asociada.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_spans"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nmmodel",
+      "functional_definition": "Nombre del modelo LLM en el que el agente esta construido.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_spans"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_interaction",
+      "functional_definition": "Identificador unico que representa la sesion de la interaccion del agente actual. Este campo tiene por objetivo poder asociar la telemetria a un agente que se quiera orquestar (agente Activo).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "id_parent_interaction",
+      "functional_definition": "Identificador unico que representa la sesion de la interaccion del agente por quien es llamado. Este campo tiene por objetivo poder asociar la telemetria al agente quien lo ha invocado (agente pasivo).",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cod_agent",
+      "functional_definition": "Codigo unico que identifica a un agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "descguardrailtype",
+      "functional_definition": "Descripción del tipo de guardrail aplicado",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hrt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flgapprovedstatus",
+      "functional_definition": "Indica si el guardrail pasó o no pasó (aprobación)",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "hrt_guardrails_span",
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flgbypass",
+      "functional_definition": "Indica si el guardrail fue 'bypasseado' u omitido",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "hrt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "jsonguardrailanalysis",
+      "functional_definition": "Detalle del análisis del guardrail en formato JSON",
+      "data_type": "VARIANT",
+      "used_in_tables": [
+        "hrt_guardrails_span",
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "desc_guardrail",
+      "functional_definition": "Descripción funcional del guardrail",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_guardrail",
+      "functional_definition": "Nombre del guardrail",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_category",
+      "functional_definition": "Nombre de la categoría funcional del guardrail",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flg_is_active",
+      "functional_definition": "Flag que indica si el guardrail está habilitado",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_blocklist",
+      "functional_definition": "Listas de bloqueo asociadas al guardrail",
+      "data_type": "ARRAY<STRING>",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_actions",
+      "functional_definition": "Acciones de respuesta cuando el guardrail rechaza o detecta severidad en un JSON de tipo key:value",
+      "data_type": "VARIANT",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_modes",
+      "functional_definition": "Lista de modos donde aplica el guardrail (entrada usuario, salida agente, pre/post tool)",
+      "data_type": "ARRAY<STRING>",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "json_tags",
+      "functional_definition": "Lista de tags actuales asociados al guardrail",
+      "data_type": "ARRAY<STRING>",
+      "used_in_tables": [
+        "md_guardrail_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnt_total_spans",
+      "functional_definition": "Cantidad total de spans asociado a la traza/operacion.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnt_tokens_in",
+      "functional_definition": "Cantidad de tokens de entrada utilizados.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnt_tokens_out",
+      "functional_definition": "Cantidad de tokens de salida generados.",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "cnt_tokens_total",
+      "functional_definition": "Cantidad total de tokens utilizados (entrada + salida).",
+      "data_type": "BIGINT",
+      "used_in_tables": [
+        "hd_rt_traces"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nmagent",
+      "functional_definition": "Nombre del agente registrado por el consumidor.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "dtpartition",
+      "functional_definition": "Partición por fecha para optimizar consultas diarias.",
+      "data_type": "DATE",
+      "used_in_tables": [
+        "md_agents_registry"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "emailowner",
+      "functional_definition": "Correo del owner asociado al agente desplegado.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_agents_owner"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "tsstart",
+      "functional_definition": "Fecha y hora inicio en el que hilo de conversacion inicia.",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "hrt_conversation_threads"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "codapp",
+      "functional_definition": "Código de la aplicación.",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hrt_conversation_threads",
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "idguardrail",
+      "functional_definition": "Identificador único del guardrail evaluado",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "flgisbypass",
+      "functional_definition": "Flag (true/false) que indica si el guardrail fue bypasseado/omitido",
+      "data_type": "BOOLEAN",
+      "used_in_tables": [
+        "hd_rt_guardrails_span"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "nm_guardrail_version",
+      "functional_definition": "Código de versionamiento del guardrail basado en x (major)/Y (minor)/Y (patch)",
+      "data_type": "STRING",
+      "used_in_tables": [
+        "md_guardrails_catalog"
+      ],
+      "is_new": true
+    },
+    {
+      "column_name": "ts_guardrail_last_update",
+      "functional_definition": "Última fecha/hora de actualización del guardrail",
+      "data_type": "TIMESTAMP",
+      "used_in_tables": [
+        "md_guardrails_catalog"
       ],
       "is_new": true
     }

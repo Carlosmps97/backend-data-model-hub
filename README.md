@@ -98,43 +98,83 @@ agent-modeler/
 
 ## Pipeline de Modelamiento
 
+El backend tiene **dos modos** que se eligen automáticamente según el input:
+
+### Modo `per-table` (Excel con tablas)
+
+Cuando se sube un archivo Excel se activa una variante **lean** del workflow
+(sin QA) y se aplica chunking en 3 niveles para garantizar que no se pierdan
+columnas, independientemente del cap de tokens del modelo.
+
 ```
-Input del usuario
-(texto + Excel opcional + engine)
+Excel parseado (N tablas)
+         │
+         ▼
+┌───────────────────────────────────────────────────────────┐
+│  Nivel 1 — Per-tabla parallel                              │
+│  Hasta PER_TABLE_PARALLELISM tablas en simultáneo          │
+└───────────────────────────────┬───────────────────────────┘
+                                │  por cada tabla:
+                                ▼
+┌───────────────────────────────────────────────────────────┐
+│  Nivel 2 — Per-chunk de columnas                           │
+│  Si len(cols) > COLS_PER_BATCH → split en chunks           │
+│  Cada chunk = 1 llamada al LLM (lean: ExecutorAgent solo)  │
+│  Chunks en paralelo bajo el rate limiter global            │
+└───────────────────────────────┬───────────────────────────┘
+                                │  merge de chunks → 1 tabla
+                                ▼
+┌───────────────────────────────────────────────────────────┐
+│  Nivel 3 — Completion check + targeted retry               │
+│  Si cobertura < 80 % → reintento dirigido SOLO con las     │
+│  columnas que faltan                                       │
+└───────────────────────────────┬───────────────────────────┘
+                                ▼
+                    ModelingResponseAPI
+        (todas las tablas + DDL + relationships + summary)
+```
+
+Cada llamada al LLM pasa por:
+- `llm_rate_limiter.acquire()` — token bucket por minuto (LLM_RPM_CAP).
+- `call_with_retry()` — reintento exponencial en 429 (LLM_MAX_RETRIES).
+
+### Modo `single` (texto libre / refinamiento conversacional)
+
+Cuando NO hay Excel (mensajes tipo "agregale una columna de auditoría a la
+tabla X") se mantiene el grafo completo con QAValidatorAgent porque ahí sí
+aporta valor: estandariza nombres contra el catálogo corporativo y marca
+violaciones de lineamientos.
+
+```
+Input del usuario (texto + engine)
          │
          ▼
 ┌─────────────────────┐
-│   prepare_input     │  Construye prompt enriquecido con:
-│   (Executor)        │  • Historial de conversación (si existe)
-└──────────┬──────────┘  • Último modelo generado (si existe)
-           │              • Tablas, columnas, relaciones, motor
-           ▼
-┌─────────────────────┐
-│   ExecutorAgent     │  Llama get_all_guidelines()
-│   (Agent · GPT-4o)  │  Genera modelo + DDL aplicando lineamientos
-└──────────┬──────────┘  Responde JSON estructurado
-           │
-           ▼
-┌─────────────────────┐
-│   extract_model     │  Limpia JSON del ExecutorAgent
-│   (Executor)        │  Prepara prompt para QA
+│   prepare_input     │  Construye prompt enriquecido con historial
+│   (Executor)        │  + último modelo + tablas/columnas/relaciones.
 └──────────┬──────────┘
-           │
            ▼
 ┌─────────────────────┐
-│  QAValidatorAgent   │  search_column_catalog() por cada columna
-│  (Agent · GPT-4o)   │  add_column_to_catalog() para columnas nuevas
-└──────────┬──────────┘  Valida lineamientos, regenera DDL, quality_score
-           │
-           ▼
-┌─────────────────────┐
-│   format_output     │  Combina modelo + QA report
-│   (Executor)        │  Emite JSON final
+│   ExecutorAgent     │  Llama get_all_guidelines().
+│   (Agent · GPT-4o)  │  Genera modelo + DDL aplicando lineamientos.
 └──────────┬──────────┘
-           │
+           ▼
+┌─────────────────────┐
+│   extract_model     │  Limpia JSON del Executor para pasar al QA.
+│   (Executor)        │
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  QAValidatorAgent   │  search_column_catalog() por cada columna.
+│  (Agent · GPT-4o)   │  add_column_to_catalog() para columnas nuevas.
+└──────────┬──────────┘  Valida lineamientos, regenera DDL, quality_score.
+           ▼
+┌─────────────────────┐
+│   format_output     │  Combina modelo + QA report → JSON final.
+│   (Executor)        │
+└──────────┬──────────┘
            ▼
     ModelingResponseAPI
-    (tablas, DDL, relaciones, qa_report, guidelines_applied)
 ```
 
 ---

@@ -48,9 +48,22 @@ class RawColumnInput(BaseModel):
 
 
 class RawTableInput(BaseModel):
-    """Tabla tal como viene del Excel del usuario (una pestaña)."""
+    """Tabla tal como viene del Excel del usuario (una pestaña).
 
-    table_name: str = Field(description="Nombre de la pestaña / tabla candidata")
+    El `table_name` es PROVISIONAL (nombre de la pestaña del Excel).
+    El agente debe derivar el nombre físico final aplicando las
+    convenciones de nomenclatura de los lineamientos corporativos.
+    """
+
+    table_name: str = Field(description="Nombre provisional tomado de la pestaña del Excel")
+    table_description: str | None = Field(
+        default=None,
+        description="Descripción funcional de la tabla (de la pestaña TableDefinition si existe)",
+    )
+    is_proposed_name: bool = Field(
+        default=True,
+        description="Indica que table_name es provisional; el agente define el nombre físico final",
+    )
     columns: list[RawColumnInput] = Field(default_factory=list)
 
 

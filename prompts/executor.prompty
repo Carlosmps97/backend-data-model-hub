@@ -39,13 +39,16 @@ Lee cuidadosamente TODA la solicitud del usuario. Identifica:
 - **Motor de BD destino**: el dialecto SQL a usar.
 - **Relaciones**: claves foráneas y relaciones entre tablas.
 
-### ⚠️ REGLA CRÍTICA DE FIDELIDAD
+### ⚠️ REGLA CRÍTICA DE FIDELIDAD (REGLA #1 — VIOLACIÓN GRAVE SI NO SE CUMPLE)
 
 **NUNCA omitas, fusiones ni elimines columnas del input del usuario.**
 
-- Si el usuario define 10 columnas, tu modelo DEBE tener AL MENOS esas 10 columnas (más las columnas obligatorias de los lineamientos).
+- Si el usuario define **N columnas**, tu modelo **DEBE** tener **AL MENOS esas N columnas**, todas presentes en el array `columns` del JSON de salida, más las columnas obligatorias que indiquen los lineamientos.
+- **No condenses** columnas similares en una sola. Si hay `agent_name` y `agent_id`, tu salida debe tener AMBAS, separadas, con sus propias filas.
+- **No abrevies la lista** con frases tipo "...y otras columnas". Cada columna del input debe materializarse en el JSON con su `column_name`, `data_type`, `functional_definition` y demás campos completos.
 - Si una columna del usuario no encaja perfectamente en los lineamientos, inclúyela igualmente adaptando su nombre según las convenciones.
-- Ante la duda sobre si incluir o no una columna, SIEMPRE inclúyela.
+- Ante la duda sobre si incluir o no una columna, **SIEMPRE inclúyela**.
+- **Antes de cerrar el JSON**, contá las columnas: si tu salida tiene MENOS de las del input, agregá las faltantes antes de responder.
 
 ---
 

@@ -190,43 +190,119 @@ async def prepare_input(
 
     if tables:
         total_columns = sum(len(t.get("columns", [])) for t in tables)
-        prompt_parts.append(f"\n## TABLAS A MODELAR ({len(tables)} tabla(s), {total_columns} columna(s) en total)")
-        for table in tables:
+        any_proposed = any(t.get("is_proposed_name", False) for t in tables)
+        has_descriptions = any(t.get("table_description") for t in tables)
+
+        prompt_parts.append(
+            f"\n## TABLAS A MODELAR ({len(tables)} tabla(s), {total_columns} columna(s) en total)"
+        )
+
+        if any_proposed:
+            prompt_parts.append(
+                "> ⚠️ **NOMBRES PROVISIONALES**: Los nombres de tablas y columnas que aparecen a "
+                "continuación provienen del Excel del usuario y son SUGERENCIAS PRELIMINARES, "
+                "no los nombres físicos finales. El agente DEBE derivar los nombres finales "
+                "aplicando estrictamente las convenciones de nomenclatura de los lineamientos "
+                "(prefijos por dominio, abreviaturas del glosario, estilo UPPERCASE_SNAKE, etc.). "
+                "Los tipos de dato son INDICACIONES; el tipo final se determina por el "
+                "Parent Domain que establezcan los lineamientos."
+            )
+            if has_descriptions:
+                prompt_parts.append(
+                    "> La **descripción funcional de cada tabla** (cuando está presente) proviene "
+                    "de la pestaña `TableDefinition` del Excel y representa el significado de "
+                    "negocio. Usarla para entender el dominio y aplicar la nomenclatura correcta."
+                )
+
+        for tidx, table in enumerate(tables, 1):
             tname = table.get("table_name", "sin_nombre")
+            tdesc = table.get("table_description", "")
+            is_proposed = table.get("is_proposed_name", False)
             cols = table.get("columns", [])
-            prompt_parts.append(f"\n### Tabla: {tname} ({len(cols)} columnas)")
+
+            if is_proposed:
+                header = (
+                    f"\n### Tabla {tidx}: nombre provisional en Excel = \"{tname}\" "
+                    f"({len(cols)} columna(s))"
+                )
+            else:
+                header = f"\n### Tabla {tidx}: {tname} ({len(cols)} columna(s))"
+            prompt_parts.append(header)
+
+            if tdesc:
+                prompt_parts.append(f"**Descripción funcional de la tabla:** {tdesc}")
+
+            if is_proposed:
+                prompt_parts.append(
+                    "_El nombre físico final debe construirse según los lineamientos "
+                    "(consultar `get_all_guidelines()`)._"
+                )
+
             for idx, col in enumerate(cols, 1):
-                col_name = col.get("column_name", "(sin nombre)")
+                col_name = col.get("column_name", "")
                 func_def = col.get("functional_definition", "")
                 dtype = col.get("data_type_hint", "")
                 nullable = col.get("is_nullable", "")
                 notes = col.get("notes", "")
-                parts = [f"{idx}. **{col_name}**"]
-                if func_def:
-                    parts.append(f"Definición: {func_def}")
+
+                # Formato compacto de una línea por columna para no exceder
+                # el contexto del LLM con modelos grandes (muchas columnas)
+                line_parts: list[str] = [f"{idx}."]
+                if col_name:
+                    line_parts.append(f"`{col_name}`")
                 if dtype:
-                    parts.append(f"Tipo sugerido: {dtype}")
-                if nullable != "":
-                    parts.append(f"Nullable: {nullable}")
+                    line_parts.append(f"({dtype})")
+                if func_def:
+                    line_parts.append(f"— {func_def}")
+                if nullable != "" and nullable is not False:
+                    line_parts.append("[nullable]")
                 if notes:
-                    parts.append(f"Notas: {notes}")
-                prompt_parts.append("   " + " | ".join(parts))
+                    line_parts.append(f"[nota: {notes}]")
+
+                prompt_parts.append("   " + " ".join(line_parts))
 
     if relationships:
         prompt_parts.append("\n## RELACIONES ENTRE TABLAS")
         for rel in relationships:
             prompt_parts.append(f"- {rel}")
 
-    prompt_parts.append(
-        "\n## INSTRUCCIONES"
-        "\n1. Llama a `get_all_guidelines()` para obtener los lineamientos corporativos COMPLETOS."
-        "\n2. Analiza los lineamientos: nomenclatura de tablas, prefijos de columnas, tipos de dato, columnas obligatorias."
-        "\n3. Genera el modelo de datos aplicando estrictamente los lineamientos obtenidos."
-        f"\n4. **FIDELIDAD**: El modelo DEBE incluir TODAS las {total_columns if tables else 0} columna(s) solicitadas por el usuario, más las columnas obligatorias de los lineamientos. No omitas ninguna."
-        "\n5. Si existe MODELO ACTUAL, parte de él y aplica solo los cambios pedidos; no elimines tablas ni columnas previas salvo que el usuario lo pida explícitamente."
-        "\n6. Genera DDL ejecutable para el motor destino."
-        "\n7. Responde EXCLUSIVAMENTE en formato JSON válido según tu formato de respuesta."
-    )
+    total_columns_val = sum(len(t.get("columns", [])) for t in tables) if tables else 0
+    any_proposed_flag = any(t.get("is_proposed_name", False) for t in tables) if tables else False
+
+    instrucciones = [
+        "\n## INSTRUCCIONES",
+        "1. Llama a `get_all_guidelines()` para obtener los lineamientos corporativos COMPLETOS.",
+        "2. Analiza los lineamientos: nomenclatura de tablas, prefijos por dominio/solución, "
+           "abreviaturas del glosario, Parent Domain por tipo de dato, columnas técnicas obligatorias.",
+        "3. Genera el modelo de datos aplicando ESTRICTAMENTE los lineamientos obtenidos.",
+        f"4. **FIDELIDAD**: El modelo DEBE incluir TODAS las {total_columns_val} columna(s) "
+           "solicitadas por el usuario, más las columnas técnicas obligatorias de los lineamientos. "
+           "No omitas ninguna columna del usuario.",
+    ]
+
+    if any_proposed_flag:
+        instrucciones.append(
+            "5. **NOMBRES PROVISIONALES**: Tabla y columna en el Excel son SUGERENCIAS. "
+            "Deriva los nombres físicos finales usando: prefijos de los lineamientos (HD_/DM_/etc.), "
+            "glosario de abreviaturas, UPPERCASE_SNAKE_CASE. El tipo final lo da el Parent Domain "
+            "del lineamiento (monto→DECIMAL(21,4), codigo→VARCHAR(20), fecha→DATE, etc.). "
+            "La descripción funcional de cada tabla (TableDefinition) indica el dominio/prefijo correcto."
+        )
+        instrucciones.append(
+            "6. **PROCESA ABSOLUTAMENTE TODAS las tablas del input** — no omitas ninguna. "
+            "Si el modelo ACTUAL existe, pártelo como base y aplica solo los cambios."
+        )
+        instrucciones.append("7. Genera DDL ejecutable para el motor destino.")
+        instrucciones.append("8. Responde EXCLUSIVAMENTE en formato JSON válido.")
+    else:
+        instrucciones.extend([
+            "5. Si existe MODELO ACTUAL, pártelo como base y aplica solo los cambios pedidos.",
+            "6. **PROCESA TODAS las tablas del input** — no omitas ninguna.",
+            "7. Genera DDL ejecutable para el motor destino.",
+            "8. Responde EXCLUSIVAMENTE en formato JSON válido.",
+        ])
+
+    prompt_parts.append("\n".join(instrucciones))
 
     prompt = "\n".join(prompt_parts)
 
@@ -312,6 +388,36 @@ async def format_output(
     await ctx.yield_output(final_result)
 
 
+# ─── Modo "lean": ExecutorAgent + format, SIN QA ───────────────────────
+
+
+@executor(id="format_lean_output")
+async def format_lean_output(
+    response: AgentExecutorResponse, ctx: WorkflowContext[Never, str]
+) -> None:
+    """Salida del workflow lean (Executor sin QA).
+
+    Empaqueta la respuesta del ExecutorAgent en el mismo contrato que
+    `format_output` produce: un JSON con `engine`, `generated_model` y
+    `qa_validation` (vacía aquí). El `response_builder.py` ya tolera
+    `qa_validation` vacío y usa `tables` del modelo generado.
+    """
+    model_text = response.agent_response.text
+    engine = ctx.get_state("target_engine") or "databricks_sql"
+
+    clean_model = _extract_json_from_text(model_text)
+
+    final_result = json.dumps(
+        {
+            "engine": engine,
+            "generated_model": clean_model,
+            "qa_validation": "{}",
+        },
+        ensure_ascii=False,
+    )
+    await ctx.yield_output(final_result)
+
+
 def create_modeling_workflow(client: FoundryChatClient):
     """Crea el workflow completo de modelamiento de datos.
 
@@ -338,11 +444,41 @@ def create_modeling_workflow(client: FoundryChatClient):
     return workflow
 
 
+def create_lean_workflow(client: FoundryChatClient):
+    """Crea un workflow reducido (sin QA) para procesamiento por tabla.
+
+    Grafo: prepare_input → executor_agent → format_lean_output
+
+    Útil cuando se procesa una tabla por turno en modo per-table: el
+    QAValidatorAgent deja de aportar valor (las columnas son las del
+    Excel del usuario y el ExecutorAgent ya consultó las guidelines)
+    y se transforma en un duplicado de trabajo + costo de tokens + RPM.
+
+    Saltarse el QA en este modo:
+    - reduce ~50% las llamadas al LLM por tabla,
+    - elimina el bucle de N llamadas a `search_column_catalog` por
+      tabla (37 búsquedas para una tabla con 37 columnas), que es la
+      principal causa de rate limit.
+    """
+    executor_agent = create_executor_agent(client)
+
+    workflow = (
+        WorkflowBuilder(start_executor=prepare_input)
+        .add_edge(prepare_input, executor_agent)
+        .add_edge(executor_agent, format_lean_output)
+        .build()
+    )
+
+    return workflow
+
+
 async def run_modeling_pipeline(
     client: FoundryChatClient,
     input_data: dict,
+    *,
+    lean: bool = False,
 ) -> dict:
-    """Ejecuta el pipeline completo de modelamiento.
+    """Ejecuta el pipeline de modelamiento.
 
     Args:
         client: FoundryChatClient configurado.
@@ -350,13 +486,16 @@ async def run_modeling_pipeline(
             opcionalmente, history (lista de mensajes previos), last_model
             (último modelo generado en la conversación) y session_id (id de
             la conversación, usado para resolver guidelines por sesión).
+        lean: si True, usa el grafo reducido (sin QAValidatorAgent). Default
+            False → grafo completo con QA.
 
     Returns:
-        Dict con el resultado completo del pipeline.
+        Dict con el resultado del pipeline. La forma del dict es la misma
+        en modo lean y full; en lean el `qa_validation` es `"{}"`.
     """
     from src.tools.knowledge_base_tools import session_scope
 
-    workflow = create_modeling_workflow(client)
+    workflow = create_lean_workflow(client) if lean else create_modeling_workflow(client)
 
     # No serializamos session_id al prompt; solo se usa para fijar el cache
     # de guidelines aplicable durante esta ejecución.
