@@ -1,19 +1,23 @@
-"""Construcción de la respuesta API a partir del output del workflow.
+"""Construcción del `ModelingResponseAPI` final.
 
-El workflow devuelve un dict con `engine`, `generated_model` (string JSON
-limpio del ExecutorAgent) y `qa_validation` (string JSON limpio del
-QAValidatorAgent). Esta capa:
+Toma:
+- La lista de tablas crudas que produjo el LLM (una por tabla del Excel).
+- El motor destino.
+- El estado de conversación (para meta).
+- Los guidelines activos (para inyectar audit columns).
 
-- Parsea ambos JSON.
-- Mapea los nombres internos del agente (is_primary_key, is_nullable,
-  fk_reference, ...) a los nombres del contrato API (is_pk, nullable,
-  fk_references, ...).
-- Prefiere las tablas del QA (que pueden tener nombres estandarizados) sobre
-  las del Executor cuando ambas existen.
-- Genera `export_sql` (concatenación de DDLs) y `export_markdown` (modelo
-  formateado en Markdown).
-- No inventa contenido: si un campo falta en la salida del agente, devuelve
-  default (string vacío, lista vacía, etc.).
+Y produce el `ModelingResponseAPI` que el frontend consume.
+
+El pipeline es 100 % determinista a partir del JSON del LLM:
+1. Mapea el JSON a `TableAPI` (sin DDL, sin audit columns todavía).
+2. Inyecta audit columns desde los guidelines.
+3. Genera DDL por motor con templates de Python.
+4. Construye el export Markdown.
+
+Sin QA report, sin standardized columns, sin relationships, sin
+matching tolerante. Si el LLM se confundió en un nombre, el revisor
+humano lo edita en el frontend — no es responsabilidad del backend
+"recuperarlo".
 """
 
 from __future__ import annotations
@@ -22,54 +26,22 @@ import json
 from typing import Any
 
 from src.conversation import ConversationState
+from src.processing.audit_columns import inject_audit_columns
+from src.processing.ddl_generator import (
+    render_export_sql,
+    render_table_ddl,
+)
+from src.processing.markdown_generator import render_export_markdown
 from src.schemas import (
     ColumnAPI,
-    GuidelineViolationAPI,
     ModelingResponseAPI,
-    NewCatalogEntryAPI,
     QAReportAPI,
-    StandardizedColumnAPI,
     TableAPI,
 )
+from src.tools.knowledge_base_tools import _resolve_guidelines
 
 
 # ─── Parseo defensivo ───────────────────────────────────────────────────
-
-
-def _normalize_relationship(item: Any) -> str:
-    """Convierte un item de relación a string, tolerando dicts del agente.
-
-    El LLM a veces devuelve relaciones como dicts con from_table/to_table
-    en lugar de strings. Esta función los aplana a texto legible sin romper
-    el contrato `list[str]` del schema API.
-    """
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        from_t = (
-            item.get("from_table") or item.get("source_table")
-            or item.get("table_from") or item.get("from") or ""
-        )
-        to_t = (
-            item.get("to_table") or item.get("target_table")
-            or item.get("table_to") or item.get("to") or ""
-        )
-        col_from = item.get("from_column") or item.get("source_column") or ""
-        col_to = item.get("to_column") or item.get("target_column") or ""
-        rel_type = item.get("type") or item.get("relationship_type") or ""
-        description = item.get("description") or item.get("desc") or ""
-
-        if from_t and to_t:
-            src = f"{from_t}.{col_from}" if col_from else from_t
-            tgt = f"{to_t}.{col_to}" if col_to else to_t
-            link = f"{src} → {tgt}"
-            if rel_type:
-                link = f"{link} [{rel_type}]"
-            return f"{link} — {description}".rstrip(" —") if description else link
-        if description:
-            return description
-        return str(item)
-    return str(item)
 
 
 def _parse_json(value: Any) -> dict:
@@ -100,248 +72,119 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-# ─── Mapeo de columna interna → ColumnAPI ───────────────────────────────
+# ─── Mapeo del JSON del LLM al schema API ──────────────────────────────
 
 
 def _map_column(raw: dict) -> ColumnAPI:
-    """Mapea un dict de columna del agente al schema API."""
-    fk_ref_raw = raw.get("fk_reference") or raw.get("fk_references")
-    fk_references = (
-        fk_ref_raw if isinstance(fk_ref_raw, str) and fk_ref_raw else None
-    )
+    """Convierte un dict de columna del LLM a `ColumnAPI`.
 
-    constraints = raw.get("constraints") or []
-    default_value = raw.get("default_value")
-    notes = raw.get("notes") or raw.get("observations") or ""
+    Contrato esperado del LLM:
+        {column_name, data_type, is_pk, nullable, functional_definition}
 
-    # `observations` consolida notas + constraints + default si los hay.
-    obs_parts: list[str] = []
-    if notes:
-        obs_parts.append(str(notes))
-    if default_value not in (None, ""):
-        obs_parts.append(f"default={default_value}")
-    if constraints:
-        if isinstance(constraints, list):
-            obs_parts.append("constraints=" + ", ".join(str(c) for c in constraints))
-        else:
-            obs_parts.append(f"constraints={constraints}")
-    observations = " | ".join(obs_parts)
+    Tolera nombres legacy: `is_primary_key`, `is_nullable`.
+    Si el LLM omitió algún campo, usa defaults razonables.
+    """
+    name = str(raw.get("column_name") or "").strip()
+    data_type = str(raw.get("data_type") or "STRING").strip()
+    is_pk = _coerce_bool(raw.get("is_pk", raw.get("is_primary_key")))
+    nullable = _coerce_bool(raw.get("nullable", raw.get("is_nullable")), default=True)
+    if is_pk:
+        nullable = False  # PK nunca puede ser nullable
+    fdef = str(raw.get("functional_definition") or "").strip()
 
     return ColumnAPI(
-        column_name=str(raw.get("column_name") or ""),
-        data_type=str(raw.get("data_type") or ""),
-        nullable=_coerce_bool(raw.get("is_nullable", raw.get("nullable")), default=True),
-        is_pk=_coerce_bool(raw.get("is_primary_key", raw.get("is_pk")), default=False),
-        is_fk=_coerce_bool(raw.get("is_foreign_key", raw.get("is_fk")), default=False),
-        fk_references=fk_references,
-        functional_definition=str(raw.get("functional_definition") or ""),
-        observations=observations,
+        column_name=name,
+        data_type=data_type,
+        nullable=nullable,
+        is_pk=is_pk,
+        is_fk=False,
+        fk_references=None,
+        functional_definition=fdef,
+        observations="",
     )
 
 
 def _map_table(raw: dict) -> TableAPI:
-    """Mapea un dict de tabla del agente al schema API."""
+    """Convierte un dict de tabla del LLM a `TableAPI` (sin DDL aún)."""
     return TableAPI(
-        table_name=str(raw.get("table_name") or ""),
-        table_description=str(raw.get("notes") or raw.get("table_description") or ""),
+        table_name=str(raw.get("table_name") or "").strip(),
+        table_description=str(raw.get("table_description") or "").strip(),
         columns=[_map_column(c) for c in (raw.get("columns") or [])],
-        ddl=str(raw.get("ddl") or ""),
+        ddl="",
     )
 
 
-# ─── QA report ──────────────────────────────────────────────────────────
+# ─── Ensamblado final del modelo ───────────────────────────────────────
 
 
-def _map_qa_report(qa_data: dict) -> QAReportAPI:
-    """Mapea el reporte de QA al schema API."""
-    qa_report = qa_data.get("qa_report") or {}
+def assemble_tables(
+    raw_tables: list[dict],
+    engine: str,
+    guidelines: dict | None = None,
+) -> list[TableAPI]:
+    """Convierte el output crudo del LLM en la lista final de `TableAPI`.
 
-    return QAReportAPI(
-        quality_score=int(qa_report.get("quality_score") or 0),
-        standardized_columns=[
-            StandardizedColumnAPI(
-                table_name=str(item.get("table_name") or ""),
-                original_name=str(item.get("original_name") or ""),
-                standardized_name=str(item.get("standardized_name") or ""),
-                reason=str(item.get("reason") or ""),
-            )
-            for item in (qa_report.get("standardized_columns") or [])
-        ],
-        guideline_violations=[
-            GuidelineViolationAPI(
-                table_name=str(item.get("table_name") or ""),
-                column_name=str(item.get("column_name") or ""),
-                violation=str(item.get("violation") or ""),
-                correction_applied=str(item.get("correction_applied") or ""),
-            )
-            for item in (qa_report.get("guideline_violations") or [])
-        ],
-        new_catalog_entries=[
-            NewCatalogEntryAPI(
-                column_name=str(item.get("column_name") or ""),
-                functional_definition=str(item.get("functional_definition") or ""),
-                data_type=str(item.get("data_type") or ""),
-                table_name=str(item.get("table_name") or ""),
-            )
-            for item in (qa_report.get("new_catalog_entries") or [])
-        ],
-        summary=str(qa_report.get("summary") or ""),
-    )
+    Pasos por tabla:
+        1. Map columnas del LLM → `ColumnAPI`.
+        2. Inyectar audit columns desde guidelines.
+        3. Generar DDL con template del motor.
 
-
-# ─── Exportes ───────────────────────────────────────────────────────────
-
-
-def _build_export_sql(tables: list[TableAPI]) -> str:
-    """Concatena los DDLs de todas las tablas, separados por header."""
-    chunks: list[str] = []
-    for t in tables:
-        if not t.ddl.strip():
+    Si `guidelines` es None, se intentan resolver del context activo
+    (sesión o config global).
+    """
+    g = guidelines if guidelines is not None else _resolve_guidelines()
+    out: list[TableAPI] = []
+    for raw in raw_tables:
+        table = _map_table(raw)
+        if not table.table_name:
             continue
-        header = f"-- ── Tabla: {t.table_name} ──"
-        chunks.append(f"{header}\n{t.ddl.strip()}")
-    return "\n\n".join(chunks)
+        table.columns = inject_audit_columns(table.columns, table.table_name, g)
+        table.ddl = render_table_ddl(table, engine)
+        out.append(table)
+    return out
 
 
-def _markdown_escape(text: str) -> str:
-    """Escapa pipes para que no rompan tablas Markdown."""
-    return text.replace("|", "\\|").replace("\n", " ")
+def build_model_payload(
+    raw_tables: list[dict],
+    engine: str,
+    guidelines: dict | None = None,
+) -> dict[str, Any]:
+    """Devuelve un dict serializable con el modelo ensamblado.
 
-
-def _build_export_markdown(
-    tables: list[TableAPI],
-    relationships: list[str],
-    summary: str,
-) -> str:
-    """Genera un Markdown completo del modelo (tablas + DDL + relaciones)."""
-    lines: list[str] = ["# Modelo de Datos", ""]
-
-    if summary:
-        lines.append(summary)
-        lines.append("")
-
-    for t in tables:
-        lines.append(f"## {t.table_name}")
-        if t.table_description:
-            lines.append("")
-            lines.append(t.table_description)
-        lines.append("")
-        lines.append("| Columna | Tipo | Nullable | PK | FK | Definición funcional | Observaciones |")
-        lines.append("|---|---|:-:|:-:|:-:|---|---|")
-        for c in t.columns:
-            fk_cell = c.fk_references or ""
-            row = (
-                f"| {_markdown_escape(c.column_name)} "
-                f"| {_markdown_escape(c.data_type)} "
-                f"| {'✓' if c.nullable else '✗'} "
-                f"| {'✓' if c.is_pk else ''} "
-                f"| {'✓' if c.is_fk else ''} "
-                f"| {_markdown_escape(c.functional_definition)} "
-                f"| {_markdown_escape(c.observations)} |"
-            )
-            lines.append(row)
-        lines.append("")
-        if t.ddl.strip():
-            lines.append("```sql")
-            lines.append(t.ddl.strip())
-            lines.append("```")
-            lines.append("")
-
-    if relationships:
-        lines.append("## Relaciones")
-        for r in relationships:
-            lines.append(f"- {r}")
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _summarize_guidelines_applied(
-    state: ConversationState,
-    model_summary: str,
-) -> str:
-    """Genera el campo `guidelines_applied` para el response.
-
-    Sin inventar: si la sesión cargó un archivo, lo nombra; si no, indica
-    que se usaron los lineamientos por defecto del sistema. Anexa el
-    resumen del agente cuando el agente lo provee.
+    Útil para persistir en `state.last_model` sin armar todavía el
+    response API completo.
     """
-    parts: list[str] = []
-    if state.guidelines_meta is not None:
-        meta = state.guidelines_meta
-        parts.append(
-            f"Lineamientos de sesión: {meta.file_name} "
-            f"({meta.file_format}, {meta.file_size_bytes} bytes)"
-        )
-    else:
-        parts.append("Lineamientos por defecto del sistema.")
-    if model_summary:
-        parts.append(model_summary.strip())
-    return " — ".join(parts)
-
-
-# ─── API pública ────────────────────────────────────────────────────────
-
-
-def build_model_payload(workflow_result: dict) -> dict[str, Any]:
-    """Devuelve un dict con tables/relationships/qa_report parseados.
-
-    Útil cuando solo se quiere persistir el último modelo en el store sin
-    ensamblar todavía el `ModelingResponseAPI` final. La forma del payload
-    es estable y serializable como JSON.
-    """
-    generated = _parse_json(workflow_result.get("generated_model"))
-    qa = _parse_json(workflow_result.get("qa_validation"))
-
-    # Preferimos las tablas del QA si las trae (pueden tener nombres
-    # estandarizados y DDL regenerado).
-    raw_tables = qa.get("tables") or generated.get("tables") or []
-    tables = [_map_table(t) for t in raw_tables]
-    relationships = [_normalize_relationship(r) for r in (generated.get("relationships") or [])]
-    qa_report = _map_qa_report(qa)
-    summary = str(generated.get("summary") or "")
-
+    tables = assemble_tables(raw_tables, engine, guidelines)
     return {
+        "engine": engine,
         "tables": [t.model_dump() for t in tables],
-        "relationships": relationships,
-        "qa_report": qa_report.model_dump(),
-        "summary": summary,
     }
 
 
 def build_modeling_response(
     state: ConversationState,
-    workflow_result: dict,
+    raw_tables: list[dict],
+    engine: str,
+    guidelines: dict | None = None,
 ) -> ModelingResponseAPI:
-    """Construye el `ModelingResponseAPI` final a partir del output bruto.
+    """Construye el `ModelingResponseAPI` listo para devolver al frontend."""
+    tables = assemble_tables(raw_tables, engine, guidelines)
+    export_sql = render_export_sql(tables, engine)
+    export_md = render_export_markdown(tables, engine)
 
-    `state` se usa solo para meta (conversation_id, engine, turn_number,
-    guidelines de sesión).
-    """
-    generated = _parse_json(workflow_result.get("generated_model"))
-    qa = _parse_json(workflow_result.get("qa_validation"))
-
-    raw_tables = qa.get("tables") or generated.get("tables") or []
-    tables = [_map_table(t) for t in raw_tables]
-    relationships = [_normalize_relationship(r) for r in (generated.get("relationships") or [])]
-    qa_report = _map_qa_report(qa)
-    model_summary = str(generated.get("summary") or "")
-
-    export_sql = _build_export_sql(tables)
-    export_markdown = _build_export_markdown(tables, relationships, model_summary)
-    guidelines_applied = _summarize_guidelines_applied(state, model_summary)
+    guidelines_applied = _summarize_guidelines_applied(state)
 
     return ModelingResponseAPI(
         conversation_id=state.conversation_id,
-        engine=str(workflow_result.get("engine") or state.engine),
-        turn_number=state.turn_number,
+        engine=engine,
+        turn_number=max(state.turn_number, 1),
         tables=tables,
-        relationships=relationships,
+        relationships=[],
         export_sql=export_sql,
-        export_markdown=export_markdown,
-        qa_report=qa_report,
+        export_markdown=export_md,
+        qa_report=QAReportAPI(),
         guidelines_applied=guidelines_applied,
-        summary=model_summary,
+        summary="",
     )
 
 
@@ -351,27 +194,36 @@ def build_modeling_response_from_payload(
 ) -> ModelingResponseAPI:
     """Reconstruye el `ModelingResponseAPI` a partir de un payload guardado.
 
-    Usado por GET /api/conversations/{id}/model para devolver el último
-    modelo sin reejecutar el agente.
+    Se usa en GET /api/conversations/{id}/model para devolver el último
+    modelo sin reejecutar el agente. Las tablas en `payload` ya pasaron
+    por `assemble_tables`, así que solo regeneramos los exportes.
     """
-    tables = [TableAPI(**t) for t in (payload.get("tables") or [])]
-    relationships = [_normalize_relationship(r) for r in (payload.get("relationships") or [])]
-    qa_report = QAReportAPI(**(payload.get("qa_report") or {}))
-    model_summary = str(payload.get("summary") or "")
-
-    export_sql = _build_export_sql(tables)
-    export_markdown = _build_export_markdown(tables, relationships, model_summary)
-    guidelines_applied = _summarize_guidelines_applied(state, model_summary)
+    raw_tables = payload.get("tables") or []
+    engine = str(payload.get("engine") or state.engine)
+    tables = [TableAPI(**t) for t in raw_tables]
+    export_sql = render_export_sql(tables, engine)
+    export_md = render_export_markdown(tables, engine)
 
     return ModelingResponseAPI(
         conversation_id=state.conversation_id,
-        engine=state.engine,
+        engine=engine,
         turn_number=max(state.turn_number, 1),
         tables=tables,
-        relationships=relationships,
+        relationships=[],
         export_sql=export_sql,
-        export_markdown=export_markdown,
-        qa_report=qa_report,
-        guidelines_applied=guidelines_applied,
-        summary=model_summary,
+        export_markdown=export_md,
+        qa_report=QAReportAPI(),
+        guidelines_applied=_summarize_guidelines_applied(state),
+        summary="",
     )
+
+
+def _summarize_guidelines_applied(state: ConversationState) -> str:
+    """Texto corto descriptivo de qué lineamientos se aplicaron."""
+    if state.guidelines_meta is not None:
+        meta = state.guidelines_meta
+        return (
+            f"Lineamientos de sesión: {meta.file_name} "
+            f"({meta.file_format}, {meta.file_size_bytes} bytes)"
+        )
+    return "Lineamientos por defecto del sistema."

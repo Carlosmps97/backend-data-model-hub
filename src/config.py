@@ -34,13 +34,14 @@ class Settings:
     AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 
-    # ─── Rutas de datos ────────────────────────────────────────
-    GUIDELINES_PATH: Path = _PROJECT_ROOT / os.getenv(
-        "GUIDELINES_PATH", "data/guidelines/modeling_guidelines.json"
-    )
-    COLUMN_CATALOG_PATH: Path = _PROJECT_ROOT / os.getenv(
-        "COLUMN_CATALOG_PATH", "data/column_catalog.json"
-    )
+    # ─── Guidelines (carga por sesión desde chat — sin archivo global) ─
+    GUIDELINES_PATH: str = (os.getenv("GUIDELINES_PATH") or "").strip()
+
+    # ─── Azure Cosmos DB for MongoDB ───────────────────────────
+    # Misma cuenta que el frontend (db_modeler). El catálogo de columnas
+    # del agente se persiste en la colección `column_catalog`.
+    COSMOS_CONNECTION_STRING: str = os.getenv("COSMOS_CONNECTION_STRING", "")
+    COSMOS_DATABASE: str = os.getenv("COSMOS_DATABASE", "db_modeler")
 
     # ─── Motor de BD por defecto ───────────────────────────────
     DEFAULT_DB_ENGINE: str = os.getenv("DEFAULT_DB_ENGINE", "databricks_sql")

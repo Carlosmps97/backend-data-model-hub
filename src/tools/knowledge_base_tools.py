@@ -160,13 +160,26 @@ def clear_session_guidelines(session_id: str) -> None:
 
 
 def _load_guidelines_global() -> dict:
-    """Carga (y cachea) las guidelines desde la ruta global configurada."""
+    """Carga (y cachea) las guidelines desde la ruta global configurada.
+
+    Si GUIDELINES_PATH está vacío o no configurado, devuelve un dict indicando
+    que no hay guidelines globales — el agente debe usar las de sesión o
+    informar al usuario que cargue un archivo de lineamientos.
+    """
     global _guidelines_cache_global
     if _guidelines_cache_global is not None:
         return _guidelines_cache_global
-    _guidelines_cache_global = _process_guidelines_path(
-        Path(settings.GUIDELINES_PATH)
-    )
+
+    path_str = (settings.GUIDELINES_PATH or "").strip()
+    if not path_str:
+        _guidelines_cache_global = {
+            "error": "No hay guidelines configuradas globalmente. "
+                     "Carga un archivo de lineamientos (JSON/DOCX/PDF) "
+                     "en el chat para que el agente los aplique.",
+            "status": "no_global_guidelines",
+        }
+    else:
+        _guidelines_cache_global = _process_guidelines_path(Path(path_str))
     return _guidelines_cache_global
 
 
