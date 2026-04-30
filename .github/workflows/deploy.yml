@@ -114,22 +114,27 @@ jobs:
               FOUNDRY_PROJECT_ENDPOINT="${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}"
 
       # ── 7. Apuntar el App Service a la nueva imagen ───────────────────
+      # Sin --container-registry-url: evita que el CLI intente buscar
+      # credenciales de admin (que están deshabilitadas en el ACR).
+      # La autenticación la gestiona la managed identity del App Service
+      # (que ya tiene AcrPull sobre el ACR) habilitada en el paso siguiente.
       - name: Update App Service container image
         run: |
           az webapp config container set \
             --name            ${{ env.APP_SERVICE_NAME }} \
             --resource-group  ${{ env.RESOURCE_GROUP }} \
             --subscription    ${{ env.SUBSCRIPTION_ID }} \
-            --container-image-name ${{ steps.tags.outputs.latest_tag }} \
-            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+            --container-image-name ${{ steps.tags.outputs.latest_tag }}
 
-          # Habilitar managed identity para pull del ACR
-          az resource update \
+          # Habilitar managed identity para pull del ACR.
+          # az webapp config set --generic-configurations es el comando
+          # correcto para setear acrUseManagedIdentityCreds (az resource
+          # update no funciona para la configuración de App Service).
+          az webapp config set \
+            --name            ${{ env.APP_SERVICE_NAME }} \
             --resource-group  ${{ env.RESOURCE_GROUP }} \
             --subscription    ${{ env.SUBSCRIPTION_ID }} \
-            --resource-type   "Microsoft.Web/sites/config" \
-            --name            "${{ env.APP_SERVICE_NAME }}/web" \
-            --set properties.acrUseManagedIdentityCreds=true
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
 
       # ── 8. Reiniciar App Service para tomar la nueva imagen ───────────
       - name: Restart App Service
