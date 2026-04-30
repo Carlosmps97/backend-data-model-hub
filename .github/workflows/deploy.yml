@@ -1,0 +1,148 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Deploy: agent-modeler → ACR → App Service (wbap-back-modelhub)
+#
+# Trigger: push a la rama main.
+#
+# Prerequisito de permisos en Azure:
+#   El SP identificado por SVPR_CLIENT_ID necesita el rol
+#   "Website Contributor" (o "Contributor") sobre el App Service
+#   wbap-back-modelhub para poder ejecutar az webapp config container set
+#   y az webapp restart. Actualmente solo tiene Contributor sobre el ACR.
+#   → Añadir en Azure Portal: App Service → IAM → Add role assignment.
+#
+# Secrets requeridos en GitHub (Settings → Secrets → Actions):
+#   SVPR_TENANT_ID              Tenant ID del Service Principal de despliegue
+#   SVPR_CLIENT_ID              Client ID del SP
+#   SVPRR_SECRET                Client Secret del SP   (doble R según convención)
+#   APP_AZURE_CLIENT_ID
+#   APP_AZURE_CLIENT_SECRET
+#   APP_AZURE_TENANT_ID
+#   AZURE_OPENAI_API_VERSION
+#   AZURE_OPENAI_ENDPOINT
+#   COSMOS_CONNECTION_STRING
+#   COSMOS_DATABASE
+#   DEFAULT_DB_ENGINE
+#   FOUNDRY_API_KEY
+#   FOUNDRY_MODEL
+#   FOUNDRY_PROJECT_ENDPOINT
+# ─────────────────────────────────────────────────────────────────────────
+
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  ACR_LOGIN_SERVER: acrgmodelhub01.azurecr.io
+  IMAGE_NAME:       acrgmodelhub01.azurecr.io/modelhub-backend
+  APP_SERVICE_NAME: wbap-back-modelhub
+  RESOURCE_GROUP:   rg-model-platform
+  SUBSCRIPTION_ID:  821dd031-a878-450e-afcc-5e7d701ca3d8
+
+jobs:
+  build-and-deploy:
+    name: Build · Push · Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Login a Azure con el SP de despliegue ─────────────────────
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId":       "${{ secrets.SVPR_CLIENT_ID }}",
+              "clientSecret":   "${{ secrets.SVPRR_SECRET }}",
+              "tenantId":       "${{ secrets.SVPR_TENANT_ID }}",
+              "subscriptionId": "${{ env.SUBSCRIPTION_ID }}"
+            }
+
+      # ── 3. Login al ACR ───────────────────────────────────────────────
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name acrgmodelhub01 --subscription ${{ env.SUBSCRIPTION_ID }}
+
+      # ── 4. Calcular tags de imagen ────────────────────────────────────
+      - name: Set image tags
+        id: tags
+        run: |
+          SHA_TAG="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          LATEST_TAG="${{ env.IMAGE_NAME }}:latest"
+          echo "sha_tag=$SHA_TAG"       >> $GITHUB_OUTPUT
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      # ── 5. Build y push de la imagen Docker ──────────────────────────
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.sha_tag }}
+            ${{ steps.tags.outputs.latest_tag }}
+
+      # ── 6. Actualizar App Settings del App Service ───────────────────
+      # Las variables de entorno del backend se leen de los secrets de
+      # GitHub y se sincronizan como Application Settings del App Service.
+      # Esto garantiza que cualquier cambio de secret en GitHub se refleje
+      # automáticamente en el próximo despliegue.
+      - name: Sync App Service environment variables
+        run: |
+          az webapp config appsettings set \
+            --name            ${{ env.APP_SERVICE_NAME }} \
+            --resource-group  ${{ env.RESOURCE_GROUP }} \
+            --subscription    ${{ env.SUBSCRIPTION_ID }} \
+            --settings \
+              WEBSITES_PORT=8000 \
+              APP_AZURE_CLIENT_ID="${{ secrets.APP_AZURE_CLIENT_ID }}" \
+              APP_AZURE_CLIENT_SECRET="${{ secrets.APP_AZURE_CLIENT_SECRET }}" \
+              APP_AZURE_TENANT_ID="${{ secrets.APP_AZURE_TENANT_ID }}" \
+              AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+              AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
+              COSMOS_CONNECTION_STRING="${{ secrets.COSMOS_CONNECTION_STRING }}" \
+              COSMOS_DATABASE="${{ secrets.COSMOS_DATABASE }}" \
+              DEFAULT_DB_ENGINE="${{ secrets.DEFAULT_DB_ENGINE }}" \
+              FOUNDRY_API_KEY="${{ secrets.FOUNDRY_API_KEY }}" \
+              FOUNDRY_MODEL="${{ secrets.FOUNDRY_MODEL }}" \
+              FOUNDRY_PROJECT_ENDPOINT="${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}"
+
+      # ── 7. Apuntar el App Service a la nueva imagen ───────────────────
+      - name: Update App Service container image
+        run: |
+          az webapp config container set \
+            --name            ${{ env.APP_SERVICE_NAME }} \
+            --resource-group  ${{ env.RESOURCE_GROUP }} \
+            --subscription    ${{ env.SUBSCRIPTION_ID }} \
+            --container-image-name ${{ steps.tags.outputs.latest_tag }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+
+          # Habilitar managed identity para pull del ACR
+          az resource update \
+            --resource-group  ${{ env.RESOURCE_GROUP }} \
+            --subscription    ${{ env.SUBSCRIPTION_ID }} \
+            --resource-type   "Microsoft.Web/sites/config" \
+            --name            "${{ env.APP_SERVICE_NAME }}/web" \
+            --set properties.acrUseManagedIdentityCreds=true
+
+      # ── 8. Reiniciar App Service para tomar la nueva imagen ───────────
+      - name: Restart App Service
+        run: |
+          az webapp restart \
+            --name           ${{ env.APP_SERVICE_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --subscription   ${{ env.SUBSCRIPTION_ID }}
+
+      # ── 9. Resumen del despliegue ─────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "✅ Deployment complete"
+          echo "   Image SHA:   ${{ steps.tags.outputs.sha_tag }}"
+          echo "   Image:       ${{ steps.tags.outputs.latest_tag }}"
+          echo "   App Service: https://${{ env.APP_SERVICE_NAME }}.azurewebsites.net"

@@ -1,0 +1,17 @@
+agent-framework
+azure-identity
+azure-core
+openpyxl
+python-docx
+pdfplumber
+pyyaml
+pydantic>=2.0
+rich
+python-dotenv
+
+# API Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.7
+docling==2.90.0
+pymongo>=4.0
