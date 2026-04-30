@@ -101,17 +101,17 @@ jobs:
             --subscription    ${{ env.SUBSCRIPTION_ID }} \
             --settings \
               WEBSITES_PORT=8000 \
-              APP_AZURE_CLIENT_ID="${{ secrets.APP_AZURE_CLIENT_ID }}" \
-              APP_AZURE_CLIENT_SECRET="${{ secrets.APP_AZURE_CLIENT_SECRET }}" \
-              APP_AZURE_TENANT_ID="${{ secrets.APP_AZURE_TENANT_ID }}" \
-              AZURE_OPENAI_API_VERSION="${{ secrets.AZURE_OPENAI_API_VERSION }}" \
-              AZURE_OPENAI_ENDPOINT="${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
-              COSMOS_CONNECTION_STRING="${{ secrets.COSMOS_CONNECTION_STRING }}" \
-              COSMOS_DATABASE="${{ secrets.COSMOS_DATABASE }}" \
-              DEFAULT_DB_ENGINE="${{ secrets.DEFAULT_DB_ENGINE }}" \
-              FOUNDRY_API_KEY="${{ secrets.FOUNDRY_API_KEY }}" \
-              FOUNDRY_MODEL="${{ secrets.FOUNDRY_MODEL }}" \
-              FOUNDRY_PROJECT_ENDPOINT="${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}"
+              APP_AZURE_CLIENT_ID="${{ vars.APP_AZURE_CLIENT_ID }}" \
+              APP_AZURE_CLIENT_SECRET="${{ vars.APP_AZURE_CLIENT_SECRET }}" \
+              APP_AZURE_TENANT_ID="${{ vars.APP_AZURE_TENANT_ID }}" \
+              AZURE_OPENAI_API_VERSION="${{ vars.AZURE_OPENAI_API_VERSION }}" \
+              AZURE_OPENAI_ENDPOINT="${{ vars.AZURE_OPENAI_ENDPOINT }}" \
+              COSMOS_CONNECTION_STRING="${{ vars.COSMOS_CONNECTION_STRING }}" \
+              COSMOS_DATABASE="${{ vars.COSMOS_DATABASE }}" \
+              DEFAULT_DB_ENGINE="${{ vars.DEFAULT_DB_ENGINE }}" \
+              FOUNDRY_API_KEY="${{ vars.FOUNDRY_API_KEY }}" \
+              FOUNDRY_MODEL="${{ vars.FOUNDRY_MODEL }}" \
+              FOUNDRY_PROJECT_ENDPOINT="${{ vars.FOUNDRY_PROJECT_ENDPOINT }}"
 
       # ── 7. Apuntar el App Service a la nueva imagen ───────────────────
       # Sin --container-registry-url: evita que el CLI intente buscar
