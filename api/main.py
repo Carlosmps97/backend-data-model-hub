@@ -28,9 +28,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from api.routes import conversations_router, health_router, modeling_router
+from api.routes import auth_router, conversations_router, health_router, modeling_router, projects_router
 from src.agents.factory import get_chat_client
 from src.conversation import ConversationStore
+from src.db import motor_client
 from src.logger import configure_logging, get_logger
 
 configure_logging()
@@ -43,11 +44,22 @@ log = get_logger("api.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicializa los singletons del proceso al arrancar."""
-    # ConversationStore: en memoria, sin persistencia (por consigna).
+    # ── Cosmos DB (Motor async) ──────────────────────────────────────────
+    # Opcional: si COSMOS_CONNECTION_STRING no está, la API arranca igual
+    # pero los endpoints que accedan a DB fallarán con 500.
+    try:
+        await motor_client.connect()
+        app.state.db_connected = True
+        log.info("motor db connected")
+    except Exception as e:
+        app.state.db_connected = False
+        log.error("motor db connection failed", extra={"error": str(e)})
+
+    # ── ConversationStore (en memoria) ───────────────────────────────────
     app.state.store = ConversationStore()
 
-    # Cliente de AI Foundry: opcional al arranque (puede fallar por
-    # credenciales). Los endpoints que lo requieren responderán 503 si es None.
+    # ── Cliente de AI Foundry ────────────────────────────────────────────
+    # Opcional al arranque: los endpoints que lo requieren responden 503 si None.
     try:
         app.state.chat_client = get_chat_client()
         log.info("foundry connected")
@@ -55,7 +67,7 @@ async def lifespan(app: FastAPI):
         app.state.chat_client = None
         log.error("foundry connection failed", extra={"error": str(e)})
 
-    # Semaphore que limita ejecuciones concurrentes del pipeline.
+    # ── Semaphore de pipeline ────────────────────────────────────────────
     try:
         max_concurrent = int(os.getenv("MAX_CONCURRENT_PIPELINES", "5"))
     except ValueError:
@@ -72,6 +84,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("api stopping")
+        await motor_client.disconnect()
 
 
 # ─── Aplicación ─────────────────────────────────────────────────────────
@@ -170,8 +183,10 @@ def _extract_conversation_id(path: str) -> str | None:
 # ─── Montaje de routers ─────────────────────────────────────────────────
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(modeling_router)
+app.include_router(projects_router)
 
 
 # ─── Ejecución directa (desarrollo) ─────────────────────────────────────
