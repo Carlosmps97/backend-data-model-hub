@@ -24,6 +24,7 @@ from src.api.dependencies import (
     is_admin,
     visible_project_ids,
 )
+from src.api.response_builder import ok
 from src.db.db_models import ProjectDoc
 from src.db.projects_db import (
     create_project,
@@ -50,10 +51,10 @@ class UpdateProjectRequest(BaseModel):
 async def list_projects(user: AuthUserDep):
     projects = await get_projects()
     if is_admin(user):
-        return {"success": True, "data": [p.model_dump() for p in projects]}
+        return ok([p.model_dump() for p in projects])
     visible = visible_project_ids(user)
     filtered = [p for p in projects if p.id in visible]
-    return {"success": True, "data": [p.model_dump() for p in filtered]}
+    return ok([p.model_dump() for p in filtered])
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -72,7 +73,7 @@ async def create_new_project(body: CreateProjectRequest, user: AdminDep):
         updatedAt=now,
     )
     created = await create_project(project)
-    return {"success": True, "data": created.model_dump()}
+    return ok(created.model_dump())
 
 
 @router.get("/{project_id}")
@@ -81,7 +82,7 @@ async def get_one_project(project_id: str, user: AuthUserDep):
     project = await get_project(project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    return {"success": True, "data": project.model_dump()}
+    return ok(project.model_dump())
 
 
 @router.put("/{project_id}")
@@ -96,7 +97,7 @@ async def update_one_project(project_id: str, body: UpdateProjectRequest, user: 
     updated = await update_project(project_id, updates)
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    return {"success": True, "data": updated.model_dump()}
+    return ok(updated.model_dump())
 
 
 @router.delete("/{project_id}")
@@ -104,4 +105,4 @@ async def delete_one_project(project_id: str, user: AdminDep):
     deleted = await delete_project(project_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-    return {"success": True, "data": {"deleted": True}}
+    return ok({"deleted": True})

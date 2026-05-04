@@ -41,6 +41,14 @@ from src.schemas import (
 from src.tools.knowledge_base_tools import _resolve_guidelines
 
 
+# ─── Utilidades HTTP genéricas ──────────────────────────────────────────
+
+
+def ok(data: Any = None) -> dict[str, Any]:
+    """Envuelve datos en el sobre estándar: {success: true, data: ...}."""
+    return {"success": True, "data": data}
+
+
 # ─── Parseo defensivo ───────────────────────────────────────────────────
 
 

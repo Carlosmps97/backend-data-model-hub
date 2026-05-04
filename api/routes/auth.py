@@ -23,6 +23,7 @@ from src.api.auth import (
     verify_password,
 )
 from src.api.dependencies import CurrentUserDep
+from src.api.response_builder import ok
 from src.db.db_models import UserDoc
 from src.db.users_db import get_user_by_username, mark_login_success
 
@@ -81,13 +82,13 @@ async def login(body: LoginRequest, response: Response):
         samesite="lax",
         max_age=TOKEN_LIFETIME_SECONDS,
     )
-    return {"success": True, "data": _user_payload(record)}
+    return ok(_user_payload(record))
 
 
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(response: Response):
     response.delete_cookie(key=AUTH_COOKIE_NAME, path="/")
-    return {"success": True}
+    return ok(None)
 
 
 @router.get("/me")
@@ -102,4 +103,4 @@ async def me(user: CurrentUserDep):
             {"success": False, "error": "This user is disabled.", "code": "inactive"},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
-    return {"success": True, "data": _user_payload(user)}
+    return ok(_user_payload(user))
