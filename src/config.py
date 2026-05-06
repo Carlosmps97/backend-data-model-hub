@@ -34,6 +34,14 @@ class Settings:
     AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 
+    # ─── Embeddings y búsqueda vectorial semántica ─────────────
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = os.getenv(
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"
+    )
+    VECTOR_SIMILARITY_THRESHOLD: float = float(
+        os.getenv("VECTOR_SIMILARITY_THRESHOLD", "0.85")
+    )
+
     # ─── Guidelines (carga por sesión desde chat — sin archivo global) ─
     GUIDELINES_PATH: str = (os.getenv("GUIDELINES_PATH") or "").strip()
 

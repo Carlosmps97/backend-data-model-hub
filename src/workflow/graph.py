@@ -36,6 +36,8 @@ from agent_framework.foundry import FoundryChatClient
 from typing_extensions import Never
 
 from src.agents.factory import create_executor_agent
+from src.config import settings
+from src.db.catalog_db import embed_texts, search_similar_columns
 
 
 def _fix_trailing_commas(text: str) -> str:
@@ -118,6 +120,64 @@ def _format_columns_block(columns: list[dict]) -> str:
     return "\n".join(lines)
 
 
+async def _build_semantic_dict(columns: list[dict]) -> str:
+    """Consulta el catálogo vectorial y genera el bloque de diccionario mandatorio.
+
+    Genera embeddings en un solo batch para todas las columnas con definición
+    funcional, luego busca coincidencias históricas por encima del umbral de
+    similitud. Si no hay coincidencias o la API de embeddings falla, retorna ''
+    para que el flujo continúe sin interrupciones.
+    """
+    non_empty = [
+        (i, col)
+        for i, col in enumerate(columns)
+        if (col.get("functional_definition") or "").strip()
+    ]
+    if not non_empty:
+        return ""
+
+    try:
+        texts = [col.get("functional_definition", "") for _, col in non_empty]
+        embeddings = await embed_texts(texts)
+        if not embeddings or len(embeddings) != len(texts):
+            return ""
+
+        matches: list[str] = []
+        for (_idx, col), emb in zip(non_empty, embeddings):
+            fdef = col.get("functional_definition", "")
+            similar = await search_similar_columns(
+                emb,
+                limit=3,
+                threshold=settings.VECTOR_SIMILARITY_THRESHOLD,
+            )
+            if not similar:
+                continue
+            best = similar[0]
+            col_name = best.get("column_name") or str(best.get("_id", ""))
+            data_type = best.get("data_type", "")
+            score = best.get("score", 0.0)
+            matches.append(
+                f'- Definicion: "{fdef}" '
+                f'-> Nombre EXACTO: `{col_name}` | Tipo: {data_type} | Similitud: {score:.2f}'
+            )
+
+        if not matches:
+            return ""
+
+        lines = [
+            "## DICCIONARIO SEMANTICO MANDATORIO",
+            "Las siguientes columnas ya existen en el catalogo historico con alta similitud semantica.",
+            "DEBES usar EXACTAMENTE estos nombres fisicos y tipos — NO inventes nombres alternativos:",
+            "",
+        ]
+        lines.extend(matches)
+        lines.append("")
+        return "\n".join(lines)
+
+    except Exception:
+        return ""
+
+
 @executor(id="build_prompt")
 async def build_prompt(
     input_json: str, ctx: WorkflowContext[AgentExecutorRequest]
@@ -148,6 +208,8 @@ async def build_prompt(
     table_desc = table.get("table_description") or ""
     columns = table.get("columns") or []
 
+    semantic_dict = await _build_semantic_dict(columns)
+
     parts: list[str] = []
     parts.append("## SOLICITUD")
     parts.append(f"Motor destino: **{target_engine}**")
@@ -161,7 +223,12 @@ async def build_prompt(
     parts.append(f"## COLUMNAS DEL INPUT ({len(columns)})")
     parts.append(_format_columns_block(columns))
     parts.append("")
+    if semantic_dict:
+        parts.append(semantic_dict)
     parts.append("## INSTRUCCIONES")
+    parts.append(
+        "0. Si existe el DICCIONARIO SEMANTICO MANDATORIO arriba, DEBES respetar esos nombres y tipos EXACTOS para las columnas correspondientes — no los omitas ni los renombres."
+    )
     parts.append(
         "1. Llamá a `get_all_guidelines()` UNA SOLA VEZ para tener los lineamientos completos en contexto."
     )

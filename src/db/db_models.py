@@ -17,6 +17,7 @@ Design rules:
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,6 +49,13 @@ class ForeignKeyRefDoc(BaseModel):
 class TableColumnDoc(BaseModel):
     model_config = _cfg
 
+    # Stable identifier that survives renames. Mirrors the TS
+    # `TableColumn.id` — all `RelationshipDoc.sourceColumn` /
+    # `targetColumn` point at this value (not at `name`).
+    # Default factory makes in-memory construction safe; persistence
+    # layers should pass an explicit id when the document already
+    # carries one, to keep it stable across saves.
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     logicalName: str | None = None
     dataType: str

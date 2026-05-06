@@ -139,6 +139,30 @@ def project_access_level(user: UserDoc, project_id: str) -> Literal["view", "edi
     return best
 
 
+def model_access_level(
+    user: UserDoc, model_id: str, project_id: str,
+) -> Literal["view", "edit"] | None:
+    """Returns the user's effective access level on a specific model.
+
+    A model-scope grant matching the `modelId` wins. Otherwise, any
+    project-scope grant on its `projectId` applies.
+    """
+    if user.role == "admin":
+        return "edit"
+    best: Literal["view", "edit"] | None = None
+    for perm in user.permissions:
+        matches = (
+            (perm.scope == "model" and perm.modelId == model_id)
+            or (perm.scope == "project" and perm.projectId == project_id)
+        )
+        if matches:
+            if perm.level == "edit":
+                return "edit"
+            if best is None:
+                best = "view"
+    return best
+
+
 def is_admin(user: UserDoc) -> bool:
     return user.role == "admin"
 
@@ -149,6 +173,14 @@ def can_view_project(user: UserDoc, project_id: str) -> bool:
 
 def can_edit_project(user: UserDoc, project_id: str) -> bool:
     return project_access_level(user, project_id) == "edit"
+
+
+def can_view_model(user: UserDoc, model_id: str, project_id: str) -> bool:
+    return model_access_level(user, model_id, project_id) is not None
+
+
+def can_edit_model(user: UserDoc, model_id: str, project_id: str) -> bool:
+    return model_access_level(user, model_id, project_id) == "edit"
 
 
 def visible_project_ids(user: UserDoc) -> set[str]:

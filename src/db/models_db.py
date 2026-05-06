@@ -16,6 +16,7 @@ Key design decisions carried over from TypeScript:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -56,6 +57,29 @@ def _to_child(doc: dict) -> dict:
     doc.pop("deletedAt", None)
     doc.pop("updatedAt", None)
     return doc
+
+
+def _ensure_column_ids(tables: list[dict]) -> list[dict]:
+    """Backfill a UUID on any column that reaches the persistence layer
+    without one.
+
+    Safety net for the column-id migration: the frontend always stamps
+    ids on freshly-created columns, but a request coming from an
+    outdated client, a script, or a future import path that forgot to
+    mint ids would silently break relationship edges (which now reference
+    `TableColumn.id`). This helper is idempotent — columns that already
+    have a non-empty string id are left untouched.
+
+    Mutates in place (and returns the same list) because the input is
+    constructed per-request from `request.json()`; no outside caller is
+    holding a reference to it.
+    """
+    for table in tables or []:
+        for col in table.get("columns") or []:
+            cid = col.get("id")
+            if not isinstance(cid, str) or not cid:
+                col["id"] = str(uuid.uuid4())
+    return tables
 
 
 # ── replaceEntities (bulk upsert) ──────────────────────────────────────────
@@ -233,6 +257,12 @@ async def create_model(model: DataModelDoc) -> DataModelDoc:
     views = [v.model_dump(by_alias=True) for v in model.views]
     domain_catalog = [d.model_dump(by_alias=True) for d in model.domainCatalog]
 
+    # Safety net: pydantic default_factory already stamped ids during
+    # `.model_validate`, but we re-check the serialised dict in case a
+    # future code path constructs `model` through a different shape
+    # (e.g. direct dict injection).
+    _ensure_column_ids(tables)
+
     await db["models"].insert_one(
         {
             "_id": model.id,
@@ -274,6 +304,11 @@ async def update_model(
     views = updates.pop("views", None)
     domain_catalog = updates.pop("domainCatalog", None)
     updates.pop("id", None)
+
+    # Safety net — stamp uuids on any column missing `id` so edges keep
+    # pointing at valid handles after the write. Idempotent.
+    if tables is not None:
+        _ensure_column_ids(tables)
 
     meta_patch: dict[str, Any] = {**updates, "updatedAt": _now()}
     if domain_catalog is not None:

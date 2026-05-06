@@ -28,7 +28,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from api.routes import auth_router, conversations_router, health_router, modeling_router, projects_router
+from api.routes import (
+    auth_router,
+    conversations_router,
+    health_router,
+    modeling_router,
+    models_router,
+    projects_router,
+)
 from src.agents.factory import get_chat_client
 from src.conversation import ConversationStore
 from src.db import motor_client
@@ -187,6 +194,7 @@ app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(modeling_router)
 app.include_router(projects_router)
+app.include_router(models_router)
 
 
 # ─── Ejecución directa (desarrollo) ─────────────────────────────────────
