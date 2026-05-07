@@ -1,154 +1,210 @@
 # Configuración
 
-## Visión general
+> Toda la configuración del backend se carga desde un único archivo
+> `.env` en la raíz de `agent-modeler/`. El módulo `src/config.py`
+> expone un singleton `settings` que centraliza el acceso. No hay
+> archivos de configuración por entorno — el deploy decide qué `.env`
+> inyectar.
 
-La configuración del sistema se gestiona a través de un archivo `.env` en la raíz del proyecto. El módulo `src/config.py` carga estas variables al iniciar y las expone como un singleton `settings` accesible desde cualquier módulo.
+## 1. Variables de entorno
 
----
-
-## Variables de entorno
-
-### Azure AI Foundry
+### 1.1 Azure AI Foundry (LLM)
 
 | Variable | Descripción | Default | Requerida |
 |----------|-------------|---------|-----------|
 | `FOUNDRY_PROJECT_ENDPOINT` | URL del proyecto en Azure AI Foundry | — | ✓ |
-| `FOUNDRY_MODEL` | Modelo LLM a utilizar | `gpt-4o` | ✗ |
-| `FOUNDRY_API_KEY` | API Key (alternativa a Service Principal) | `""` | ✗ |
+| `FOUNDRY_MODEL` | Modelo LLM | `gpt-4o` | — |
+| `FOUNDRY_API_KEY` | API key (también se usa para los clientes de Azure OpenAI Embeddings) | `""` | parcialmente* |
 
-### Azure Service Principal
+*Requerido cuando `AZURE_OPENAI_ENDPOINT` está configurado para
+embeddings; opcional si solo se usa el chat client con Service Principal.
 
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `APP_AZURE_TENANT_ID` | ID del tenant de Azure AD | `""` | ✓ |
-| `APP_AZURE_CLIENT_ID` | ID de la aplicación registrada | `""` | ✓ |
-| `APP_AZURE_CLIENT_SECRET` | Secret de la aplicación | `""` | ✓ |
+### 1.2 Azure Service Principal (autenticación con AI Foundry)
 
-### Azure OpenAI (alternativo)
+| Variable | Descripción | Requerida |
+|----------|-------------|-----------|
+| `APP_AZURE_TENANT_ID` | Tenant ID de Azure AD | ✓ |
+| `APP_AZURE_CLIENT_ID` | Client ID de la app registrada | ✓ |
+| `APP_AZURE_CLIENT_SECRET` | Client secret | ✓ |
 
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `AZURE_OPENAI_ENDPOINT` | Endpoint de Azure OpenAI | `""` | ✗ |
-| `AZURE_OPENAI_API_VERSION` | Versión de API | `2025-01-01-preview` | ✗ |
+El backend usa `ClientSecretCredential` para hablar con AI Foundry.
+El Service Principal necesita `Cognitive Services User` (o equivalente)
+sobre el recurso de AI Foundry.
 
-### Rutas de datos
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `GUIDELINES_PATH` | Ruta relativa al archivo de lineamientos | `data/guidelines/modeling_guidelines.json` |
-| `COLUMN_CATALOG_PATH` | Ruta relativa al catálogo de columnas | `data/column_catalog.json` |
-
-### Motor de BD
+### 1.3 Azure OpenAI Embeddings (diccionario semántico)
 
 | Variable | Descripción | Default |
 |----------|-------------|---------|
-| `DEFAULT_DB_ENGINE` | Motor de BD por defecto | `databricks_sql` |
+| `AZURE_OPENAI_ENDPOINT` | Endpoint de Azure OpenAI | `""` |
+| `AZURE_OPENAI_API_VERSION` | Versión de API | `2025-01-01-preview` |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Nombre del deployment de embeddings | `text-embedding-3-small` |
+| `VECTOR_SIMILARITY_THRESHOLD` | Umbral de similitud para inyectar el diccionario semántico mandatorio | `0.85` |
 
-Motores válidos: `databricks_sql`, `cosmosdb`, `sqlserver`, `postgresql`, `mysql`.
+Si estas variables faltan o el endpoint falla, el pipeline degrada
+silenciosamente: no inyecta el bloque "DICCIONARIO SEMÁNTICO
+MANDATORIO" pero todo lo demás funciona.
 
-### API REST
-
-Aplican solo cuando se ejecuta la API (`uvicorn api.main:app`). El CLI las ignora.
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `MAX_CONCURRENT_PIPELINES` | Máximo de pipelines `POST .../model` ejecutándose en paralelo. Implementado como `asyncio.Semaphore` que envuelve únicamente al endpoint del modelo (no afecta health, engines, GET del modelo). | `5` |
-| `CORS_ORIGINS` | Lista separada por comas de orígenes permitidos por CORS. | `http://localhost:3000,http://127.0.0.1:3000` |
-
-### Logging
+### 1.4 Cosmos DB for MongoDB (persistencia)
 
 | Variable | Descripción | Default |
 |----------|-------------|---------|
-| `LOG_FORMAT` | `pretty` (legible) o `json` (un objeto por línea). | `pretty` |
-| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. | `INFO` |
+| `COSMOS_CONNECTION_STRING` | Connection string completo a la cuenta Cosmos DB | `""` |
+| `COSMOS_DATABASE` | Nombre de la base de datos | `db_modeler` |
+
+Cuando `COSMOS_CONNECTION_STRING` no está, `motor_client.connect()`
+falla en el lifespan y todos los endpoints que toquen DB devuelven 500.
+La app igual arranca para que `/api/health` siga reportando estado.
+
+### 1.5 Autenticación
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `AUTH_SECRET` | Secret HS256 compartido con el frontend Next.js. **Debe coincidir literalmente** entre `web-data-model-hub/.env` y `agent-modeler/.env`. | dev fallback (no usar en prod) |
+
+> ⚠️ Si los dos `.env` divergen, el browser firma el JWT con un secret
+> y el backend lo valida con otro → 401 silencioso en cada request.
+> Esta es la causa más frecuente de "el login se queda colgado".
+
+### 1.6 Pipeline / concurrencia
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `MAX_CONCURRENT_PIPELINES` | Nº máximo de POST `/conversations/{id}/model` concurrentes en todo el proceso. Se materializa como `asyncio.Semaphore`. | `5` |
+| `PER_TABLE_PARALLELISM` | Tablas por turno procesadas en paralelo dentro de un mismo request. | `4` |
+| `LLM_RPM_CAP` | Tokens de la ventana del rate limiter (60s deslizantes). Conservador para el quota típico de Foundry. | `30` |
+| `LLM_MAX_RETRIES` | Reintentos cuando se detecta un 429 del LLM (backoff con jitter). | `4` |
+| `AGENT_MAX_OUTPUT_TOKENS` | `max_tokens` que se envían al LLM por llamada. | `8000` |
+
+Cómo interactúan los tres limitadores:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ POST /conversations/{id}/model                              │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ 1. Excel parseado → N tablas                        │   │
+│   │ 2. asyncio.gather(N tareas)                         │   │
+│   │      └── local_sem (PER_TABLE_PARALLELISM = 4)      │   │
+│   │            └── llm_rate_limiter.acquire()           │   │
+│   │                  (LLM_RPM_CAP = 30/min global)      │   │
+│   │                  └── pipeline_semaphore             │   │
+│   │                        (MAX_CONCURRENT_PIPELINES=5) │   │
+│   │                        └── workflow.run() → LLM    │   │
+│   └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 1.7 CORS
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `CORS_ORIGINS` | Lista separada por comas de orígenes permitidos. | `http://localhost:3000,http://127.0.0.1:3000` |
+
+`allow_credentials=True` está fijo en código — sin él, el cookie
+`modeler-auth` no cruza el origen y el frontend pierde la sesión.
+
+### 1.8 Logging
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `LOG_FORMAT` | `pretty` (humano, colores) o `json` (un objeto por línea, ideal para colectores) | `pretty` |
+| `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | `INFO` |
+
+Cada request se loguea inicio/fin con `request_id`, `conversation_id`
+(extraído del path si aplica) y duración en ms.
+
+### 1.9 Motor de BD por defecto
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `DEFAULT_DB_ENGINE` | Engine asignado a una conversación cuando el frontend no lo especifica. | `databricks_sql` |
+| `GUIDELINES_PATH` | Path opcional a un archivo de guidelines global (fallback cuando la sesión no subió uno propio). | `""` |
+
+**Engines soportados** (`settings.SUPPORTED_ENGINES`):
+
+```python
+["databricks_sql", "cosmosdb", "sqlserver", "postgresql", "mysql"]
+```
 
 ---
 
-## Archivo `.env.example`
+## 2. Archivo `.env.example`
 
 ```env
-# Azure AI Foundry
+# ── Azure AI Foundry ─────────────────────────────────────────
 FOUNDRY_PROJECT_ENDPOINT=https://<tu-recurso>.services.ai.azure.com/api/projects/<tu-proyecto>
 FOUNDRY_MODEL=gpt-4o
-FOUNDRY_API_KEY=
+FOUNDRY_API_KEY=<api-key-si-necesitas-embeddings>
 
-# Azure Service Principal
-APP_AZURE_TENANT_ID=<tu-tenant-id>
-APP_AZURE_CLIENT_ID=<tu-client-id>
-APP_AZURE_CLIENT_SECRET=<tu-client-secret>
+# ── Azure Service Principal ─────────────────────────────────
+APP_AZURE_TENANT_ID=<tenant-id>
+APP_AZURE_CLIENT_ID=<client-id>
+APP_AZURE_CLIENT_SECRET=<client-secret>
 
-# Azure OpenAI (alternativo)
-AZURE_OPENAI_ENDPOINT=
+# ── Embeddings (vector search) ──────────────────────────────
+AZURE_OPENAI_ENDPOINT=https://<recurso>.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2025-01-01-preview
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+VECTOR_SIMILARITY_THRESHOLD=0.85
 
-# Rutas de datos
-GUIDELINES_PATH=data/guidelines/modeling_guidelines.json
-COLUMN_CATALOG_PATH=data/column_catalog.json
+# ── Cosmos DB ───────────────────────────────────────────────
+COSMOS_CONNECTION_STRING=mongodb+srv://...
+COSMOS_DATABASE=db_modeler
 
-# Motor de BD por defecto
-DEFAULT_DB_ENGINE=databricks_sql
+# ── Auth (DEBE coincidir con web-data-model-hub/.env) ───────
+AUTH_SECRET=<secret-largo-y-aleatorio>
 
-# API REST
+# ── Pipeline / concurrencia ─────────────────────────────────
 MAX_CONCURRENT_PIPELINES=5
-# CORS_ORIGINS=http://localhost:3000
+PER_TABLE_PARALLELISM=4
+LLM_RPM_CAP=30
+LLM_MAX_RETRIES=4
+AGENT_MAX_OUTPUT_TOKENS=8000
 
-# Logging
+# ── CORS / engine ───────────────────────────────────────────
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+DEFAULT_DB_ENGINE=databricks_sql
+GUIDELINES_PATH=
+
+# ── Logging ─────────────────────────────────────────────────
 LOG_FORMAT=pretty
 LOG_LEVEL=INFO
 ```
 
 ---
 
-## Configurar credenciales de Azure
-
-### Paso 1: Registrar aplicación en Azure AD
-
-1. Ir a **Azure Portal** → **Azure Active Directory** → **App registrations**.
-2. Crear nueva aplicación.
-3. Copiar **Application (client) ID** y **Directory (tenant) ID**.
-4. En **Certificates & secrets** → crear nuevo client secret.
-5. Copiar el valor del secret.
-
-### Paso 2: Asignar permisos
-
-La aplicación registrada necesita permisos para:
-- **Azure AI Foundry**: rol `Cognitive Services User` o `Cognitive Services Contributor` en el recurso AI.
-- **Azure OpenAI** (si se usa como alternativa): mismo rol.
-
-### Paso 3: Configurar `.env`
-
-```env
-APP_AZURE_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-APP_AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-APP_AZURE_CLIENT_SECRET=tu-secret-aqui
-FOUNDRY_PROJECT_ENDPOINT=https://tu-recurso.services.ai.azure.com/api/projects/tu-proyecto
-```
-
----
-
-## Clase Settings
-
-El singleton `Settings` (`src/config.py`) centraliza toda la configuración:
+## 3. Acceso desde código
 
 ```python
 from src.config import settings
 
-# Acceder a configuración
-print(settings.FOUNDRY_MODEL)         # "gpt-4o"
-print(settings.DEFAULT_DB_ENGINE)     # "databricks_sql"
-print(settings.GUIDELINES_PATH)       # Path absoluto al archivo
-print(settings.SUPPORTED_ENGINES)     # ["databricks_sql", "cosmosdb", ...]
-print(settings.PROJECT_ROOT)          # Path raíz del proyecto
+settings.FOUNDRY_MODEL                        # "gpt-4o"
+settings.SUPPORTED_ENGINES                    # ["databricks_sql", ...]
+settings.VECTOR_SIMILARITY_THRESHOLD          # 0.85
+settings.COSMOS_DATABASE                      # "db_modeler"
+settings.PROJECT_ROOT                         # absolute Path al repo
 ```
 
-### Resolución de rutas
-Las rutas `GUIDELINES_PATH` y `COLUMN_CATALOG_PATH` se resuelven como **rutas absolutas** relativas a la raíz del proyecto (`_PROJECT_ROOT`), independientemente de desde dónde se ejecute el script.
+`Settings` es un singleton plano sin Pydantic — la sencillez es
+deliberada. Todas las rutas (`GUIDELINES_PATH`) se resuelven contra
+`PROJECT_ROOT`, de modo que el backend funciona igual sea que se
+invoque desde la raíz del repo o desde cualquier subdirectorio.
 
 ---
 
-## Lineamientos de modelamiento
+## 4. Estructura de las guidelines
 
-### Estructura del archivo (`modeling_guidelines.json`)
+El backend acepta guidelines en cualquiera de estos formatos —
+**uno solo por sesión**, subido por el usuario en
+`POST /api/conversations/{id}/guidelines`:
+
+| Extensión | Formato | Notas |
+|-----------|---------|-------|
+| `.json` | preferido | búsqueda por clave directa con `query_guidelines` |
+| `.md` / `.txt` | texto plano | el LLM lo lee íntegro con `get_all_guidelines` |
+| `.pdf` / `.docx` | binario | se convierten a Markdown con Docling (`convert_to_markdown`) y se cachean al lado del original |
+| `.xlsx` | tablas | una pestaña por sección |
+
+### Ejemplo en JSON (canónico)
 
 ```json
 {
@@ -162,92 +218,110 @@ Las rutas `GUIDELINES_PATH` y `COLUMN_CATALOG_PATH` se resuelven como **rutas ab
       "name": "name_",
       "date": "date_",
       "amount": "amount_",
-      "flag": "flag_",
-      "..."
+      "flag": "flag_"
     },
-    "reserved_words_to_avoid": ["user", "table", "order", "..."],
+    "reserved_words_to_avoid": ["user", "table", "order"],
     "max_column_name_length": 64,
     "max_table_name_length": 64
   },
   "audit_columns": {
     "required": true,
+    "applies_to": "ALL tables except static reference (r*) and temporary (t*)",
     "columns": [
-      {"column_name": "date_created", "data_type": "TIMESTAMP", "..."},
-      {"column_name": "date_updated", "..."},
-      {"column_name": "user_created", "..."},
-      {"column_name": "user_updated", "..."}
+      { "column_name": "tscreated",   "data_type": "TIMESTAMP", "nullable": false, "default": "CURRENT_TIMESTAMP", "description": "Fecha y hora de creación" },
+      { "column_name": "tsupdated",   "data_type": "TIMESTAMP", "nullable": true,  "description": "Fecha y hora de última modificación" },
+      { "column_name": "srcbatchid",  "data_type": "STRING",    "nullable": true,  "description": "ID del batch que cargó el registro" }
     ]
   },
-  "primary_key_conventions": {
-    "naming_pattern": "id_{entity}",
-    "preferred_type": "BIGINT"
-  },
-  "foreign_key_conventions": {
-    "naming_pattern": "id_{referenced_entity}",
-    "suffix_constraint": "_fk"
-  },
+  "primary_key_conventions": { "naming_pattern": "id_{entity}", "preferred_type": "BIGINT" },
   "data_type_mappings": {
-    "databricks_sql": {"VARCHAR": "STRING", "BOOLEAN": "BOOLEAN", "..."},
-    "sqlserver": {"VARCHAR": "NVARCHAR", "BOOLEAN": "BIT", "..."},
-    "postgresql": {"VARCHAR": "VARCHAR", "BOOLEAN": "BOOLEAN", "..."},
-    "mysql": {"VARCHAR": "VARCHAR", "BOOLEAN": "TINYINT(1)", "..."},
-    "cosmosdb": {"VARCHAR": "string", "BOOLEAN": "boolean", "..."}
-  },
-  "general_rules": [
-    "Todas las tablas deben tener columnas de auditoría",
-    "Los nombres deben estar en snake_case y en inglés",
-    "..."
-  ]
+    "databricks_sql": { "VARCHAR": "STRING", "BOOLEAN": "BOOLEAN" },
+    "sqlserver":      { "VARCHAR": "NVARCHAR", "BOOLEAN": "BIT" },
+    "postgresql":     { "VARCHAR": "VARCHAR", "BOOLEAN": "BOOLEAN" },
+    "mysql":          { "VARCHAR": "VARCHAR", "BOOLEAN": "TINYINT(1)" },
+    "cosmosdb":       { "VARCHAR": "string",  "BOOLEAN": "boolean" }
+  }
 }
 ```
 
-### Personalización
-Para personalizar los lineamientos:
-1. Editar `data/guidelines/modeling_guidelines.json`.
-2. O crear un archivo en otro formato soportado (XLSX, DOCX, PDF, TXT).
-3. Actualizar `GUIDELINES_PATH` en `.env`.
+### Cómo se aplican las guidelines
+
+```mermaid
+flowchart LR
+    F["Frontend sube archivo<br/>POST /conversations/{id}/guidelines"] --> P["process_guidelines_file<br/>(detecta formato)"]
+    P --> C["set_session_guidelines(session_id, content)"]
+    C --> CV["_session_guidelines_cache[session_id] = content"]
+
+    POST["POST /conversations/{id}/model"] --> SS["session_scope(session_id)<br/>(ContextVar)"]
+    SS --> LLM["LLM toolcall<br/>get_all_guidelines / query_guidelines"]
+    LLM --> RG["_resolve_guidelines()<br/>lee ContextVar → cache de sesión"]
+    RG -->|sí hay sesión| CV
+    RG -->|sin sesión| GL["GUIDELINES_PATH global"]
+```
 
 ---
 
-## Catálogo de columnas
+## 5. Catálogo de columnas — Cosmos DB
 
-### Estructura del archivo (`column_catalog.json`)
+El catálogo histórico vive en la colección `column_catalog` (misma
+cuenta de Cosmos DB que el resto):
 
 ```json
 {
-  "columns": [
-    {
-      "column_name": "id_customer",
-      "functional_definition": "Identificador único del cliente",
-      "data_type": "BIGINT",
-      "used_in_tables": ["tbl_customers", "tbl_orders"],
-      "is_new": false
-    }
-  ]
+  "_id": "id_customer",
+  "column_name": "id_customer",
+  "functional_definition": "Identificador único del cliente",
+  "data_type": "BIGINT",
+  "used_in_tables": ["tbl_customers", "tbl_orders"],
+  "is_new": false,
+  "flgactive": true,
+  "embedding": [0.123, -0.456, ...]
 }
 ```
 
+| Atributo | Detalle |
+|----------|---------|
+| `_id` | nombre exacto de la columna (PK física) |
+| `embedding` | vector 1536-dim de `text-embedding-3-small`. Se regenera en cada `upsert_entry` cuando se actualiza la definición funcional. |
+| Vector index | `cosmosSearch` con `kind=vector-ivf`, `numLists=1`, `similarity=COS`. Se crea idempotentemente en `ensure_index()`. |
+| `flgactive` | soft-delete (mismo patrón que el resto del sistema). |
+
 ### Comportamiento en runtime
-- **Lectura**: el QAValidatorAgent consulta el catálogo para estandarizar nombres.
-- **Escritura**: columnas nuevas se agregan automáticamente con `is_new: true`.
-- **Thread safety**: operaciones protegidas con `threading.Lock`.
-- **Persistencia**: cambios se guardan inmediatamente en el archivo JSON.
+
+- **Lectura** (`build_prompt` durante el modelado): vectoriza las
+  definiciones funcionales del input en un solo batch async, busca
+  matches con similitud ≥ `VECTOR_SIMILARITY_THRESHOLD` y los inyecta
+  como diccionario mandatorio en el prompt.
+- **Escritura**: el agente no agrega nuevas entradas al catálogo en
+  el flujo del modelado actual (decisión de diseño — lo hace un job
+  posterior fuera del camino caliente).
+- **Concurrencia**: las operaciones sync usan `MongoClient` con un
+  lock por proceso; las async usan Motor.
 
 ---
 
-## Dependencias
+## 6. Dependencias
 
-### Archivo `requirements.txt`
+`requirements.txt`:
 
 ```
 agent-framework>=0.1
-openpyxl>=3.1
+fastapi>=0.110
+uvicorn[standard]>=0.27
+motor>=3.4                  # Cosmos DB async
+pymongo>=4.6                # Cosmos DB sync (vector index)
+pyjwt>=2.8                  # JWT HS256
+bcrypt>=4.1                 # password hashing
+openai>=1.40                # Azure OpenAI Embeddings
+azure-identity>=1.15
+docling>=2.0                # PDF/DOCX → Markdown
+openpyxl>=3.1               # Excel parsing
 python-docx>=1.0
 pdfplumber>=0.10
 pydantic>=2.0
-rich>=13.0
+pydantic-settings>=2.0
+rich>=13.0                  # logging pretty
 python-dotenv>=1.0
-azure-identity>=1.15
 ```
 
 ### Instalación
@@ -256,4 +330,14 @@ azure-identity>=1.15
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+### Verificación rápida
+
+```bash
+# Importa todo el backend sin arrancar el servidor — debe terminar en 0
+python -c "from api.main import app; print('ok')"
+
+# Corre la suite de tests (si existe)
+pytest -q
 ```

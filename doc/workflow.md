@@ -1,352 +1,307 @@
-# Workflow y Pipeline de Modelamiento
+# Workflow de Modelamiento
 
-## Visión general
+> El pipeline de modelamiento se rediseñó por completo. Donde antes
+> había un grafo de 5 nodos con dos agentes, ahora hay un grafo de
+> **3 nodos** con un único agente que procesa **una sola tabla por
+> ejecución**. La concurrencia entre tablas vive afuera del workflow,
+> en `api/routes/modeling.py`.
 
-El pipeline de modelamiento se implementa como un **grafo dirigido** usando `WorkflowBuilder` del Microsoft Agent Framework. El grafo consta de 5 nodos que procesan secuencialmente el input del usuario hasta producir un modelo validado con DDL y reporte de calidad.
-
-**Archivo**: `src/workflow/graph.py`
+**Archivo principal**: `src/workflow/graph.py`
 
 ---
 
-## Grafo del pipeline
+## 1. El grafo
 
 ```mermaid
 flowchart LR
-    subgraph Input["📥 Input"]
-        JSON["JSON Input<br/>{tables, engine, relaciones}"]
-    end
+    IN["JSON in<br/>{table, target_engine}"] --> BP["build_prompt<br/>(@executor)"]
+    BP -->|"AgentExecutorRequest<br/>(prompt + tools)"| EA["ExecutorAgent<br/>(Foundry GPT-4o)"]
+    EA -->|"AgentExecutorResponse<br/>(text con JSON)"| EJ["emit_json<br/>(@executor)"]
+    EJ -->|"yield_output"| OUT["JSON out<br/>{engine, table_json}"]
 
-    subgraph Node1["⚙️ prepare_input<br/><i>Executor custom</i>"]
-        N1["• Parsea JSON<br/>• Extrae datos<br/>• Guarda en Context<br/>• Construye prompt"]
-    end
-
-    subgraph Node2["🤖 ExecutorAgent<br/><i>Agent del framework</i>"]
-        N2["• Llama query_guidelines<br/>• Genera modelo<br/>• Genera DDL<br/>• Responde JSON"]
-    end
-
-    subgraph Node3["⚙️ extract_model<br/><i>Executor custom</i>"]
-        N3["• Almacena en ctx.state<br/>• Extrae JSON<br/>• Prepara prompt QA"]
-    end
-
-    subgraph Node4["🤖 QAValidatorAgent<br/><i>Agent del framework</i>"]
-        N4["• search_column_catalog<br/>• add_column_to_catalog<br/>• Valida lineamientos<br/>• Regenera DDL<br/>• Calcula quality_score"]
-    end
-
-    subgraph Node5["⚙️ format_output<br/><i>Executor custom</i>"]
-        N5["• Limpia JSON<br/>• Combina modelo + QA<br/>• yield_output"]
-    end
-
-    subgraph Output["📤 Output"]
-        OUT["JSON Final<br/>{engine, generated_model, qa_validation}"]
-    end
-
-    JSON --> N1 --> N2 --> N3 --> N4 --> N5 --> OUT
-
-    style Node1 fill:#e3f2fd
-    style Node2 fill:#e8f5e9
-    style Node3 fill:#e3f2fd
-    style Node4 fill:#fff3e0
-    style Node5 fill:#e3f2fd
-    style Input fill:#e1f5fe
-    style Output fill:#ffebee
+    style BP fill:#e3f2fd
+    style EA fill:#e8f5e9
+    style EJ fill:#e3f2fd
+    style IN fill:#e1f5fe
+    style OUT fill:#ffebee
 ```
 
----
-
-## Nodos del pipeline
-
-### 1. `prepare_input` (Executor)
-
-**Entrada**: JSON string con datos del usuario.
-
-**Proceso**:
-1. Parsea el JSON de entrada.
-2. Extrae: `tables`, `user_text`, `target_engine`, `relationships`, `history` (opcional), `last_model` (opcional).
-3. Construye un prompt Markdown estructurado con secciones (cada sección solo aparece si tiene contenido):
-   - `## HISTORIAL DE CONVERSACIÓN PREVIA` — mensajes previos del usuario y del agente, formateados como `**Usuario:** ...` / `**Agente:** ...`. Solo aparece si la API pasó `history` no vacío.
-   - `## MODELO ACTUAL` — el último `last_model` serializado en JSON dentro de un fence ` ```json ... ``` `. Solo aparece si la API pasó `last_model` no vacío. Indica al agente que parta de ese estado y aplique solo los cambios de la solicitud actual.
-   - `## SOLICITUD DE MODELAMIENTO DE DATOS` — motor destino.
-   - `## CONTEXTO DEL USUARIO` — texto libre.
-   - `## TABLAS A MODELAR` — tablas, conteos totales y resumen de columnas (nombre, definición, tipo, nullable, notas).
-   - `## RELACIONES ENTRE TABLAS` — FK declaradas por el usuario.
-   - `## INSTRUCCIONES` — pasos para el ExecutorAgent, incluyendo: respetar el `MODELO ACTUAL` cuando exista y no eliminar tablas/columnas previas salvo que el usuario lo pida.
-4. Guarda `input_data` y `target_engine` en `WorkflowContext`.
-5. Envía `AgentExecutorRequest` con el prompt.
-
-**`session_id` (campo opcional fuera del prompt)**: si el caller (la API) pasa `session_id` dentro de `input_data`, `run_modeling_pipeline` envuelve la ejecución en `session_scope(session_id)` para que las tools `query_guidelines` y `get_all_guidelines` resuelvan al cache de esa sesión. El `session_id` **no se serializa en el prompt** — el LLM no lo ve.
-
-**Formato del input JSON**:
-```json
-{
-  "user_text": "Crea una tabla de productos...",
-  "tables": [
-    {
-      "table_name": "productos",
-      "columns": [
-        {
-          "column_name": "nombre",
-          "functional_definition": "Nombre del producto",
-          "data_type_hint": "VARCHAR",
-          "is_nullable": false,
-          "notes": ""
-        }
-      ]
-    }
-  ],
-  "target_engine": "postgresql",
-  "relationships": ["productos tiene FK hacia categorias"]
-}
-```
-
-### 2. `ExecutorAgent` (Agent)
-
-**Entrada**: prompt Markdown del paso anterior.
-
-**Proceso**:
-1. Lee el prompt con la solicitud de modelamiento y el conteo de tablas/columnas.
-2. Invoca obligatoriamente `get_all_guidelines` para obtener lineamientos corporativos, convirtiendo (de ser necesario) los DOCX/PDF nativos.
-3. Genera el modelo de datos completo mediante análisis de reglas extraídas:
-   - Aplica nomenclaturas de tablas dinámicamente según indique la KB.
-   - Aplica prefijos estándar de columnas y tipado según las guías.
-   - Preserva absolutamente el 100% de las columnas requeridas garantizando **Fidelidad Estricta**.
-   - Agrega columnas de auditoría establecidas obligatoriamente por los lineamientos.
-   - Claves primarias y foráneas inferidas y tipadas.
-   - DDL ejecutable.
-4. Responde con JSON estructurado.
-
-**Salida**: JSON del modelo generado (puede contener markdown fences o texto preamble).
-
-### 3. `extract_model` (Executor)
-
-**Entrada**: `AgentExecutorResponse` del ExecutorAgent.
-
-**Proceso**:
-1. Obtiene `response.agent_response.text`.
-2. Guarda el modelo raw en `ctx.state["generated_model"]`.
-3. Construye prompt de validación para QAValidatorAgent con:
-   - El modelo generado completo.
-   - El motor de BD.
-   - Instrucciones de validación detalladas (7 pasos).
-4. Envía `AgentExecutorRequest` con el prompt de QA.
-
-### 4. `QAValidatorAgent` (Agent)
-
-**Entrada**: prompt con modelo a validar + instrucciones.
-
-**Proceso**:
-1. Consulta lineamientos con `query_guidelines`.
-2. Para cada columna del modelo:
-   - Llama a `search_column_catalog` con la definición funcional.
-   - Si match ≥ 0.5 → reemplaza nombre.
-   - Si no hay match → llama a `add_column_to_catalog`.
-3. Verifica cumplimiento de lineamientos (naming, tipos, auditoría, PK).
-4. Regenera DDL si hubo correcciones.
-5. Calcula quality_score (0-100).
-6. Responde con JSON del QA report.
-
-**Salida**: JSON con tablas corregidas + qa_report.
-
-### 5. `format_output` (Executor)
-
-**Entrada**: `AgentExecutorResponse` del QAValidatorAgent.
-
-**Proceso**:
-1. Obtiene resultado QA y modelo original del estado.
-2. Aplica `_extract_json_from_text` para limpiar ambas respuestas.
-3. Construye JSON final:
-```json
-{
-  "engine": "postgresql",
-  "generated_model": "{ ... JSON limpio del modelo ... }",
-  "qa_validation": "{ ... JSON limpio del QA report ... }"
-}
-```
-4. Emite resultado con `ctx.yield_output`.
-
----
-
-## Estado del workflow (WorkflowContext)
-
-El estado se gestiona con `ctx.set_state()` y `ctx.get_state()`:
-
-| Clave | Tipo | Establecido por | Consumido por |
-|-------|------|-----------------|---------------|
-| `input_data` | `dict` | `prepare_input` | (disponible) |
-| `target_engine` | `str` | `prepare_input` | `extract_model`, `format_output` |
-| `generated_model` | `str` | `extract_model` | `format_output` |
-
----
-
-## Extracción robusta de JSON
-
-### Problema
-Los LLMs frecuentemente producen respuestas con:
-- Texto preamble antes del JSON ("Aquí está el modelo generado:\n```json\n{...}")
-- Markdown fences (`` ```json ... ``` ``)
-- Trailing commas (`{"key": "value",}`)
-- Texto después del JSON
-
-### Solución: `_extract_json_from_text(text)`
-
-Tres estrategias progresivas:
-
-**Caso 1 — JSON en fences**:
-```
-Busca: ```json\n{...}\n```
-Extrae contenido entre fences.
-```
-
-**Caso 2 — JSON puro**:
-```
-Si el texto empieza con {, intenta parsear directamente.
-Si falla, busca el último } balanceado (conteo de profundidad).
-```
-
-**Caso 3 — JSON embebido en texto**:
-```
-Busca primer { y último } en todo el texto.
-Extrae la subcadena y valida.
-```
-
-En cada caso, si el parse directo falla, aplica `_fix_trailing_commas` y reintenta.
-
-### `_fix_trailing_commas(text)`
-Regex: `r',\s*([}\]])'` → elimina comas antes de `}` o `]`.
-
----
-
-## Creación y ejecución
-
-### Crear el workflow
+Construcción (`create_modeling_workflow`):
 
 ```python
-from src.workflow.graph import create_modeling_workflow
-from src.agents.factory import get_chat_client
-
-client = get_chat_client()
-workflow = create_modeling_workflow(client)
-```
-
-Internamente, `create_modeling_workflow`:
-1. Crea `ExecutorAgent` y `QAValidatorAgent` con el cliente compartido.
-2. Construye el grafo con `WorkflowBuilder`:
-```python
-workflow = (
-    WorkflowBuilder(start_executor=prepare_input)
-    .add_edge(prepare_input, executor_agent)
-    .add_edge(executor_agent, extract_model)
-    .add_edge(extract_model, qa_agent)
-    .add_edge(qa_agent, format_output)
+WorkflowBuilder(start_executor=build_prompt)
+    .add_edge(build_prompt, executor_agent)
+    .add_edge(executor_agent, emit_json)
     .build()
-)
 ```
-
-### Ejecutar el pipeline
-
-```python
-from src.workflow.graph import run_modeling_pipeline
-
-result = await run_modeling_pipeline(client, input_data)
-# result = {"engine": "...", "generated_model": "...", "qa_validation": "..."}
-```
-
-La función `run_modeling_pipeline`:
-1. Crea el workflow.
-2. Serializa input a JSON.
-3. Ejecuta `workflow.run(input_json)`.
-4. Extrae outputs del resultado.
-5. Retorna dict parseado o `{"error": "..."}`.
 
 ---
 
-## Flujo de datos completo
+## 2. Nodos en detalle
+
+### 2.1 `build_prompt` (executor)
+
+**Entrada**: JSON string con
+
+```json
+{
+  "table": {
+    "table_name": "Customers",            // provisional, viene del Excel
+    "table_description": "Clientes B2B",
+    "columns": [
+      {
+        "column_name": "id",
+        "data_type_hint": "BIGINT",
+        "functional_definition": "Identificador único del cliente"
+      }
+    ]
+  },
+  "target_engine": "databricks_sql"
+}
+```
+
+**Proceso**:
+
+1. Parse del JSON. Si está malformado, envía un mensaje cortés al
+   agente para que devuelva `{}` y termine.
+2. **Vector search del diccionario semántico** (`_build_semantic_dict`):
+   - Embeb las definiciones funcionales no vacías en un solo batch.
+   - Por cada una, busca matches en `column_catalog` con similitud
+     ≥ `VECTOR_SIMILARITY_THRESHOLD` (default 0.85).
+   - Si hay matches, agrega al prompt una sección "DICCIONARIO
+     SEMÁNTICO MANDATORIO" con el formato:
+     ```
+     - Definicion: "<def>" -> Nombre EXACTO: `<nombre>` | Tipo: <type> | Similitud: 0.92
+     ```
+3. Construye el prompt en Markdown con secciones:
+   - `## SOLICITUD` — motor destino.
+   - `## TABLA A MODELAR` — nombre provisional, descripción.
+   - `## COLUMNAS DEL INPUT (N)` — bullets con `name (type) — definicion`.
+   - `## DICCIONARIO SEMANTICO MANDATORIO` (opcional, solo si hubo matches).
+   - `## INSTRUCCIONES` — 4 puntos: respeto al diccionario, llamar
+     `get_all_guidelines` una vez, devolver SOLO JSON sin DDL ni
+     audit columns.
+4. Guarda en `ctx.state` el `target_engine` y el `input_table_name`.
+5. Envía `AgentExecutorRequest(messages=[Message("user", contents=[prompt])])`.
+
+> El **diccionario semántico es el corazón del rediseño**: garantiza
+> que columnas con la misma semántica se nombren igual entre tablas y
+> entre modelos, sin pagar el costo de un agente QA por cada
+> ejecución.
+
+### 2.2 `ExecutorAgent` (agent)
+
+**Tools disponibles** (de `src/tools/knowledge_base_tools.py`):
+`query_guidelines`, `get_all_guidelines`.
+
+**Comportamiento esperado** (instruido por el system prompt en
+`src/agents/instructions.py`):
+
+1. Llamar `get_all_guidelines()` una sola vez al recibir el prompt
+   para tener los lineamientos en contexto.
+2. Decidir nombres físicos basándose 100 % en las **definiciones
+   funcionales** (los nombres provisionales del Excel son orientativos).
+3. Respetar el diccionario semántico mandatorio cuando exista.
+4. Aplicar prefijos / sufijos / tipos según los lineamientos.
+5. Devolver JSON plano (sin wrapper `tables`):
+   ```json
+   {
+     "table_name": "tbl_customers",
+     "table_description": "...",
+     "columns": [
+       {
+         "column_name": "id_customer",
+         "data_type": "BIGINT",
+         "is_pk": true,
+         "nullable": false,
+         "functional_definition": "...",
+         "notes": ""
+       }
+     ],
+     "notes": ""
+   }
+   ```
+6. **No** incluir DDL, **no** incluir audit columns, **no** incluir
+   relaciones — todo eso se agrega después en Python.
+
+**Configuración del agente** (`src/agents/factory.py`):
+
+| Param | Valor | Razón |
+|-------|-------|-------|
+| `temperature` | `0.1` | tarea estructural, no creativa |
+| `max_tokens` | `8000` (default) | output ~500 tokens / tabla; el techo deja margen |
+| `model` | `settings.FOUNDRY_MODEL` (default `gpt-4o`) | |
+
+### 2.3 `emit_json` (executor)
+
+**Entrada**: `AgentExecutorResponse` del agente.
+
+**Proceso**:
+
+1. `response.agent_response.text` → texto crudo del LLM (puede traer
+   markdown fences, preamble, trailing commas).
+2. `_extract_json_from_text` aplica una serie de heurísticas
+   tolerantes (ver §3) para devolver un JSON string válido.
+3. `ctx.yield_output(json.dumps({"engine": ..., "table_json": cleaned}))`.
+
+---
+
+## 3. Extracción robusta de JSON
+
+`_extract_json_from_text(text)` aplica estrategias en este orden:
 
 ```mermaid
-flowchart TB
-    U[👤 Usuario<br/>'Crea tabla productos'] --> M[src/main.py]
+flowchart TD
+    T["text crudo del LLM"] --> S1["¿Hay markdown fence \\`\\`\\`json?"]
+    S1 -->|"sí"| EX1["extraer contenido entre fences"]
+    S1 -->|"no"| S2["¿Empieza con {?"]
+    S2 -->|"sí"| EX2["intentar parse directo<br/>fallback: cortar en último } balanceado"]
+    S2 -->|"no"| S3["buscar primer { y último }"]
+    EX1 --> FT["_fix_trailing_commas si parse falla"]
+    EX2 --> FT
+    S3 --> FT
+    FT --> RES["JSON string válido"]
+```
 
-    M -->|Extrae engine, tables| P[run_modeling_pipeline]
+`_fix_trailing_commas` aplica regex `r",\s*([}\]])"` → elimina
+comas espurias antes de `}` o `]` (el LLM ocasionalmente las pone
+imitando estilo "humano").
 
-    subgraph Pipeline["⚙️ Pipeline de Modelamiento"]
+---
+
+## 4. La concurrencia vive afuera del workflow
+
+`api/routes/modeling.py::generate_model` es quien orquesta la
+ejecución de **N workflows en paralelo** (uno por tabla del Excel):
+
+```mermaid
+flowchart TD
+    REQ["POST /conversations/{id}/model<br/>(multipart con Excel)"] --> EX["parse_excel_file"]
+    EX --> SP["Por cada tabla → asyncio.create_task(_process_one)"]
+    SP --> GA["asyncio.gather(*tasks)"]
+
+    subgraph PROC["_process_one(idx, table)"]
         direction TB
-        PI[prepare_input] -->|Prompt| EA[ExecutorAgent]
-        EA -->|Tool calls| EA_OUT[Response JSON<br/>modelo + DDL]
-        EA_OUT --> EM[extract_model]
-        EM -->|Prompt QA| QA[QAValidatorAgent]
-        QA -->|Tool calls| QA_OUT[Response JSON<br/>QA report]
-        QA_OUT --> FO[format_output]
-        FO -->|Clean JSON| OUT[Output Final<br/>JSON combinado]
+        L1["local_sem.acquire<br/>(PER_TABLE_PARALLELISM = 4)"]
+        L2["llm_rate_limiter.acquire<br/>(LLM_RPM_CAP = 30/min)"]
+        L3["pipeline_semaphore.acquire<br/>(MAX_CONCURRENT_PIPELINES = 5)"]
+        L4["call_with_retry(run_table_pipeline)"]
+        L5["json.loads del table_json"]
+        L1 --> L2 --> L3 --> L4 --> L5
     end
 
-    P --> Pipeline
-    OUT --> D[_display_results]
-    D --> CLI[💻 Console Output]
-
-    style U fill:#e1f5fe
-    style Pipeline fill:#e8f5e9
-    style CLI fill:#f3e5f5
+    GA --> COLLECT["Recolectar pairs<br/>raw_tables + failed"]
+    COLLECT --> AS["assemble_tables<br/>(audit cols + DDL + markdown)"]
+    AS --> PERSIST["state.last_model + history.append"]
+    PERSIST --> RES["build_modeling_response"]
 ```
 
-**Detalle del flujo paso a paso:**
+**Política de fallos parciales**: si una tabla falla, las demás
+siguen. El response devuelve solo las que salieron, y el `summary`
+del turno guardado en `state.history` deja constancia de las que
+fallaron. El cliente puede reintentar pasándole solo el subset
+fallido en otro Excel.
 
-| Paso | Componente | Acción |
-|------|------------|--------|
-| 1 | `main.py` | Extrae `engine="postgresql"`, construye `input_data` |
-| 2 | `prepare_input` | Construye prompt enriquecido exigiendo métricas de *Fidelidad*: "## TABLAS A MODELAR (1 tablas, 19 columnas)\n..." |
-| 3 | `ExecutorAgent` | Convierte y Llama `get_all_guidelines`, analiza la DB y genera modelo + DDL íntegro |
-| 4 | `extract_model` | Almacena en `ctx.state`, prepara prompt QA |
-| 5 | `QAValidatorAgent` | Llama `search_column_catalog`, valida, estandariza |
-| 6 | `format_output` | Limpia JSON con `_extract_json_from_text`, combina resultados |
-| 7 | `_display_results` | Rich tables, DDL panels, QA score panel |
+**Si fallan todas**: 500 con detalle "Ninguna tabla pudo ser
+modelada".
 
 ---
 
-## Integración con la API REST (multi-turno)
+## 5. Reintentos con backoff (429)
 
-La función `run_modeling_pipeline` recibe un dict con campos adicionales cuando es llamada desde la API:
+`call_with_retry` envuelve cada `run_table_pipeline` con detección
+de rate limits:
 
-```python
-input_data = {
-    # Campos base (también usados por CLI)
-    "user_text": str,
-    "tables": list[dict],
-    "target_engine": str,
-    "relationships": list[str],
+| Intento | Backoff base (s) | Con jitter (×40 %) |
+|---------|------------------|---------------------|
+| 1 | 5 | 5–7 |
+| 2 | 15 | 15–21 |
+| 3 | 30 | 30–42 |
+| 4 | 45 | 45–63 |
 
-    # Campos adicionales inyectados por la API
-    "history": list[{"role": str, "content": str}],  # historial de la sesión
-    "last_model": dict | None,   # último modelo generado (si hubo turno previo)
-    "session_id": str,           # UUID de la sesión (para ContextVar de guidelines)
-}
-```
+Total worst-case: ~80–130 s para una sola tabla. Si después de los
+4 reintentos sigue fallando, la tabla queda en `failed`.
 
-**`session_id`** se saca del dict antes de serializar a JSON para el prompt:
-```python
-payload = {k: v for k, v in input_data.items() if k != "session_id"}
-input_json = json.dumps(payload, ensure_ascii=False)
-
-with session_scope(session_id):  # ContextVar activo durante toda la ejecución
-    events = await workflow.run(input_json)
-```
-
-Esto garantiza que el LLM nunca reciba el `session_id` en su contexto, mientras las tools de guidelines lo resuelven transparentemente.
+`_is_rate_limit_error` identifica el 429 por substrings (`"429"`,
+`"rate_limit_exceeded"`, `"rate limit"`, `"too many requests"`)
+porque la SDK envuelve el error original en una `Exception` genérica
+y el tipo concreto cambia entre versiones.
 
 ---
 
-## Normalización de Relaciones
+## 6. Estado del workflow (`WorkflowContext`)
 
-El `QAValidatorAgent` a veces devuelve `relationships` como lista de dicts en lugar de strings. El `response_builder.py` normaliza defensivamente:
+| Clave | Set por | Leída por |
+|-------|---------|-----------|
+| `target_engine` | `build_prompt` | `emit_json` |
+| `input_table_name` | `build_prompt` | (debug / logs) |
+
+El estado es por-ejecución del workflow (no compartido entre tablas
+ni entre turnos).
+
+---
+
+## 7. Aislamiento de guidelines por sesión
+
+`run_table_pipeline` envuelve la ejecución del workflow con
+`session_scope(session_id)` (ver `src/tools/knowledge_base_tools.py`):
 
 ```python
-def _normalize_relationship(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        from_t = item.get("from_table") or item.get("source_table") or ""
-        to_t   = item.get("to_table")   or item.get("target_table") or ""
-        # ... construye "tabla_a.col → tabla_b.col [tipo] — descripción"
-    return str(item)
+async def run_table_pipeline(client, table, target_engine, *, session_id=None):
+    workflow = create_modeling_workflow(client)
+    payload = {"table": table, "target_engine": target_engine}
+    input_json = json.dumps(payload, ensure_ascii=False)
 
-# Aplicado en todos los puntos de lectura:
-relationships = [_normalize_relationship(r) for r in (raw.get("relationships") or [])]
+    with session_scope(session_id):
+        events = await workflow.run(input_json)
+        outputs = events.get_outputs()
+    ...
 ```
+
+Dentro del scope, las tools `query_guidelines` y `get_all_guidelines`
+resuelven al cache de la sesión vía `ContextVar`. **Sin** el
+`session_scope`, las tools caerían al cache global (`GUIDELINES_PATH`)
+ignorando el archivo que el usuario subió en el chat — es la causa
+más sutil de "el agente parece no usar mis guidelines".
+
+---
+
+## 8. Procesamiento determinista post-LLM
+
+Una vez que las N tablas vuelven del workflow, el endpoint encadena
+operaciones puras de Python en `src/processing/`:
+
+```mermaid
+flowchart LR
+    LLM["raw_tables del LLM<br/>(N dicts)"] --> MAP["_map_table / _map_column<br/>(response_builder)"]
+    MAP --> AC["inject_audit_columns<br/>(audit_columns.py)"]
+    AC --> DDL["render_table_ddl<br/>(ddl_generator.py)"]
+    DDL --> AGG["assemble_tables<br/>(list[TableAPI])"]
+    AGG --> SQL["render_export_sql"]
+    AGG --> MD["render_export_markdown"]
+    SQL --> RES["ModelingResponseAPI"]
+    MD --> RES
+```
+
+| Paso | Determinismo | Notas |
+|------|--------------|-------|
+| `_map_column` | 100 % | tolerante a nombres legacy del LLM (`is_primary_key` ↔ `is_pk`, etc.). |
+| `inject_audit_columns` | 100 % | salta tablas `r*` y `t*`; idempotente si el LLM ya emitió audit cols. |
+| `render_table_ddl` | 100 % por motor | un dialecto por engine (`databricks_sql`, `cosmosdb`, `sqlserver`, `postgresql`, `mysql`). |
+| `render_export_markdown` | 100 % | formatea el modelo en MD para descarga / preview. |
+
+Esto es lo que hace que la latencia y el contenido del response sean
+predecibles: si el LLM produjo el mismo JSON, el response final es
+exactamente el mismo string.
+
+---
+
+## 9. Lo que el rediseño dejó fuera (intencionalmente)
+
+| Componente eliminado | Razón |
+|----------------------|-------|
+| `QAValidatorAgent` | Doblaba latencia y costo, regularmente revertía decisiones correctas. La calidad la garantiza ahora el diccionario semántico mandatorio + el revisor humano. |
+| `_normalize_relationship` | El backend ya no devuelve relationships del LLM (siempre `[]`). Las relaciones las modela el usuario en el canvas. |
+| `prepare_input` con `history` y `last_model` | El multi-turno con memoria de modelo se simplificó a "un Excel = un turno". El historial textual sigue guardándose en `state.history` para auditoría, pero no se inyecta en el prompt — cada turno es independiente. |
+| `extract_model` | Ya no había una segunda pasada a un agente, así que el nodo intermedio sobraba. |
+| `format_output` con merge QA | Reemplazado por el ensamblado determinista en Python (`assemble_tables`). |

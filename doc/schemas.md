@@ -1,220 +1,345 @@
-# Modelos de Datos (Schemas)
+# Schemas (Pydantic v2)
 
-## Visión general
-
-Todos los modelos de datos del sistema se definen con **Pydantic v2** en `src/schemas.py`. Estos schemas proporcionan validación, serialización y documentación automática de las estructuras intercambiadas entre componentes.
-
----
-
-## Catálogo de columnas
-
-### `CatalogColumn`
-
-Columna registrada en el catálogo corporativo.
-
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `column_name` | `str` | — | Nombre estandarizado |
-| `functional_definition` | `str` | — | Definición funcional |
-| `data_type` | `str` | — | Tipo de dato base |
-| `used_in_tables` | `list[str]` | `[]` | Tablas donde se usa |
-| `is_new` | `bool` | `False` | Si fue agregada recientemente |
-
-### `ColumnCatalog`
-
-Catálogo completo de columnas.
-
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `columns` | `list[CatalogColumn]` | `[]` | Lista de columnas |
+> El backend tiene **dos familias** de schemas Pydantic, viviendo en
+> archivos separados:
+>
+> - `src/schemas.py` → contratos de la **API REST** (request/response,
+>   modelos internos del workflow, `ColumnAPI`/`TableAPI`/etc.).
+> - `src/db/db_models.py` → **modelos de persistencia** Cosmos DB,
+>   espejo exacto de las interfaces TypeScript del frontend.
+>
+> No se mezclan: el flujo es `request → API schema → workflow → API
+> schema → response` *o* `request → DB doc → Cosmos → DB doc →
+> response`. La capa que une ambos mundos es la suite `assemble_*` de
+> `response_builder.py`.
 
 ---
 
-## Input del usuario
+## 1. Modelos de persistencia (`src/db/db_models.py`)
 
-### `RawColumnInput`
+Todos heredan `BaseModel` con `ConfigDict(extra="ignore",
+populate_by_name=True)` — los campos internos de Mongo (`flgactive`,
+`deletedAt`, `_id`, etc.) se ignoran silenciosamente al validar.
 
-Columna tal como viene del Excel del usuario.
+### 1.1 `ProjectDoc`
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `column_name` | `str \| None` | `None` | Nombre sugerido (opcional) |
-| `functional_definition` | `str` | — | Definición funcional (obligatoria) |
-| `data_type_hint` | `str \| None` | `None` | Sugerencia de tipo |
-| `is_nullable` | `bool \| None` | `None` | ¿Permite nulos? |
-| `notes` | `str \| None` | `None` | Notas adicionales |
+| Campo | Tipo | Notas |
+|-------|------|-------|
+| `id` | `str` | uuid |
+| `name` | `str` | |
+| `description` | `str \| None` | |
+| `createdAt`, `updatedAt` | `str` | ISO 8601 |
 
-### `RawTableInput`
+### 1.2 `TableColumnDoc`
 
-Tabla tal como viene del Excel (una pestaña).
+```mermaid
+classDiagram
+    class TableColumnDoc {
+        +str id  «uuid, default_factory»
+        +str name
+        +str? logicalName
+        +str dataType
+        +int? length
+        +int? scale
+        +bool? isPrimaryKey
+        +bool? isSurrogateKey
+        +bool? isPartitionKey
+        +bool? isForeignKey
+        +ForeignKeyRefDoc? foreignKeyRef
+        +bool? isNullable
+        +bool? isUnique
+        +str? defaultValue
+        +str? functionalDefinition
+        +str? observations
+    }
+    class ForeignKeyRefDoc {
+        +str table
+        +str column
+    }
+    TableColumnDoc --> ForeignKeyRefDoc
+```
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `table_name` | `str` | — | Nombre de la pestaña |
-| `columns` | `list[RawColumnInput]` | `[]` | Columnas de la tabla |
+> **Punto crítico**: `id` es un identificador estable que sobrevive a
+> renames. Las relaciones (`RelationshipDoc.sourceColumn` /
+> `targetColumn`) apuntan a este `id`, **no a `name`**. La
+> `default_factory=lambda: str(uuid.uuid4())` garantiza que cualquier
+> documento construido en código tenga id; el persistence layer
+> (`models_db._ensure_column_ids`) además hace backfill defensivo
+> sobre cualquier dict que llegue sin id.
 
-### `UserInput`
+### 1.3 `TableModelDoc` (colección `model_tables`)
 
-Input completo del usuario.
+```python
+class TableModelDoc(BaseModel):
+    id: str
+    sql_schema: str | None = Field(default=None, alias="schema")  # Mongo key sigue siendo "schema"
+    name: str
+    logicalName: str | None = None
+    columns: list[TableColumnDoc]
+    functionalDefinition: str | None = None
+    color: str | None = None
+    applicationCode: str | None = None
+    domain: str | None = None
+    subdomain: str | None = None
+    domainId: str | None = None
+    subdomainId: str | None = None
+    tags: list[str] | None = None
+    partition: PartitionSpecDoc | None = None
+    # NOTA: `modelId` NO está en el schema — se inyecta/elimina al persistir
+```
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `tables` | `list[RawTableInput]` | `[]` | Tablas parseadas |
-| `user_text` | `str` | `""` | Texto libre del usuario |
-| `target_engine` | `str` | `"databricks_sql"` | Motor de BD destino |
-| `relationships` | `list[str]` | `[]` | Relaciones entre tablas |
+`PartitionSpecDoc` lleva `strategy`, `columns`, `buckets`,
+`granularity`, `clusteringColumns`. La UI filtra estrategias
+soportadas por engine.
+
+### 1.4 `RelationshipDoc` (colección `model_relationships`)
+
+| Campo | Tipo | Semántica |
+|-------|------|-----------|
+| `id` | `str` | uuid de la relación |
+| `sourceTable` | `str` | acepta `TableModelDoc.id` (preferido) o `name` (legacy) |
+| `sourceColumn` | `str` | apunta a `TableColumnDoc.id` (post-migration) — `resolveColumnName` en TS hace fallback a `name` para datos viejos |
+| `targetTable` | `str` | idem |
+| `targetColumn` | `str` | idem |
+| `type` | `str` | `one-to-one` / `one-to-many` / `many-to-many` |
+
+### 1.5 `ViewModelDoc` (colección `model_views`)
+
+```python
+class ViewModelDoc(BaseModel):
+    id: str
+    name: str
+    logicalName: str | None = None
+    sql_schema: str | None = Field(default=None, alias="schema")
+    sourceTableId: str
+    viewType: Literal["technical", "user", "business"]
+    columns: list[ViewColumnTransformDoc]
+    whereClause: str | None = None
+    useCustomSql: bool | None = None
+    customSql: str | None = None
+    functionalDefinition: str | None = None
+    domain: str | None = None
+    subdomain: str | None = None
+    domainId: str | None = None
+    subdomainId: str | None = None
+    tags: list[str] | None = None
+    color: str | None = None
+```
+
+### 1.6 `DataModelDoc` (colección `models` — hidratado)
+
+`DataModelDoc` es el agregado completo: la colección `models` solo
+guarda los metadatos (`projectId`, `name`, `engine`, `domainCatalog`,
+`createdAt`, etc.) y `tables` / `relationships` / `views` se hidratan
+al leer mediante `asyncio.gather` sobre las tres colecciones hijas.
+
+```mermaid
+flowchart LR
+    M[("models<br/>(metadata + domainCatalog)")]
+    MT[("model_tables")]
+    MR[("model_relationships")]
+    MV[("model_views")]
+    M -->|"id"| MT
+    M -->|"id"| MR
+    M -->|"id"| MV
+    M --> DMD["DataModelDoc<br/>(en memoria)"]
+    MT --> DMD
+    MR --> DMD
+    MV --> DMD
+```
+
+### 1.7 `UserDoc` y `PermissionDoc`
+
+```python
+class PermissionDoc(BaseModel):
+    scope: Literal["project", "model"]
+    projectId: str
+    modelId: str | None = None  # solo cuando scope == "model"
+    level: Literal["view", "edit"]
+
+
+class UserDoc(BaseModel):
+    id: str
+    username: str
+    passwordHash: str
+    role: Literal["admin", "editor", "viewer"]
+    isActive: bool
+    permissions: list[PermissionDoc]
+    createdAt: str
+    statusUpdatedAt: str
+    lastLoginAt: str | None = None
+```
+
+| Campo | Notas |
+|-------|-------|
+| `passwordHash` | bcrypt con `gensalt(rounds=10)`. Nunca sale del backend (omitido en respuestas API). |
+| `role` | el rol "global"; los permisos finos viven en `permissions`. |
+| `isActive` | desactivar a un usuario lo bloquea inmediatamente — `require_user` valida en cada request. |
+| `permissions` | array de scopes. Un usuario puede tener `(project=A, level=view)` + `(model=A.M1, level=edit)` simultáneamente. |
+
+`role=admin` cortocircuita los permisos (`is_admin` → edit en todo).
 
 ---
 
-## Modelo de datos generado
+## 2. Schemas de la API (`src/schemas.py`)
 
-### `ColumnDefinition`
+### 2.1 Tipo alias `UUIDv4`
 
-Definición completa de una columna del modelo generado.
+```python
+UUIDv4 = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+        strip_whitespace=True,
+    ),
+]
+```
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `column_name` | `str` | — | Nombre de la columna |
-| `functional_definition` | `str` | — | Definición funcional |
-| `data_type` | `str` | — | Tipo para el motor destino |
-| `is_nullable` | `bool` | `True` | ¿Permite nulos? |
-| `is_primary_key` | `bool` | `False` | ¿Es clave primaria? |
-| `is_foreign_key` | `bool` | `False` | ¿Es clave foránea? |
-| `fk_reference` | `str \| None` | `None` | `tabla.columna` referenciada |
-| `default_value` | `str \| None` | `None` | Valor por defecto |
-| `constraints` | `list[str]` | `[]` | Constraints adicionales |
+Se aplica en todos los `conversation_id` que entran o salen del API.
+Pydantic rechaza con 422 cualquier string que no sea UUID v4.
 
-### `TableModel`
+### 2.2 Endpoints de conversación
 
-Modelo completo de una tabla generada.
+| Schema | Endpoint | Notas |
+|--------|----------|-------|
+| `CreateConversationRequest` | `POST /api/conversations` body | `{ conversation_id: UUIDv4, engine: str = "databricks_sql" }` |
+| `CreateConversationResponse` | idem response | `created: bool` indica si la sesión se creó o ya existía. |
+| `GuidelinesUploadResponse` | `POST /api/conversations/{id}/guidelines` | incluye `preview` (primeros 500 chars del contenido procesado). |
+| `DeleteConversationResponse` | `DELETE /api/conversations/{id}` | confirma `deleted: True`. |
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `table_name` | `str` | — | Nombre final de la tabla |
-| `columns` | `list[ColumnDefinition]` | `[]` | Columnas del modelo |
-| `ddl` | `str` | `""` | DDL generado |
-| `notes` | `str` | `""` | Notas |
+### 2.3 Endpoint de modelado
 
-### `DataModelOutput`
+`POST /api/conversations/{id}/model` recibe **multipart/form-data**:
 
-Salida completa del ExecutorAgent.
+| Field | Tipo | Obligatoriedad |
+|-------|------|----------------|
+| `excel_file` | `UploadFile` (.xlsx) | **obligatorio** |
+| `context_text` | `str` | opcional (texto libre del usuario para contexto del turno) |
+| `engine` | `str` | opcional, override del engine de la sesión |
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `tables` | `list[TableModel]` | `[]` | Tablas generadas |
-| `relationships` | `list[str]` | `[]` | Relaciones |
-| `engine` | `str` | `"databricks_sql"` | Motor de BD |
-| `summary` | `str` | `""` | Resumen del modelo |
+> Nota: en el rediseño actual el modelado **siempre** parte del Excel.
+> Si el frontend manda solo `context_text` sin Excel, el backend
+> responde 400.
 
----
-
-## Reporte de QA
-
-### `ColumnStandardization`
-
-Registro de estandarización de una columna.
+**Response: `ModelingResponseAPI`**
 
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
-| `table_name` | `str` | Tabla afectada |
-| `original_name` | `str` | Nombre propuesto por ExecutorAgent |
-| `standardized_name` | `str` | Nombre corregido del catálogo |
-| `reason` | `str` | Razón del cambio |
+| `conversation_id` | `UUIDv4` | eco del id de la sesión |
+| `engine` | `str` | motor efectivamente usado en este turno |
+| `turn_number` | `int ≥ 1` | número de turno tras este request |
+| `tables` | `list[TableAPI]` | tablas modeladas (con DDL ya generado en Python) |
+| `relationships` | `list[str]` | siempre `[]` en el rediseño actual (las FK las modela el usuario en el frontend) |
+| `export_sql` | `str` | DDL completo concatenado de todas las tablas |
+| `export_markdown` | `str` | resumen del modelo en MD |
+| `qa_report` | `QAReportAPI` | siempre vacío en el rediseño (sin QA agent), pero el campo existe por compatibilidad |
+| `guidelines_applied` | `str` | resumen textual de los lineamientos efectivos |
+| `summary` | `str` | reservado, vacío hoy |
 
-### `GuidelineViolation`
+### 2.4 `ColumnAPI` y `TableAPI`
 
-Violación de lineamiento detectada.
+```python
+class ColumnAPI(BaseModel):
+    column_name: str
+    data_type: str
+    nullable: bool
+    is_pk: bool = False
+    is_fk: bool = False
+    fk_references: str | None = None      # "tabla.columna" o null
+    functional_definition: str = ""
+    observations: str = ""                # razón del tipo, default aplicado, "audit column", etc.
 
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `table_name` | `str` | Tabla afectada |
-| `column_name` | `str` | Columna con violación |
-| `violation` | `str` | Descripción de la violación |
-| `correction_applied` | `str` | Corrección aplicada |
 
-### `NewCatalogEntry`
+class TableAPI(BaseModel):
+    table_name: str
+    table_description: str = ""
+    columns: list[ColumnAPI]
+    ddl: str = ""                         # generado en src/processing/ddl_generator.py
+```
 
-Nueva entrada agregada al catálogo.
+> El frontend convierte estas estructuras a `TableModel` /
+> `TableColumn` (las del canvas) con `modelingResponseToCanvas` en
+> `@/lib/agent/mapping.ts`. Ahí se asignan los `id` estables de
+> columna y se resuelven los `fk_references` a relaciones por id.
 
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `column_name` | `str` | Nombre de la columna |
-| `functional_definition` | `str` | Definición funcional |
-| `data_type` | `str` | Tipo de dato |
-| `table_name` | `str` | Tabla donde se usa |
+### 2.5 `QAReportAPI` (legacy compat)
 
-### `QAReport`
+```python
+class QAReportAPI(BaseModel):
+    quality_score: int = 0       # ge=0, le=100
+    standardized_columns: list[StandardizedColumnAPI] = []
+    guideline_violations: list[GuidelineViolationAPI] = []
+    new_catalog_entries: list[NewCatalogEntryAPI] = []
+    summary: str = ""
+```
 
-Reporte completo de validación.
+Se mantiene en el contrato para no romper el frontend, pero el backend
+**actualmente lo deja vacío**. El QAValidatorAgent fue retirado en el
+rediseño.
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `standardized_columns` | `list[ColumnStandardization]` | `[]` | Columnas renombradas |
-| `guideline_violations` | `list[GuidelineViolation]` | `[]` | Violaciones corregidas |
-| `new_catalog_entries` | `list[NewCatalogEntry]` | `[]` | Nuevas columnas en catálogo |
-| `quality_score` | `int` (0-100) | `0` | Score de calidad |
-| `summary` | `str` | `""` | Resumen del QA |
+### 2.6 Health / engines
 
-### `QAValidationOutput`
+```python
+class HealthResponseAPI(BaseModel):
+    status: str
+    version: str
+    foundry_connected: bool
+    default_engine: str
+    active_conversations: int
 
-Salida completa del QAValidatorAgent.
 
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `tables` | `list[TableModel]` | `[]` | Tablas corregidas |
-| `qa_report` | `QAReport` | `QAReport()` | Reporte de QA |
+class EnginesResponseAPI(BaseModel):
+    engines: list[str]    # ["databricks_sql", "cosmosdb", "sqlserver", "postgresql", "mysql"]
+    default: str
+```
+
+### 2.7 Errores
+
+```python
+class ErrorResponseAPI(BaseModel):
+    detail: str
+    code: str = "error"
+```
+
+Usado por los `HTTPException(detail=...)` y por las respuestas 502
+del proxy del frontend (cuando lo había). Para los CRUD de proyectos /
+modelos / users / auth las respuestas usan el envelope
+`{success: bool, data?: ..., error?: ...}` (helper `ok` en
+`response_builder.py`).
 
 ---
 
-## Resultado final
+## 3. Modelos internos del workflow (`src/schemas.py`)
 
-### `WorkflowResult`
-
-Resultado final que se presenta al usuario.
-
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `data_model` | `DataModelOutput` | `DataModelOutput()` | Modelo generado |
-| `qa_validation` | `QAValidationOutput` | `QAValidationOutput()` | Validación QA |
-| `final_ddls` | `dict[str, str]` | `{}` | Mapa `tabla → DDL corregido` |
-| `relationship_diagram` | `str` | `""` | Diagrama textual de relaciones |
-
----
-
-## Relaciones entre schemas
+Estos no salen al API — viven en el dominio del agente y del CLI:
 
 ```mermaid
 classDiagram
     class UserInput {
-        +List~RawTableInput~ tables
+        +list~RawTableInput~ tables
         +str user_text
         +str target_engine
-        +List~str~ relationships
+        +list~str~ relationships
     }
 
     class RawTableInput {
-        +str table_name
-        +List~RawColumnInput~ columns
+        +str table_name  «provisional»
+        +str? table_description
+        +bool is_proposed_name
+        +list~RawColumnInput~ columns
     }
 
     class RawColumnInput {
-        +str column_name
+        +str? column_name
         +str functional_definition
-        +str data_type_hint
-        +bool is_nullable
-        +str notes
-    }
-
-    class DataModelOutput {
-        +List~TableModel~ tables
-        +List~str~ relationships
-        +str engine
-        +str summary
+        +str? data_type_hint
+        +bool? is_nullable
+        +str? notes
     }
 
     class TableModel {
         +str table_name
-        +List~ColumnDefinition~ columns
+        +list~ColumnDefinition~ columns
         +str ddl
         +str notes
     }
@@ -226,104 +351,49 @@ classDiagram
         +bool is_nullable
         +bool is_primary_key
         +bool is_foreign_key
-        +str fk_reference
-    }
-
-    class QAValidationOutput {
-        +List~TableModel~ tables
-        +QAReport qa_report
-    }
-
-    class QAReport {
-        +List~ColumnStandardization~ standardized_columns
-        +List~GuidelineViolation~ guideline_violations
-        +List~NewCatalogEntry~ new_catalog_entries
-        +int quality_score
-        +str summary
-    }
-
-    class WorkflowResult {
-        +DataModelOutput data_model
-        +QAValidationOutput qa_validation
-        +Dict~str,str~ final_ddls
-        +str relationship_diagram
+        +str? fk_reference
+        +str? default_value
+        +list~str~ constraints
     }
 
     UserInput --> RawTableInput : contains
     RawTableInput --> RawColumnInput : contains
-    DataModelOutput --> TableModel : contains
     TableModel --> ColumnDefinition : contains
-    QAValidationOutput --> TableModel : contains (corrected)
-    QAValidationOutput --> QAReport : contains
-    QAReport --> ColumnStandardization : contains
-    QAReport --> GuidelineViolation : contains
-    QAReport --> NewCatalogEntry : contains
-    WorkflowResult --> DataModelOutput : combines
-    WorkflowResult --> QAValidationOutput : combines
 ```
+
+`TableModel` aquí es el modelo **interno** del agente — no se
+confunde con `TableAPI` (contrato externo). Hoy el workflow opera
+sobre dicts plano (más rápido de pasar entre nodos del Agent
+Framework) y solo se cosechan a `TableAPI` en `response_builder`.
 
 ---
 
-## Schemas de la API REST
+## 4. Mapeo agente → API
 
-Los modelos consumidos por el frontend Next.js viven en el mismo `src/schemas.py` con sufijo `API` para distinguirlos. Son **Pydantic v2** y se serializan a JSON puro (sin strings JSON anidados).
+`src/api/response_builder.py::_map_column` traduce los nombres
+internos que produce el LLM al contrato del frontend:
 
-### Validación de `conversation_id`
-
-Tipo alias `UUIDv4`: `Annotated[str, StringConstraints(pattern=...)]`. Acepta solo UUIDs versión 4 estrictos. Se valida tanto en el body de POST como en el path.
-
-### Request / Response de conversaciones
-
-| Schema | Endpoint | Notas |
-|---|---|---|
-| `CreateConversationRequest` | `POST /api/conversations` (body) | Campos: `conversation_id: UUIDv4`, `engine: str = "databricks_sql"`. |
-| `CreateConversationResponse` | idem (response) | `created: bool` indica si la conversación se creó o ya existía. |
-| `GuidelinesUploadResponse` | `POST /api/conversations/{id}/guidelines` | Incluye `preview` con los primeros 500 caracteres del contenido procesado. |
-| `DeleteConversationResponse` | `DELETE /api/conversations/{id}` | Confirma `deleted: True`. |
-
-### Request / Response del modelo
-
-`POST /api/conversations/{id}/model` recibe **multipart/form-data**:
-
-- `excel_file: UploadFile | None` (opcional).
-- `context_text: str | None` (opcional).
-- `engine: str | None` (opcional, sobreescribe el de la sesión solo para este turno).
-
-Al menos uno de `excel_file` o `context_text` es obligatorio (400 si ninguno).
-
-**Response: `ModelingResponseAPI`**
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `conversation_id` | `UUIDv4` | Eco del id de la sesión. |
-| `engine` | `str` | Motor efectivamente usado para este turno. |
-| `turn_number` | `int ≥ 1` | Número de turno tras este request. |
-| `tables` | `list[TableAPI]` | Tablas del modelo (ver más abajo). |
-| `relationships` | `list[str]` | Relaciones entre tablas. |
-| `export_sql` | `str` | DDL completo concatenado de todas las tablas. |
-| `export_markdown` | `str` | Modelo completo en Markdown. |
-| `qa_report` | `QAReportAPI` | Reporte de calidad. |
-| `guidelines_applied` | `str` | Resumen de los lineamientos aplicados (sesión vs. globales). |
-| `summary` | `str` | Resumen en lenguaje natural del modelo. |
-
-**`TableAPI`**: `table_name`, `table_description`, `columns: list[ColumnAPI]`, `ddl`.
-
-**`ColumnAPI`**: `column_name`, `data_type`, `nullable`, `is_pk`, `is_fk`, `fk_references` (string `"tabla.columna"` o `null`), `functional_definition`, `observations`.
-
-**`QAReportAPI`**: `quality_score (0–100)`, `standardized_columns`, `guideline_violations`, `new_catalog_entries`, `summary`.
-
-### Mapeo agente → API
-
-`src/api/response_builder.py` traduce los nombres internos del agente a los del contrato API:
-
-| Interno (agente) | API |
-|---|---|
-| `is_nullable` | `nullable` |
-| `is_primary_key` | `is_pk` |
-| `is_foreign_key` | `is_fk` |
-| `fk_reference` | `fk_references` |
+| Interno (LLM JSON) | API (`ColumnAPI`) |
+|--------------------|-------------------|
+| `column_name` | `column_name` |
+| `data_type` | `data_type` |
+| `is_pk` (o legacy `is_primary_key`) | `is_pk` |
+| `nullable` (o legacy `is_nullable`) | `nullable` (forzado a `False` si `is_pk=True`) |
+| `is_fk` | `is_fk` |
+| `fk_references` | `fk_references` (string `"tabla.columna"` o null) |
+| `functional_definition` | `functional_definition` |
 | `notes` (de columna) | parte de `observations` |
-| `default_value` y `constraints` | concatenados en `observations` |
-| `notes` (de tabla) | `table_description` |
+| `default_value` | concatenado en `observations` |
+| `constraints` | concatenado en `observations` |
+| `notes` (de tabla) | `table_description` (en `_map_table`) |
 
-Cuando QA y Executor producen ambos un `tables`, se prefiere el del QA porque puede traer nombres estandarizados y DDL regenerado.
+**Coerción defensiva**: el LLM ocasionalmente devuelve booleanos como
+strings (`"true"`, `"si"`, `"yes"`). `_coerce_bool` los normaliza con
+una lista cerrada de valores aceptados — cualquier string desconocido
+cae al default declarado.
+
+**Audit columns**: después del mapeo, `inject_audit_columns` agrega
+las audit columns declaradas en los guidelines de la sesión, salvo
+para tablas con prefijos `r*` (referencia) o `t*` (temporal). Si el
+LLM ya emitió alguna audit column, no se duplica (gana la del LLM
+que pudo haberla refinado).
