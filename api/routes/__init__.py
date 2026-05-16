@@ -9,6 +9,7 @@
 - `models`: GET/POST /api/models, GET/PUT/DELETE /api/models/{id}.
 """
 
+from api.routes.admin import router as admin_router
 from api.routes.auth import router as auth_router
 from api.routes.conversations import router as conversations_router
 from api.routes.health import router as health_router
@@ -17,6 +18,7 @@ from api.routes.models import router as models_router
 from api.routes.projects import router as projects_router
 
 __all__ = [
+    "admin_router",
     "auth_router",
     "conversations_router",
     "health_router",

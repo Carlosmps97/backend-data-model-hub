@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from api.routes import (
+    admin_router,
     auth_router,
     conversations_router,
     health_router,
@@ -195,6 +196,7 @@ app.include_router(conversations_router)
 app.include_router(modeling_router)
 app.include_router(projects_router)
 app.include_router(models_router)
+app.include_router(admin_router)
 
 
 # ─── Ejecución directa (desarrollo) ─────────────────────────────────────

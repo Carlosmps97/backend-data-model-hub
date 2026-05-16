@@ -331,6 +331,86 @@ async def update_model(
     return await get_model(model_id)
 
 
+async def bulk_update_positions(
+    model_id: str,
+    table_positions: dict[str, dict[str, float]] | None = None,
+    view_positions: dict[str, dict[str, float]] | None = None,
+) -> dict[str, int]:
+    """Patch only the `position` field on the given tables / views.
+
+    Used by `PATCH /api/models/{id}/positions` for fast persistence of
+    the ELK-computed layout and user drags, without rewriting the full
+    model payload. Each entry in `table_positions` / `view_positions`
+    maps an entity id to a `{"x": float, "y": float}` dict.
+
+    Ignores ids that don't belong to `model_id` (defensive; the filter
+    `{"_id": entity_id, "modelId": model_id}` prevents cross-model
+    writes from a buggy frontend).
+
+    Returns the counts `{"tables": N, "views": M}` of matched docs for
+    observability/tests.
+    """
+    db = await get_db()
+    now = _now()
+    tables_matched = 0
+    views_matched = 0
+
+    if table_positions:
+        tasks = []
+        for tid, pos in table_positions.items():
+            if not isinstance(pos, dict):
+                continue
+            x = pos.get("x")
+            y = pos.get("y")
+            if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                continue
+            tasks.append(
+                db["model_tables"].update_one(
+                    {"_id": tid, "modelId": model_id, "flgactive": {"$ne": False}},
+                    {
+                        "$set": {
+                            "position": {"x": float(x), "y": float(y)},
+                            "updatedAt": now,
+                        }
+                    },
+                )
+            )
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            tables_matched = sum(r.matched_count for r in results)
+
+    if view_positions:
+        tasks = []
+        for vid, pos in view_positions.items():
+            if not isinstance(pos, dict):
+                continue
+            x = pos.get("x")
+            y = pos.get("y")
+            if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                continue
+            tasks.append(
+                db["model_views"].update_one(
+                    {"_id": vid, "modelId": model_id, "flgactive": {"$ne": False}},
+                    {
+                        "$set": {
+                            "position": {"x": float(x), "y": float(y)},
+                            "updatedAt": now,
+                        }
+                    },
+                )
+            )
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            views_matched = sum(r.matched_count for r in results)
+
+    if tables_matched or views_matched:
+        # Bump the parent model's updatedAt so list views reflect the
+        # layout change without re-hydrating children.
+        await db["models"].update_one({"_id": model_id}, {"$set": {"updatedAt": now}})
+
+    return {"tables": tables_matched, "views": views_matched}
+
+
 async def delete_model(model_id: str) -> bool:
     """Soft-delete model and all its child entities."""
     db = await get_db()

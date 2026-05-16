@@ -83,6 +83,19 @@ class PartitionSpecDoc(BaseModel):
     clusteringColumns: list[str] | None = None
 
 
+class NodePositionDoc(BaseModel):
+    """Canvas position of a node. Mirrors `NodePosition` in TS.
+
+    Persisted so the ELK-computed layout (and any manual drags) survive
+    reloads. See `PATCH /api/models/{id}/positions`.
+    """
+
+    model_config = _cfg
+
+    x: float
+    y: float
+
+
 class ViewColumnTransformDoc(BaseModel):
     model_config = _cfg
 
@@ -138,6 +151,8 @@ class TableModelDoc(BaseModel):
     subdomainId: str | None = None
     tags: list[str] | None = None
     partition: PartitionSpecDoc | None = None
+    # Canvas position persisted by the ELK layout engine / drag handler.
+    position: NodePositionDoc | None = None
 
 
 # ── model_relationships ────────────────────────────────────────────────────
@@ -151,6 +166,12 @@ class RelationshipDoc(BaseModel):
     targetTable: str
     targetColumn: str
     type: str  # 'one-to-one' | 'one-to-many' | 'many-to-many'
+    # Optional Crow's Foot cardinality overrides. When absent the frontend
+    # derives them from `type` + FK.isNullable. Values mirror the TS
+    # `CrowsFootCardinality` union:
+    #   'one-only' | 'zero-or-one' | 'one-or-many' | 'zero-or-many'
+    sourceCardinality: str | None = None
+    targetCardinality: str | None = None
 
 
 # ── model_views ────────────────────────────────────────────────────────────
@@ -175,6 +196,8 @@ class ViewModelDoc(BaseModel):
     subdomainId: str | None = None
     tags: list[str] | None = None
     color: str | None = None
+    # Canvas position persisted alongside `TableModelDoc.position`.
+    position: NodePositionDoc | None = None
 
 
 # ── models (metadata + embedded domainCatalog) ─────────────────────────────

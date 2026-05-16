@@ -31,6 +31,7 @@ from src.api.dependencies import (
 from src.api.response_builder import ok
 from src.db.db_models import DataModelDoc
 from src.db.models_db import (
+    bulk_update_positions,
     create_model,
     delete_model,
     get_model,
@@ -167,6 +168,65 @@ async def update_one_model(
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
     return ok(updated.model_dump(by_alias=True))
+
+
+# ── PATCH /api/models/{id}/positions ───────────────────────────────────────
+
+
+class PositionPayload(BaseModel):
+    x: float
+    y: float
+
+
+class PatchPositionsRequest(BaseModel):
+    """Partial update of canvas positions. Any id absent from these maps is
+    left untouched. `tables` / `views` are both optional (callers can send
+    only the one they need to update)."""
+
+    tables: dict[str, PositionPayload] | None = None
+    views: dict[str, PositionPayload] | None = None
+
+
+@router.patch("/{model_id}/positions")
+async def patch_positions(
+    model_id: str,
+    body: PatchPositionsRequest,
+    user: AuthUserDep,
+):
+    """Lightweight endpoint dedicated to canvas layout persistence.
+
+    Separate from PUT /api/models/{id} so a drag handler with 500ms
+    debounce doesn't have to round-trip the full (possibly MB-sized)
+    model payload. Only mutates the `position` field on the referenced
+    tables/views.
+    """
+    existing = await get_model(model_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
+    if not can_edit_model(user, model_id, existing.projectId):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"No edit access to model {model_id}.",
+        )
+
+    table_positions = (
+        {tid: pos.model_dump() for tid, pos in body.tables.items()}
+        if body.tables
+        else None
+    )
+    view_positions = (
+        {vid: pos.model_dump() for vid, pos in body.views.items()}
+        if body.views
+        else None
+    )
+    if not table_positions and not view_positions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide at least one of `tables` or `views`.",
+        )
+
+    counts = await bulk_update_positions(model_id, table_positions, view_positions)
+    return ok(counts)
 
 
 # ── DELETE /api/models/{id} ────────────────────────────────────────────────
