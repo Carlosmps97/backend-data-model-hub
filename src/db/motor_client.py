@@ -3,9 +3,6 @@
 Single client shared across all async DB modules. Call `connect()` once
 in the FastAPI lifespan, use `get_db()` inside endpoint handlers, and
 `disconnect()` during lifespan teardown.
-
-The synchronous `catalog_db.py` keeps its own pymongo client because
-agent `@tool` decorators run outside the async event loop.
 """
 
 from __future__ import annotations

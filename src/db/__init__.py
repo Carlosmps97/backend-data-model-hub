@@ -1,4 +1,4 @@
-"""Database layer for the Data Modeler Agent backend.
+"""Database layer for the platform backend (backend-data-model-hub).
 
 Modules:
   motor_client  — async Motor (Cosmos DB) connection singleton.
@@ -6,7 +6,8 @@ Modules:
   projects_db   — async CRUD for the `projects` collection.
   models_db     — async CRUD for models + child collections.
   users_db      — async CRUD for the `users` collection.
-  catalog_db    — sync pymongo CRUD for `column_catalog` (used by agent tools).
+
+The agent's `column_catalog` lives in `app-agents-modeler/src/db/catalog_db.py`.
 """
 
 from src.db import motor_client

@@ -1,19 +1,20 @@
-"""API REST async para el Data Modeler Agent.
+"""API REST async del backend de plataforma (backend-data-model-hub).
 
 Punto de entrada de FastAPI. Responsabilidades acotadas:
 - Configurar logging.
-- Lifespan: crear singletons (FoundryChatClient, ConversationStore,
-  asyncio.Semaphore) y guardarlos en `app.state`.
+- Lifespan: abrir/cerrar la conexión a Cosmos DB (Motor async).
 - Middleware: logueo estructurado de cada request.
-- CORS para el frontend Next.js.
-- Montar los routers `health`, `conversations`, `modeling`.
+- CORS para el frontend Next.js (con credenciales — comparte cookie
+  `modeler-auth` con el frontend).
+- Montar los routers `health`, `auth`, `admin`, `projects`, `models`.
 
-Sin lógica de negocio.
+El servicio de agentes (modelado conversacional, ConversationStore,
+FoundryChatClient) vive en `app-agents-modeler` y se invoca desde el
+frontend directamente — el backend no lo proxea.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import time
@@ -31,14 +32,10 @@ from starlette.responses import Response
 from api.routes import (
     admin_router,
     auth_router,
-    conversations_router,
     health_router,
-    modeling_router,
     models_router,
     projects_router,
 )
-from src.agents.factory import get_chat_client
-from src.conversation import ConversationStore
 from src.db import motor_client
 from src.logger import configure_logging, get_logger
 
@@ -63,30 +60,6 @@ async def lifespan(app: FastAPI):
         app.state.db_connected = False
         log.error("motor db connection failed", extra={"error": str(e)})
 
-    # ── ConversationStore (en memoria) ───────────────────────────────────
-    app.state.store = ConversationStore()
-
-    # ── Cliente de AI Foundry ────────────────────────────────────────────
-    # Opcional al arranque: los endpoints que lo requieren responden 503 si None.
-    try:
-        app.state.chat_client = get_chat_client()
-        log.info("foundry connected")
-    except Exception as e:
-        app.state.chat_client = None
-        log.error("foundry connection failed", extra={"error": str(e)})
-
-    # ── Semaphore de pipeline ────────────────────────────────────────────
-    try:
-        max_concurrent = int(os.getenv("MAX_CONCURRENT_PIPELINES", "5"))
-    except ValueError:
-        max_concurrent = 5
-    max_concurrent = max(1, max_concurrent)
-    app.state.pipeline_semaphore = asyncio.Semaphore(max_concurrent)
-    log.info(
-        "pipeline semaphore initialized",
-        extra={"max_concurrent": max_concurrent},
-    )
-
     log.info("api started")
     try:
         yield
@@ -99,17 +72,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Data Modeler Agent API",
+    title="Data Modeler Platform Backend",
     description=(
-        "API REST para generación de modelos de datos con validación QA. "
-        "Soporta conversaciones multi-turno con memoria por `conversation_id`."
+        "API REST de plataforma del Data Modeler. Maneja autenticación, "
+        "permisos, proyectos, modelos y la persistencia en Cosmos DB. "
+        "El agente de modelado conversacional vive en `app-agents-modeler`."
     ),
-    version="2.0.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
 
 # ─── CORS ───────────────────────────────────────────────────────────────
+# Política: allowlist explícita; `allow_credentials=True` porque el
+# frontend Next.js envía la cookie de sesión `modeler-auth` con cada
+# request al backend.
 
 _cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
 if _cors_origins_env:
@@ -134,10 +111,9 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next) -> Response:
-    """Loguea inicio/fin de cada request con conv id (si está) y duración."""
+    """Loguea inicio/fin de cada request con su request_id y duración."""
     request_id = uuid.uuid4().hex[:12]
     started = time.monotonic()
-    conv_id = _extract_conversation_id(request.url.path)
 
     log.info(
         "request started",
@@ -145,7 +121,6 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
             "request_id": request_id,
             "method": request.method,
             "path": request.url.path,
-            "conversation_id": conv_id,
         },
     )
     try:
@@ -158,7 +133,6 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
                 "request_id": request_id,
                 "method": request.method,
                 "path": request.url.path,
-                "conversation_id": conv_id,
                 "ms": elapsed_ms,
             },
         )
@@ -171,7 +145,6 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
             "request_id": request_id,
             "method": request.method,
             "path": request.url.path,
-            "conversation_id": conv_id,
             "status": response.status_code,
             "ms": elapsed_ms,
         },
@@ -180,20 +153,10 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
     return response
 
 
-def _extract_conversation_id(path: str) -> str | None:
-    """Extrae el `conversation_id` del path si está presente."""
-    parts = [p for p in path.split("/") if p]
-    if len(parts) >= 3 and parts[0] == "api" and parts[1] == "conversations":
-        return parts[2]
-    return None
-
-
 # ─── Montaje de routers ─────────────────────────────────────────────────
 
 app.include_router(health_router)
 app.include_router(auth_router)
-app.include_router(conversations_router)
-app.include_router(modeling_router)
 app.include_router(projects_router)
 app.include_router(models_router)
 app.include_router(admin_router)

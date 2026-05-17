@@ -1,6 +1,7 @@
-"""Módulo de soporte para la capa API REST.
+"""Capa de soporte de la API REST del backend de plataforma.
 
-Contiene `dependencies.py` con los providers de FastAPI compartidos
-(ConversationStore, FoundryChatClient, semaphore de concurrencia) y
-helpers de validación que requieren múltiples rutas.
+Contiene `auth.py` (JWT + bcrypt + bootstrap admin), `dependencies.py`
+(providers de auth + helpers de permisos) y `response_builder.py` (sobre
+estándar `ok(...)`). Sin lógica de modelado: el agente vive en
+`app-agents-modeler`.
 """
