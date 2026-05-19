@@ -20,10 +20,48 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 _cfg = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+# ── Tags ───────────────────────────────────────────────────────────────────
+
+class TagDoc(BaseModel):
+    """Key-value metadata tag attached to tables (and views). Mirrors the
+    TS `Tag` interface in `web-data-model-hub/src/types/model.ts`.
+
+    Both `key` and `value` are free-text; the application does not enforce a
+    controlled vocabulary. The shape replaces the previous `list[str]` —
+    legacy string entries are coerced into `{key: "", value: <str>}` by the
+    validator on each consuming model so pre-migration Cosmos docs keep
+    loading without a hard cutover.
+    """
+
+    model_config = _cfg
+
+    key: str = ""
+    value: str = ""
+
+
+def _coerce_tags(raw: Any) -> Any:
+    """Accept either the new `list[TagDoc]` shape or the legacy `list[str]`
+    shape that lives in pre-migration Cosmos documents. Strings become
+    `{key: "", value: <str>}`; objects pass through to Pydantic."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return raw  # let Pydantic raise its usual validation error
+    out: list[Any] = []
+    for item in raw:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                out.append({"key": "", "value": stripped})
+        else:
+            out.append(item)
+    return out
 
 
 # ── Project ────────────────────────────────────────────────────────────────
@@ -105,6 +143,22 @@ class ViewColumnTransformDoc(BaseModel):
     include: bool = True
 
 
+class DomainDefaultsDoc(BaseModel):
+    """Inheritable defaults nested under a domain or subdomain. Tables
+    assigned to a (sub)domain copy these values onto themselves at edit
+    time (see `TableForm.tsx` in the frontend)."""
+
+    model_config = _cfg
+
+    schema_: str | None = Field(default=None, alias="schema")
+    tags: list[TagDoc] | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_legacy_tags(cls, v: Any) -> Any:
+        return _coerce_tags(v)
+
+
 class SubdomainDefinitionDoc(BaseModel):
     model_config = _cfg
 
@@ -112,7 +166,7 @@ class SubdomainDefinitionDoc(BaseModel):
     name: str
     code: str | None = None
     description: str | None = None
-    defaults: dict[str, Any] | None = None
+    defaults: DomainDefaultsDoc | None = None
 
 
 class DomainDefinitionDoc(BaseModel):
@@ -124,7 +178,7 @@ class DomainDefinitionDoc(BaseModel):
     description: str | None = None
     color: str | None = None
     subdomains: list[SubdomainDefinitionDoc] = Field(default_factory=list)
-    defaults: dict[str, Any] | None = None
+    defaults: DomainDefaultsDoc | None = None
 
 
 # ── model_tables ───────────────────────────────────────────────────────────
@@ -149,10 +203,15 @@ class TableModelDoc(BaseModel):
     subdomain: str | None = None
     domainId: str | None = None
     subdomainId: str | None = None
-    tags: list[str] | None = None
+    tags: list[TagDoc] | None = None
     partition: PartitionSpecDoc | None = None
     # Canvas position persisted by the ELK layout engine / drag handler.
     position: NodePositionDoc | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_legacy_tags(cls, v: Any) -> Any:
+        return _coerce_tags(v)
 
 
 # ── model_relationships ────────────────────────────────────────────────────
@@ -194,10 +253,15 @@ class ViewModelDoc(BaseModel):
     subdomain: str | None = None
     domainId: str | None = None
     subdomainId: str | None = None
-    tags: list[str] | None = None
+    tags: list[TagDoc] | None = None
     color: str | None = None
     # Canvas position persisted alongside `TableModelDoc.position`.
     position: NodePositionDoc | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_legacy_tags(cls, v: Any) -> Any:
+        return _coerce_tags(v)
 
 
 # ── models (metadata + embedded domainCatalog) ─────────────────────────────

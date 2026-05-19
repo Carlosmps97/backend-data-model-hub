@@ -32,6 +32,7 @@ from starlette.responses import Response
 from api.routes import (
     admin_router,
     auth_router,
+    excel_import_router,
     health_router,
     models_router,
     projects_router,
@@ -159,6 +160,7 @@ app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(models_router)
+app.include_router(excel_import_router)
 app.include_router(admin_router)
 
 
