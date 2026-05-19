@@ -1,346 +1,360 @@
-# Arquitectura del Sistema — Data Modeler Agent
+# Arquitectura — `backend-data-model-hub`
 
-## Visión General
+> Backend **de plataforma** del Data Modeler. Resuelve autenticación,
+> permisos, CRUD de proyectos / modelos / usuarios y la previsualización
+> del import desde Excel. **No** ejecuta agentes LLM — el modelado
+> conversacional vive en el servicio separado `app-agents-modeler`.
 
-El sistema se compone de dos procesos independientes que se comunican vía HTTP:
+## 1. Visión general
 
+```mermaid
+flowchart LR
+    subgraph Browser["Browser · Next.js (:3000)"]
+        UI["React UI<br/>Zustand stores"]
+        SVC["src/services/*"]
+    end
+
+    subgraph Platform["backend-data-model-hub (:8000)"]
+        MID["Middleware<br/>(request_id + logs)"]
+        H["/api/health"]
+        AUTH["/api/auth/*"]
+        PRJ["/api/projects/*"]
+        MOD["/api/models/*"]
+        ADM["/api/admin/users/*"]
+        XLS["/api/excel-import/preview"]
+    end
+
+    subgraph Agent["app-agents-modeler (:8001)"]
+        AGT["/api/conversations/*<br/>/api/engines"]
+    end
+
+    subgraph Cloud["Azure"]
+        COSMOS[("Cosmos DB<br/>db_modeler")]
+    end
+
+    UI --> SVC
+    SVC -.cookie modeler-auth.-> MID
+    SVC -.CORS allowlist.-> AGT
+    MID --> AUTH
+    MID --> PRJ
+    MID --> MOD
+    MID --> ADM
+    MID --> XLS
+    AUTH --> COSMOS
+    PRJ --> COSMOS
+    MOD --> COSMOS
+    ADM --> COSMOS
+    AGT --> COSMOS
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│              Data Model Hub  (Next.js · puerto 3000)             │
-│                                                                  │
-│  ┌──────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │
-│  │ Canvas ER    │  │  AI Chat Panel  │  │  Docs / Settings    │ │
-│  │ (React Flow) │  │  (useAgentStore)│  │                     │ │
-│  └──────┬───────┘  └────────┬────────┘  └─────────────────────┘ │
-│         │                   │                                    │
-│         └───────────────────▼─────────────────────────────────── │
-│                  /api/agent/* — proxy Route Handlers             │
-│              /api/projects, /api/models — JSON storage           │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │ HTTP / multipart-form
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│           agent-modeler  (FastAPI · puerto 8000)                 │
-│                                                                  │
-│  Endpoints:                                                      │
-│    POST   /api/conversations          crear sesión               │
-│    DELETE /api/conversations/{id}     liberar sesión             │
-│    POST   /api/conversations/{id}/guidelines  subir guidelines   │
-│    POST   /api/conversations/{id}/model       ejecutar pipeline  │
-│    GET    /api/conversations/{id}/model       último modelo      │
-│    GET    /api/health                         estado             │
-│    GET    /api/engines                        motores soportados │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │  Pipeline (WorkflowBuilder — Microsoft Agent Framework)    │ │
-│  │                                                            │ │
-│  │  prepare_input → ExecutorAgent → extract_model             │ │
-│  │                                       ↓                    │ │
-│  │                               QAValidatorAgent             │ │
-│  │                                       ↓                    │ │
-│  │                                 format_output              │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  ConversationStore (in-memory, async-safe)                       │
-│  Azure AI Foundry ← FoundryChatClient ← Service Principal       │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+**Stack**: Python 3.12 · FastAPI · Pydantic v2 · Motor (async MongoDB) ·
+bcrypt · PyJWT · openpyxl · rapidfuzz · Azure Cosmos DB for MongoDB.
+
+**Procesos en juego**: 1 proceso FastAPI por deploy + 1 cuenta de Cosmos DB.
+No hay broker de colas, ni caché Redis, ni dependencia de Azure AI Foundry
+(esa vive solo en `app-agents-modeler`).
+
+### Topología de colecciones
+
+| Servicio | Colecciones que toca |
+|---|---|
+| `backend-data-model-hub` (este repo) | `users`, `projects`, `models`, `model_tables`, `model_relationships`, `model_views` |
+| `app-agents-modeler` | `column_catalog` (diccionario semántico) |
+
+Apuntan al **mismo cluster Cosmos** y a la **misma database** (`db_modeler`)
+pero tocan colecciones disjuntas — no hay carreras de escritura entre
+ellos.
 
 ---
 
-## Capas del Sistema
+## 2. Capas del sistema
 
-### 1. Capa de Presentación
+### 2.1 Punto de entrada — `api/main.py`
 
-**Frontend (Next.js `web-data-model-hub/`):**
+Crea la aplicación FastAPI, configura CORS y el middleware de logging,
+y monta los routers. El **lifespan** abre Motor al arrancar:
 
-| Componente | Archivo | Responsabilidad |
-|-----------|---------|-----------------|
-| Canvas ER | `features/diagram/DiagramCanvas.tsx` | React Flow, TableNode, ViewNode, tool sidebar, connect mode |
-| TableForm | `features/table-editor/TableForm.tsx` | Formulario completo de tabla: lógico/físico, dominio, columnas, partición |
-| ViewForm | `features/views/ViewForm.tsx` | Crear/editar vistas SQL con alias, expresiones, WHERE, custom SQL |
-| DomainManager | `features/domains/DomainManager.tsx` | CRUD catálogo de dominios y subdominios |
-| ChatPanel | `features/chat-agent/ChatPanel.tsx` | UI del chat con el agente IA |
-| AgentDogState | `features/chat-agent/AgentDogState.tsx` | Animaciones de estado del agente |
-| useModelStore | `store/useModelStore.ts` | Estado global: tablas, relaciones, vistas, dominios, guardado |
-| useAgentStore | `store/useAgentStore.ts` | Sesiones del agente IA por modelId |
+| Singleton | Tipo | Resilencia ante fallo |
+|---|---|---|
+| `motor_client` (Cosmos DB) | `AsyncIOMotorClient` + `ensure_indexes` | si falla, `app.state.db_connected = False` y `/api/health` lo reporta; los endpoints que usen DB devuelven 500 |
 
-**CLI (`src/main.py`, `chat.py`):** interfaz multi-turno con Rich. Usa `run_modeling_pipeline` directamente, sin sesiones explícitas ni `ConversationStore`.
+```mermaid
+flowchart TD
+    L0["lifespan start"] --> M["motor_client.connect()<br/>+ ensure_indexes"]
+    M --> READY["app ready"]
+    READY --> REQ["requests"]
+    REQ --> SHUTDOWN["lifespan stop"]
+    SHUTDOWN --> D["motor_client.disconnect()"]
+```
+
+### 2.2 Routers (`api/routes/`)
+
+| Router | Prefijo | Auth | Responsabilidad |
+|---|---|---|---|
+| `health` | `/api/health` | público | liveness + flag `db_connected` |
+| `auth` | `/api/auth/*` | público (`/login`, `/logout`); `/me` requiere cookie | login / logout / me con cookie `modeler-auth` |
+| `projects` | `/api/projects/*` | `AuthUserDep` (admin para POST/DELETE) | CRUD proyectos |
+| `models` | `/api/models/*` | `AuthUserDep` + permisos por modelo | CRUD modelos hidratados + PATCH positions |
+| `admin` | `/api/admin/users/*` | `AdminDep` | gestión de usuarios y permisos (solo admin) |
+| `excel_import` | `/api/excel-import/preview` | `AuthUserDep` | preview normalizado de un `.xlsx` |
+
+### 2.3 Capa de servicios (`src/api/`)
+
+```
+src/api/
+├── auth.py             # JWT sign/verify (HS256), bcrypt, bootstrap admin
+├── dependencies.py     # FastAPI Depends + helpers de permisos
+└── response_builder.py # envelope ok({...}) → {success: true, data: ...}
+```
+
+`dependencies.py` es el wiring de autorización: lee la cookie
+`modeler-auth`, valida el JWT, **recarga `UserDoc` desde Cosmos en cada
+request** (un cambio de permisos toma efecto al instante) y expone los
+helpers `can_view_project` / `can_edit_model` / `is_admin` que reflejan
+el contrato de `web-data-model-hub/src/lib/auth/permissions.ts`.
+
+### 2.4 Capa de datos (`src/db/`)
+
+```
+src/db/
+├── motor_client.py     # singleton AsyncIOMotorClient + ensure_indexes
+├── db_models.py        # Pydantic v2 — espejo de las interfaces TS del frontend
+├── projects_db.py      # CRUD proyectos (soft-delete + cascade a modelos)
+├── models_db.py        # CRUD modelos + child collections + safety-net column ids
+└── users_db.py         # CRUD usuarios (hard-delete; isActive=false para lock-out)
+```
+
+**Colecciones en `db_modeler`**:
+
+| Colección | PK | Notas |
+|---|---|---|
+| `users` | `_id` (uuid) | índice único en `username`; hard-delete |
+| `projects` | `_id` (uuid) | soft-delete `flgactive`; cascade a `models` |
+| `models` | `_id` (uuid) | índice `(projectId, updatedAt desc)`. Embebe `domainCatalog`. |
+| `model_tables` | `_id` (uuid) | índices `(modelId)`, `(modelId, schema)`, `(modelId, domain)` |
+| `model_relationships` | `_id` (uuid) | índice `(modelId)` |
+| `model_views` | `_id` (uuid) | índices `(modelId)`, `(modelId, sourceTableId)` |
+
+`models_db._replace_entities` hace **soft-delete + bulkWrite upsert** —
+los docs viejos se marcan `flgactive=false` antes del upsert para evitar
+`E11000` en Cosmos DB sobre rows previamente soft-eliminados. Es el
+mismo patrón que usa el frontend en `web-data-model-hub/src/server/db/mongo.ts`.
+
+### 2.5 Feature Excel-import — `src/excel_import/`
+
+Módulo aislado (no comparte estado con el resto del backend) que se monta
+como router en `/api/excel-import/preview`.
+
+```
+src/excel_import/
+├── __init__.py           # superficie pública: parse_workbook, normalize_type
+├── schemas.py            # Pydantic v2 — ExcelPreview, PreviewTable, PreviewColumn
+├── workbook_reader.py    # openpyxl read-only → RawWorkbook
+├── service.py            # orquestador (split schema.tabla, match descripciones)
+└── type_normalizer.py    # pipeline tokenize → exact → alias → fuzzy
+```
+
+Pipeline funcional (sin estado entre requests):
+
+```mermaid
+flowchart LR
+    BYT["bytes (.xlsx subido)"] --> RD["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
+    RD --> SV["service.parse_workbook"]
+    SV --> SP["_split_sheet_name<br/>(schema.table)"]
+    SV --> TN["type_normalizer.normalize_type<br/>(rapidfuzz)"]
+    SV --> TD["_match_table_description<br/>(TablesDescriptions)"]
+    SP --> EP["ExcelPreview<br/>(Pydantic)"]
+    TN --> EP
+    TD --> EP
+```
+
+Decisiones clave:
+- El parsing es **100 % determinista**, sin LLM. El frontend recibe el
+  preview, lo edita en el modal y luego invoca el PUT habitual a
+  `/api/models/{id}` con las tablas resultantes.
+- La normalización de tipos sigue el orden `tokenize → exact → alias →
+  fuzzy` con un umbral configurable (`FUZZY_THRESHOLD = 75.0`). Cualquier
+  string que no supere el umbral queda con `matched_via="unknown"` para
+  que el usuario corrija en la UI — no se bloquea el import.
+- La hoja `TablesDescriptions` es opcional (match case-insensitive); si
+  no existe, las tablas vienen sin descripción y todo lo demás funciona.
+
+Ver `doc/workflow.md` para el detalle del pipeline.
 
 ---
 
-### 2. Capa de API (FastAPI)
+## 3. Autenticación
 
+```mermaid
+sequenceDiagram
+    participant U as Browser
+    participant M as Next.js middleware
+    participant FA as backend-data-model-hub
+    participant DB as Cosmos DB
+
+    U->>FA: POST /api/auth/login {username, password}
+    FA->>FA: ensure_bootstrap_admin (idempotent)
+    FA->>DB: get_user_by_username
+    DB-->>FA: UserDoc
+    FA->>FA: bcrypt.checkpw + sign_token (HS256, 10h)
+    FA->>DB: mark_login_success (best-effort)
+    FA-->>U: 200 + Set-Cookie modeler-auth (HttpOnly, SameSite=Lax)
+
+    U->>M: GET /projects/abc (HTML)
+    M->>M: jose.jwtVerify(cookie)
+    alt token válido
+        M-->>U: render page
+    else token inválido o ausente
+        M-->>U: redirect /login?next=...
+    end
+
+    U->>FA: GET /api/projects (XHR con cookie)
+    FA->>FA: verify_token
+    FA->>DB: get_user_by_id (recarga viva)
+    DB-->>FA: UserDoc actualizado
+    FA->>FA: filtrar por permissions
+    FA-->>U: lista filtrada
 ```
-api/
-├── main.py          # lifespan, CORS, middleware de logging, routers
-└── routes/
-    ├── health.py        # GET /api/health, GET /api/engines
-    ├── conversations.py # POST/DELETE sesión + POST guidelines
-    └── modeling.py      # POST/GET /api/conversations/{id}/model
-```
 
-**Lifespan (`main.py`):**
-1. Instancia `ConversationStore` → guardado en `app.state.store`
-2. Crea `FoundryChatClient` → guardado en `app.state.chat_client` (puede ser `None` si falla, responde 503)
-3. Crea `asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)` → limita ejecuciones paralelas
+**Detalles importantes**:
 
-**Middleware de logging:** loguea inicio/fin de cada request con `request_id`, path, `conversation_id` extraído del path y duración en ms.
+- **`AUTH_SECRET` compartido** entre frontend y backend — la cookie
+  firmada por uno se valida del otro. El middleware Next.js usa `jose`
+  (Edge runtime) y este backend usa `PyJWT`, ambos con HS256 y 10 h de
+  vida. Si los dos `.env` divergen, 401 silencioso en todas las requests.
+- **Bootstrap admin**: la primera vez que se invoca `/api/auth/login`, si
+  no existe ningún usuario `admin` en DB se crea `admin / dogadmin2019`.
+  Es **idempotente** y se hace dentro del handler para no bloquear el
+  arranque del servicio (`src/api/auth.py::ensure_bootstrap_admin`).
+- **Recarga viva por request**: `get_current_user` no confía en los
+  claims del JWT — relee `UserDoc` desde DB para que cambios de permisos
+  / desactivaciones tomen efecto sin esperar a que expire la cookie.
+- **Permisos** (`src/api/dependencies.py`): granularidad scope-project o
+  scope-model, niveles `view` / `edit`. Admin tiene `edit` total. Las
+  funciones replican exactamente `web-data-model-hub/src/lib/auth/permissions.ts`.
 
 ---
 
-### 3. Capa de Orquestación — Pipeline (`src/workflow/graph.py`)
+## 4. Flujo end-to-end: editar un modelo + importar Excel
 
-Grafo dirigido implementado con `WorkflowBuilder` del Microsoft Agent Framework:
+```mermaid
+sequenceDiagram
+    participant FE as Frontend Next.js
+    participant API as backend-data-model-hub
+    participant DB as Cosmos DB
 
+    Note over FE,DB: 1. Cargar el modelo
+    FE->>API: GET /api/models/{M}
+    API->>DB: find_one models + 3 paralelos (tables / rels / views)
+    DB-->>API: docs hidratados
+    API-->>FE: DataModelDoc completo
+
+    Note over FE,DB: 2. Importar tablas desde Excel
+    FE->>API: POST /api/excel-import/preview (multipart .xlsx)
+    API->>API: workbook_reader → service → type_normalizer
+    API-->>FE: ExcelPreview (tables, warnings, descriptions found)
+    FE->>FE: el usuario edita columnas / tipos en el modal
+
+    Note over FE,DB: 3. Aplicar al canvas + persistir
+    FE->>FE: previewToTables(...)  →  TableModel[]
+    FE->>API: PUT /api/models/{M} (con tables nuevos)
+    API->>API: _ensure_column_ids (stamp uuid si faltan)
+    API->>DB: update models + _replace_entities en model_tables / rels / views
+    API-->>FE: DataModelDoc actualizado
+
+    Note over FE,DB: 4. Layout (drag o auto-arrange ELK)
+    FE->>API: PATCH /api/models/{M}/positions
+    API->>DB: bulk_update_positions (solo campo position)
+    API-->>FE: {tables: N, views: M}
 ```
-prepare_input  ──▶  ExecutorAgent  ──▶  extract_model
-                                              │
-                                              ▼
-                                      QAValidatorAgent
-                                              │
-                                              ▼
-                                        format_output
-                                              │
-                                              ▼
-                                         JSON final
-```
 
-**Estado del workflow (`WorkflowContext`):**
+**Decisiones de diseño** que se ven en este flujo:
 
-| Clave | Tipo | Establecido por | Consumido por |
-|-------|------|-----------------|---------------|
-| `input_data` | `dict` | `prepare_input` | (disponible para debug) |
-| `target_engine` | `str` | `prepare_input` | `extract_model`, `format_output` |
-| `generated_model` | `str` | `extract_model` | `format_output` |
-
-**Inyección de contexto multi-turno:**
-
-`prepare_input` construye el prompt con secciones opcionales:
-- `## HISTORIAL DE CONVERSACIÓN PREVIA` — solo si la API pasó `history` no vacío
-- `## MODELO ACTUAL` — solo si la API pasó `last_model` no vacío (el agente lo toma como base y aplica solo los cambios solicitados)
-
-El `session_id` nunca aparece en el prompt — se usa solo para resolver el cache de guidelines vía `ContextVar`.
+1. `GET /api/models/{id}` hace 4 queries en paralelo (`asyncio.gather`)
+   en lugar de un `$lookup` — Cosmos DB RU no recomienda joins amplios y
+   las child collections ya tienen índice por `modelId`.
+2. `PATCH /positions` es un endpoint dedicado que solo escribe el campo
+   `position`. Sin él, el handler de drag (≈500 ms debounce) tendría que
+   re-enviar todo el modelo (potencialmente varios MB) por cada cambio.
+3. `_ensure_column_ids` es una safety-net: el frontend ya stampea UUID
+   en columnas nuevas, pero un import desde Excel o un cliente
+   desactualizado podría llegar sin `id`. Las relaciones referencian
+   `TableColumn.id` (no `name`), así que un id faltante rompe edges.
 
 ---
 
-### 4. Capa de Agentes (`src/agents/`)
+## 5. Excel-import (vista de capas)
 
-**Factoría (`factory.py`)** crea agentes con el cliente compartido:
+```mermaid
+flowchart TB
+    REQ["POST /api/excel-import/preview<br/>(multipart .xlsx)"]
+    REQ --> RT["excel_import.py router<br/>· valida extensión<br/>· cap 10 MB<br/>· lee bytes a memoria"]
+    RT --> SVC["service.parse_workbook(bytes)"]
 
-| Agente | Tools disponibles | Rol |
-|--------|-------------------|-----|
-| `ExecutorAgent` | `query_guidelines`, `get_all_guidelines`, `convert_to_markdown` | Genera modelo + DDL aplicando lineamientos |
-| `QAValidatorAgent` | `query_guidelines`, `search_column_catalog`, `add_column_to_catalog`, `get_full_column_catalog`, `convert_to_markdown` | Valida, estandariza nombres, calcula quality_score |
-| `ConversationalAgent` | `parse_excel_file` | Orquestador CLI (no usado en pipeline web) |
+    subgraph PIPE["src/excel_import/"]
+        SVC --> WR["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
+        WR --> RW["RawWorkbook<br/>{sheets, table_descriptions, warnings}"]
+        RW --> SP["_split_sheet_name<br/>(schema.table o (None, name))"]
+        RW --> TN["type_normalizer.normalize_type<br/>(tokenize → exact → alias → fuzzy)"]
+        RW --> TD["_match_table_description<br/>(case-insensitive)"]
+        SP --> EP["ExcelPreview"]
+        TN --> EP
+        TD --> EP
+    end
+
+    EP --> RES["JSON {success, data: ExcelPreview}"]
+```
+
+Detalles que afectan el contrato HTTP:
+
+- `schema` se serializa con `by_alias=True` (el atributo Python es
+  `schema_` porque `BaseModel.schema()` está deprecado pero todavía
+  expuesto en Pydantic v2; el JSON sale como `"schema"`).
+- `matched_via` es un literal: `"exact" | "alias" | "fuzzy" | "unknown" |
+  "empty"`. El frontend lo usa para pintar el badge bajo el dropdown del
+  tipo (`unknown` aparece naranja para invitar a corregir).
+- Si el archivo tiene ≥1 hoja vacía, el response trae `warnings` con el
+  detalle — no se levanta excepción.
 
 ---
 
-### 5. Capa de Tools (`src/tools/`)
+## 6. Decisiones de diseño
 
-```python
-# knowledge_base_tools.py
-query_guidelines(query: str) -> str          # busca en los lineamientos cargados
-get_all_guidelines() -> str                  # retorna el documento completo
+### Por qué separar el backend de la plataforma del backend del agente
+El servicio de modelado conversacional (LLM) tiene un perfil de recursos
+muy distinto: necesita Azure AI Foundry, tokens-por-minuto, semáforos
+para concurrencia de pipeline, dependencias pesadas (Docling, openai SDK,
+agent-framework). Mantenerlos separados permite escalarlos y desplegarlos
+de forma independiente. Este backend arranca en segundos, tiene huella
+RAM baja y sus únicas dependencias externas son Cosmos DB y la cuenta de
+JWT del frontend.
 
-# catalog_tools.py
-search_column_catalog(definition: str) -> str  # Jaccard similarity ≥ 0.3 → candidatos
-add_column_to_catalog(name, definition, type, table) -> str
-get_full_column_catalog() -> str
+### Por qué Cosmos DB for MongoDB y no SQL nativo
+Una única cuenta de Cosmos DB sirve a frontend y backend con la API
+MongoDB, lo que permite usar Motor (async) acá y la SDK estándar de
+MongoDB desde scripts auxiliares. Las colecciones hijas (`model_tables`,
+etc.) tienen índices compuestos por `modelId` que dan latencia constante
+para la hidratación.
 
-# excel_tools.py
-parse_excel_file(file_path: str) -> str      # parsea .xlsx, header matching flexible
+### Por qué un único proceso FastAPI
+El backend está pensado para correr en un único proceso por deploy.
+Multi-proceso requeriría coordinar la cache de bootstrap admin
+(`_bootstrap_done`) y revisar la concurrencia de Motor. Si se necesita
+escalar horizontalmente, el siguiente paso es desplegarlo detrás de un
+load balancer (todos los handlers son stateless excepto el flag de
+bootstrap, que es idempotente).
 
-# convert_tools.py
-convert_to_markdown(file_path: str) -> str   # PDF/DOCX → Markdown con Docling + caché
-```
+### Por qué el Excel-import no toca el LLM
+La normalización de tipos es resoluble con texto/regex/fuzzy. Pagarle al
+LLM cada vez que el usuario sube un Excel sería lento, caro y
+no-determinista. El pipeline actual (`rapidfuzz` con `fuzz.ratio` y
+threshold 75) corrige typos comunes (`decximam → decimal`, `datatime →
+datetime`) sin riesgos. Lo que no encaja queda en `unknown` y el usuario
+corrige a mano.
 
-**Aislamiento de guidelines por sesión:**
-
-```python
-# Patrón ContextVar para guidelines por sesión
-_session_id_var: ContextVar[str | None] = ContextVar('session_id', default=None)
-
-@contextmanager
-def session_scope(session_id: str | None):
-    token = _session_id_var.set(session_id)
-    try:
-        yield
-    finally:
-        _session_id_var.reset(token)
-
-# Al ejecutar el pipeline:
-with session_scope(session_id):
-    events = await workflow.run(input_json)
-```
-
----
-
-### 6. Capa de Memoria — `ConversationStore` (`src/conversation.py`)
-
-Store en memoria (sin persistencia, por diseño):
-
-```python
-@dataclass
-class ConversationState:
-    conversation_id: str
-    engine: str
-    history: list[dict[str, str]]     # [{role, content}]
-    guidelines_meta: GuidelinesMeta | None
-    last_model: dict | None            # inyectado en próximo turno
-    turn_number: int                   # se incrementa en cada turno exitoso
-    created_at: float
-    updated_at: float
-    lock: asyncio.Lock                 # serializa mutaciones por sesión
-```
-
-**Diseño de concurrencia:**
-- `_root_lock` (1 global) para crear/borrar entradas del dict
-- `state.lock` (1 por sesión) para mutaciones dentro de la sesión
-- Semáforo `MAX_CONCURRENT_PIPELINES` (default 5) en app.state
-
----
-
-### 7. Capa de Respuesta — `response_builder.py`
-
-Transforma el output crudo del workflow en `ModelingResponseAPI`:
-
-```
-workflow_result: {engine, generated_model: str, qa_validation: str}
-         │
-         ▼
-_parse_json() — tolera dicts ya parseados y errores
-_map_column() — mapea nombres internos (is_primary_key → is_pk, etc.)
-_map_table()
-_map_qa_report()
-_normalize_relationship() — convierte dicts a strings si el LLM los generó mal
-_build_export_sql() — concatena DDLs
-_build_export_markdown() — genera Markdown estructurado
-_summarize_guidelines_applied()
-         │
-         ▼
-ModelingResponseAPI (contrato del frontend)
-```
-
----
-
-## Flujo End-to-End Completo
-
-```
-1. Frontend genera UUID v4 como conversation_id
-
-2. Frontend: POST /api/conversations {conversation_id, engine}
-   Backend: ConversationStore.get_or_create() → devuelve {created: true}
-
-3. (Opcional) Frontend: POST /api/conversations/{id}/guidelines
-   Backend: procesa archivo → cachea en _guidelines_cache_by_session[session_id]
-            → guarda GuidelinesMeta en ConversationState
-
-4. Frontend: POST /api/conversations/{id}/model {context_text, excel_file?, engine?}
-   Backend:
-     a. Lee ConversationState: history, last_model, engine
-     b. Adquiere semáforo (MAX_CONCURRENT_PIPELINES)
-     c. Llama run_modeling_pipeline({...input_data, history, last_model, session_id})
-     d. session_scope(session_id) → ContextVar listo para guidelines
-     e. Pipeline ejecuta 5 nodos (≈15-60s según complejidad)
-     f. response_builder.build_modeling_response()
-     g. ConversationStore.append_message(user + assistant)
-     h. ConversationStore.set_last_model(model_payload)
-   Frontend: recibe ModelingResponseAPI → muestra en chat
-
-5. Usuario: "Aplicar al canvas" (2-step confirm)
-   Frontend: setTables() + setRelationships() en useModelStore
-
-6. Usuario: click "Guardar"
-   Frontend: PUT /api/models/{id} {tables, relationships, views, domainCatalog}
-   Next.js API: jsonStore.updateModel() → escribe JSON en disco
-
-7. (Opcional) Frontend: DELETE /api/conversations/{id}
-   Backend: ConversationStore.clear() + clear_session_guidelines()
-```
-
----
-
-## Decisiones de Diseño
-
-### Por qué UUID generado por el frontend
-
-El `conversation_id` es generado por el frontend (UUID v4 estricto validado por regex en el backend). Esto permite:
-- El frontend puede crear la sesión de forma optimista sin round-trip previo
-- El UUID es predecible desde el frontend para logging/debugging
-- El backend puede rechazar IDs malformados con 422 antes de tocar el store
-
-### Por qué guidelines como ContextVar
-
-Las guidelines son por sesión pero el pipeline corre en un contexto asyncio diferente al request. `ContextVar` propaga el `session_id` dentro del scope del pipeline sin necesidad de pasarlo como parámetro a cada tool, manteniendo las tools agnósticas de la sesión.
-
-### Por qué el store es in-memory (sin BD)
-
-Por diseño explícito: la plataforma es conversacional y las sesiones son efímeras. La memoria de conversación (historial, guidelines, último modelo) solo es relevante mientras el usuario trabaja. El modelo persistido vive en el JSON del frontend.
-
-### Por qué `_normalize_relationship`
-
-El LLM a veces devuelve `relationships` como lista de dicts `{from_table, to_table, description}` en lugar de strings. `_normalize_relationship` aplana cualquier formato a string legible (`tabla_a.col → tabla_b.col [tipo] — descripción`) sin romper el contrato `list[str]` del schema API.
-
----
-
-## Diagrama de Componentes Detallado
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Presentation                                                    │
-│  ┌──────────────┐  ┌──────────────────────────────────────────┐ │
-│  │  CLI         │  │  FastAPI REST API                        │ │
-│  │  src/main.py │  │  api/main.py + api/routes/               │ │
-│  │  chat.py     │  │                                          │ │
-│  └──────┬───────┘  └──────────────────┬───────────────────────┘ │
-└─────────┼─────────────────────────────┼─────────────────────────┘
-          │                             │
-          └──────────────┬──────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Orchestration  (src/workflow/graph.py)                         │
-│                                                                  │
-│  run_modeling_pipeline(client, input_data)                       │
-│    └── create_modeling_workflow(client)                          │
-│          └── WorkflowBuilder                                     │
-│                .add_edge(prepare_input, executor_agent)          │
-│                .add_edge(executor_agent, extract_model)          │
-│                .add_edge(extract_model, qa_agent)                │
-│                .add_edge(qa_agent, format_output)                │
-│                .build()                                          │
-└─────────────────────────────────────────────────────────────────┘
-          │                             │
-          ▼                             ▼
-┌─────────────────────┐   ┌────────────────────────────────────────┐
-│  ExecutorAgent      │   │  QAValidatorAgent                      │
-│  (src/agents/)      │   │  (src/agents/)                         │
-│                     │   │                                        │
-│  Tools:             │   │  Tools:                                │
-│  • get_all_guidelines│  │  • query_guidelines                   │
-│  • query_guidelines  │  │  • search_column_catalog              │
-│  • convert_to_markdown│ │  • add_column_to_catalog              │
-└─────────┬───────────┘   │  • get_full_column_catalog            │
-          │               │  • convert_to_markdown                │
-          │               └────────────────┬───────────────────────┘
-          │                                │
-          ▼                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Tools Layer  (src/tools/)                                       │
-│                                                                  │
-│  knowledge_base_tools ──▶ guidelines file (PDF/DOCX → .md)      │
-│  catalog_tools        ──▶ data/column_catalog.json              │
-│  excel_tools          ──▶ .xlsx input                           │
-│  convert_tools        ──▶ Docling conversion + local cache      │
-└─────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Infrastructure                                                  │
-│                                                                  │
-│  src/config.py   → Settings (pydantic-settings, .env)           │
-│  Azure Identity  → ClientSecretCredential (Service Principal)   │
-│  FoundryChatClient → Azure AI Foundry endpoint + GPT-4o         │
-└─────────────────────────────────────────────────────────────────┘
-```
+### Por qué `_ensure_column_ids` es defensivo aunque el frontend stampea ids
+Los ids estables sobreviven a renames y son la base de las relaciones FK.
+Un cliente desactualizado, un script de migración, o un futuro importador
+podría enviar columnas sin id — y eso rompería las edges del canvas en
+silencio. El helper es idempotente, barato, y mantiene la invariante de
+que **toda columna persistida tiene un uuid**.

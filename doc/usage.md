@@ -1,252 +1,425 @@
-# Guía de Uso
+# Guía de uso
 
-## Iniciar el sistema
+> Este backend se opera **exclusivamente como API HTTP**. Toda la
+> interacción real ocurre desde el frontend Next.js o llamando directo
+> a los endpoints REST con `curl` / Postman / etc.
+
+---
+
+## 1. Arrancar el servidor
+
+### Desarrollo
 
 ```bash
-# Activar entorno virtual
+# 1. Crear venv con Python 3.12 (una sola vez)
+/opt/homebrew/bin/python3.12 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
 
-# Ejecutar CLI
-python -m src.main
+# 2. Configurar .env (ver doc/configuration.md)
+cp .env.example .env
+$EDITOR .env
+# Variables críticas: COSMOS_CONNECTION_STRING + AUTH_SECRET
+
+# 3. Arrancar con autoreload
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+# o equivalente:
+python -m api.main
 ```
 
-Al iniciar, se muestra el banner con la configuración activa:
-```
-╔══════════════════════════════════════════════════════════════╗
-║           🏗️  DATA MODELER AGENT  🏗️                        ║
-║     Sistema Multi-Agente de Modelamiento de Datos           ║
-║     Microsoft Agent Framework · Python 3.12                 ║
-╠══════════════════════════════════════════════════════════════╣
-║  Comandos:                                                  ║
-║    • Escribe tu solicitud en lenguaje natural                ║
-║    • Incluye una ruta .xlsx para cargar tablas               ║
-║    • 'exit' o 'quit' para salir                              ║
-║    • 'engines' para ver motores soportados                   ║
-║    • 'help' para ver esta ayuda                              ║
-╚══════════════════════════════════════════════════════════════╝
-  Motor por defecto: databricks_sql
-  Modelo LLM: gpt-4o
-```
+Por defecto escucha en `0.0.0.0:8000`. La OpenAPI auto-generada queda en
+`http://localhost:8000/docs`.
 
----
-
-## Comandos del CLI
-
-| Comando | Descripción |
-|---------|-------------|
-| `help` | Muestra el banner de ayuda |
-| `engines` | Lista los motores de BD soportados |
-| `exit` / `quit` / `salir` | Cierra la aplicación |
-| *(texto libre)* | Solicitud de modelamiento |
-
----
-
-## Tipos de input
-
-### 1. Texto libre (lenguaje natural)
-
-Describe las tablas que deseas modelar directamente en español o inglés:
-
-```
-┌─ Data Modeler
-└─▶ Crea una tabla de productos con: id, nombre, precio, categoría, stock. Motor: postgresql
-```
-
-El sistema detecta automáticamente:
-- **Motor de BD**: `postgresql`, `mysql`, `sqlserver`, `databricks`, `cosmos`, etc.
-- **Relaciones FK**: "tiene FK hacia", "foreign key", "relación con", etc.
-
-### 2. Archivo Excel
-
-Incluye la ruta a un archivo `.xlsx` en tu solicitud:
-
-```
-┌─ Data Modeler
-└─▶ Modela las tablas del archivo data/sample_input.xlsx para databricks_sql
-```
-
-El archivo Excel debe tener:
-- **Una pestaña por tabla** (el nombre de la pestaña = nombre de la tabla).
-- **Columnas** con headers reconocibles (ver [Tools > parse_excel_file](tools.md#parse_excel_file)).
-
-Ejemplo mínimo de pestaña "Customers":
-
-| Columna | Definición | Tipo |
-|---------|-----------|------|
-| customer_id | Identificador único del cliente | BIGINT |
-| full_name | Nombre completo del cliente | VARCHAR |
-| email | Correo electrónico | VARCHAR |
-
-### 3. Texto + Excel combinado
-
-```
-┌─ Data Modeler
-└─▶ Modela data/sample_input.xlsx para sqlserver. Agrega una relación FK de orders hacia customers por customer_id
-```
-
-### 4. Con relaciones explícitas
-
-```
-┌─ Data Modeler
-└─▶ Crea tablas customers y orders. La tabla orders tiene FK hacia customers por customer_id. Motor: sqlserver
-```
-
----
-
-## Detección automática del motor de BD
-
-El CLI reconoce las siguientes palabras clave para detectar el motor:
-
-| Palabra clave | Motor asignado |
-|---------------|----------------|
-| `databricks`, `databricks_sql`, `delta` | `databricks_sql` |
-| `cosmos`, `cosmosdb` | `cosmosdb` |
-| `sqlserver`, `sql server`, `mssql` | `sqlserver` |
-| `postgresql`, `postgres` | `postgresql` |
-| `mysql` | `mysql` |
-
-Si no se detecta motor, se usa el valor de `DEFAULT_DB_ENGINE` en `.env`.
-
----
-
-## Salida del sistema
-
-El pipeline produce tres secciones de output:
-
-### 1. Modelo generado
-
-Para cada tabla se muestra:
-- **Tabla de columnas** con nombre, tipo, nullable, PK, FK y definición funcional.
-- **DDL** sintácticamente correcto para el motor seleccionado.
-- **Relaciones** entre tablas (si aplica).
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 📊 Resultado del Modelamiento de Datos                      │
-│ Motor de BD: postgresql                                     │
-└─────────────────────────────────────────────────────────────┘
-
-          tbl_customers
-┌──────────────┬───────────┬──────────┬────┬────┬──────────────────────────┐
-│ Columna      │ Tipo      │ Nullable │ PK │ FK │ Definición               │
-├──────────────┼───────────┼──────────┼────┼────┼──────────────────────────┤
-│ id_customer  │ BIGSERIAL │ ✗        │ PK │    │ Identificador del cliente│
-│ name_full    │ VARCHAR   │ ✗        │    │    │ Nombre completo          │
-│ email_main   │ VARCHAR   │ ✓        │    │    │ Correo electrónico       │
-│ date_created │ TIMESTAMP │ ✗        │    │    │ Fecha de creación        │
-│ ...          │           │          │    │    │                          │
-└──────────────┴───────────┴──────────┴────┴────┴──────────────────────────┘
-
-┌─ DDL — tbl_customers ──────────────────────────────────────┐
-│ CREATE TABLE tbl_customers (                                │
-│   id_customer BIGSERIAL PRIMARY KEY,                        │
-│   name_full VARCHAR(200) NOT NULL,                          │
-│   ...                                                       │
-│ );                                                          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 2. Reporte de QA
-
-```
-┌───────────────────┐
-│ Score de Calidad   │
-│       85/100       │
-└───────────────────┘
-
-     Columnas Estandarizadas
-┌─────────────┬──────────────┬───┬────────────────┬────────────────┐
-│ Tabla       │ Original     │ → │ Estandarizado  │ Razón          │
-├─────────────┼──────────────┼───┼────────────────┼────────────────┤
-│ tbl_orders  │ creation_date│ → │ date_created   │ Match catálogo │
-└─────────────┴──────────────┴───┴────────────────┴────────────────┘
-
-     Nuevas Columnas en Catálogo
-┌──────────────┬───────────┬────────────┬──────────────────────────┐
-│ Columna      │ Tipo      │ Tabla      │ Definición               │
-├──────────────┼───────────┼────────────┼──────────────────────────┤
-│ price_unit   │ DECIMAL   │ tbl_orders │ Precio unitario producto │
-└──────────────┴───────────┴────────────┴──────────────────────────┘
-```
-
-### 3. DDL corregido
-
-Si el QA aplicó correcciones de nombres, se muestra el DDL regenerado con los nombres estandarizados.
-
----
-
-## Conversación multi-turno
-
-Después de recibir resultados, puedes seguir refinando:
-
-```
-┌─ Data Modeler
-└─▶ Agrega una columna phone_number a la tabla customers
-
-┌─ Data Modeler
-└─▶ Cambia el motor a mysql y regenera el DDL
-
-┌─ Data Modeler
-└─▶ Agrega una tabla de categorías con relación FK desde productos
-```
-
----
-
-## Generar archivo de ejemplo
+### Verificación rápida
 
 ```bash
-python scripts/create_sample_xlsx.py
+curl http://localhost:8000/api/health
 ```
 
-Crea `data/sample_input.xlsx` con dos pestañas:
-- **Customers**: id, nombre, email, teléfono, fecha registro.
-- **Orders**: id, id_cliente, monto, fecha, estado.
+Respuesta esperada:
+
+```json
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "db_connected": true
+}
+```
+
+Si `db_connected: false`, los endpoints que toquen Cosmos devuelven 500.
+Verifica `COSMOS_CONNECTION_STRING` en `.env` y reiniciá el proceso.
 
 ---
 
-## Test end-to-end
+## 2. Flujo end-to-end típico (desde el frontend)
+
+```mermaid
+sequenceDiagram
+    participant U as Usuario (browser)
+    participant FE as Frontend Next.js
+    participant API as backend-data-model-hub (:8000)
+    participant AG as app-agents-modeler (:8001)
+
+    Note over U,API: 0. Login (una vez por jornada)
+    U->>FE: abre /login + credenciales
+    FE->>API: POST /api/auth/login
+    API-->>FE: 200 + Set-Cookie modeler-auth
+    FE->>API: GET /api/auth/me (hidrata useAuthStore)
+    API-->>FE: AuthUser
+
+    Note over U,API: 1. Trabajar en un modelo
+    U->>FE: abre Project A / Model M
+    FE->>API: GET /api/models/{M}
+    API-->>FE: DataModel hidratado
+
+    Note over U,API: 2. Importar tablas desde Excel
+    U->>FE: arrastra tablas.xlsx al modal "Import"
+    FE->>API: POST /api/excel-import/preview (multipart)
+    API-->>FE: ExcelPreview (tables, warnings)
+    U->>FE: ajusta columnas/tipos en el modal
+    FE->>FE: previewToTables → TableModel[]
+
+    Note over U,API: 3. Persistir cambios
+    FE->>API: PUT /api/models/{M} (con tables nuevos)
+    API-->>FE: DataModel actualizado
+
+    Note over U,AG: 4. Modelado conversacional (opcional)
+    U->>FE: abre AI Agent panel
+    FE->>AG: POST /api/conversations + /model
+    AG-->>FE: ModelingResponse (tablas + DDL)
+    U->>FE: "Aplicar al canvas"
+    FE->>API: PUT /api/models/{M}
+    API-->>FE: DataModel actualizado
+
+    Note over U,API: 5. Drag de tablas en el canvas
+    U->>FE: mueve tablas
+    FE->>API: PATCH /api/models/{M}/positions (debounce 500ms)
+    API-->>FE: {tables: N, views: M}
+```
+
+---
+
+## 3. Llamadas con `curl` (para diagnóstico)
+
+> Todos los ejemplos asumen que ya hiciste login y tenés `cookies.txt`
+> con el cookie `modeler-auth`.
+
+### 3.1 Health
 
 ```bash
-python scripts/test_pipeline_v2.py
+curl http://localhost:8000/api/health
 ```
 
-Ejecuta el pipeline completo con el archivo de ejemplo y muestra:
-1. Tablas parseadas del Excel.
-2. Modelo generado por ExecutorAgent.
-3. QA report del QAValidatorAgent.
-4. Resultado final combinado.
+### 3.2 Auth
+
+```bash
+# Login (escribe el cookie en cookies.txt)
+curl -c cookies.txt -X POST http://localhost:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"dogadmin2019"}'
+
+# Quién soy
+curl -b cookies.txt http://localhost:8000/api/auth/me
+
+# Logout
+curl -b cookies.txt -X POST http://localhost:8000/api/auth/logout
+```
+
+### 3.3 Proyectos
+
+```bash
+# Listar proyectos visibles para el usuario
+curl -b cookies.txt http://localhost:8000/api/projects
+
+# Crear proyecto (admin only)
+curl -b cookies.txt -X POST http://localhost:8000/api/projects \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Sales","description":"Sales analytics"}'
+
+# Detalle (con permisos)
+curl -b cookies.txt http://localhost:8000/api/projects/<uuid>
+
+# Actualizar (edit access)
+curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid> \
+  -H 'Content-Type: application/json' \
+  -d '{"description":"Updated description"}'
+
+# Borrar (admin only — cascade a modelos)
+curl -b cookies.txt -X DELETE http://localhost:8000/api/projects/<uuid>
+```
+
+### 3.4 Modelos
+
+```bash
+# Listar modelos de un proyecto (lightweight, solo count de tablas)
+curl -b cookies.txt 'http://localhost:8000/api/models?projectId=<uuid>'
+
+# Listar con tablas/relationships/views completos
+curl -b cookies.txt 'http://localhost:8000/api/models?projectId=<uuid>&full=true'
+
+# Modelo hidratado por id
+curl -b cookies.txt http://localhost:8000/api/models/<modelId>
+
+# Crear modelo
+curl -b cookies.txt -X POST http://localhost:8000/api/models \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "projectId": "<projectUuid>",
+        "name": "My Model",
+        "engine": "postgresql",
+        "tables": [],
+        "relationships": [],
+        "views": [],
+        "domainCatalog": []
+      }'
+
+# Actualizar (PUT parcial)
+curl -b cookies.txt -X PUT http://localhost:8000/api/models/<modelId> \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Renamed Model"}'
+
+# Patch de posiciones (solo el campo position)
+curl -b cookies.txt -X PATCH http://localhost:8000/api/models/<modelId>/positions \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "tables": {
+          "<tableId-1>": {"x": 100, "y": 200},
+          "<tableId-2>": {"x": 500, "y": 200}
+        }
+      }'
+
+# Soft-delete
+curl -b cookies.txt -X DELETE http://localhost:8000/api/models/<modelId>
+```
+
+### 3.5 Excel-import
+
+```bash
+# Preview de un workbook
+curl -b cookies.txt -X POST http://localhost:8000/api/excel-import/preview \
+  -F "file=@./tablas.xlsx"
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "tables": [
+      {
+        "sheetName": "dbo.Customer",
+        "schema": "dbo",
+        "name": "Customer",
+        "description": "Clientes B2B",
+        "columns": [
+          {
+            "name": "id",
+            "dataType": "bigint",
+            "rawDataType": "BIGINT",
+            "length": null,
+            "scale": null,
+            "functionalDefinition": "Identificador único",
+            "typeConfidence": 100,
+            "typeMatchedVia": "exact"
+          },
+          {
+            "name": "amount",
+            "dataType": "decimal",
+            "rawDataType": "decximam(10,2)",
+            "length": 10,
+            "scale": 2,
+            "functionalDefinition": "Monto",
+            "typeConfidence": 87,
+            "typeMatchedVia": "fuzzy"
+          }
+        ]
+      }
+    ],
+    "tableDescriptionsFound": true,
+    "warnings": []
+  }
+}
+```
+
+### 3.6 Admin de usuarios
+
+```bash
+# Listar usuarios (admin only)
+curl -b cookies.txt http://localhost:8000/api/admin/users
+
+# Crear usuario
+curl -b cookies.txt -X POST http://localhost:8000/api/admin/users \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "username": "alice",
+        "password": "s3cret123",
+        "role": "editor",
+        "isActive": true,
+        "permissions": [
+          {"scope": "project", "projectId": "<uuid>", "level": "edit"}
+        ]
+      }'
+
+# Actualizar (password queda con el actual si se omite)
+curl -b cookies.txt -X PUT http://localhost:8000/api/admin/users/<userId> \
+  -H 'Content-Type: application/json' \
+  -d '{"isActive": false}'
+
+# Hard-delete (no se puede borrar uno mismo)
+curl -b cookies.txt -X DELETE http://localhost:8000/api/admin/users/<userId>
+```
 
 ---
 
-## Troubleshooting
+## 4. Formato del Excel para `/api/excel-import/preview`
 
-### Error de conexión con Azure
-```
-✗ Error al conectar con Azure AI Foundry: ...
-```
-- Verificar credenciales en `.env`.
-- Verificar que el Service Principal tenga permisos sobre el recurso AI.
-- Verificar acceso a internet y firewall.
+### 4.1 Reglas
 
-### Archivo Excel no encontrado
-```
-✗ Archivo no encontrado: ruta/al/archivo.xlsx
-```
-- Verificar que la ruta sea correcta (absoluta o relativa a la raíz del proyecto).
-- Solo se soportan archivos `.xlsx`.
+- **Cada hoja es una tabla**. El nombre de la hoja puede llevar schema
+  con el separador `.`:
+  - `dbo.Customer` → schema=`dbo`, table=`Customer`
+  - `Customer` → schema=`None`, table=`Customer`
+  - `a.b.c` → schema=`a`, table=`b.c` (solo el primer `.` separa)
+- **La primera fila es header obligatoria** (se descarta).
+- **Lectura por posición** dentro de cada hoja:
 
-### JSON inválido en respuesta del LLM
-El sistema maneja automáticamente:
-- Markdown fences (` ```json ... ``` `).
-- Texto preamble antes del JSON.
-- Trailing commas.
+| Columna A | Columna B | Columna C |
+|---|---|---|
+| nombre de la columna | tipo de dato (con o sin parámetros) | descripción funcional (opcional) |
 
-Si persiste el error, puede indicar que el modelo LLM no está generando JSON válido. Intentar con un modelo más capaz (e.g., `gpt-4o` en vez de `gpt-4o-mini`).
+Ejemplo:
 
-### Sin resultados del workflow
+| (A) name | (B) type | (C) description |
+|---|---|---|
+| customer_id | BIGINT | Identificador único |
+| full_name | VARCHAR(120) | Nombre completo |
+| amount | decimal(10, 2) | Monto de la operación |
+| created_at | timestamp | Fecha de creación |
+
+### 4.2 Hoja opcional `TablesDescriptions`
+
+Si existe (case-insensitive: `TablesDescriptions`, `tablesdescriptions`,
+etc.), el backend la lee y matchea cada fila con la tabla correspondiente:
+
+| TableName | TableDescription |
+|---|---|
+| dbo.Customer | Clientes B2B con datos de facturación |
+| Order | Cabecera de órdenes de venta |
+
+Estrategia de match (case-insensitive, en orden):
+1. `sheetName` exacto.
+2. `schema.table_name` reconstruido.
+3. `table_name` solo.
+
+Si una entrada de `TablesDescriptions` no matchea ninguna hoja, el
+backend la reporta en `warnings` para que el usuario detecte el typo.
+
+### 4.3 Normalización de tipos
+
+| Input del usuario | Resultado |
+|---|---|
+| `BIGINT` | `bigint` (matched_via=`exact`) |
+| `int` | `integer` (matched_via=`alias`) |
+| `decimal(10, 2)` | `decimal`, length=10, scale=2 (matched_via=`exact`) |
+| `VARCHAR(50)` | `varchar`, length=50 (matched_via=`exact`) |
+| `decximam(10,2)` | `decimal`, length=10, scale=2 (matched_via=`fuzzy`, confidence≈86) |
+| `datatime` | `datetime` (matched_via=`fuzzy`) |
+| `variant` (Snowflake-only) | `variant` (matched_via=`unknown`, confidence=0) |
+| `(vacío)` | `varchar` (matched_via=`empty`) |
+
+Los `unknown` no rompen el import — el frontend los pinta con badge
+naranja y el usuario corrige en el modal antes de aplicar al canvas.
+
+---
+
+## 5. Operación: monitorear errores
+
+### Logging estructurado
+
+`LOG_FORMAT=json` produce una línea por evento, ideal para Loki /
+Datadog / cualquier colector de logs:
+
+```json
+{"level":"info","time":"...","logger":"api.main","message":"request started","request_id":"a1b2c3d4e5f6","method":"POST","path":"/api/excel-import/preview"}
+{"level":"info","time":"...","logger":"api.main","message":"request completed","request_id":"a1b2c3d4e5f6","method":"POST","path":"/api/excel-import/preview","status":200,"ms":143}
 ```
-✗ Error: El workflow no produjo resultados.
+
+Eventos clave para alertar:
+
+| Mensaje | Cuándo aparece |
+|---|---|
+| `motor db connection failed` | En lifespan, Cosmos DB no responde |
+| `request crashed` | Un handler levantó excepción no controlada |
+| `excel parse failed` | openpyxl falló al abrir el archivo (probablemente corrupto) |
+
+El `X-Request-ID` que se devuelve en el response permite buscar el
+request en los logs sin ambigüedad.
+
+---
+
+## 6. Troubleshooting
+
+### "Login se queda colgado / 401 silencioso"
+
+Causa típica: `AUTH_SECRET` distinto entre el `.env` del frontend y el
+del backend.
+
+**Verifica**:
+
+```bash
+grep -E '^AUTH_SECRET' web-data-model-hub/.env backend-data-model-hub/.env
 ```
-- Verificar que el endpoint de AI Foundry esté accesible.
-- Verificar logs para errores en llamadas a tools.
-- El modelo puede haber excedido tokens o timeout.
+
+Ambos valores deben ser idénticos. Si uno está vacío y el otro custom,
+se rompe.
+
+### `403 Forbidden` en `/api/projects/{id}`
+
+El usuario está autenticado pero no tiene `permissions` con `projectId`
+igual al proyecto solicitado. Como admin, edita los permisos en
+`/admin/users` o, si no podés entrar al frontend, asigna manualmente en
+Cosmos DB:
+
+```javascript
+db.users.updateOne(
+  { username: "<user>" },
+  { $push: { permissions: { scope: "project", projectId: "<uuid>", level: "edit" } } }
+)
+```
+
+### `500` en cualquier endpoint que toque DB
+
+`GET /api/health` → `db_connected: false`. La causa es que Motor no
+pudo conectar a Cosmos. Verifica en este orden:
+
+1. `COSMOS_CONNECTION_STRING` está completo (incluye `tls=true` y
+   `authMechanism=SCRAM-SHA-256`).
+2. La IP del servidor está habilitada en el firewall de Cosmos DB
+   (vCore).
+3. La connection string no expiró (rotación de keys).
+
+Después de corregir, **reiniciá el proceso** — la conexión se intenta
+solo en el lifespan.
+
+### `400 Could not parse Excel file: ...` en el preview
+
+Causas comunes:
+- El archivo está corrupto o no es un xlsx real (rename de `.csv` a `.xlsx`).
+- El archivo está protegido con contraseña.
+- El archivo es xlsb (Excel binario) — no soportado por openpyxl.
+
+Solución: re-exportar desde Excel como `.xlsx` "estándar".
+
+### `413 File too large`
+
+Tope hardcodeado: 10 MB en `api/routes/excel_import.py::_MAX_UPLOAD_BYTES`.
+Un xlsx normal con decenas de miles de columnas pesa mucho menos — si
+estás chocando este límite, probablemente el archivo tiene imágenes /
+datos embedded que conviene limpiar.
+
+### Bootstrap admin no aparece en DB
+
+El bootstrap se dispara solo en el handler de `/api/auth/login`. Si
+nunca llamaste al endpoint, el admin no existe todavía. Hacé un login
+con `admin / dogadmin2019` y se crea en ese mismo request.

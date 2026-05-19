@@ -25,14 +25,10 @@ COPY --from=builder /usr/local/lib/python3.12  /usr/local/lib/python3.12
 COPY --from=builder /usr/local/bin             /usr/local/bin
 
 # Copy application source (excluding test data, local config, venv)
-COPY api/    ./api/
-COPY src/    ./src/
-COPY prompts/ ./prompts/
+COPY api/ ./api/
+COPY src/ ./src/
 
-# data/ directory is intentionally empty — guidelines are session-only
-# (uploaded via chat) and the column catalog is in Cosmos DB.
-RUN mkdir -p data \
- && chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /app
 
 USER appuser
 

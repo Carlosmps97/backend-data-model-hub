@@ -1,13 +1,28 @@
-"""Routers de la API REST del Data Modeler Agent.
+"""Routers de la API REST del backend de plataforma.
 
-- `health`: GET /api/health, GET /api/engines.
-- `conversations`: POST /api/conversations, POST /api/conversations/{id}/guidelines,
-  DELETE /api/conversations/{id}.
-- `modeling`: POST /api/conversations/{id}/model, GET /api/conversations/{id}/model.
+- `health`:        GET /api/health.
+- `auth`:          POST /api/auth/login, POST /api/auth/logout, GET /api/auth/me.
+- `admin`:         CRUD de usuarios + permisos.
+- `projects`:      GET/POST /api/projects, GET/PUT/DELETE /api/projects/{id}.
+- `models`:        GET/POST /api/models, GET/PUT/DELETE /api/models/{id}.
+- `excel_import`:  POST /api/excel-import/preview.
+
+Las rutas de modelado conversacional (`/api/conversations/*`) viven
+ahora en el servicio `app-agents-modeler`.
 """
 
-from api.routes.conversations import router as conversations_router
+from api.routes.admin import router as admin_router
+from api.routes.auth import router as auth_router
+from api.routes.excel_import import router as excel_import_router
 from api.routes.health import router as health_router
-from api.routes.modeling import router as modeling_router
+from api.routes.models import router as models_router
+from api.routes.projects import router as projects_router
 
-__all__ = ["health_router", "conversations_router", "modeling_router"]
+__all__ = [
+    "admin_router",
+    "auth_router",
+    "excel_import_router",
+    "health_router",
+    "models_router",
+    "projects_router",
+]

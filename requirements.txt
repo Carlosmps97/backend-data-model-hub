@@ -1,17 +1,20 @@
-agent-framework
-azure-identity
-azure-core
-openpyxl
-python-docx
-pdfplumber
-pyyaml
+# Pydantic + env
 pydantic>=2.0
-rich
 python-dotenv
 
 # API Server
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
-python-multipart>=0.0.7
-docling==2.90.0
+python-multipart>=0.0.9   # required by FastAPI for multipart uploads
+
+# Cosmos DB (Motor async + pymongo for type compat)
 pymongo>=4.0
+motor>=3.3.0
+
+# Authentication (JWT + bcrypt)
+PyJWT>=2.0
+bcrypt>=4.0
+
+# Excel import
+openpyxl>=3.1
+rapidfuzz>=3.6

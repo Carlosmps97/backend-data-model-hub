@@ -1,352 +1,345 @@
-# Workflow y Pipeline de Modelamiento
+# Workflow: import desde Excel
 
-## Visión general
+> Este backend ya **no orquesta el pipeline LLM** (eso vive en
+> `app-agents-modeler`). El único "workflow" relevante acá es el
+> Excel-import: bytes subidos → preview normalizado.
+>
+> Es 100 % determinista, sin LLM, con un único responsable por paso.
+> El frontend usa el preview para hidratar el modal de import, deja
+> que el usuario revise/corrija y luego dispara un `PUT
+> /api/models/{id}` con las tablas resultantes.
 
-El pipeline de modelamiento se implementa como un **grafo dirigido** usando `WorkflowBuilder` del Microsoft Agent Framework. El grafo consta de 5 nodos que procesan secuencialmente el input del usuario hasta producir un modelo validado con DDL y reporte de calidad.
-
-**Archivo**: `src/workflow/graph.py`
+**Endpoint**: `POST /api/excel-import/preview` (multipart/form-data)
+**Auth**: `AuthUserDep`
+**Tope de upload**: 10 MB (`_MAX_UPLOAD_BYTES`)
+**Extensiones aceptadas**: `.xlsx`, `.xlsm`
 
 ---
 
-## Grafo del pipeline
+## 1. Vista de alto nivel
 
 ```mermaid
 flowchart LR
-    subgraph Input["📥 Input"]
-        JSON["JSON Input<br/>{tables, engine, relaciones}"]
+    REQ["POST /api/excel-import/preview<br/>(multipart)"] --> VAL["api/routes/excel_import.py<br/>· valida extensión<br/>· cap 10 MB<br/>· lee bytes a memoria"]
+    VAL --> PARSE["service.parse_workbook(bytes)"]
+
+    subgraph PIPE["src/excel_import/"]
+        PARSE --> RD["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
+        RD --> RAW["RawWorkbook<br/>{sheets, table_descriptions, warnings}"]
+        RAW --> BUILD["Por cada hoja → _build_preview_table"]
+        BUILD --> SPLIT["_split_sheet_name<br/>(schema.table)"]
+        BUILD --> NORM["type_normalizer.normalize_type<br/>(tokenize → exact → alias → fuzzy)"]
+        BUILD --> MATCH["_match_table_description<br/>(case-insensitive)"]
+        SPLIT --> EP["ExcelPreview"]
+        NORM --> EP
+        MATCH --> EP
+        EP --> WARN["_emit_unmatched_description_warnings"]
+        WARN --> EP
     end
 
-    subgraph Node1["⚙️ prepare_input<br/><i>Executor custom</i>"]
-        N1["• Parsea JSON<br/>• Extrae datos<br/>• Guarda en Context<br/>• Construye prompt"]
-    end
-
-    subgraph Node2["🤖 ExecutorAgent<br/><i>Agent del framework</i>"]
-        N2["• Llama query_guidelines<br/>• Genera modelo<br/>• Genera DDL<br/>• Responde JSON"]
-    end
-
-    subgraph Node3["⚙️ extract_model<br/><i>Executor custom</i>"]
-        N3["• Almacena en ctx.state<br/>• Extrae JSON<br/>• Prepara prompt QA"]
-    end
-
-    subgraph Node4["🤖 QAValidatorAgent<br/><i>Agent del framework</i>"]
-        N4["• search_column_catalog<br/>• add_column_to_catalog<br/>• Valida lineamientos<br/>• Regenera DDL<br/>• Calcula quality_score"]
-    end
-
-    subgraph Node5["⚙️ format_output<br/><i>Executor custom</i>"]
-        N5["• Limpia JSON<br/>• Combina modelo + QA<br/>• yield_output"]
-    end
-
-    subgraph Output["📤 Output"]
-        OUT["JSON Final<br/>{engine, generated_model, qa_validation}"]
-    end
-
-    JSON --> N1 --> N2 --> N3 --> N4 --> N5 --> OUT
-
-    style Node1 fill:#e3f2fd
-    style Node2 fill:#e8f5e9
-    style Node3 fill:#e3f2fd
-    style Node4 fill:#fff3e0
-    style Node5 fill:#e3f2fd
-    style Input fill:#e1f5fe
-    style Output fill:#ffebee
+    EP --> RES["JSON {success:true, data: ExcelPreview}"]
 ```
 
 ---
 
-## Nodos del pipeline
+## 2. Paso 1 — Lectura cruda (`workbook_reader.read_workbook`)
 
-### 1. `prepare_input` (Executor)
+Responsabilidad acotada: abrir el archivo con `openpyxl` en modo
+read-only y devolver estructuras simples (`RawSheet`, `RawColumnRow`,
+`RawWorkbook`). **Cero lógica de negocio acá**.
 
-**Entrada**: JSON string con datos del usuario.
-
-**Proceso**:
-1. Parsea el JSON de entrada.
-2. Extrae: `tables`, `user_text`, `target_engine`, `relationships`, `history` (opcional), `last_model` (opcional).
-3. Construye un prompt Markdown estructurado con secciones (cada sección solo aparece si tiene contenido):
-   - `## HISTORIAL DE CONVERSACIÓN PREVIA` — mensajes previos del usuario y del agente, formateados como `**Usuario:** ...` / `**Agente:** ...`. Solo aparece si la API pasó `history` no vacío.
-   - `## MODELO ACTUAL` — el último `last_model` serializado en JSON dentro de un fence ` ```json ... ``` `. Solo aparece si la API pasó `last_model` no vacío. Indica al agente que parta de ese estado y aplique solo los cambios de la solicitud actual.
-   - `## SOLICITUD DE MODELAMIENTO DE DATOS` — motor destino.
-   - `## CONTEXTO DEL USUARIO` — texto libre.
-   - `## TABLAS A MODELAR` — tablas, conteos totales y resumen de columnas (nombre, definición, tipo, nullable, notas).
-   - `## RELACIONES ENTRE TABLAS` — FK declaradas por el usuario.
-   - `## INSTRUCCIONES` — pasos para el ExecutorAgent, incluyendo: respetar el `MODELO ACTUAL` cuando exista y no eliminar tablas/columnas previas salvo que el usuario lo pida.
-4. Guarda `input_data` y `target_engine` en `WorkflowContext`.
-5. Envía `AgentExecutorRequest` con el prompt.
-
-**`session_id` (campo opcional fuera del prompt)**: si el caller (la API) pasa `session_id` dentro de `input_data`, `run_modeling_pipeline` envuelve la ejecución en `session_scope(session_id)` para que las tools `query_guidelines` y `get_all_guidelines` resuelvan al cache de esa sesión. El `session_id` **no se serializa en el prompt** — el LLM no lo ve.
-
-**Formato del input JSON**:
-```json
-{
-  "user_text": "Crea una tabla de productos...",
-  "tables": [
-    {
-      "table_name": "productos",
-      "columns": [
-        {
-          "column_name": "nombre",
-          "functional_definition": "Nombre del producto",
-          "data_type_hint": "VARCHAR",
-          "is_nullable": false,
-          "notes": ""
-        }
-      ]
-    }
-  ],
-  "target_engine": "postgresql",
-  "relationships": ["productos tiene FK hacia categorias"]
-}
+```mermaid
+flowchart TD
+    F["file_stream (BytesIO)"] --> O["openpyxl.load_workbook<br/>(read_only=True, data_only=True)"]
+    O --> L["Por cada sheet_name en workbook.sheetnames"]
+    L --> Q{"sheet_name.lower() ==<br/>'tablesdescriptions'?"}
+    Q -->|"sí"| DS["_read_descriptions_sheet<br/>→ dict[name → description]"]
+    Q -->|"no"| TS["_read_table_sheet<br/>→ RawSheet | None"]
+    DS --> R["RawWorkbook"]
+    TS --> R
 ```
 
-### 2. `ExecutorAgent` (Agent)
+**Reglas que aplica este paso**:
 
-**Entrada**: prompt Markdown del paso anterior.
+| Regla | Razón |
+|---|---|
+| La primera fila se descarta sin mirar contenido | Contrato explícito: la primera fila es siempre header. Sin "detectar header" mágico. |
+| Lectura por **posición** (A=name, B=type, C=description) | Predecible, no rompe si el usuario renombra el header. |
+| Filas con A vacío se saltan | Sin nombre de columna, la fila no tiene sentido. Cubre filas vacías intercaladas. |
+| Hoja vacía → warning, sigue con el resto | El preview siempre se debe poder renderizar. |
+| Hoja con solo header → warning | Idem. |
+| `read_only=True` | El usuario puede subir workbooks de cualquier tamaño; no necesitamos mantener todo el modelo editable en memoria. |
+| `data_only=True` | Si la celda tiene una fórmula, leemos el último valor cacheado (no la fórmula como string). |
 
-**Proceso**:
-1. Lee el prompt con la solicitud de modelamiento y el conteo de tablas/columnas.
-2. Invoca obligatoriamente `get_all_guidelines` para obtener lineamientos corporativos, convirtiendo (de ser necesario) los DOCX/PDF nativos.
-3. Genera el modelo de datos completo mediante análisis de reglas extraídas:
-   - Aplica nomenclaturas de tablas dinámicamente según indique la KB.
-   - Aplica prefijos estándar de columnas y tipado según las guías.
-   - Preserva absolutamente el 100% de las columnas requeridas garantizando **Fidelidad Estricta**.
-   - Agrega columnas de auditoría establecidas obligatoriamente por los lineamientos.
-   - Claves primarias y foráneas inferidas y tipadas.
-   - DDL ejecutable.
-4. Responde con JSON estructurado.
+**Hoja `TablesDescriptions`**:
 
-**Salida**: JSON del modelo generado (puede contener markdown fences o texto preamble).
-
-### 3. `extract_model` (Executor)
-
-**Entrada**: `AgentExecutorResponse` del ExecutorAgent.
-
-**Proceso**:
-1. Obtiene `response.agent_response.text`.
-2. Guarda el modelo raw en `ctx.state["generated_model"]`.
-3. Construye prompt de validación para QAValidatorAgent con:
-   - El modelo generado completo.
-   - El motor de BD.
-   - Instrucciones de validación detalladas (7 pasos).
-4. Envía `AgentExecutorRequest` con el prompt de QA.
-
-### 4. `QAValidatorAgent` (Agent)
-
-**Entrada**: prompt con modelo a validar + instrucciones.
-
-**Proceso**:
-1. Consulta lineamientos con `query_guidelines`.
-2. Para cada columna del modelo:
-   - Llama a `search_column_catalog` con la definición funcional.
-   - Si match ≥ 0.5 → reemplaza nombre.
-   - Si no hay match → llama a `add_column_to_catalog`.
-3. Verifica cumplimiento de lineamientos (naming, tipos, auditoría, PK).
-4. Regenera DDL si hubo correcciones.
-5. Calcula quality_score (0-100).
-6. Responde con JSON del QA report.
-
-**Salida**: JSON con tablas corregidas + qa_report.
-
-### 5. `format_output` (Executor)
-
-**Entrada**: `AgentExecutorResponse` del QAValidatorAgent.
-
-**Proceso**:
-1. Obtiene resultado QA y modelo original del estado.
-2. Aplica `_extract_json_from_text` para limpiar ambas respuestas.
-3. Construye JSON final:
-```json
-{
-  "engine": "postgresql",
-  "generated_model": "{ ... JSON limpio del modelo ... }",
-  "qa_validation": "{ ... JSON limpio del QA report ... }"
-}
-```
-4. Emite resultado con `ctx.yield_output`.
+- Match case-insensitive con la constante `TABLE_DESCRIPTIONS_SHEET = "tablesdescriptions"`.
+- Header validado por posición + `"table"` / `"name"` / `"desc"` en
+  substring; si no coincide, se emite warning pero se lee igual A/B.
+- Filas con `TableName` o `TableDescription` vacíos se saltan.
 
 ---
 
-## Estado del workflow (WorkflowContext)
-
-El estado se gestiona con `ctx.set_state()` y `ctx.get_state()`:
-
-| Clave | Tipo | Establecido por | Consumido por |
-|-------|------|-----------------|---------------|
-| `input_data` | `dict` | `prepare_input` | (disponible) |
-| `target_engine` | `str` | `prepare_input` | `extract_model`, `format_output` |
-| `generated_model` | `str` | `extract_model` | `format_output` |
-
----
-
-## Extracción robusta de JSON
-
-### Problema
-Los LLMs frecuentemente producen respuestas con:
-- Texto preamble antes del JSON ("Aquí está el modelo generado:\n```json\n{...}")
-- Markdown fences (`` ```json ... ``` ``)
-- Trailing commas (`{"key": "value",}`)
-- Texto después del JSON
-
-### Solución: `_extract_json_from_text(text)`
-
-Tres estrategias progresivas:
-
-**Caso 1 — JSON en fences**:
-```
-Busca: ```json\n{...}\n```
-Extrae contenido entre fences.
-```
-
-**Caso 2 — JSON puro**:
-```
-Si el texto empieza con {, intenta parsear directamente.
-Si falla, busca el último } balanceado (conteo de profundidad).
-```
-
-**Caso 3 — JSON embebido en texto**:
-```
-Busca primer { y último } en todo el texto.
-Extrae la subcadena y valida.
-```
-
-En cada caso, si el parse directo falla, aplica `_fix_trailing_commas` y reintenta.
-
-### `_fix_trailing_commas(text)`
-Regex: `r',\s*([}\]])'` → elimina comas antes de `}` o `]`.
-
----
-
-## Creación y ejecución
-
-### Crear el workflow
+## 3. Paso 2 — Split del nombre de hoja (`_split_sheet_name`)
 
 ```python
-from src.workflow.graph import create_modeling_workflow
-from src.agents.factory import get_chat_client
-
-client = get_chat_client()
-workflow = create_modeling_workflow(client)
+def _split_sheet_name(sheet_name: str) -> tuple[str | None, str]:
+    raw = sheet_name.strip()
+    if "." not in raw:
+        return None, raw
+    schema, _, table = raw.partition(".")
+    schema = schema.strip()
+    table = table.strip()
+    if not schema or not table:
+        return None, raw
+    return schema, table
 ```
 
-Internamente, `create_modeling_workflow`:
-1. Crea `ExecutorAgent` y `QAValidatorAgent` con el cliente compartido.
-2. Construye el grafo con `WorkflowBuilder`:
+| Input | Output |
+|---|---|
+| `"dbo.Customer"` | `("dbo", "Customer")` |
+| `"Customer"` | `(None, "Customer")` |
+| `"a.b.c"` | `("a", "b.c")` *(solo el primer `.` separa)* |
+| `".Customer"` | `(None, ".Customer")` *(conservador)* |
+| `"dbo."` | `(None, "dbo.")` *(idem)* |
+| `"  dbo.Customer  "` | `("dbo", "Customer")` |
+
+---
+
+## 4. Paso 3 — Normalización del tipo (`normalize_type`)
+
+Pipeline determinista en 4 pasos:
+
+```mermaid
+flowchart TD
+    R["raw: 'decimal(10, 2)'"] --> T["_tokenize<br/>regex extrae base + args"]
+    T --> B["base='decimal'<br/>length=10<br/>scale=2"]
+    B --> S1{"base in CANONICAL_TYPES?"}
+    S1 -->|"sí"| OK1["NormalizedType<br/>matched_via='exact'<br/>confidence=100"]
+    S1 -->|"no"| S2{"base in ALIASES?"}
+    S2 -->|"sí"| OK2["NormalizedType<br/>canonical=ALIASES[base]<br/>matched_via='alias'<br/>confidence=100"]
+    S2 -->|"no"| S3["_fuzzy_match<br/>rapidfuzz contra CANONICAL+ALIASES<br/>scorer=fuzz.ratio"]
+    S3 --> S4{"score ≥ FUZZY_THRESHOLD?"}
+    S4 -->|"sí"| OK3["matched_via='fuzzy'<br/>confidence=score"]
+    S4 -->|"no"| U["matched_via='unknown'<br/>canonical=base<br/>confidence=0"]
+```
+
+### 4.1 `_tokenize`
+
+Regex `_TYPE_TOKEN_RE` permisiva:
+
 ```python
-workflow = (
-    WorkflowBuilder(start_executor=prepare_input)
-    .add_edge(prepare_input, executor_agent)
-    .add_edge(executor_agent, extract_model)
-    .add_edge(extract_model, qa_agent)
-    .add_edge(qa_agent, format_output)
-    .build()
+_TYPE_TOKEN_RE = re.compile(
+    r"""
+    ^\s*
+    (?P<base>[A-Za-z][A-Za-z0-9 _]*?)
+    \s*
+    (?:\(\s*(?P<args>[^)]*)\s*\))?
+    \s*$
+    """,
+    re.VERBOSE,
 )
 ```
 
-### Ejecutar el pipeline
+| Input | base | length | scale |
+|---|---|---|---|
+| `"VARCHAR(50)"` | `"varchar"` | 50 | None |
+| `"decimal(10, 2)"` | `"decimal"` | 10 | 2 |
+| `"character varying(120)"` | `"character varying"` | 120 | None |
+| `"int"` | `"int"` | None | None |
+| `"  Bigint  "` | `"bigint"` | None | None |
+| `"weird-thing"` | `"weird-thing"` | None | None *(regex no matchea — fallback a lowercase)* |
+
+Argumentos no numéricos (`VARCHAR(MAX)`) se ignoran silenciosamente.
+
+### 4.2 Paso exact — `CANONICAL_TYPES`
 
 ```python
-from src.workflow.graph import run_modeling_pipeline
-
-result = await run_modeling_pipeline(client, input_data)
-# result = {"engine": "...", "generated_model": "...", "qa_validation": "..."}
+CANONICAL_TYPES: tuple[str, ...] = (
+    "integer", "bigint", "smallint", "tinyint",
+    "float", "double", "real", "decimal", "numeric", "money",
+    "varchar", "char", "text", "nvarchar", "string",
+    "boolean",
+    "date", "datetime", "timestamp", "timestamptz", "time",
+    "binary", "varbinary", "blob", "bytes",
+    "json", "jsonb", "xml", "uuid",
+    "array", "map", "struct",
+)
 ```
 
-La función `run_modeling_pipeline`:
-1. Crea el workflow.
-2. Serializa input a JSON.
-3. Ejecuta `workflow.run(input_json)`.
-4. Extrae outputs del resultado.
-5. Retorna dict parseado o `{"error": "..."}`.
+Alineado con `web-data-model-hub/src/types/model.ts::COLUMN_DATA_TYPES`.
+Cualquier cambio acá requiere cambio allá.
 
----
-
-## Flujo de datos completo
-
-```mermaid
-flowchart TB
-    U[👤 Usuario<br/>'Crea tabla productos'] --> M[src/main.py]
-
-    M -->|Extrae engine, tables| P[run_modeling_pipeline]
-
-    subgraph Pipeline["⚙️ Pipeline de Modelamiento"]
-        direction TB
-        PI[prepare_input] -->|Prompt| EA[ExecutorAgent]
-        EA -->|Tool calls| EA_OUT[Response JSON<br/>modelo + DDL]
-        EA_OUT --> EM[extract_model]
-        EM -->|Prompt QA| QA[QAValidatorAgent]
-        QA -->|Tool calls| QA_OUT[Response JSON<br/>QA report]
-        QA_OUT --> FO[format_output]
-        FO -->|Clean JSON| OUT[Output Final<br/>JSON combinado]
-    end
-
-    P --> Pipeline
-    OUT --> D[_display_results]
-    D --> CLI[💻 Console Output]
-
-    style U fill:#e1f5fe
-    style Pipeline fill:#e8f5e9
-    style CLI fill:#f3e5f5
-```
-
-**Detalle del flujo paso a paso:**
-
-| Paso | Componente | Acción |
-|------|------------|--------|
-| 1 | `main.py` | Extrae `engine="postgresql"`, construye `input_data` |
-| 2 | `prepare_input` | Construye prompt enriquecido exigiendo métricas de *Fidelidad*: "## TABLAS A MODELAR (1 tablas, 19 columnas)\n..." |
-| 3 | `ExecutorAgent` | Convierte y Llama `get_all_guidelines`, analiza la DB y genera modelo + DDL íntegro |
-| 4 | `extract_model` | Almacena en `ctx.state`, prepara prompt QA |
-| 5 | `QAValidatorAgent` | Llama `search_column_catalog`, valida, estandariza |
-| 6 | `format_output` | Limpia JSON con `_extract_json_from_text`, combina resultados |
-| 7 | `_display_results` | Rich tables, DDL panels, QA score panel |
-
----
-
-## Integración con la API REST (multi-turno)
-
-La función `run_modeling_pipeline` recibe un dict con campos adicionales cuando es llamada desde la API:
+### 4.3 Paso alias — `ALIASES`
 
 ```python
-input_data = {
-    # Campos base (también usados por CLI)
-    "user_text": str,
-    "tables": list[dict],
-    "target_engine": str,
-    "relationships": list[str],
-
-    # Campos adicionales inyectados por la API
-    "history": list[{"role": str, "content": str}],  # historial de la sesión
-    "last_model": dict | None,   # último modelo generado (si hubo turno previo)
-    "session_id": str,           # UUID de la sesión (para ContextVar de guidelines)
+ALIASES: dict[str, str] = {
+    # Enteros
+    "int": "integer",
+    "int2": "smallint",
+    "int4": "integer",
+    "int8": "bigint",
+    "long": "bigint",
+    "short": "smallint",
+    "byte": "tinyint",
+    # Booleano
+    "bool": "boolean",
+    # Texto
+    "str": "string",
+    "character": "char",
+    "character varying": "varchar",
+    "char varying": "varchar",
+    "nchar": "char",
+    # Tiempo
+    "timestamp with time zone": "timestamptz",
+    "timestamp without time zone": "timestamp",
+    # Binario
+    "bytea": "binary",
 }
 ```
 
-**`session_id`** se saca del dict antes de serializar a JSON para el prompt:
-```python
-payload = {k: v for k, v in input_data.items() if k != "session_id"}
-input_json = json.dumps(payload, ensure_ascii=False)
+> **Regla**: la tabla de alias contiene solo sinónimos NO ambiguos. Las
+> variantes con typo (`decximam`, `datatime`) se atrapan en el paso
+> fuzzy. Mantener `ALIASES` chica evita drift silencioso.
 
-with session_scope(session_id):  # ContextVar activo durante toda la ejecución
-    events = await workflow.run(input_json)
+### 4.4 Paso fuzzy — `_fuzzy_match`
+
+```python
+def _fuzzy_match(base: str, *, threshold: float) -> tuple[str | None, float]:
+    universe = list(CANONICAL_TYPES) + list(ALIASES.keys())
+    result = process.extractOne(base, universe, scorer=fuzz.ratio)
+    if result is None:
+        return None, 0.0
+    match, score, _ = result
+    if score < threshold:
+        return None, 0.0
+    canonical = ALIASES.get(match, match)
+    return canonical, float(score)
 ```
 
-Esto garantiza que el LLM nunca reciba el `session_id` en su contexto, mientras las tools de guidelines lo resuelven transparentemente.
+**Por qué `fuzz.ratio` (Levenshtein puro) y no `fuzz.WRatio`**:
+
+WRatio inflaba el score cuando una opción está contenida dentro del
+input. Ejemplo histórico que motivó el cambio:
+
+| Input | Con `WRatio` | Con `ratio` |
+|---|---|---|
+| `"datatime"` vs `"time"` | 90 *(match espurio)* | 33 *(correcto: descartado)* |
+| `"datatime"` vs `"datetime"` | 87 | 87 |
+
+Con `ratio`, `"datatime"` resuelve a `"datetime"` como queremos.
+
+**Umbral**: `FUZZY_THRESHOLD = 75.0`. Calibrado para que:
+
+| Caso | Score aprox | Aceptado |
+|---|---|---|
+| `decximam` → `decimal` | ~86 | ✓ |
+| `datatime` → `datetime` | ~87 | ✓ |
+| `varian` → `?` | <75 | ✗ (queda unknown) |
+| `foobarbaz` → `?` | <75 | ✗ |
+
+### 4.5 Paso unknown
+
+Cuando nada matchea, se devuelve la base original en minúsculas con
+`matched_via="unknown"`, `confidence=0`. El frontend lo muestra con
+badge naranja y el usuario puede:
+- Editar el dropdown del tipo en el modal.
+- Si es un tipo nuevo y legítimo, agregarlo a `CANONICAL_TYPES` (ver
+  `doc/tools.md::Cómo agregar un alias / tipo canónico nuevo`).
 
 ---
 
-## Normalización de Relaciones
+## 5. Paso 4 — Match de descripciones (`_match_table_description`)
 
-El `QAValidatorAgent` a veces devuelve `relationships` como lista de dicts en lugar de strings. El `response_builder.py` normaliza defensivamente:
+Para cada tabla parseada, intenta encontrar su descripción en la hoja
+`TablesDescriptions` con tres niveles de fallback (case-insensitive):
 
 ```python
-def _normalize_relationship(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        from_t = item.get("from_table") or item.get("source_table") or ""
-        to_t   = item.get("to_table")   or item.get("target_table") or ""
-        # ... construye "tabla_a.col → tabla_b.col [tipo] — descripción"
-    return str(item)
+candidates = [sheet_name.lower()]
+if schema:
+    candidates.append(f"{schema}.{table_name}".lower())
+candidates.append(table_name.lower())
 
-# Aplicado en todos los puntos de lectura:
-relationships = [_normalize_relationship(r) for r in (raw.get("relationships") or [])]
+for candidate in candidates:
+    if candidate in normalized_descriptions:
+        return normalized_descriptions[candidate]
+return None
 ```
+
+Caso típico:
+
+| Hoja | TablesDescriptions key | Match resuelve por |
+|---|---|---|
+| `dbo.Customer` | `"dbo.Customer"` | candidato 1 |
+| `dbo.Customer` | `"Customer"` | candidato 3 |
+| `Customer` | `"Customer"` | candidato 1 |
+| `dbo.Customer` | `"dbo.cliente"` | sin match → `None` |
+
+Las entradas de `TablesDescriptions` que no encontraron a quién
+matchear se reportan en `warnings`:
+
+```
+TablesDescriptions row "OldTable" did not match any sheet — description ignored.
+```
+
+---
+
+## 6. Lo que **no** hace este pipeline
+
+| Operación | Por qué no |
+|---|---|
+| Generar DDL | No es responsabilidad del preview. El usuario edita en el modal y luego el frontend persiste el modelo; la generación de DDL la hace el frontend o el agente. |
+| Inferir relaciones FK | El backend no propone relaciones — eso lo hace el frontend / el usuario. |
+| Aplicar audit columns | Las audit columns se aplican según lineamientos que viven en `app-agents-modeler`. |
+| Embedding / vector search | Sin LLM. La normalización de tipos es Levenshtein puro. |
+| Persistencia automática | El preview no escribe nada en Cosmos. El frontend dispara un PUT con las tablas resultantes después de la revisión humana. |
+
+Esto mantiene el endpoint **rápido, predecible y reentrante**: re-subir
+el mismo archivo dos veces produce exactamente el mismo preview.
+
+---
+
+## 7. Errores y comportamiento ante fallos
+
+| Caso | Respuesta |
+|---|---|
+| Sin filename / extensión inválida | `400 Unsupported file type` |
+| Archivo vacío | `400 Empty file` |
+| Archivo > 10 MB | `413 File too large` |
+| `openpyxl` falla (archivo corrupto, protegido, formato xlsb) | `400 Could not parse Excel file: <detalle>` |
+| Hojas vacías o sin columnas | 200 con `warnings` que las listan; el resto de hojas se procesa |
+| Entrada de `TablesDescriptions` sin match | 200 con warning; la entrada se ignora |
+| Tipo `variant` (Snowflake-only) | 200 con `matched_via="unknown"`; el usuario corrige en el modal |
+
+El backend nunca propaga excepciones al cliente — `api/routes/excel_import.py`
+las captura todas como `400 Could not parse Excel file: <exc>` y loguea
+el stack con `log.exception`.
+
+---
+
+## 8. Cómo testear localmente
+
+```bash
+# 1. Asegurate de tener el .venv del backend activado
+source backend-data-model-hub/.venv/bin/activate
+
+# 2. Probar normalize_type sin levantar servidor
+python -c "
+from src.excel_import import normalize_type
+for raw in ['BIGINT', 'int', 'decimal(10,2)', 'decximam(10,2)', 'datatime', 'variant', '']:
+    n = normalize_type(raw)
+    print(f'{raw!r:30s} → canonical={n.canonical:12s} via={n.matched_via:8s} conf={n.confidence:6.1f} len={n.length} scale={n.scale}')
+"
+
+# 3. Probar parse_workbook con un archivo real
+python -c "
+from src.excel_import import parse_workbook
+with open('/tmp/test.xlsx', 'rb') as f:
+    preview = parse_workbook(f.read())
+print(preview.model_dump_json(by_alias=True, indent=2))
+"
+```
+
+Si modificás `CANONICAL_TYPES`, `ALIASES` o `FUZZY_THRESHOLD`, validá
+con casos negativos (`foobar`, `xyz`, etc.) que no produzcan falsos
+positivos antes de mergear.

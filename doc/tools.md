@@ -1,263 +1,212 @@
-# Referencia de Tools
+# Scripts y utilidades
 
-## Visión general
-
-Las tools son funciones Python decoradas con `@tool` del Microsoft Agent Framework. Los agentes las invocan automáticamente durante su ejecución para acceder a datos, parsear archivos o gestionar el catálogo.
-
-Todas las tools usan `approval_mode="never_require"` (ejecución sin aprobación manual).
-
----
-
-## parse_excel_file
-
-**Archivo**: `src/tools/excel_tools.py`
-**Usada por**: ConversationalAgent
-
-### Descripción
-Parsea un archivo Excel (`.xlsx`) donde cada pestaña representa una tabla del modelo de datos. Extrae columnas con sus definiciones funcionales, tipos de dato sugeridos y metadatos.
-
-### Parámetros
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
-| `file_path` | `str` | Ruta absoluta o relativa al archivo `.xlsx` |
-
-### Retorno
-JSON string con la estructura:
-```json
-{
-  "tables": [
-    {
-      "table_name": "NombrePestaña",
-      "columns": [
-        {
-          "column_name": "nombre",
-          "functional_definition": "descripción funcional",
-          "data_type_hint": "tipo sugerido",
-          "is_nullable": true,
-          "notes": "observaciones"
-        }
-      ]
-    }
-  ],
-  "total_tables": 2
-}
-```
-
-### Header matching flexible
-La tool reconoce múltiples variaciones de nombres de columna en el Excel:
-
-| Campo interno | Aliases reconocidos |
-|---------------|---------------------|
-| `column_name` | `columna`, `nombre`, `nombre_columna`, `col_name`, `field`, `campo` |
-| `functional_definition` | `definicion`, `definicion_funcional`, `definition`, `descripcion`, `description`, `desc`, `funcional` |
-| `data_type_hint` | `data_type`, `tipo`, `tipo_dato`, `type`, `type_hint`, `datatype` |
-| `is_nullable` | `nullable`, `nulo`, `permite_nulos`, `null`, `nulable` |
-| `notes` | `notas`, `observaciones`, `comentarios`, `comments`, `note` |
-
-Si no se detecta `functional_definition`, la tool asume que la primera columna es el nombre y la segunda la definición.
-
-### Valores booleanos para `is_nullable`
-Acepta: `true`, `1`, `si`, `sí`, `yes`, `y`, `s` como verdadero.
-
-### Errores
-```json
-{"error": "Archivo no encontrado: ruta/al/archivo.xlsx"}
-{"error": "Formato no soportado: .csv. Solo .xlsx"}
-{"error": "No se encontraron tablas válidas en el archivo Excel."}
-```
+> Este backend **no expone tools de LLM** — las tools de Agent Framework
+> que usaba el pipeline anterior (`query_guidelines`, `get_all_guidelines`,
+> `parse_excel_file`, `convert_to_markdown`) viven ahora en el servicio
+> separado `app-agents-modeler`. Acá solo hay scripts CLI de mantenimiento
+> y la lógica determinista del Excel-import.
 
 ---
 
-## convert_to_markdown
+## 1. Scripts de mantenimiento (`scripts/`)
 
-**Archivo**: `src/tools/convert_tools.py`
-**Usada por**: ExecutorAgent, QAValidatorAgent
+Scripts standalone que se ejecutan a mano contra Cosmos DB. Todos
+asumen que `COSMOS_CONNECTION_STRING` está en el `.env` y que el venv
+local tiene Motor + Pydantic.
 
-### Descripción
-Convierte documentos (PDF o DOCX) a formato Markdown estructurado de manera eficiente, apoyando a la interpretación de los LLMs. Utiliza la librería `docling` por debajo. Implementa un sistema de caché en disco (`.md` cacheado) para evitar el retrabajo si el original no ha sido modificado.
+### 1.1 `backfill_column_ids.py`
 
-### Parámetros
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
-| `file_path` | `str` | Ruta al archivo DOCX o PDF a convertir |
+**Propósito**: stampea un UUID en cualquier columna persistida que no
+tenga `id`. Es la contraparte server-side de
+`web-data-model-hub/src/lib/columnRef.ts::ensureColumnId` — corre una
+sola vez como migración cuando se introdujo el `TableColumn.id` estable.
 
-### Retorno
-Cadena de texto con el Markdown generado, o un mensaje de error si hay un problema en la conversión. El archivo Markdown resultante también es guardado físicamente en disco junto al original.
+**Uso**:
+
+```bash
+.venv/bin/python -m scripts.backfill_column_ids
+```
+
+**Idempotencia**: las columnas que ya tienen `id` string no-vacío se
+saltan. Se puede correr múltiples veces sin efecto.
+
+> Aunque el script ya corrió en producción, el código del runtime
+> mantiene la safety-net `models_db._ensure_column_ids` para futuros
+> imports/scripts que olviden stampear ids.
+
+### 1.2 `prune_dangling_relationships.py`
+
+**Propósito**: elimina `RelationshipDoc` cuya `sourceColumn` /
+`targetColumn` ya no apuntan a una columna existente (por ejemplo,
+cuando una migración a mano borró la columna pero no la relación).
+
+**Uso**:
+
+```bash
+.venv/bin/python -m scripts.prune_dangling_relationships
+```
+
+Hace soft-delete (`flgactive=false`) — los registros se conservan en DB
+para auditoría.
 
 ---
 
-## query_guidelines
+## 2. Pipeline determinista del Excel-import (`src/excel_import/`)
 
-**Archivo**: `src/tools/knowledge_base_tools.py`
-**Usada por**: ExecutorAgent, QAValidatorAgent
+No son "tools" en el sentido del Agent Framework, pero son las funciones
+puras que el endpoint `/api/excel-import/preview` invoca para producir
+el preview.
 
-### Descripción
-Consulta los lineamientos corporativos de modelamiento de datos por tema específico.
+### 2.1 `workbook_reader.read_workbook(file_stream)`
 
-### Parámetros
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
-| `topic` | `str` | Tema a consultar. Ejemplos: `naming_conventions`, `audit_columns`, `data_type_mappings`, `primary_key_conventions`, `foreign_key_conventions`, `general_rules`, `databricks_sql`, `sqlserver`, etc. |
+**Archivo**: `src/excel_import/workbook_reader.py`
 
-### Lógica de búsqueda (formato JSON)
-1. **Clave directa**: si `topic` coincide con una clave del JSON, retorna su valor.
-2. **Motor de BD**: busca en `data_type_mappings[topic]` para mapeos por motor.
-3. **Keywords**: busca coincidencias parciales en claves y valores del JSON.
+Lee un workbook xlsx con `openpyxl` en modo read-only y devuelve
+`RawWorkbook` (dataclass):
 
-### Ejemplo de uso por un agente
+```python
+@dataclass(slots=True)
+class RawWorkbook:
+    sheets: list[RawSheet]
+    table_descriptions: dict[str, str]
+    warnings: list[str]
 ```
-Agente llama: query_guidelines(topic="naming_conventions")
-Retorna:
-{
-  "table_prefix": "tbl_",
-  "column_case": "snake_case",
-  "column_prefixes": {
-    "identifier": "id_",
-    "name": "name_",
-    "date": "date_",
+
+**Reglas**:
+
+- **La primera fila de cada hoja es siempre header** y se descarta.
+  Contrato explícito con el usuario — no hay heurística "detectar si la
+  primera fila es header".
+- Lectura por **posición** (A=nombre, B=tipo, C=descripción opcional).
+  No se intenta matchear headers — el formato es estable y predecible.
+- La hoja `tablesdescriptions` (match case-insensitive) se separa del
+  resto y se devuelve como `dict[sheet_name -> description]`.
+- Filas con celda A vacía se saltan (no tienen sentido sin nombre de
+  columna).
+- Hojas vacías o sin filas de datos producen una entrada en `warnings`
+  pero no abortan el parse.
+
+### 2.2 `type_normalizer.normalize_type(raw)`
+
+**Archivo**: `src/excel_import/type_normalizer.py`
+
+**Prototipo**:
+
+```python
+def normalize_type(raw: str | None, *, threshold: float = FUZZY_THRESHOLD) -> NormalizedType:
     ...
-  },
-  "max_column_name_length": 64
-}
 ```
 
-### Formatos de lineamientos soportados
-- **JSON**: búsqueda por claves estructuradas.
-- **XLSX**: cada pestaña como sección.
-- **MD / Markdown**: búsqueda pura a través de texto estructurado.
-- **DOCX / PDF**: se convierten transparente y automáticamente a Markdown usando `convert_to_markdown` en la capa base.
+**Pipeline determinista** (4 pasos en orden fijo, sin árboles de `if`):
+
+```mermaid
+flowchart LR
+    R["raw string<br/>'decimal(10,2)'"] --> T["1. tokenize<br/>(base, length, scale)"]
+    T --> E["2. exact match<br/>CANONICAL_TYPES"]
+    E -->|hit| OK1["NormalizedType<br/>matched_via='exact'"]
+    E -->|miss| A["3. alias lookup<br/>ALIASES"]
+    A -->|hit| OK2["matched_via='alias'"]
+    A -->|miss| F["4. fuzzy match<br/>rapidfuzz.process.extractOne<br/>(scorer=fuzz.ratio)"]
+    F -->|score ≥ 75| OK3["matched_via='fuzzy'<br/>confidence=score"]
+    F -->|score < 75| U["matched_via='unknown'<br/>confidence=0"]
+```
+
+**`NormalizedType`** (frozen dataclass):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `canonical` | `str` | Tipo canónico final o, si `matched_via=unknown`, la base original en minúsculas. |
+| `raw` | `str` | Input original sin tocar. |
+| `length` | `int \| None` | Primer argumento entre paréntesis (`varchar(50)` → 50). |
+| `scale` | `int \| None` | Segundo argumento (`decimal(10, 2)` → 2). |
+| `confidence` | `float` | 0-100. 100 si exact/alias, score de rapidfuzz si fuzzy, 0 si unknown. |
+| `matched_via` | `Literal["exact", "alias", "fuzzy", "unknown", "empty"]` | Qué paso del pipeline produjo el resultado. |
+
+**Comportamiento ante input degenerado**:
+
+- `normalize_type(None)` → `canonical="varchar"`, `matched_via="empty"`.
+- `normalize_type("")` → idem.
+- `normalize_type("   foo   ")` → `_collapse_whitespace` + lowercase, base
+  `"foo"`, fuzzy → probablemente `"unknown"`.
+
+**Por qué `fuzz.ratio` (Levenshtein puro) en lugar de `fuzz.WRatio`**:
+WRatio infla el score cuando una opción está contenida en el input
+(`"datatime"` contiene `"time"` → score espurio de 90). `fuzz.ratio`
+penaliza inserciones y borrados simétricamente, que es lo que queremos
+para corregir typos sin saltar a un tipo más corto por substring.
+
+### 2.3 `service.parse_workbook(file_bytes)`
+
+**Archivo**: `src/excel_import/service.py`
+
+Orquestador puro. Pega las piezas anteriores:
+
+```python
+def parse_workbook(file_bytes: bytes) -> ExcelPreview:
+    raw = read_workbook(BytesIO(file_bytes))
+    tables = [_build_preview_table(sheet, raw.table_descriptions) for sheet in raw.sheets]
+    warnings = list(raw.warnings)
+    if raw.table_descriptions:
+        _emit_unmatched_description_warnings(tables, raw.table_descriptions, warnings)
+    return ExcelPreview(
+        tables=tables,
+        tableDescriptionsFound=bool(raw.table_descriptions),
+        warnings=warnings,
+    )
+```
+
+**Helpers internos**:
+
+- `_split_sheet_name("dbo.Customer")` → `("dbo", "Customer")`.
+  `"a.b.c"` → `("a", "b.c")` (solo el primer punto separa).
+  `".Customer"` o `"dbo."` → `(None, raw)` (más conservador que aceptar
+  schema vacío).
+- `_match_table_description(sheet_name, schema, table_name, descriptions)`:
+  intenta match case-insensitive en este orden:
+  1. `sheet_name` exacto.
+  2. `schema.table_name` reconstruido.
+  3. `table_name` solo.
+- `_emit_unmatched_description_warnings`: emite warnings por cada
+  entrada de `TablesDescriptions` que no matcheó ninguna hoja — útil
+  para detectar typos en el nombre.
 
 ---
 
-## get_all_guidelines
+## 3. Patrón general
 
-**Archivo**: `src/tools/knowledge_base_tools.py`
-**Usada por**: ExecutorAgent
+Los scripts y la lógica del Excel-import comparten un par de decisiones:
 
-### Descripción
-Retorna todos los lineamientos corporativos completos en formato JSON.
-
-### Parámetros
-Ninguno.
-
-### Retorno
-JSON string con el contenido completo del archivo de lineamientos.
+| Decisión | Razón |
+|---|---|
+| **Funciones puras, no clases** | Más fáciles de testear. El módulo no acumula estado entre requests. |
+| **No raise sobre input degenerado** | El preview siempre se debe poder renderizar. Los errores se reportan como `warnings` o como `matched_via="unknown"`. |
+| **dataclasses con `slots=True`** | Estructuras intermedias rápidas y con tipos estables (`RawWorkbook`, `RawSheet`, `RawColumnRow`, `NormalizedType`). |
+| **Lecturas por posición** | El contrato es estable y predecible. Sin "detección mágica" de headers que falle silenciosamente cuando el usuario renombra una columna. |
 
 ---
 
-## search_column_catalog
+## 4. Cómo agregar un alias / tipo canónico nuevo
 
-**Archivo**: `src/tools/catalog_tools.py`
-**Usada por**: QAValidatorAgent
+Pasos en orden:
 
-### Descripción
-Busca en el catálogo corporativo columnas con definición funcional similar. Usa similitud por keywords (Jaccard index) para encontrar coincidencias.
+1. **Frontend** — agregar el tipo a `web-data-model-hub/src/types/model.ts`:
+   ```typescript
+   export const COLUMN_DATA_TYPES = [
+     // ...existentes
+     'tu_tipo_nuevo',
+   ] as const;
+   ```
+2. **Backend canonical** — agregar en
+   `src/excel_import/type_normalizer.py::CANONICAL_TYPES`.
+3. **Backend alias** (si aplica) — agregar en `ALIASES` solo si es un
+   sinónimo NO ambiguo (`mi_tipo_alias → tu_tipo_nuevo`).
+   **No** agregar variantes con typo: el paso fuzzy las atrapa solo.
+4. **Verificación rápida**:
+   ```bash
+   .venv/bin/python -c "from src.excel_import import normalize_type; print(normalize_type('tu_tipo_nuevo'))"
+   ```
+   Debe devolver `matched_via='exact'` y `confidence=100`.
 
-### Parámetros
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
-| `functional_definition` | `str` | Definición funcional de la columna a buscar |
-
-### Algoritmo de similitud
-1. Tokeniza ambos textos en palabras.
-2. Remueve stopwords (español e inglés).
-3. Calcula **Jaccard similarity**: `|intersección| / |unión|`.
-4. Umbral de inclusión: ≥ 0.3.
-5. Umbral de match firme: ≥ 0.5.
-
-### Retorno — con coincidencias
-```json
-{
-  "found": true,
-  "matches": [
-    {
-      "column_name": "date_created",
-      "functional_definition": "Fecha y hora de creación del registro",
-      "data_type": "TIMESTAMP",
-      "used_in_tables": ["tbl_customers", "tbl_orders"],
-      "similarity_score": 0.714
-    }
-  ],
-  "best_match": { "..." },
-  "recommendation": "USAR nombre estandarizado: 'date_created' (similitud: 0.714)"
-}
-```
-
-### Retorno — sin coincidencias
-```json
-{
-  "found": false,
-  "matches": [],
-  "recommendation": "No se encontró columna similar en el catálogo. Usar nombre propuesto y agregar al catálogo."
-}
-```
-
----
-
-## add_column_to_catalog
-
-**Archivo**: `src/tools/catalog_tools.py`
-**Usada por**: QAValidatorAgent
-
-### Descripción
-Agrega una nueva columna al catálogo corporativo. Si la columna ya existe, agrega la tabla a su lista de `used_in_tables`. Las columnas nuevas se marcan con `is_new: true` para revisión posterior.
-
-### Parámetros
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
-| `column_name` | `str` | Nombre de la columna |
-| `functional_definition` | `str` | Definición funcional |
-| `data_type` | `str` | Tipo de dato base |
-| `table_name` | `str` | Tabla donde se usa |
-
-### Retornos posibles
-```json
-// Columna nueva creada
-{"status": "created", "message": "Columna 'price_total' agregada al catálogo como nueva."}
-
-// Tabla agregada a columna existente
-{"status": "updated", "message": "Tabla 'tbl_orders' agregada a columna existente 'id_customer'."}
-
-// Columna ya existe con esa tabla
-{"status": "exists", "message": "La columna 'id_customer' ya existe en el catálogo."}
-```
-
-### Thread safety
-Usa `threading.Lock` para operaciones atómicas de lectura-escritura sobre `column_catalog.json`.
-
----
-
-## get_full_column_catalog
-
-**Archivo**: `src/tools/catalog_tools.py`
-**Usada por**: QAValidatorAgent
-
-### Descripción
-Retorna el catálogo completo de columnas corporativas para validación integral.
-
-### Parámetros
-Ninguno.
-
-### Retorno
-JSON string con todo el contenido de `column_catalog.json`.
-
----
-
-## Mapa de tools por agente
-
-```
-ConversationalAgent
-  └── parse_excel_file
-
-ExecutorAgent
-  ├── query_guidelines
-  ├── get_all_guidelines
-  └── convert_to_markdown
-
-QAValidatorAgent
-  ├── query_guidelines
-  ├── search_column_catalog
-  ├── add_column_to_catalog
-  ├── get_full_column_catalog
-  └── convert_to_markdown
-```
+Si después de agregar un alias el threshold rechaza variantes razonables,
+bajar `FUZZY_THRESHOLD` con cuidado y validar con casos negativos
+(`foo`, `bar`, etc.) que no produzcan falsos positivos.

@@ -1,259 +1,216 @@
 # Configuración
 
-## Visión general
+> Toda la configuración del backend de plataforma se carga desde un
+> único archivo `.env` en la raíz del repo. El módulo `src/config.py`
+> expone el singleton `settings`. **No hay configuración por entorno
+> dentro del repo** — cada deploy inyecta su propio `.env`.
 
-La configuración del sistema se gestiona a través de un archivo `.env` en la raíz del proyecto. El módulo `src/config.py` carga estas variables al iniciar y las expone como un singleton `settings` accesible desde cualquier módulo.
+> Las variables relacionadas con LLM, Foundry, embeddings, rate limiters
+> y engines viven en el servicio separado `app-agents-modeler`. Acá solo
+> hay Cosmos DB, JWT, CORS y logging.
+
+## 1. Variables de entorno
+
+### 1.1 Azure Cosmos DB for MongoDB
+
+| Variable | Descripción | Default | Requerida |
+|---|---|---|---|
+| `COSMOS_CONNECTION_STRING` | Connection string completo (`mongodb+srv://...`) | `""` | ✓ |
+| `COSMOS_DATABASE` | Nombre de la base de datos | `db_modeler` | — |
+
+Cuando `COSMOS_CONNECTION_STRING` está vacío, `motor_client.connect()`
+lanza `RuntimeError` en el lifespan. El proceso sigue arriba (para que
+`/api/health` reporte el estado), pero los endpoints que toquen DB
+devuelven 500. Útil para diagnosticar errores de credenciales sin
+matar el contenedor.
+
+> El backend comparte la **misma cuenta de Cosmos** con el servicio de
+> agentes (`app-agents-modeler`). Cada uno toca colecciones disjuntas
+> (este: `users` / `projects` / `models` / `model_tables` /
+> `model_relationships` / `model_views`; el agente: `column_catalog`).
+
+### 1.2 Autenticación
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `AUTH_SECRET` | Secret HS256 compartido con el frontend Next.js. **Debe coincidir literalmente** entre `web-data-model-hub/.env` y este `.env`. | dev fallback (no usar en prod) |
+
+Generar uno nuevo:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+> ⚠️ Si los dos `.env` divergen, el browser firma el JWT con un secret
+> y el backend lo valida con otro → 401 silencioso en cada request.
+> Esta es la causa más frecuente de "el login se queda colgado".
+
+Otras constantes hardcodeadas en `src/api/auth.py` (no se exponen como
+env vars porque están atadas a la implementación):
+
+| Constante | Valor | Razón |
+|---|---|---|
+| `TOKEN_LIFETIME_SECONDS` | `10 * 60 * 60` (10 h) | jornada laboral típica |
+| `JWT_ALG` | `HS256` | match con el `jose` del Next.js middleware |
+| `AUTH_COOKIE_NAME` | `modeler-auth` | compartido con el frontend |
+| `_BCRYPT_ROUNDS` | `10` | balance latencia/seguridad |
+
+### 1.3 CORS
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `CORS_ORIGINS` | Lista separada por comas de orígenes permitidos | `http://localhost:3000,http://127.0.0.1:3000` |
+
+`allow_credentials=True` está fijo en código — sin él, el cookie
+`modeler-auth` no cruza el origen y el frontend pierde la sesión.
+
+### 1.4 Logging
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `LOG_FORMAT` | `pretty` (humano, colores) o `json` (un objeto por línea, ideal para colectores) | `pretty` |
+| `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` | `INFO` |
+
+Cada request se loguea inicio/fin con `request_id` y duración en ms; el
+mismo `request_id` se envía de regreso en el header `X-Request-ID`.
 
 ---
 
-## Variables de entorno
+## 2. Archivo `.env.example`
 
-### Azure AI Foundry
-
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `FOUNDRY_PROJECT_ENDPOINT` | URL del proyecto en Azure AI Foundry | — | ✓ |
-| `FOUNDRY_MODEL` | Modelo LLM a utilizar | `gpt-4o` | ✗ |
-| `FOUNDRY_API_KEY` | API Key (alternativa a Service Principal) | `""` | ✗ |
-
-### Azure Service Principal
-
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `APP_AZURE_TENANT_ID` | ID del tenant de Azure AD | `""` | ✓ |
-| `APP_AZURE_CLIENT_ID` | ID de la aplicación registrada | `""` | ✓ |
-| `APP_AZURE_CLIENT_SECRET` | Secret de la aplicación | `""` | ✓ |
-
-### Azure OpenAI (alternativo)
-
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `AZURE_OPENAI_ENDPOINT` | Endpoint de Azure OpenAI | `""` | ✗ |
-| `AZURE_OPENAI_API_VERSION` | Versión de API | `2025-01-01-preview` | ✗ |
-
-### Rutas de datos
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `GUIDELINES_PATH` | Ruta relativa al archivo de lineamientos | `data/guidelines/modeling_guidelines.json` |
-| `COLUMN_CATALOG_PATH` | Ruta relativa al catálogo de columnas | `data/column_catalog.json` |
-
-### Motor de BD
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `DEFAULT_DB_ENGINE` | Motor de BD por defecto | `databricks_sql` |
-
-Motores válidos: `databricks_sql`, `cosmosdb`, `sqlserver`, `postgresql`, `mysql`.
-
-### API REST
-
-Aplican solo cuando se ejecuta la API (`uvicorn api.main:app`). El CLI las ignora.
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `MAX_CONCURRENT_PIPELINES` | Máximo de pipelines `POST .../model` ejecutándose en paralelo. Implementado como `asyncio.Semaphore` que envuelve únicamente al endpoint del modelo (no afecta health, engines, GET del modelo). | `5` |
-| `CORS_ORIGINS` | Lista separada por comas de orígenes permitidos por CORS. | `http://localhost:3000,http://127.0.0.1:3000` |
-
-### Logging
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `LOG_FORMAT` | `pretty` (legible) o `json` (un objeto por línea). | `pretty` |
-| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. | `INFO` |
-
----
-
-## Archivo `.env.example`
+Versión vigente (verbatim — copia de `.env.example`):
 
 ```env
-# Azure AI Foundry
-FOUNDRY_PROJECT_ENDPOINT=https://<tu-recurso>.services.ai.azure.com/api/projects/<tu-proyecto>
-FOUNDRY_MODEL=gpt-4o
-FOUNDRY_API_KEY=
+# ─── Azure Cosmos DB for MongoDB (vCore) ───────────────────────
+# Misma cuenta que el servicio de agentes (`app-agents-modeler`).
+# Cada uno toca colecciones distintas (ver src/db/__init__.py).
+COSMOS_CONNECTION_STRING=mongodb+srv://<user>:<password>@<cluster>.global.mongocluster.cosmos.azure.com/?tls=true&authMechanism=SCRAM-SHA-256&retrywrites=false&maxIdleTimeMS=120000
+COSMOS_DATABASE=db_modeler
 
-# Azure Service Principal
-APP_AZURE_TENANT_ID=<tu-tenant-id>
-APP_AZURE_CLIENT_ID=<tu-client-id>
-APP_AZURE_CLIENT_SECRET=<tu-client-secret>
+# ─── Autenticación JWT ─────────────────────────────────────────
+# Secreto HS256 para firmar tokens de sesión. Genera uno con:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+# DEBE coincidir con el AUTH_SECRET del frontend (web-data-model-hub/.env).
+AUTH_SECRET=your-auth-secret-here
 
-# Azure OpenAI (alternativo)
-AZURE_OPENAI_ENDPOINT=
-AZURE_OPENAI_API_VERSION=2025-01-01-preview
+# ─── CORS ──────────────────────────────────────────────────────
+# Orígenes permitidos por CORS, separados por coma.
+# Default: localhost:3000 y 127.0.0.1:3000 (Next.js dev).
+# Ejemplo:
+# CORS_ORIGINS=http://localhost:3000,https://modeler.example.com
 
-# Rutas de datos
-GUIDELINES_PATH=data/guidelines/modeling_guidelines.json
-COLUMN_CATALOG_PATH=data/column_catalog.json
-
-# Motor de BD por defecto
-DEFAULT_DB_ENGINE=databricks_sql
-
-# API REST
-MAX_CONCURRENT_PIPELINES=5
-# CORS_ORIGINS=http://localhost:3000
-
-# Logging
+# ─── Logging ───────────────────────────────────────────────────
+# Formato de logs: "pretty" (legible para dev) o "json" (producción).
 LOG_FORMAT=pretty
+# Nivel mínimo: DEBUG, INFO, WARNING, ERROR, CRITICAL.
 LOG_LEVEL=INFO
 ```
 
 ---
 
-## Configurar credenciales de Azure
-
-### Paso 1: Registrar aplicación en Azure AD
-
-1. Ir a **Azure Portal** → **Azure Active Directory** → **App registrations**.
-2. Crear nueva aplicación.
-3. Copiar **Application (client) ID** y **Directory (tenant) ID**.
-4. En **Certificates & secrets** → crear nuevo client secret.
-5. Copiar el valor del secret.
-
-### Paso 2: Asignar permisos
-
-La aplicación registrada necesita permisos para:
-- **Azure AI Foundry**: rol `Cognitive Services User` o `Cognitive Services Contributor` en el recurso AI.
-- **Azure OpenAI** (si se usa como alternativa): mismo rol.
-
-### Paso 3: Configurar `.env`
-
-```env
-APP_AZURE_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-APP_AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-APP_AZURE_CLIENT_SECRET=tu-secret-aqui
-FOUNDRY_PROJECT_ENDPOINT=https://tu-recurso.services.ai.azure.com/api/projects/tu-proyecto
-```
-
----
-
-## Clase Settings
-
-El singleton `Settings` (`src/config.py`) centraliza toda la configuración:
+## 3. Acceso desde código
 
 ```python
 from src.config import settings
 
-# Acceder a configuración
-print(settings.FOUNDRY_MODEL)         # "gpt-4o"
-print(settings.DEFAULT_DB_ENGINE)     # "databricks_sql"
-print(settings.GUIDELINES_PATH)       # Path absoluto al archivo
-print(settings.SUPPORTED_ENGINES)     # ["databricks_sql", "cosmosdb", ...]
-print(settings.PROJECT_ROOT)          # Path raíz del proyecto
+settings.COSMOS_CONNECTION_STRING   # "mongodb+srv://..."
+settings.COSMOS_DATABASE            # "db_modeler"
+settings.PROJECT_ROOT               # absolute Path al repo
 ```
 
-### Resolución de rutas
-Las rutas `GUIDELINES_PATH` y `COLUMN_CATALOG_PATH` se resuelven como **rutas absolutas** relativas a la raíz del proyecto (`_PROJECT_ROOT`), independientemente de desde dónde se ejecute el script.
+`Settings` es una clase Python plana (sin `pydantic-settings`) porque
+solo expone dos valores — agregar Pydantic acá sería gold-plating.
+
+`AUTH_SECRET` se lee con `os.getenv` directamente en `src/api/auth.py`,
+no se expone en `settings` para evitar leakage accidental al loguear
+todo el objeto de settings en debug.
 
 ---
 
-## Lineamientos de modelamiento
+## 4. Excel-import: parámetros internos
 
-### Estructura del archivo (`modeling_guidelines.json`)
+El módulo `src/excel_import/` también tiene constantes calibrables, pero
+**no se exponen como env vars** — son parte de la lógica del feature.
+Si necesitas tocarlas, edita el módulo:
 
-```json
-{
-  "version": "1.0",
-  "area": "default",
-  "naming_conventions": {
-    "table_prefix": "tbl_",
-    "column_case": "snake_case",
-    "column_prefixes": {
-      "identifier": "id_",
-      "name": "name_",
-      "date": "date_",
-      "amount": "amount_",
-      "flag": "flag_",
-      "..."
-    },
-    "reserved_words_to_avoid": ["user", "table", "order", "..."],
-    "max_column_name_length": 64,
-    "max_table_name_length": 64
-  },
-  "audit_columns": {
-    "required": true,
-    "columns": [
-      {"column_name": "date_created", "data_type": "TIMESTAMP", "..."},
-      {"column_name": "date_updated", "..."},
-      {"column_name": "user_created", "..."},
-      {"column_name": "user_updated", "..."}
-    ]
-  },
-  "primary_key_conventions": {
-    "naming_pattern": "id_{entity}",
-    "preferred_type": "BIGINT"
-  },
-  "foreign_key_conventions": {
-    "naming_pattern": "id_{referenced_entity}",
-    "suffix_constraint": "_fk"
-  },
-  "data_type_mappings": {
-    "databricks_sql": {"VARCHAR": "STRING", "BOOLEAN": "BOOLEAN", "..."},
-    "sqlserver": {"VARCHAR": "NVARCHAR", "BOOLEAN": "BIT", "..."},
-    "postgresql": {"VARCHAR": "VARCHAR", "BOOLEAN": "BOOLEAN", "..."},
-    "mysql": {"VARCHAR": "VARCHAR", "BOOLEAN": "TINYINT(1)", "..."},
-    "cosmosdb": {"VARCHAR": "string", "BOOLEAN": "boolean", "..."}
-  },
-  "general_rules": [
-    "Todas las tablas deben tener columnas de auditoría",
-    "Los nombres deben estar en snake_case y en inglés",
-    "..."
-  ]
-}
-```
+| Constante | Archivo | Default | Para qué |
+|---|---|---|---|
+| `_MAX_UPLOAD_BYTES` | `api/routes/excel_import.py` | `10 * 1024 * 1024` (10 MB) | Tope defensivo de tamaño del upload |
+| `_ALLOWED_EXTENSIONS` | `api/routes/excel_import.py` | `(".xlsx", ".xlsm")` | Extensiones aceptadas |
+| `FUZZY_THRESHOLD` | `src/excel_import/type_normalizer.py` | `75.0` | Umbral mínimo (0-100) para aceptar un match fuzzy |
+| `TABLE_DESCRIPTIONS_SHEET` | `src/excel_import/workbook_reader.py` | `"tablesdescriptions"` | Match case-insensitive del nombre de la hoja opcional |
+| `CANONICAL_TYPES` | `src/excel_import/type_normalizer.py` | tupla con ~30 tipos | Universo de tipos canónicos (match exacto) |
+| `ALIASES` | `src/excel_import/type_normalizer.py` | dict pequeño | Sinónimos NO ambiguos (`int → integer`, `bool → boolean`) |
 
-### Personalización
-Para personalizar los lineamientos:
-1. Editar `data/guidelines/modeling_guidelines.json`.
-2. O crear un archivo en otro formato soportado (XLSX, DOCX, PDF, TXT).
-3. Actualizar `GUIDELINES_PATH` en `.env`.
+> Subir `FUZZY_THRESHOLD` reduce falsos positivos pero rechaza más typos
+> reales. Bajarlo invita matches espurios (`datatime` → `time`).
+> El valor actual (75) está calibrado para que `decximam → decimal`
+> entre (≈86) pero `foobar` no.
+
+> `CANONICAL_TYPES` debe quedar alineado con `COLUMN_DATA_TYPES` en
+> `web-data-model-hub/src/types/model.ts`. Cuando agregues un tipo en
+> uno, agrégalo también en el otro.
 
 ---
 
-## Catálogo de columnas
+## 5. Dependencias
 
-### Estructura del archivo (`column_catalog.json`)
-
-```json
-{
-  "columns": [
-    {
-      "column_name": "id_customer",
-      "functional_definition": "Identificador único del cliente",
-      "data_type": "BIGINT",
-      "used_in_tables": ["tbl_customers", "tbl_orders"],
-      "is_new": false
-    }
-  ]
-}
-```
-
-### Comportamiento en runtime
-- **Lectura**: el QAValidatorAgent consulta el catálogo para estandarizar nombres.
-- **Escritura**: columnas nuevas se agregan automáticamente con `is_new: true`.
-- **Thread safety**: operaciones protegidas con `threading.Lock`.
-- **Persistencia**: cambios se guardan inmediatamente en el archivo JSON.
-
----
-
-## Dependencias
-
-### Archivo `requirements.txt`
+`requirements.txt` (verbatim):
 
 ```
-agent-framework>=0.1
-openpyxl>=3.1
-python-docx>=1.0
-pdfplumber>=0.10
+# Pydantic + env
 pydantic>=2.0
-rich>=13.0
-python-dotenv>=1.0
-azure-identity>=1.15
+python-dotenv
+
+# API Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.9   # required by FastAPI for multipart uploads
+
+# Cosmos DB (Motor async + pymongo for type compat)
+pymongo>=4.0
+motor>=3.3.0
+
+# Authentication (JWT + bcrypt)
+PyJWT>=2.0
+bcrypt>=4.0
+
+# Excel import
+openpyxl>=3.1
+rapidfuzz>=3.6
 ```
 
 ### Instalación
 
 ```bash
-python3.12 -m venv .venv
+# Crear venv local (Python 3.12)
+/opt/homebrew/bin/python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### Verificación rápida
+
+```bash
+# Importa todo el backend sin arrancar el servidor — debe terminar en 0
+.venv/bin/python -c "from api.main import app; print('ok')"
+
+# Probar el endpoint de health
+curl http://localhost:8000/api/health
+# → {"status":"ok","version":"1.0.0","db_connected":true}
+```
+
+---
+
+## 6. Despliegue
+
+`Dockerfile` es multi-stage (Python 3.12-slim). Puerto expuesto: `8000`.
+Para Azure App Service:
+
+| Variable de plataforma | Valor |
+|---|---|
+| `WEBSITES_PORT` | `8000` |
+| `WEBSITES_CONTAINER_START_TIME_LIMIT` | `300` (Cosmos puede tardar en responder durante el cold start) |
+
+Y todas las variables descritas arriba como App Settings (no hardcodear
+en la imagen).
