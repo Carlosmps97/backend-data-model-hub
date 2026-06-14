@@ -2,7 +2,11 @@
 
 Mirrors `web-data-model-hub/src/server/db/mongo.ts` — PROYECTOS section.
 Soft-delete: `flgactive: false` + `deletedAt` (never hard-deletes).
-Cascade: delete cascades to all models via `models_db.delete_model`.
+Cascade: delete cascades to the project's canvas via `canvas_db.delete_canvas`.
+
+A project embeds its `engines` / `layers` (ModelLevels) / `domains` arrays; the
+heavy child data (tables + relationships) lives in `project_tables` /
+`project_relationships` (see `canvas_db`).
 """
 
 from __future__ import annotations
@@ -68,19 +72,15 @@ async def update_project(
 
 
 async def delete_project(project_id: str) -> bool:
-    """Soft-delete the project and cascade to all its models."""
+    """Soft-delete the project and cascade to its canvas (tables + relationships)."""
     # Import here to avoid circular dependency at module load time.
-    from src.db.models_db import delete_model  # noqa: PLC0415
+    from src.db.canvas_db import delete_canvas  # noqa: PLC0415
 
     db = await get_db()
     now = _now()
 
-    # Cascade: soft-delete every model that belongs to this project.
-    model_docs = await db["models"].find(
-        {"projectId": project_id}, {"_id": 1}
-    ).to_list(None)
-    for m in model_docs:
-        await delete_model(str(m["_id"]))
+    # Cascade: soft-delete every table + relationship of this project.
+    await delete_canvas(project_id)
 
     result = await db["projects"].update_one(
         {"_id": project_id},

@@ -3,8 +3,10 @@
 Modules:
   motor_client  — async Motor (Cosmos DB) connection singleton.
   db_models     — Pydantic v2 document models for every collection.
-  projects_db   — async CRUD for the `projects` collection.
-  models_db     — async CRUD for models + child collections.
+  projects_db   — async CRUD for the `projects` collection (embeds engines/
+                  layers/domains).
+  canvas_db     — async CRUD for a project's canvas (`project_tables` +
+                  `project_relationships`).
   users_db      — async CRUD for the `users` collection.
 
 The agent's `column_catalog` lives in `app-agents-modeler/src/db/catalog_db.py`.
@@ -12,23 +14,21 @@ The agent's `column_catalog` lives in `app-agents-modeler/src/db/catalog_db.py`.
 
 from src.db import motor_client
 from src.db.db_models import (
-    DataModelDoc,
-    DomainDefinitionDoc,
+    DomainDoc,
+    ModelLevelDoc,
     PermissionDoc,
     ProjectDoc,
     RelationshipDoc,
-    SubdomainDefinitionDoc,
     TableColumnDoc,
-    TableModelDoc,
+    TableDoc,
     UserDoc,
-    ViewModelDoc,
+    ViewDoc,
 )
-from src.db.models_db import (
-    create_model,
-    delete_model,
-    get_model,
-    get_models,
-    update_model,
+from src.db.canvas_db import (
+    bulk_update_positions,
+    delete_canvas,
+    get_canvas,
+    replace_canvas,
 )
 from src.db.projects_db import (
     create_project,
@@ -50,29 +50,27 @@ from src.db.users_db import (
 __all__ = [
     # connection
     "motor_client",
-    # models
-    "DataModelDoc",
-    "DomainDefinitionDoc",
+    # document models
+    "DomainDoc",
+    "ModelLevelDoc",
     "PermissionDoc",
     "ProjectDoc",
     "RelationshipDoc",
-    "SubdomainDefinitionDoc",
     "TableColumnDoc",
-    "TableModelDoc",
+    "TableDoc",
     "UserDoc",
-    "ViewModelDoc",
+    "ViewDoc",
     # projects
     "create_project",
     "delete_project",
     "get_project",
     "get_projects",
     "update_project",
-    # models
-    "create_model",
-    "delete_model",
-    "get_model",
-    "get_models",
-    "update_model",
+    # canvas
+    "bulk_update_positions",
+    "delete_canvas",
+    "get_canvas",
+    "replace_canvas",
     # users
     "create_user",
     "delete_user",

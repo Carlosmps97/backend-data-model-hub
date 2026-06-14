@@ -7,3 +7,5 @@ dist/
 build/
 .DS_Store
 tests/
+# Migration backups (contain data + password hashes — never commit)
+scripts/_backup_*.json

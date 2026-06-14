@@ -6,7 +6,7 @@ Punto de entrada de FastAPI. Responsabilidades acotadas:
 - Middleware: logueo estructurado de cada request.
 - CORS para el frontend Next.js (con credenciales — comparte cookie
   `modeler-auth` con el frontend).
-- Montar los routers `health`, `auth`, `admin`, `projects`, `models`.
+- Montar los routers `health`, `auth`, `admin`, `projects`, `canvas`.
 
 El servicio de agentes (modelado conversacional, ConversationStore,
 FoundryChatClient) vive en `app-agents-modeler` y se invoca desde el
@@ -32,9 +32,9 @@ from starlette.responses import Response
 from api.routes import (
     admin_router,
     auth_router,
+    canvas_router,
     excel_import_router,
     health_router,
-    models_router,
     projects_router,
 )
 from src.db import motor_client
@@ -159,7 +159,7 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(projects_router)
-app.include_router(models_router)
+app.include_router(canvas_router)
 app.include_router(excel_import_router)
 app.include_router(admin_router)
 

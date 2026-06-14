@@ -3,16 +3,25 @@
 These are *persistence-layer* models that mirror the TypeScript interfaces
 in `web-data-model-hub/src/types/model.ts` and `types/auth.ts`.
 
+Project-centric architecture (Aurora refactor):
+- A **Project** owns `engines[]`, `layers: ModelLevel[]` (the "Modelos / niveles",
+  e.g. RDV·UDV·DDV) and `domains: Domain[]` (vertical data products that span
+  layers). These small arrays are embedded in the `projects` document.
+- **Tables** live in `project_tables` (shard key `projectId`), tagged with
+  `layer` (ModelLevel id) + `domain` (Domain id) + `subdomain`, and embed their
+  role-specific SQL `views[]`.
+- **Relationships** live in `project_relationships` (shard key `projectId`) with
+  the nested `source/target/cardinality` shape and may cross layers/domains.
+
 Design rules:
 - Field names are camelCase to match Mongo documents.
-- `_id` (MongoDB) ↔ `id` (Python/TypeScript): the CRUD helpers perform the
-  mapping; these models always use `id`.
-- `modelId` is NOT present on child models (`TableModelDoc`, `RelationshipDoc`,
-  `ViewModelDoc`) because it is stripped on read and injected on write, exactly
-  as the TypeScript layer does.
-- `schema` is a valid Pydantic v2 field name (not a reserved keyword).
+- `_id` (MongoDB) ↔ `id` (Python/TypeScript): the CRUD helpers map it.
+- `projectId` is NOT a field on child models (`TableDoc`, `RelationshipDoc`) —
+  it is stripped on read and injected on write by `canvas_db._replace_entities`.
+- `schema` is exposed via the `sql_schema` attribute with `alias="schema"`
+  (avoids shadowing the deprecated `BaseModel.schema()`).
 - `extra="ignore"` so Mongo internal fields (`flgactive`, `deletedAt`, etc.)
-  are dropped silently during validation.
+  and any legacy fields are dropped silently during validation.
 """
 
 from __future__ import annotations
@@ -29,15 +38,9 @@ _cfg = ConfigDict(extra="ignore", populate_by_name=True)
 # ── Tags ───────────────────────────────────────────────────────────────────
 
 class TagDoc(BaseModel):
-    """Key-value metadata tag attached to tables (and views). Mirrors the
-    TS `Tag` interface in `web-data-model-hub/src/types/model.ts`.
-
-    Both `key` and `value` are free-text; the application does not enforce a
-    controlled vocabulary. The shape replaces the previous `list[str]` —
-    legacy string entries are coerced into `{key: "", value: <str>}` by the
-    validator on each consuming model so pre-migration Cosmos docs keep
-    loading without a hard cutover.
-    """
+    """Key-value metadata tag attached to tables. Mirrors the TS `Tag`
+    interface. Both `key` and `value` are free-text. Legacy `list[str]`
+    entries are coerced into `{key: "", value: <str>}` by `_coerce_tags`."""
 
     model_config = _cfg
 
@@ -47,8 +50,7 @@ class TagDoc(BaseModel):
 
 def _coerce_tags(raw: Any) -> Any:
     """Accept either the new `list[TagDoc]` shape or the legacy `list[str]`
-    shape that lives in pre-migration Cosmos documents. Strings become
-    `{key: "", value: <str>}`; objects pass through to Pydantic."""
+    shape from pre-migration Cosmos documents."""
     if raw is None:
         return None
     if not isinstance(raw, list):
@@ -64,6 +66,42 @@ def _coerce_tags(raw: Any) -> Any:
     return out
 
 
+# ── Project-level catalog: levels (models) + domains ────────────────────────
+
+class ModelLevelDoc(BaseModel):
+    """A "Modelo (nivel)" — agnostic layer of the project (e.g. RDV/UDV/DDV).
+    Mirrors the TS `ModelLevel`. Embedded in the project document."""
+
+    model_config = _cfg
+
+    id: str
+    name: str                       # short code, e.g. "RDV"
+    full: str | None = None         # full name, e.g. "Raw Data Vault"
+    color: str | None = None
+    order: int = 0                  # left→right canvas position + adjacency
+    engine: str | None = None
+    desc: str | None = None
+
+
+class DomainDoc(BaseModel):
+    """A Domain (data product) — project-level and VERTICAL (spans layers).
+    Mirrors the TS `Domain`. Embedded in the project document."""
+
+    model_config = _cfg
+
+    id: str
+    name: str
+    color: str | None = None
+    owner: str | None = None
+    steward: str | None = None
+    # 'Public' | 'Internal' | 'Confidential' | 'Restricted' | 'PII' — kept as a
+    # plain str for resilience against legacy / agent-written values.
+    sensitivity: str | None = None
+    description: str | None = None
+    subdomains: list[str] = Field(default_factory=list)
+    layers: list[str] = Field(default_factory=list)  # ModelLevel ids spanned
+
+
 # ── Project ────────────────────────────────────────────────────────────────
 
 class ProjectDoc(BaseModel):
@@ -72,6 +110,9 @@ class ProjectDoc(BaseModel):
     id: str
     name: str
     description: str | None = None
+    engines: list[str] = Field(default_factory=list)
+    layers: list[ModelLevelDoc] = Field(default_factory=list)
+    domains: list[DomainDoc] = Field(default_factory=list)
     createdAt: str
     updatedAt: str
 
@@ -85,14 +126,11 @@ class ForeignKeyRefDoc(BaseModel):
 
 
 class TableColumnDoc(BaseModel):
+    """One column. `id` is a stable identifier that survives renames — all
+    relationship endpoints point at it (not at `name`)."""
+
     model_config = _cfg
 
-    # Stable identifier that survives renames. Mirrors the TS
-    # `TableColumn.id` — all `RelationshipDoc.sourceColumn` /
-    # `targetColumn` point at this value (not at `name`).
-    # Default factory makes in-memory construction safe; persistence
-    # layers should pass an explicit id when the document already
-    # carries one, to keep it stable across saves.
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     logicalName: str | None = None
@@ -122,11 +160,7 @@ class PartitionSpecDoc(BaseModel):
 
 
 class NodePositionDoc(BaseModel):
-    """Canvas position of a node. Mirrors `NodePosition` in TS.
-
-    Persisted so the ELK-computed layout (and any manual drags) survive
-    reloads. See `PATCH /api/models/{id}/positions`.
-    """
+    """Canvas position of a node. Persisted via `PATCH /api/projects/{id}/positions`."""
 
     model_config = _cfg
 
@@ -134,75 +168,48 @@ class NodePositionDoc(BaseModel):
     y: float
 
 
-class ViewColumnTransformDoc(BaseModel):
-    model_config = _cfg
+# ── Views (role-specific SQL projection, embedded in a table) ───────────────
 
-    sourceColumn: str
-    alias: str | None = None
-    expression: str | None = None
-    include: bool = True
+class ViewDoc(BaseModel):
+    """A role-specific SQL view, embedded in its source table's `views[]`.
+    Mirrors the TS `View`: free-text multiline `select` (one expression per
+    line) and `where` (AND-joined conditions)."""
 
-
-class DomainDefaultsDoc(BaseModel):
-    """Inheritable defaults nested under a domain or subdomain. Tables
-    assigned to a (sub)domain copy these values onto themselves at edit
-    time (see `TableForm.tsx` in the frontend)."""
-
-    model_config = _cfg
-
-    schema_: str | None = Field(default=None, alias="schema")
-    tags: list[TagDoc] | None = None
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _coerce_legacy_tags(cls, v: Any) -> Any:
-        return _coerce_tags(v)
-
-
-class SubdomainDefinitionDoc(BaseModel):
     model_config = _cfg
 
     id: str
     name: str
-    code: str | None = None
-    description: str | None = None
-    defaults: DomainDefaultsDoc | None = None
+    type: str = "business"          # 'business' | 'technical'
+    role: str | None = None
+    select: str = ""
+    where: str = ""
 
 
-class DomainDefinitionDoc(BaseModel):
-    model_config = _cfg
+# ── project_tables ──────────────────────────────────────────────────────────
 
-    id: str
-    name: str
-    code: str | None = None
-    description: str | None = None
-    color: str | None = None
-    subdomains: list[SubdomainDefinitionDoc] = Field(default_factory=list)
-    defaults: DomainDefaultsDoc | None = None
+class TableDoc(BaseModel):
+    """One document from `project_tables`. `projectId` is NOT a field here —
+    it is stripped on read and injected on write by `canvas_db._replace_entities`.
 
-
-# ── model_tables ───────────────────────────────────────────────────────────
-
-class TableModelDoc(BaseModel):
-    """One document from `model_tables`. `modelId` is NOT a field here —
-    it is stripped on read and injected on write by `models_db._replace_entities`."""
+    `layer` holds a ModelLevel id and `domain` holds a Domain id (both refer to
+    the parent project's embedded `layers[]` / `domains[]`). `color` is inherited
+    from the domain."""
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     id: str
-    # "schema" shadows deprecated BaseModel.schema() — use alias so the MongoDB
-    # key stays "schema" while the Python attribute is "sql_schema".
+    # MongoDB key stays "schema"; Python attribute is "sql_schema".
     sql_schema: str | None = Field(default=None, alias="schema")
     name: str
     logicalName: str | None = None
-    columns: list[TableColumnDoc] = Field(default_factory=list)
-    functionalDefinition: str | None = None
-    color: str | None = None
-    applicationCode: str | None = None
-    domain: str | None = None
+    layer: str | None = None        # ModelLevel id
+    domain: str | None = None       # Domain id
     subdomain: str | None = None
-    domainId: str | None = None
-    subdomainId: str | None = None
+    color: str | None = None
+    functionalDefinition: str | None = None
+    applicationCode: str | None = None
+    columns: list[TableColumnDoc] = Field(default_factory=list)
+    views: list[ViewDoc] = Field(default_factory=list)
     tags: list[TagDoc] | None = None
     partition: PartitionSpecDoc | None = None
     # Canvas position persisted by the ELK layout engine / drag handler.
@@ -214,89 +221,38 @@ class TableModelDoc(BaseModel):
         return _coerce_tags(v)
 
 
-# ── model_relationships ────────────────────────────────────────────────────
+# ── project_relationships ───────────────────────────────────────────────────
+
+class RelEndpointDoc(BaseModel):
+    """One end of a relationship: a (tableId, columnId) pair."""
+
+    model_config = _cfg
+    table: str
+    column: str
+
 
 class RelationshipDoc(BaseModel):
-    model_config = _cfg
-
-    id: str
-    sourceTable: str
-    sourceColumn: str
-    targetTable: str
-    targetColumn: str
-    type: str  # 'one-to-one' | 'one-to-many' | 'many-to-many'
-    # Optional Crow's Foot cardinality overrides. When absent the frontend
-    # derives them from `type` + FK.isNullable. Values mirror the TS
-    # `CrowsFootCardinality` union:
-    #   'one-only' | 'zero-or-one' | 'one-or-many' | 'zero-or-many'
-    sourceCardinality: str | None = None
-    targetCardinality: str | None = None
-
-
-# ── model_views ────────────────────────────────────────────────────────────
-
-class ViewModelDoc(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    id: str
-    name: str
-    logicalName: str | None = None
-    sql_schema: str | None = Field(default=None, alias="schema")
-    sourceTableId: str
-    viewType: str  # 'technical' | 'user' | 'business'
-    columns: list[ViewColumnTransformDoc] = Field(default_factory=list)
-    whereClause: str | None = None
-    useCustomSql: bool | None = None
-    customSql: str | None = None
-    functionalDefinition: str | None = None
-    domain: str | None = None
-    subdomain: str | None = None
-    domainId: str | None = None
-    subdomainId: str | None = None
-    tags: list[TagDoc] | None = None
-    color: str | None = None
-    # Canvas position persisted alongside `TableModelDoc.position`.
-    position: NodePositionDoc | None = None
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _coerce_legacy_tags(cls, v: Any) -> Any:
-        return _coerce_tags(v)
-
-
-# ── models (metadata + embedded domainCatalog) ─────────────────────────────
-
-class DataModelDoc(BaseModel):
-    """Full DataModel with child entities hydrated.
-
-    When reading from the `models` collection the child arrays start empty
-    and are populated from `model_tables`, `model_relationships`, and
-    `model_views` by the CRUD layer (same architecture as TypeScript).
-    """
+    """One document from `project_relationships`. Nested `source`/`target`
+    endpoints reference `TableDoc.id` + `TableColumnDoc.id`. May cross layers
+    and domains; `crossLayer`/`skip` are derived on the frontend (not stored)."""
 
     model_config = _cfg
 
     id: str
-    projectId: str
-    name: str
-    description: str | None = None
-    engine: str | None = None
-    tables: list[TableModelDoc] = Field(default_factory=list)
-    relationships: list[RelationshipDoc] = Field(default_factory=list)
-    views: list[ViewModelDoc] = Field(default_factory=list)
-    domainCatalog: list[DomainDefinitionDoc] = Field(default_factory=list)
-    createdAt: str
-    updatedAt: str
+    source: RelEndpointDoc
+    target: RelEndpointDoc
+    cardinality: str = "1:N"        # '1:1' | '1:N' | 'N:N'
 
 
 # ── users ──────────────────────────────────────────────────────────────────
 
 class PermissionDoc(BaseModel):
+    """Project-scoped grant. The legacy `scope`/`modelId` fields (model-scope)
+    are dropped — `extra="ignore"` keeps pre-migration docs loading."""
+
     model_config = _cfg
 
-    scope: Literal["project", "model"]
     projectId: str
-    modelId: str | None = None  # present only when scope == "model"
     level: Literal["view", "edit"]
 
 

@@ -42,9 +42,9 @@ router = APIRouter(prefix="/api/admin/users", tags=["admin"])
 
 
 class PermissionPayload(BaseModel):
-    scope: str  # "project" | "model"
+    # Project-scoped grant. Legacy `scope`/`modelId` fields sent by older
+    # clients are silently ignored (Pydantic v2 default `extra="ignore"`).
     projectId: str
-    modelId: str | None = None
     level: str  # "view" | "edit"
 
 
@@ -69,7 +69,6 @@ class UpdateUserRequest(BaseModel):
 
 _VALID_ROLES = {"admin", "editor", "viewer"}
 _VALID_LEVELS = {"view", "edit"}
-_VALID_SCOPES = {"project", "model"}
 
 
 def _now() -> str:
@@ -101,26 +100,14 @@ def _validate_role(role: str) -> None:
 def _validate_permissions(perms: list[PermissionPayload]) -> list[PermissionDoc]:
     out: list[PermissionDoc] = []
     for p in perms:
-        if p.scope not in _VALID_SCOPES:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid permission scope '{p.scope}'.",
-            )
         if p.level not in _VALID_LEVELS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid permission level '{p.level}'.",
             )
-        if p.scope == "model" and not p.modelId:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="modelId is required for model-scope permissions.",
-            )
         out.append(
             PermissionDoc(
-                scope=p.scope,  # type: ignore[arg-type]
                 projectId=p.projectId,
-                modelId=p.modelId if p.scope == "model" else None,
                 level=p.level,  # type: ignore[arg-type]
             )
         )

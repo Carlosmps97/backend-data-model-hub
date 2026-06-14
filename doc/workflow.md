@@ -6,8 +6,8 @@
 >
 > Es 100 % determinista, sin LLM, con un único responsable por paso.
 > El frontend usa el preview para hidratar el modal de import, deja
-> que el usuario revise/corrija y luego dispara un `PUT
-> /api/models/{id}` con las tablas resultantes.
+> que el usuario revise/corrija y luego persiste las tablas resultantes
+> con `PUT /api/projects/{id}/canvas`.
 
 **Endpoint**: `POST /api/excel-import/preview` (multipart/form-data)
 **Auth**: `AuthUserDep`
@@ -292,7 +292,7 @@ TablesDescriptions row "OldTable" did not match any sheet — description ignore
 | Inferir relaciones FK | El backend no propone relaciones — eso lo hace el frontend / el usuario. |
 | Aplicar audit columns | Las audit columns se aplican según lineamientos que viven en `app-agents-modeler`. |
 | Embedding / vector search | Sin LLM. La normalización de tipos es Levenshtein puro. |
-| Persistencia automática | El preview no escribe nada en Cosmos. El frontend dispara un PUT con las tablas resultantes después de la revisión humana. |
+| Persistencia automática | El preview no escribe nada en Cosmos. El frontend dispara `PUT /api/projects/{id}/canvas` con las tablas resultantes después de la revisión humana. |
 
 Esto mantiene el endpoint **rápido, predecible y reentrante**: re-subir
 el mismo archivo dos veces produce exactamente el mismo preview.

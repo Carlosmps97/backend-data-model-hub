@@ -26,8 +26,8 @@ matar el contenedor.
 
 > El backend comparte la **misma cuenta de Cosmos** con el servicio de
 > agentes (`app-agents-modeler`). Cada uno toca colecciones disjuntas
-> (este: `users` / `projects` / `models` / `model_tables` /
-> `model_relationships` / `model_views`; el agente: `column_catalog`).
+> (este: `users` / `projects` / `project_tables` / `project_relationships`;
+> el agente: `column_catalog`).
 
 ### 1.2 Autenticación
 

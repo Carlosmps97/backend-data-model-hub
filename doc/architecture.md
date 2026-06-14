@@ -1,9 +1,10 @@
 # Arquitectura — `backend-data-model-hub`
 
 > Backend **de plataforma** del Data Modeler. Resuelve autenticación,
-> permisos, CRUD de proyectos / modelos / usuarios y la previsualización
-> del import desde Excel. **No** ejecuta agentes LLM — el modelado
-> conversacional vive en el servicio separado `app-agents-modeler`.
+> permisos, CRUD de **proyectos** (con su jerarquía embebida), persistencia
+> del **canvas** (tablas + relaciones), administración de usuarios y la
+> previsualización del import desde Excel. **No** ejecuta agentes LLM: el
+> modelado conversacional vive en el servicio separado `app-agents-modeler`.
 
 ## 1. Visión general
 
@@ -11,21 +12,21 @@
 flowchart LR
     subgraph Browser["Browser · Next.js (:3000)"]
         UI["React UI<br/>Zustand stores"]
+        PXY["proxy.ts<br/>(verifica JWT por request)"]
         SVC["src/services/*"]
     end
 
     subgraph Platform["backend-data-model-hub (:8000)"]
-        MID["Middleware<br/>(request_id + logs)"]
         H["/api/health"]
         AUTH["/api/auth/*"]
         PRJ["/api/projects/*"]
-        MOD["/api/models/*"]
+        CNV["/api/projects/{id}/canvas<br/>/api/projects/{id}/positions"]
         ADM["/api/admin/users/*"]
         XLS["/api/excel-import/preview"]
     end
 
-    subgraph Agent["app-agents-modeler (:8001)"]
-        AGT["/api/conversations/*<br/>/api/engines"]
+    subgraph Agent["app-agents-modeler (servicio aparte)"]
+        AGT["modelado conversacional<br/>(desacoplado)"]
     end
 
     subgraph Cloud["Azure"]
@@ -33,18 +34,17 @@ flowchart LR
     end
 
     UI --> SVC
-    SVC -.cookie modeler-auth.-> MID
-    SVC -.CORS allowlist.-> AGT
-    MID --> AUTH
-    MID --> PRJ
-    MID --> MOD
-    MID --> ADM
-    MID --> XLS
+    SVC -.cookie modeler-auth.-> AUTH
+    SVC --> PRJ
+    SVC --> CNV
+    SVC --> ADM
+    SVC --> XLS
+    PXY -. verifica firma .- AUTH
     AUTH --> COSMOS
     PRJ --> COSMOS
-    MOD --> COSMOS
+    CNV --> COSMOS
     ADM --> COSMOS
-    AGT --> COSMOS
+    AGT -. column_catalog .-> COSMOS
 ```
 
 **Stack**: Python 3.12 · FastAPI · Pydantic v2 · Motor (async MongoDB) ·
@@ -52,143 +52,130 @@ bcrypt · PyJWT · openpyxl · rapidfuzz · Azure Cosmos DB for MongoDB.
 
 **Procesos en juego**: 1 proceso FastAPI por deploy + 1 cuenta de Cosmos DB.
 No hay broker de colas, ni caché Redis, ni dependencia de Azure AI Foundry
-(esa vive solo en `app-agents-modeler`).
+(eso vive solo en `app-agents-modeler`). El backend arranca en segundos y
+tiene huella de RAM baja.
 
-### Topología de colecciones
+### Topología de colecciones (`db_modeler`)
 
 | Servicio | Colecciones que toca |
 |---|---|
-| `backend-data-model-hub` (este repo) | `users`, `projects`, `models`, `model_tables`, `model_relationships`, `model_views` |
-| `app-agents-modeler` | `column_catalog` (diccionario semántico) |
+| `backend-data-model-hub` (este repo) | `users`, `projects`, `project_tables`, `project_relationships` |
+| `app-agents-modeler` | `column_catalog` (diccionario semántico del agente) |
 
-Apuntan al **mismo cluster Cosmos** y a la **misma database** (`db_modeler`)
-pero tocan colecciones disjuntas — no hay carreras de escritura entre
-ellos.
+Ambos apuntan al **mismo cluster y database** pero tocan colecciones
+disjuntas — no hay carreras de escritura entre ellos. Este backend **no toca**
+`column_catalog`.
 
 ---
 
-## 2. Capas del sistema
+## 2. Modelo project-centric ("Aurora")
 
-### 2.1 Punto de entrada — `api/main.py`
+La jerarquía es **Proyecto → Modelo (nivel) → Dominio → Tabla → Columnas + Vistas**:
 
-Crea la aplicación FastAPI, configura CORS y el middleware de logging,
-y monta los routers. El **lifespan** abre Motor al arrancar:
+- Un **Proyecto** posee sus `engines[]`, sus `layers` (los "Modelos / niveles",
+  p. ej. RDV·UDV·DDV) y sus `domains` (productos de datos **verticales** que
+  cruzan niveles). Esos tres arreglos son chicos y se **embeben** en el
+  documento del proyecto.
+- Las **Tablas** viven en `project_tables` (shard key `projectId`), etiquetadas
+  con `layer` (id de ModelLevel), `domain` (id de Domain) y `subdomain`, y
+  **embeben** sus vistas SQL por rol (`views[]`).
+- Las **Relaciones** viven en `project_relationships` (shard key `projectId`)
+  con la forma anidada `source`/`target`/`cardinality`.
 
-| Singleton | Tipo | Resilencia ante fallo |
+No existe la noción de "un diagrama por modelo": hay **un único canvas por
+proyecto**, y lo que se ve se controla en el frontend con el *Scope*.
+
+---
+
+## 3. Capas del sistema
+
+### 3.1 Punto de entrada — `api/main.py`
+
+Crea la app FastAPI, configura CORS + middleware de logging y monta los
+routers. El **lifespan** abre Motor al arrancar y crea índices:
+
+| Singleton | Tipo | Resiliencia ante fallo |
 |---|---|---|
 | `motor_client` (Cosmos DB) | `AsyncIOMotorClient` + `ensure_indexes` | si falla, `app.state.db_connected = False` y `/api/health` lo reporta; los endpoints que usen DB devuelven 500 |
 
-```mermaid
-flowchart TD
-    L0["lifespan start"] --> M["motor_client.connect()<br/>+ ensure_indexes"]
-    M --> READY["app ready"]
-    READY --> REQ["requests"]
-    REQ --> SHUTDOWN["lifespan stop"]
-    SHUTDOWN --> D["motor_client.disconnect()"]
-```
-
-### 2.2 Routers (`api/routes/`)
+### 3.2 Routers (`api/routes/`)
 
 | Router | Prefijo | Auth | Responsabilidad |
 |---|---|---|---|
 | `health` | `/api/health` | público | liveness + flag `db_connected` |
-| `auth` | `/api/auth/*` | público (`/login`, `/logout`); `/me` requiere cookie | login / logout / me con cookie `modeler-auth` |
-| `projects` | `/api/projects/*` | `AuthUserDep` (admin para POST/DELETE) | CRUD proyectos |
-| `models` | `/api/models/*` | `AuthUserDep` + permisos por modelo | CRUD modelos hidratados + PATCH positions |
+| `auth` | `/api/auth/*` | público (`/login`, `/logout`); `/me` con cookie | login / logout / me con cookie `modeler-auth` |
+| `projects` | `/api/projects/*` | `AuthUserDep` (admin para POST/DELETE) | CRUD de proyectos + su jerarquía embebida (engines/layers/domains) |
+| `canvas` | `/api/projects/{id}/canvas`, `/api/projects/{id}/positions` | `AuthUserDep` + `check_project_access` | hidratar y reemplazar tablas+relaciones; persistir posiciones |
 | `admin` | `/api/admin/users/*` | `AdminDep` | gestión de usuarios y permisos (solo admin) |
 | `excel_import` | `/api/excel-import/preview` | `AuthUserDep` | preview normalizado de un `.xlsx` |
 
-### 2.3 Capa de servicios (`src/api/`)
+> No hay router `models`: el canvas reemplazó a la antigua colección `models`
+> y sus colecciones hijas.
+
+### 3.3 Capa de servicios (`src/api/`)
 
 ```
 src/api/
 ├── auth.py             # JWT sign/verify (HS256), bcrypt, bootstrap admin
-├── dependencies.py     # FastAPI Depends + helpers de permisos
+├── dependencies.py     # FastAPI Depends + helpers de permisos (project-scope)
 └── response_builder.py # envelope ok({...}) → {success: true, data: ...}
 ```
 
-`dependencies.py` es el wiring de autorización: lee la cookie
-`modeler-auth`, valida el JWT, **recarga `UserDoc` desde Cosmos en cada
-request** (un cambio de permisos toma efecto al instante) y expone los
-helpers `can_view_project` / `can_edit_model` / `is_admin` que reflejan
-el contrato de `web-data-model-hub/src/lib/auth/permissions.ts`.
+`dependencies.py` es el wiring de autorización: lee la cookie `modeler-auth`,
+valida el JWT, **recarga `UserDoc` desde Cosmos en cada request** (un cambio de
+permisos toma efecto al instante) y expone:
 
-### 2.4 Capa de datos (`src/db/`)
+| Helper | Qué hace |
+|---|---|
+| `project_access_level(user, projectId)` | `"edit"` / `"view"` / `None` (admin → siempre `"edit"`) |
+| `can_view_project` / `can_edit_project` | booleanos derivados del anterior |
+| `visible_project_ids(user)` | conjunto de proyectos que el usuario puede ver (admin → todos) |
+| `check_project_access(user, projectId, level)` | lanza 403/404 si no cumple |
+| `require_user` / `require_admin` | dependencies `AuthUserDep` / `AdminDep` |
+
+Replican el contrato de `web-data-model-hub/src/lib/auth/permissions.ts`.
+
+### 3.4 Capa de datos (`src/db/`)
 
 ```
 src/db/
 ├── motor_client.py     # singleton AsyncIOMotorClient + ensure_indexes
 ├── db_models.py        # Pydantic v2 — espejo de las interfaces TS del frontend
-├── projects_db.py      # CRUD proyectos (soft-delete + cascade a modelos)
-├── models_db.py        # CRUD modelos + child collections + safety-net column ids
+├── projects_db.py      # CRUD proyectos (soft-delete + cascade al canvas)
+├── canvas_db.py        # tablas + relaciones (get / replace / positions / delete)
 └── users_db.py         # CRUD usuarios (hard-delete; isActive=false para lock-out)
 ```
 
-**Colecciones en `db_modeler`**:
+**Colecciones e índices** (creados idempotentemente al arranque):
 
-| Colección | PK | Notas |
+| Colección | Shard / PK | Índices |
 |---|---|---|
-| `users` | `_id` (uuid) | índice único en `username`; hard-delete |
-| `projects` | `_id` (uuid) | soft-delete `flgactive`; cascade a `models` |
-| `models` | `_id` (uuid) | índice `(projectId, updatedAt desc)`. Embebe `domainCatalog`. |
-| `model_tables` | `_id` (uuid) | índices `(modelId)`, `(modelId, schema)`, `(modelId, domain)` |
-| `model_relationships` | `_id` (uuid) | índice `(modelId)` |
-| `model_views` | `_id` (uuid) | índices `(modelId)`, `(modelId, sourceTableId)` |
+| `users` | `_id` (uuid) | único en `username`; hard-delete |
+| `projects` | `_id` (uuid) | soft-delete `flgactive`; embebe `engines`/`layers`/`domains`; cascade al canvas |
+| `project_tables` | `projectId` | `(projectId)`, `(projectId, layer)`, `(projectId, domain)`; embebe `views[]` |
+| `project_relationships` | `projectId` | `(projectId)`; forma anidada `source`/`target`/`cardinality` |
 
-`models_db._replace_entities` hace **soft-delete + bulkWrite upsert** —
-los docs viejos se marcan `flgactive=false` antes del upsert para evitar
-`E11000` en Cosmos DB sobre rows previamente soft-eliminados. Es el
-mismo patrón que usa el frontend en `web-data-model-hub/src/server/db/mongo.ts`.
+`canvas_db._replace_entities` hace **soft-delete + bulkWrite `ReplaceOne(upsert)`**:
+marca los docs viejos del proyecto como `flgactive=false` y luego upserta los
+nuevos, evitando `E11000` sobre filas previamente soft-eliminadas. `projectId`
+se **inyecta al escribir y se elimina al leer** (no es campo de `TableDoc` /
+`RelationshipDoc`). `_ensure_column_ids` stampa un UUID en cualquier columna que
+llegue sin `id` (safety-net, ver §6).
 
-### 2.5 Feature Excel-import — `src/excel_import/`
+### 3.5 Feature Excel-import — `src/excel_import/`
 
-Módulo aislado (no comparte estado con el resto del backend) que se monta
-como router en `/api/excel-import/preview`.
-
-```
-src/excel_import/
-├── __init__.py           # superficie pública: parse_workbook, normalize_type
-├── schemas.py            # Pydantic v2 — ExcelPreview, PreviewTable, PreviewColumn
-├── workbook_reader.py    # openpyxl read-only → RawWorkbook
-├── service.py            # orquestador (split schema.tabla, match descripciones)
-└── type_normalizer.py    # pipeline tokenize → exact → alias → fuzzy
-```
-
-Pipeline funcional (sin estado entre requests):
-
-```mermaid
-flowchart LR
-    BYT["bytes (.xlsx subido)"] --> RD["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
-    RD --> SV["service.parse_workbook"]
-    SV --> SP["_split_sheet_name<br/>(schema.table)"]
-    SV --> TN["type_normalizer.normalize_type<br/>(rapidfuzz)"]
-    SV --> TD["_match_table_description<br/>(TablesDescriptions)"]
-    SP --> EP["ExcelPreview<br/>(Pydantic)"]
-    TN --> EP
-    TD --> EP
-```
-
-Decisiones clave:
-- El parsing es **100 % determinista**, sin LLM. El frontend recibe el
-  preview, lo edita en el modal y luego invoca el PUT habitual a
-  `/api/models/{id}` con las tablas resultantes.
-- La normalización de tipos sigue el orden `tokenize → exact → alias →
-  fuzzy` con un umbral configurable (`FUZZY_THRESHOLD = 75.0`). Cualquier
-  string que no supere el umbral queda con `matched_via="unknown"` para
-  que el usuario corrija en la UI — no se bloquea el import.
-- La hoja `TablesDescriptions` es opcional (match case-insensitive); si
-  no existe, las tablas vienen sin descripción y todo lo demás funciona.
-
-Ver `doc/workflow.md` para el detalle del pipeline.
+Módulo aislado (sin estado compartido) montado en `/api/excel-import/preview`.
+Pipeline 100 % determinista (sin LLM): bytes → `workbook_reader` → `service` →
+`type_normalizer` → `ExcelPreview`. Ver `doc/workflow.md`.
 
 ---
 
-## 3. Autenticación
+## 4. Autenticación
 
 ```mermaid
 sequenceDiagram
     participant U as Browser
-    participant M as Next.js middleware
+    participant PX as Next.js proxy.ts
     participant FA as backend-data-model-hub
     participant DB as Cosmos DB
 
@@ -200,42 +187,40 @@ sequenceDiagram
     FA->>DB: mark_login_success (best-effort)
     FA-->>U: 200 + Set-Cookie modeler-auth (HttpOnly, SameSite=Lax)
 
-    U->>M: GET /projects/abc (HTML)
-    M->>M: jose.jwtVerify(cookie)
+    U->>PX: GET /projects/abc (navegación HTML)
+    PX->>PX: jose.jwtVerify(cookie)
     alt token válido
-        M-->>U: render page
+        PX-->>U: render page
     else token inválido o ausente
-        M-->>U: redirect /login?next=...
+        PX-->>U: redirect /login?next=...
     end
 
     U->>FA: GET /api/projects (XHR con cookie)
     FA->>FA: verify_token
     FA->>DB: get_user_by_id (recarga viva)
     DB-->>FA: UserDoc actualizado
-    FA->>FA: filtrar por permissions
+    FA->>FA: filtrar por permissions (visible_project_ids)
     FA-->>U: lista filtrada
 ```
 
 **Detalles importantes**:
 
-- **`AUTH_SECRET` compartido** entre frontend y backend — la cookie
-  firmada por uno se valida del otro. El middleware Next.js usa `jose`
-  (Edge runtime) y este backend usa `PyJWT`, ambos con HS256 y 10 h de
-  vida. Si los dos `.env` divergen, 401 silencioso en todas las requests.
-- **Bootstrap admin**: la primera vez que se invoca `/api/auth/login`, si
-  no existe ningún usuario `admin` en DB se crea `admin / dogadmin2019`.
-  Es **idempotente** y se hace dentro del handler para no bloquear el
-  arranque del servicio (`src/api/auth.py::ensure_bootstrap_admin`).
-- **Recarga viva por request**: `get_current_user` no confía en los
-  claims del JWT — relee `UserDoc` desde DB para que cambios de permisos
-  / desactivaciones tomen efecto sin esperar a que expire la cookie.
-- **Permisos** (`src/api/dependencies.py`): granularidad scope-project o
-  scope-model, niveles `view` / `edit`. Admin tiene `edit` total. Las
-  funciones replican exactamente `web-data-model-hub/src/lib/auth/permissions.ts`.
+- **`AUTH_SECRET` compartido** entre `web-data-model-hub/.env` y este `.env`. El
+  proxy de Next.js usa `jose` (Edge) y este backend usa `PyJWT`, ambos HS256 y
+  10 h de vida. Si divergen → 401 silencioso en todas las requests (causa #1 de
+  "el login se queda colgado").
+- **Bootstrap admin**: el primer `POST /api/auth/login` crea `admin / dogadmin2019`
+  si no existe ningún usuario `admin`. Idempotente (`src/api/auth.py::ensure_bootstrap_admin`).
+- **Recarga viva por request**: `get_current_user` relee `UserDoc` desde DB; no
+  confía en los claims del JWT, así que desactivar un usuario o cambiar permisos
+  toma efecto sin esperar a que expire la cookie.
+- **Permisos** (`src/api/dependencies.py`): granularidad **scope-proyecto**,
+  niveles `view` / `edit`. Admin tiene `edit` total. (El antiguo scope-modelo
+  desapareció: hay un canvas por proyecto, el proyecto es la unidad de acceso.)
 
 ---
 
-## 4. Flujo end-to-end: editar un modelo + importar Excel
+## 5. Flujo end-to-end: abrir y editar un proyecto
 
 ```mermaid
 sequenceDiagram
@@ -243,118 +228,67 @@ sequenceDiagram
     participant API as backend-data-model-hub
     participant DB as Cosmos DB
 
-    Note over FE,DB: 1. Cargar el modelo
-    FE->>API: GET /api/models/{M}
-    API->>DB: find_one models + 3 paralelos (tables / rels / views)
-    DB-->>API: docs hidratados
-    API-->>FE: DataModelDoc completo
+    Note over FE,DB: 1. Abrir el proyecto (hub + editor)
+    FE->>API: GET /api/projects/{P}
+    API->>DB: find_one projects (incluye engines/layers/domains)
+    API-->>FE: ProjectDoc
+    FE->>API: GET /api/projects/{P}/canvas
+    API->>DB: find project_tables + project_relationships (paralelo, por projectId)
+    API-->>FE: { tables, relationships } hidratado
 
-    Note over FE,DB: 2. Importar tablas desde Excel
-    FE->>API: POST /api/excel-import/preview (multipart .xlsx)
-    API->>API: workbook_reader → service → type_normalizer
-    API-->>FE: ExcelPreview (tables, warnings, descriptions found)
-    FE->>FE: el usuario edita columnas / tipos en el modal
+    Note over FE,DB: 2. Editar modelos/dominios del proyecto
+    FE->>API: PUT /api/projects/{P} (engines/layers/domains)
+    API->>DB: update projects
+    API-->>FE: ProjectDoc actualizado
 
-    Note over FE,DB: 3. Aplicar al canvas + persistir
-    FE->>FE: previewToTables(...)  →  TableModel[]
-    FE->>API: PUT /api/models/{M} (con tables nuevos)
+    Note over FE,DB: 3. Editar tablas/relaciones (autosave del editor)
+    FE->>API: PUT /api/projects/{P}/canvas (tables, relationships sin position)
     API->>API: _ensure_column_ids (stamp uuid si faltan)
-    API->>DB: update models + _replace_entities en model_tables / rels / views
-    API-->>FE: DataModelDoc actualizado
+    API->>DB: _replace_entities (soft-delete + bulkWrite upsert por projectId)
+    API-->>FE: { tables, relationships }
 
-    Note over FE,DB: 4. Layout (drag o auto-arrange ELK)
-    FE->>API: PATCH /api/models/{M}/positions
-    API->>DB: bulk_update_positions (solo campo position)
-    API-->>FE: {tables: N, views: M}
+    Note over FE,DB: 4. (opcional) Persistir posiciones del canvas
+    FE->>API: PATCH /api/projects/{P}/positions {tableId: {x,y}}
+    API->>DB: bulk_update_positions (solo el campo position)
+    API-->>FE: {updated: N}
 ```
 
-**Decisiones de diseño** que se ven en este flujo:
+**Decisiones de diseño visibles en este flujo**:
 
-1. `GET /api/models/{id}` hace 4 queries en paralelo (`asyncio.gather`)
-   en lugar de un `$lookup` — Cosmos DB RU no recomienda joins amplios y
-   las child collections ya tienen índice por `modelId`.
-2. `PATCH /positions` es un endpoint dedicado que solo escribe el campo
-   `position`. Sin él, el handler de drag (≈500 ms debounce) tendría que
-   re-enviar todo el modelo (potencialmente varios MB) por cada cambio.
-3. `_ensure_column_ids` es una safety-net: el frontend ya stampea UUID
-   en columnas nuevas, pero un import desde Excel o un cliente
-   desactualizado podría llegar sin `id`. Las relaciones referencian
-   `TableColumn.id` (no `name`), así que un id faltante rompe edges.
-
----
-
-## 5. Excel-import (vista de capas)
-
-```mermaid
-flowchart TB
-    REQ["POST /api/excel-import/preview<br/>(multipart .xlsx)"]
-    REQ --> RT["excel_import.py router<br/>· valida extensión<br/>· cap 10 MB<br/>· lee bytes a memoria"]
-    RT --> SVC["service.parse_workbook(bytes)"]
-
-    subgraph PIPE["src/excel_import/"]
-        SVC --> WR["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
-        WR --> RW["RawWorkbook<br/>{sheets, table_descriptions, warnings}"]
-        RW --> SP["_split_sheet_name<br/>(schema.table o (None, name))"]
-        RW --> TN["type_normalizer.normalize_type<br/>(tokenize → exact → alias → fuzzy)"]
-        RW --> TD["_match_table_description<br/>(case-insensitive)"]
-        SP --> EP["ExcelPreview"]
-        TN --> EP
-        TD --> EP
-    end
-
-    EP --> RES["JSON {success, data: ExcelPreview}"]
-```
-
-Detalles que afectan el contrato HTTP:
-
-- `schema` se serializa con `by_alias=True` (el atributo Python es
-  `schema_` porque `BaseModel.schema()` está deprecado pero todavía
-  expuesto en Pydantic v2; el JSON sale como `"schema"`).
-- `matched_via` es un literal: `"exact" | "alias" | "fuzzy" | "unknown" |
-  "empty"`. El frontend lo usa para pintar el badge bajo el dropdown del
-  tipo (`unknown` aparece naranja para invitar a corregir).
-- Si el archivo tiene ≥1 hoja vacía, el response trae `warnings` con el
-  detalle — no se levanta excepción.
+1. El canvas se hidrata con **dos colecciones por `projectId`** (con índice), no
+   con `$lookup` — Cosmos RU no recomienda joins amplios.
+2. `PUT /canvas` **reemplaza en bloque** tablas y/o relaciones (lo que llegue en
+   el body). El frontend lo invoca con debounce desde el editor.
+3. `PUT /canvas` **omite `position`** a propósito (el store lo stripea): las
+   posiciones se escriben solo por `PATCH /positions`, para que un Save en una
+   pestaña no pise un drag de otra. En la práctica el editor actual trata las
+   posiciones como **per-sesión** (auto-organiza al abrir).
 
 ---
 
 ## 6. Decisiones de diseño
 
-### Por qué separar el backend de la plataforma del backend del agente
-El servicio de modelado conversacional (LLM) tiene un perfil de recursos
-muy distinto: necesita Azure AI Foundry, tokens-por-minuto, semáforos
-para concurrencia de pipeline, dependencias pesadas (Docling, openai SDK,
-agent-framework). Mantenerlos separados permite escalarlos y desplegarlos
-de forma independiente. Este backend arranca en segundos, tiene huella
-RAM baja y sus únicas dependencias externas son Cosmos DB y la cuenta de
-JWT del frontend.
+### Por qué separar el backend de plataforma del backend del agente
+El modelado conversacional (LLM) tiene un perfil de recursos muy distinto:
+Azure AI Foundry, tokens-por-minuto, semáforos de concurrencia, dependencias
+pesadas. Mantenerlo en `app-agents-modeler` permite escalar y desplegar ambos
+de forma independiente. Este backend solo depende de Cosmos DB y del
+`AUTH_SECRET` compartido con el frontend.
 
-### Por qué Cosmos DB for MongoDB y no SQL nativo
-Una única cuenta de Cosmos DB sirve a frontend y backend con la API
-MongoDB, lo que permite usar Motor (async) acá y la SDK estándar de
-MongoDB desde scripts auxiliares. Las colecciones hijas (`model_tables`,
-etc.) tienen índices compuestos por `modelId` que dan latencia constante
-para la hidratación.
+### Por qué project-centric (y no "models")
+El rediseño Aurora unificó el modelo: un proyecto tiene un único canvas, con sus
+niveles y dominios embebidos. Re-shardear las tablas/relaciones por `projectId`
+da hidratación con latencia constante y elimina la capa intermedia "modelo =
+diagrama" que antes complicaba permisos y navegación.
 
-### Por qué un único proceso FastAPI
-El backend está pensado para correr en un único proceso por deploy.
-Multi-proceso requeriría coordinar la cache de bootstrap admin
-(`_bootstrap_done`) y revisar la concurrencia de Motor. Si se necesita
-escalar horizontalmente, el siguiente paso es desplegarlo detrás de un
-load balancer (todos los handlers son stateless excepto el flag de
-bootstrap, que es idempotente).
+### Por qué `_ensure_column_ids` es defensivo
+Los `id` estables de columna sobreviven a renames y son la base de las
+relaciones FK (los endpoints apuntan a `TableColumn.id`, no a `name`). Un import
+de Excel o un cliente desactualizado podría enviar columnas sin id; el helper es
+idempotente, barato y mantiene la invariante de que **toda columna persistida
+tiene un uuid**.
 
 ### Por qué el Excel-import no toca el LLM
-La normalización de tipos es resoluble con texto/regex/fuzzy. Pagarle al
-LLM cada vez que el usuario sube un Excel sería lento, caro y
-no-determinista. El pipeline actual (`rapidfuzz` con `fuzz.ratio` y
-threshold 75) corrige typos comunes (`decximam → decimal`, `datatime →
-datetime`) sin riesgos. Lo que no encaja queda en `unknown` y el usuario
-corrige a mano.
-
-### Por qué `_ensure_column_ids` es defensivo aunque el frontend stampea ids
-Los ids estables sobreviven a renames y son la base de las relaciones FK.
-Un cliente desactualizado, un script de migración, o un futuro importador
-podría enviar columnas sin id — y eso rompería las edges del canvas en
-silencio. El helper es idempotente, barato, y mantiene la invariante de
-que **toda columna persistida tiene un uuid**.
+La normalización de tipos es resoluble con regex + fuzzy (`rapidfuzz`, threshold
+75). Es rápido, determinista y reentrante. Lo que no encaja queda como
+`unknown` y el usuario corrige en la UI. Ver `doc/workflow.md`.

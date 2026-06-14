@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -40,11 +41,19 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 class CreateProjectRequest(BaseModel):
     name: str
     description: str | None = None
+    # Aurora hierarchy — small embedded arrays. Usually empty at creation;
+    # the Project hub fills them in later via PUT.
+    engines: list[str] | None = None
+    layers: list[dict[str, Any]] | None = None
+    domains: list[dict[str, Any]] | None = None
 
 
 class UpdateProjectRequest(BaseModel):
     name: str | None = None
     description: str | None = None
+    engines: list[str] | None = None
+    layers: list[dict[str, Any]] | None = None
+    domains: list[dict[str, Any]] | None = None
 
 
 @router.get("")
@@ -65,12 +74,17 @@ async def create_new_project(body: CreateProjectRequest, user: AdminDep):
             detail="Project name is required.",
         )
     now = datetime.now(timezone.utc).isoformat()
-    project = ProjectDoc(
-        id=str(uuid.uuid4()),
-        name=body.name.strip(),
-        description=body.description.strip() if body.description else None,
-        createdAt=now,
-        updatedAt=now,
+    project = ProjectDoc.model_validate(
+        {
+            "id": str(uuid.uuid4()),
+            "name": body.name.strip(),
+            "description": body.description.strip() if body.description else None,
+            "engines": body.engines or [],
+            "layers": body.layers or [],
+            "domains": body.domains or [],
+            "createdAt": now,
+            "updatedAt": now,
+        }
     )
     created = await create_project(project)
     return ok(created.model_dump())

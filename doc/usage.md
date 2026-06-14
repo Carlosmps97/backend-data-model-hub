@@ -34,16 +34,7 @@ Por defecto escucha en `0.0.0.0:8000`. La OpenAPI auto-generada queda en
 
 ```bash
 curl http://localhost:8000/api/health
-```
-
-Respuesta esperada:
-
-```json
-{
-  "status": "ok",
-  "version": "1.0.0",
-  "db_connected": true
-}
+# → {"status":"ok","version":"1.0.0","db_connected":true}
 ```
 
 Si `db_connected: false`, los endpoints que toquen Cosmos devuelven 500.
@@ -51,66 +42,72 @@ Verifica `COSMOS_CONNECTION_STRING` en `.env` y reiniciá el proceso.
 
 ---
 
-## 2. Flujo end-to-end típico (desde el frontend)
+## 2. Mapa de endpoints
+
+| Método | Ruta | Auth | Qué hace |
+|---|---|---|---|
+| GET | `/api/health` | público | liveness + `db_connected` |
+| POST | `/api/auth/login` | público | login → `Set-Cookie modeler-auth` |
+| POST | `/api/auth/logout` | público | limpia la cookie |
+| GET | `/api/auth/me` | cookie | usuario actual (401 si no hay sesión) |
+| GET | `/api/projects` | sesión | proyectos visibles (filtrado por permisos) |
+| POST | `/api/projects` | **admin** | crea proyecto (+ engines/layers/domains opcionales) |
+| GET | `/api/projects/{id}` | view | proyecto con su jerarquía embebida |
+| PUT | `/api/projects/{id}` | edit | actualiza nombre/descr y **engines/layers/domains** |
+| DELETE | `/api/projects/{id}` | **admin** | soft-delete + cascade al canvas |
+| GET | `/api/projects/{id}/canvas` | view | `{ tables, relationships }` hidratado |
+| PUT | `/api/projects/{id}/canvas` | edit | reemplaza tablas y/o relaciones en bloque |
+| PATCH | `/api/projects/{id}/positions` | edit | persiste posiciones `{tableId: {x,y}}` |
+| GET | `/api/admin/users` | **admin** | lista usuarios |
+| POST/PUT/DELETE | `/api/admin/users[/{id}]` | **admin** | CRUD usuarios + permisos |
+| POST | `/api/excel-import/preview` | sesión | preview normalizado de un `.xlsx` |
+
+> No hay `/api/models*`: el canvas del proyecto reemplazó a la antigua
+> colección `models`.
+
+---
+
+## 3. Flujo end-to-end típico (desde el frontend)
 
 ```mermaid
 sequenceDiagram
     participant U as Usuario (browser)
     participant FE as Frontend Next.js
     participant API as backend-data-model-hub (:8000)
-    participant AG as app-agents-modeler (:8001)
 
     Note over U,API: 0. Login (una vez por jornada)
     U->>FE: abre /login + credenciales
     FE->>API: POST /api/auth/login
     API-->>FE: 200 + Set-Cookie modeler-auth
     FE->>API: GET /api/auth/me (hidrata useAuthStore)
-    API-->>FE: AuthUser
 
-    Note over U,API: 1. Trabajar en un modelo
-    U->>FE: abre Project A / Model M
-    FE->>API: GET /api/models/{M}
-    API-->>FE: DataModel hidratado
+    Note over U,API: 1. Abrir un proyecto
+    U->>FE: abre Project hub / editor
+    FE->>API: GET /api/projects/{P}            (jerarquía)
+    FE->>API: GET /api/projects/{P}/canvas     (tablas + relaciones)
 
     Note over U,API: 2. Importar tablas desde Excel
     U->>FE: arrastra tablas.xlsx al modal "Import"
     FE->>API: POST /api/excel-import/preview (multipart)
     API-->>FE: ExcelPreview (tables, warnings)
-    U->>FE: ajusta columnas/tipos en el modal
-    FE->>FE: previewToTables → TableModel[]
+    U->>FE: ajusta columnas/tipos en el modal → previewToTables
 
-    Note over U,API: 3. Persistir cambios
-    FE->>API: PUT /api/models/{M} (con tables nuevos)
-    API-->>FE: DataModel actualizado
+    Note over U,API: 3. Persistir (autosave del editor, debounce)
+    FE->>API: PUT /api/projects/{P}/canvas (tables, relationships)
+    API-->>FE: { tables, relationships }
 
-    Note over U,AG: 4. Modelado conversacional (opcional)
-    U->>FE: abre AI Agent panel
-    FE->>AG: POST /api/conversations + /model
-    AG-->>FE: ModelingResponse (tablas + DDL)
-    U->>FE: "Aplicar al canvas"
-    FE->>API: PUT /api/models/{M}
-    API-->>FE: DataModel actualizado
-
-    Note over U,API: 5. Drag de tablas en el canvas
-    U->>FE: mueve tablas
-    FE->>API: PATCH /api/models/{M}/positions (debounce 500ms)
-    API-->>FE: {tables: N, views: M}
+    Note over U,API: 4. Editar modelos/dominios del proyecto
+    FE->>API: PUT /api/projects/{P} (engines/layers/domains)
+    API-->>FE: ProjectDoc actualizado
 ```
 
 ---
 
-## 3. Llamadas con `curl` (para diagnóstico)
+## 4. Llamadas con `curl` (para diagnóstico)
 
-> Todos los ejemplos asumen que ya hiciste login y tenés `cookies.txt`
-> con el cookie `modeler-auth`.
+> Los ejemplos asumen un `cookies.txt` con el cookie `modeler-auth`.
 
-### 3.1 Health
-
-```bash
-curl http://localhost:8000/api/health
-```
-
-### 3.2 Auth
+### 4.1 Auth
 
 ```bash
 # Login (escribe el cookie en cookies.txt)
@@ -118,153 +115,109 @@ curl -c cookies.txt -X POST http://localhost:8000/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"dogadmin2019"}'
 
-# Quién soy
 curl -b cookies.txt http://localhost:8000/api/auth/me
-
-# Logout
 curl -b cookies.txt -X POST http://localhost:8000/api/auth/logout
 ```
 
-### 3.3 Proyectos
+### 4.2 Proyectos
 
 ```bash
-# Listar proyectos visibles para el usuario
+# Listar proyectos visibles
 curl -b cookies.txt http://localhost:8000/api/projects
 
-# Crear proyecto (admin only)
+# Crear proyecto (admin) — engines/layers/domains opcionales
 curl -b cookies.txt -X POST http://localhost:8000/api/projects \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Sales","description":"Sales analytics"}'
+  -d '{"name":"Lakehouse","description":"Repo de datos","engines":["databricks_sql"]}'
 
-# Detalle (con permisos)
+# Detalle (incluye layers/domains embebidos)
 curl -b cookies.txt http://localhost:8000/api/projects/<uuid>
 
-# Actualizar (edit access)
+# Actualizar jerarquía (niveles + dominios)
 curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid> \
   -H 'Content-Type: application/json' \
-  -d '{"description":"Updated description"}'
+  -d '{
+        "layers":[
+          {"id":"rdv","name":"RDV","full":"Raw Data Vault","color":"#0e7490","order":0,"engine":"databricks_sql"},
+          {"id":"udv","name":"UDV","full":"Unified Data Vault","color":"#4f46e5","order":1}
+        ],
+        "domains":[
+          {"id":"finanzas","name":"Finanzas","color":"#0d9488","owner":"M. Torres",
+           "sensitivity":"Confidential","subdomains":["Tarjetas","Savings"],"layers":["rdv","udv"]}
+        ]
+      }'
 
-# Borrar (admin only — cascade a modelos)
+# Borrar (admin — cascade al canvas)
 curl -b cookies.txt -X DELETE http://localhost:8000/api/projects/<uuid>
 ```
 
-### 3.4 Modelos
+### 4.3 Canvas (tablas + relaciones)
 
 ```bash
-# Listar modelos de un proyecto (lightweight, solo count de tablas)
-curl -b cookies.txt 'http://localhost:8000/api/models?projectId=<uuid>'
+# Hidratar el canvas
+curl -b cookies.txt http://localhost:8000/api/projects/<uuid>/canvas
 
-# Listar con tablas/relationships/views completos
-curl -b cookies.txt 'http://localhost:8000/api/models?projectId=<uuid>&full=true'
-
-# Modelo hidratado por id
-curl -b cookies.txt http://localhost:8000/api/models/<modelId>
-
-# Crear modelo
-curl -b cookies.txt -X POST http://localhost:8000/api/models \
+# Reemplazar tablas + relaciones en bloque
+curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid>/canvas \
   -H 'Content-Type: application/json' \
   -d '{
-        "projectId": "<projectUuid>",
-        "name": "My Model",
-        "engine": "postgresql",
-        "tables": [],
-        "relationships": [],
-        "views": [],
-        "domainCatalog": []
+        "tables":[
+          {"id":"t1","schema":"rdv","name":"h_cliente","layer":"rdv","domain":"finanzas",
+           "columns":[{"id":"c1","name":"id_cliente","dataType":"bigint","isPrimaryKey":true}],
+           "views":[]}
+        ],
+        "relationships":[]
       }'
 
-# Actualizar (PUT parcial)
-curl -b cookies.txt -X PUT http://localhost:8000/api/models/<modelId> \
+# Persistir posiciones del canvas (endpoint liviano)
+curl -b cookies.txt -X PATCH http://localhost:8000/api/projects/<uuid>/positions \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Renamed Model"}'
-
-# Patch de posiciones (solo el campo position)
-curl -b cookies.txt -X PATCH http://localhost:8000/api/models/<modelId>/positions \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "tables": {
-          "<tableId-1>": {"x": 100, "y": 200},
-          "<tableId-2>": {"x": 500, "y": 200}
-        }
-      }'
-
-# Soft-delete
-curl -b cookies.txt -X DELETE http://localhost:8000/api/models/<modelId>
+  -d '{"tables":{"t1":{"x":120,"y":80}}}'
 ```
 
-### 3.5 Excel-import
+### 4.4 Excel-import
 
 ```bash
-# Preview de un workbook
 curl -b cookies.txt -X POST http://localhost:8000/api/excel-import/preview \
   -F "file=@./tablas.xlsx"
 ```
 
-Response:
+Response (resumen):
 
 ```json
 {
   "success": true,
   "data": {
-    "tables": [
-      {
-        "sheetName": "dbo.Customer",
-        "schema": "dbo",
-        "name": "Customer",
-        "description": "Clientes B2B",
-        "columns": [
-          {
-            "name": "id",
-            "dataType": "bigint",
-            "rawDataType": "BIGINT",
-            "length": null,
-            "scale": null,
-            "functionalDefinition": "Identificador único",
-            "typeConfidence": 100,
-            "typeMatchedVia": "exact"
-          },
-          {
-            "name": "amount",
-            "dataType": "decimal",
-            "rawDataType": "decximam(10,2)",
-            "length": 10,
-            "scale": 2,
-            "functionalDefinition": "Monto",
-            "typeConfidence": 87,
-            "typeMatchedVia": "fuzzy"
-          }
-        ]
-      }
-    ],
+    "tables": [{
+      "sheetName": "dbo.Customer", "schema": "dbo", "name": "Customer",
+      "description": "Clientes B2B",
+      "columns": [
+        {"name":"id","dataType":"bigint","rawDataType":"BIGINT","typeConfidence":100,"typeMatchedVia":"exact"},
+        {"name":"amount","dataType":"decimal","rawDataType":"decximam(10,2)","length":10,"scale":2,"typeConfidence":87,"typeMatchedVia":"fuzzy"}
+      ]
+    }],
     "tableDescriptionsFound": true,
     "warnings": []
   }
 }
 ```
 
-### 3.6 Admin de usuarios
+### 4.5 Admin de usuarios
 
 ```bash
-# Listar usuarios (admin only)
 curl -b cookies.txt http://localhost:8000/api/admin/users
 
-# Crear usuario
+# Crear usuario con permiso por PROYECTO
 curl -b cookies.txt -X POST http://localhost:8000/api/admin/users \
   -H 'Content-Type: application/json' \
   -d '{
-        "username": "alice",
-        "password": "s3cret123",
-        "role": "editor",
-        "isActive": true,
-        "permissions": [
-          {"scope": "project", "projectId": "<uuid>", "level": "edit"}
-        ]
+        "username":"alice","password":"s3cret123","role":"editor","isActive":true,
+        "permissions":[{"projectId":"<uuid>","level":"edit"}]
       }'
 
-# Actualizar (password queda con el actual si se omite)
+# Actualizar (password queda igual si se omite)
 curl -b cookies.txt -X PUT http://localhost:8000/api/admin/users/<userId> \
-  -H 'Content-Type: application/json' \
-  -d '{"isActive": false}'
+  -H 'Content-Type: application/json' -d '{"isActive": false}'
 
 # Hard-delete (no se puede borrar uno mismo)
 curl -b cookies.txt -X DELETE http://localhost:8000/api/admin/users/<userId>
@@ -272,154 +225,90 @@ curl -b cookies.txt -X DELETE http://localhost:8000/api/admin/users/<userId>
 
 ---
 
-## 4. Formato del Excel para `/api/excel-import/preview`
+## 5. Formato del Excel para `/api/excel-import/preview`
 
-### 4.1 Reglas
+### 5.1 Reglas
 
-- **Cada hoja es una tabla**. El nombre de la hoja puede llevar schema
-  con el separador `.`:
-  - `dbo.Customer` → schema=`dbo`, table=`Customer`
-  - `Customer` → schema=`None`, table=`Customer`
-  - `a.b.c` → schema=`a`, table=`b.c` (solo el primer `.` separa)
+- **Cada hoja es una tabla**. El nombre de la hoja puede llevar schema con `.`:
+  `dbo.Customer` → schema=`dbo`, table=`Customer`; `a.b.c` → `("a","b.c")`
+  (solo el primer `.` separa).
 - **La primera fila es header obligatoria** (se descarta).
-- **Lectura por posición** dentro de cada hoja:
-
-| Columna A | Columna B | Columna C |
-|---|---|---|
-| nombre de la columna | tipo de dato (con o sin parámetros) | descripción funcional (opcional) |
-
-Ejemplo:
+- **Lectura por posición**: A=nombre, B=tipo (con o sin paréntesis), C=descripción (opcional).
 
 | (A) name | (B) type | (C) description |
 |---|---|---|
 | customer_id | BIGINT | Identificador único |
-| full_name | VARCHAR(120) | Nombre completo |
 | amount | decimal(10, 2) | Monto de la operación |
-| created_at | timestamp | Fecha de creación |
 
-### 4.2 Hoja opcional `TablesDescriptions`
+### 5.2 Hoja opcional `TablesDescriptions`
 
-Si existe (case-insensitive: `TablesDescriptions`, `tablesdescriptions`,
-etc.), el backend la lee y matchea cada fila con la tabla correspondiente:
+Si existe (case-insensitive), el backend la lee y matchea cada fila con su tabla
+(por `sheetName`, `schema.table` o `table`). Las entradas sin match se reportan
+en `warnings`.
 
-| TableName | TableDescription |
+### 5.3 Normalización de tipos
+
+| Input | Resultado |
 |---|---|
-| dbo.Customer | Clientes B2B con datos de facturación |
-| Order | Cabecera de órdenes de venta |
+| `BIGINT` | `bigint` (exact) |
+| `int` | `integer` (alias) |
+| `decimal(10, 2)` | `decimal`, len=10, scale=2 (exact) |
+| `decximam(10,2)` | `decimal` (fuzzy, conf≈86) |
+| `variant` (Snowflake) | `variant` (unknown, conf=0) |
+| `(vacío)` | `varchar` (empty) |
 
-Estrategia de match (case-insensitive, en orden):
-1. `sheetName` exacto.
-2. `schema.table_name` reconstruido.
-3. `table_name` solo.
-
-Si una entrada de `TablesDescriptions` no matchea ninguna hoja, el
-backend la reporta en `warnings` para que el usuario detecte el typo.
-
-### 4.3 Normalización de tipos
-
-| Input del usuario | Resultado |
-|---|---|
-| `BIGINT` | `bigint` (matched_via=`exact`) |
-| `int` | `integer` (matched_via=`alias`) |
-| `decimal(10, 2)` | `decimal`, length=10, scale=2 (matched_via=`exact`) |
-| `VARCHAR(50)` | `varchar`, length=50 (matched_via=`exact`) |
-| `decximam(10,2)` | `decimal`, length=10, scale=2 (matched_via=`fuzzy`, confidence≈86) |
-| `datatime` | `datetime` (matched_via=`fuzzy`) |
-| `variant` (Snowflake-only) | `variant` (matched_via=`unknown`, confidence=0) |
-| `(vacío)` | `varchar` (matched_via=`empty`) |
-
-Los `unknown` no rompen el import — el frontend los pinta con badge
-naranja y el usuario corrige en el modal antes de aplicar al canvas.
+Los `unknown` no rompen el import — el usuario corrige en el modal antes de
+aplicar al canvas. Ver `doc/workflow.md`.
 
 ---
 
-## 5. Operación: monitorear errores
+## 6. Operación: monitorear errores
 
-### Logging estructurado
-
-`LOG_FORMAT=json` produce una línea por evento, ideal para Loki /
-Datadog / cualquier colector de logs:
-
-```json
-{"level":"info","time":"...","logger":"api.main","message":"request started","request_id":"a1b2c3d4e5f6","method":"POST","path":"/api/excel-import/preview"}
-{"level":"info","time":"...","logger":"api.main","message":"request completed","request_id":"a1b2c3d4e5f6","method":"POST","path":"/api/excel-import/preview","status":200,"ms":143}
-```
-
-Eventos clave para alertar:
+`LOG_FORMAT=json` produce una línea por evento (ideal para Loki / Datadog). Cada
+request loguea inicio/fin con `request_id` (también devuelto en `X-Request-ID`).
 
 | Mensaje | Cuándo aparece |
 |---|---|
-| `motor db connection failed` | En lifespan, Cosmos DB no responde |
+| `motor db connection failed` | En lifespan: Cosmos no responde |
 | `request crashed` | Un handler levantó excepción no controlada |
-| `excel parse failed` | openpyxl falló al abrir el archivo (probablemente corrupto) |
-
-El `X-Request-ID` que se devuelve en el response permite buscar el
-request en los logs sin ambigüedad.
+| `excel parse failed` | openpyxl falló (archivo corrupto / protegido) |
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 ### "Login se queda colgado / 401 silencioso"
-
-Causa típica: `AUTH_SECRET` distinto entre el `.env` del frontend y el
-del backend.
-
-**Verifica**:
+Causa típica: `AUTH_SECRET` distinto entre los dos `.env`.
 
 ```bash
 grep -E '^AUTH_SECRET' web-data-model-hub/.env backend-data-model-hub/.env
 ```
 
-Ambos valores deben ser idénticos. Si uno está vacío y el otro custom,
-se rompe.
+Ambos valores deben ser idénticos.
 
-### `403 Forbidden` en `/api/projects/{id}`
-
-El usuario está autenticado pero no tiene `permissions` con `projectId`
-igual al proyecto solicitado. Como admin, edita los permisos en
-`/admin/users` o, si no podés entrar al frontend, asigna manualmente en
-Cosmos DB:
+### `403 Forbidden` en `/api/projects/{id}` (o su canvas)
+El usuario está autenticado pero no tiene un `permissions` con ese `projectId`.
+Como admin, asignalo en `/admin/users`, o directo en Cosmos:
 
 ```javascript
 db.users.updateOne(
   { username: "<user>" },
-  { $push: { permissions: { scope: "project", projectId: "<uuid>", level: "edit" } } }
+  { $push: { permissions: { projectId: "<uuid>", level: "edit" } } }
 )
 ```
 
 ### `500` en cualquier endpoint que toque DB
-
-`GET /api/health` → `db_connected: false`. La causa es que Motor no
-pudo conectar a Cosmos. Verifica en este orden:
-
-1. `COSMOS_CONNECTION_STRING` está completo (incluye `tls=true` y
-   `authMechanism=SCRAM-SHA-256`).
-2. La IP del servidor está habilitada en el firewall de Cosmos DB
-   (vCore).
+`GET /api/health` → `db_connected: false`. Verifica, en orden:
+1. `COSMOS_CONNECTION_STRING` completo (incluye `tls=true` y `authMechanism=SCRAM-SHA-256`).
+2. La IP del servidor habilitada en el firewall de Cosmos (vCore).
 3. La connection string no expiró (rotación de keys).
 
-Después de corregir, **reiniciá el proceso** — la conexión se intenta
-solo en el lifespan.
+Después de corregir, **reiniciá el proceso** (la conexión se intenta solo en el lifespan).
 
-### `400 Could not parse Excel file: ...` en el preview
-
-Causas comunes:
-- El archivo está corrupto o no es un xlsx real (rename de `.csv` a `.xlsx`).
-- El archivo está protegido con contraseña.
-- El archivo es xlsb (Excel binario) — no soportado por openpyxl.
-
-Solución: re-exportar desde Excel como `.xlsx` "estándar".
-
-### `413 File too large`
-
-Tope hardcodeado: 10 MB en `api/routes/excel_import.py::_MAX_UPLOAD_BYTES`.
-Un xlsx normal con decenas de miles de columnas pesa mucho menos — si
-estás chocando este límite, probablemente el archivo tiene imágenes /
-datos embedded que conviene limpiar.
+### `400 Could not parse Excel file: ...`
+Archivo corrupto, protegido con contraseña, o `.xlsb` (no soportado por openpyxl).
+Re-exportar como `.xlsx` estándar.
 
 ### Bootstrap admin no aparece en DB
-
-El bootstrap se dispara solo en el handler de `/api/auth/login`. Si
-nunca llamaste al endpoint, el admin no existe todavía. Hacé un login
-con `admin / dogadmin2019` y se crea en ese mismo request.
+Se dispara solo en el handler de `/api/auth/login`. Hacé un login con
+`admin / dogadmin2019` y se crea en ese mismo request.

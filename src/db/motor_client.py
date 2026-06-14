@@ -89,16 +89,13 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await asyncio.gather(
         # users
         _try("users", [("username", 1)], unique=True),
-        # models
-        _try("models", [("projectId", 1), ("updatedAt", -1)]),
-        # model_tables
-        _try("model_tables", [("modelId", 1)]),
-        _try("model_tables", [("modelId", 1), ("schema", 1)]),
-        _try("model_tables", [("modelId", 1), ("domain", 1)]),
-        # model_relationships
-        _try("model_relationships", [("modelId", 1)]),
-        # model_views
-        _try("model_views", [("modelId", 1)]),
-        _try("model_views", [("modelId", 1), ("sourceTableId", 1)]),
+        # projects
+        _try("projects", [("updatedAt", -1)]),
+        # project_tables (shard key projectId)
+        _try("project_tables", [("projectId", 1)]),
+        _try("project_tables", [("projectId", 1), ("layer", 1)]),
+        _try("project_tables", [("projectId", 1), ("domain", 1)]),
+        # project_relationships (shard key projectId)
+        _try("project_relationships", [("projectId", 1)]),
     )
     log.info("motor indexes ensured")
