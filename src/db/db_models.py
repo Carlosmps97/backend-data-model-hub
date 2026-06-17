@@ -100,6 +100,13 @@ class DomainDoc(BaseModel):
     description: str | None = None
     subdomains: list[str] = Field(default_factory=list)
     layers: list[str] = Field(default_factory=list)  # ModelLevel ids spanned
+    # Free key/value governance tags (Feature 2). Coerced like TableDoc.tags.
+    tags: list[TagDoc] | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_legacy_tags(cls, v: Any) -> Any:
+        return _coerce_tags(v)
 
 
 # ── Project ────────────────────────────────────────────────────────────────
@@ -141,12 +148,28 @@ class TableColumnDoc(BaseModel):
     isSurrogateKey: bool | None = None
     isPartitionKey: bool | None = None
     isForeignKey: bool | None = None
+    # True when the user pinned the FK by hand — keeps the relationship
+    # delete handler from clearing an FK the user set intentionally (Feature 4).
+    fkManual: bool | None = None
     foreignKeyRef: ForeignKeyRefDoc | None = None
     isNullable: bool | None = None
     isUnique: bool | None = None
     defaultValue: str | None = None
     functionalDefinition: str | None = None
     observations: str | None = None
+    # ── Semantic Type / UDP assignments (Feature 3) ──────────────────────────
+    semanticTypeId: str | None = None
+    semanticValues: dict[str, str] | None = None  # controlled-tag key → chosen value
+    udpValues: dict[str, str] | None = None        # udpId → value
+    # ── Governance metadata (Aurora "ESPECIFICACION_FUNCIONAL") ──────────────
+    # Free key/value tags (Feature 2). Coerced like TableDoc.tags so legacy
+    # `list[str]` docs keep loading.
+    tags: list[TagDoc] | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_legacy_tags(cls, v: Any) -> Any:
+        return _coerce_tags(v)
 
 
 class PartitionSpecDoc(BaseModel):
@@ -211,6 +234,8 @@ class TableDoc(BaseModel):
     columns: list[TableColumnDoc] = Field(default_factory=list)
     views: list[ViewDoc] = Field(default_factory=list)
     tags: list[TagDoc] | None = None
+    # Table-level UDP assignments (udpId → value), Feature 3.
+    udpValues: dict[str, str] | None = None
     partition: PartitionSpecDoc | None = None
     # Canvas position persisted by the ELK layout engine / drag handler.
     position: NodePositionDoc | None = None
@@ -268,3 +293,46 @@ class UserDoc(BaseModel):
     createdAt: str
     statusUpdatedAt: str
     lastLoginAt: str | None = None
+
+
+# ── UDP / Semantic Type catalog (transversal — cross-project) ───────────────
+# These live in their own global collections (`semantic_types`, `udps`), keyed
+# by `_id` with no `projectId`: they are organization-wide governance metadata
+# assignable to any project's tables/columns. Mirrors the TS interfaces in
+# `web-data-model-hub/src/types/model.ts`.
+
+class SemanticTagDoc(BaseModel):
+    """A controlled-vocabulary label carried by a Semantic Type. When assigning
+    the type to a column the user picks a value from `allowedValues`."""
+
+    model_config = _cfg
+
+    key: str
+    allowedValues: list[str] = Field(default_factory=list)
+
+
+class SemanticTypeDoc(BaseModel):
+    """A semantic classification of a column (e.g. Monto, Porcentaje). Assigning
+    it inherits `dataType` onto the column and surfaces its controlled tags."""
+
+    model_config = _cfg
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    dataType: str
+    description: str | None = None
+    tags: list[SemanticTagDoc] = Field(default_factory=list)
+
+
+class UdpDoc(BaseModel):
+    """A user-defined property assignable to tables and/or columns. Extensible:
+    free-text or a controlled enum. `appliesTo` ∈ {'table','column'}."""
+
+    model_config = _cfg
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: str | None = None
+    appliesTo: list[str] = Field(default_factory=list)
+    valueType: str = "text"  # 'text' | 'enum'
+    allowedValues: list[str] | None = None

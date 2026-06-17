@@ -97,5 +97,8 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("project_tables", [("projectId", 1), ("domain", 1)]),
         # project_relationships (shard key projectId)
         _try("project_relationships", [("projectId", 1)]),
+        # UDP / Semantic Type catalog (transversal, global)
+        _try("semantic_types", [("flgactive", 1)]),
+        _try("udps", [("flgactive", 1)]),
     )
     log.info("motor indexes ensured")

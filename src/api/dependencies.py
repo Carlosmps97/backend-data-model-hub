@@ -107,6 +107,19 @@ async def require_admin(
     return user
 
 
+async def require_editor(
+    user: Annotated[UserDoc, Depends(require_user)],
+) -> UserDoc:
+    """Raises 403 if the user is a viewer. Used by the transversal UDP /
+    Semantic Type catalog, where any non-viewer (admin or editor) may write."""
+    if user.role not in ("admin", "editor"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Editor or admin role required.",
+        )
+    return user
+
+
 async def check_project_access(user: UserDoc, project_id: str, level: str) -> None:
     """Raises 403 if the user lacks the required access level on the project."""
     ok = can_view_project(user, project_id) if level == "view" else can_edit_project(user, project_id)
@@ -121,3 +134,4 @@ async def check_project_access(user: UserDoc, project_id: str, level: str) -> No
 CurrentUserDep = Annotated[UserDoc | None, Depends(get_current_user)]
 AuthUserDep = Annotated[UserDoc, Depends(require_user)]
 AdminDep = Annotated[UserDoc, Depends(require_admin)]
+EditorDep = Annotated[UserDoc, Depends(require_editor)]

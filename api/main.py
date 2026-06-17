@@ -35,6 +35,7 @@ from api.routes import (
     canvas_router,
     excel_import_router,
     health_router,
+    metadata_router,
     projects_router,
 )
 from src.db import motor_client
@@ -161,6 +162,7 @@ app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(canvas_router)
 app.include_router(excel_import_router)
+app.include_router(metadata_router)
 app.include_router(admin_router)
 
 

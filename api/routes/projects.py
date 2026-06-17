@@ -11,7 +11,6 @@ Mirrors web-data-model-hub/src/app/api/projects/route.ts and [id]/route.ts.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,6 +29,7 @@ from src.db.db_models import ProjectDoc
 from src.db.projects_db import (
     create_project,
     delete_project,
+    generate_project_id,
     get_project,
     get_projects,
     update_project,
@@ -76,7 +76,7 @@ async def create_new_project(body: CreateProjectRequest, user: AdminDep):
     now = datetime.now(timezone.utc).isoformat()
     project = ProjectDoc.model_validate(
         {
-            "id": str(uuid.uuid4()),
+            "id": await generate_project_id(body.name.strip()),
             "name": body.name.strip(),
             "description": body.description.strip() if body.description else None,
             "engines": body.engines or [],

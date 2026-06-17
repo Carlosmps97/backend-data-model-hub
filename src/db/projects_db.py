@@ -11,6 +11,7 @@ heavy child data (tables + relationships) lives in `project_tables` /
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from pymongo import ReturnDocument
@@ -23,6 +24,20 @@ from src.db.db_models import ProjectDoc
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+async def generate_project_id(name: str) -> str:
+    """Human-readable slug used as the project `_id` (e.g. "programa-ia-credicorp"),
+    so URLs read `/projects/<slug>/…` instead of a UUID. Falls back to `project`
+    and appends `-2`, `-3`… on collision with an existing project id."""
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-") or "project"
+    db = await get_db()
+    if not await db["projects"].find_one({"_id": base}, {"_id": 1}):
+        return base
+    n = 2
+    while await db["projects"].find_one({"_id": f"{base}-{n}"}, {"_id": 1}):
+        n += 1
+    return f"{base}-{n}"
 
 
 def _to_project(doc: dict) -> ProjectDoc:

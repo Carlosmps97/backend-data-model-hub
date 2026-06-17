@@ -17,6 +17,7 @@ from api.routes.auth import router as auth_router
 from api.routes.canvas import router as canvas_router
 from api.routes.excel_import import router as excel_import_router
 from api.routes.health import router as health_router
+from api.routes.metadata import router as metadata_router
 from api.routes.projects import router as projects_router
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "canvas_router",
     "excel_import_router",
     "health_router",
+    "metadata_router",
     "projects_router",
 ]
