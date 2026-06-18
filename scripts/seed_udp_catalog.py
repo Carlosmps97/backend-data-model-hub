@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from pymongo import MongoClient  # noqa: E402
 
-from src.config import settings  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 
 def _now() -> str:

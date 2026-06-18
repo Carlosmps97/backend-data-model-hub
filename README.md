@@ -76,7 +76,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Levantar el servidor en :8000
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 4. Probar
 curl http://localhost:8000/api/health
@@ -98,33 +98,29 @@ Ver `.env.example`. Las críticas:
 
 ## Estructura
 
+Monolito modular: `app/core/` (infra compartida) + `app/features/<x>/` (vertical
+slices). Cada feature se importa SOLO por su `__init__` (API pública). Detalle y
+"cómo agregar una feature" en [`doc/feature-architecture.md`](doc/feature-architecture.md).
+
 ```
+app/
+  main.py                  create_app(): lifespan (Motor) + CORS + logging + monta routers
+  core/                    infraestructura compartida (no depende de features)
+    config.py · logging.py · models.py (DOC_CONFIG · TagDoc · coerce_tags)
+    db/        client.py (connect/disconnect/get_db) · indexes.py (ensure_indexes)
+    security/  jwt.py (HS256 + cookie) · passwords.py (bcrypt)
+    api/       envelope.py (ok({...}))
+  features/<x>/            router.py · service.py · repository.py · schemas.py · models.py · __init__.py
+    health/                GET /api/health
+    auth/                  login/logout/me · dependencies (auth/permisos) · bootstrap admin
+    users/                 CRUD usuarios + permisos (admin)
+    projects/              CRUD proyectos (engines/layers/domains embebidos)
+    canvas/                tablas + relaciones (get/replace/positions) — invariante extra="ignore"
+    metadata/              catálogo Semantic Types / UDP (transversal)
+    excel_import/          preview de .xlsx (reader · normalizer · service)
 api/
-  main.py                       FastAPI entrypoint (port 8000)
-  routes/
-    health.py                   GET /api/health
-    auth.py                     POST /api/auth/login,logout · GET /api/auth/me
-    projects.py                 CRUD de proyectos (con permisos)
-    models.py                   CRUD de modelos (con permisos)
-    admin.py                    CRUD de usuarios + permisos (solo admin)
-src/
-  api/
-    auth.py                     JWT (HS256) + bcrypt + bootstrap admin
-    dependencies.py             Providers FastAPI: get_current_user, require_*,
-                                project_access_level, model_access_level
-    response_builder.py         ok({...}) helper
-  config.py                     Settings (Cosmos + project root)
-  db/
-    motor_client.py             Motor (async MongoDB) connection singleton
-    db_models.py                UserDoc, ProjectDoc, DataModelDoc,
-                                TableModelDoc, RelationshipDoc, ViewModelDoc
-    users_db.py                 CRUD async de `users`
-    projects_db.py              CRUD async de `projects`
-    models_db.py                CRUD async de modelos + child collections
-  logger.py                     Logging estructurado (pretty/json)
-scripts/
-  backfill_column_ids.py        Migración: stamp UUID a columnas legacy
-  prune_dangling_relationships.py  Limpia FK rotas
+  main.py                  shim de compatibilidad → `from app.main import app`
+scripts/                   migraciones + seeds (seed_lakehouse · seed_udp_catalog · migrate_*)
 ```
 
 ## Despliegue

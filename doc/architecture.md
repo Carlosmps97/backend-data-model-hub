@@ -89,16 +89,24 @@ proyecto**, y lo que se ve se controla en el frontend con el *Scope*.
 
 ## 3. Capas del sistema
 
-### 3.1 Punto de entrada — `api/main.py`
+> **Monolito modular.** `app/core/` (infraestructura compartida) +
+> `app/features/<x>/` (vertical slices: `router · service · repository · schemas
+> · models`). Cada feature se importa solo por su `__init__` (API pública).
+> Convención y "cómo agregar una feature" en
+> [`feature-architecture.md`](feature-architecture.md).
 
-Crea la app FastAPI, configura CORS + middleware de logging y monta los
-routers. El **lifespan** abre Motor al arrancar y crea índices:
+### 3.1 Punto de entrada — `app/main.py`
+
+`create_app()` arma la app FastAPI, configura CORS + middleware de logging y
+monta los routers de las features. `api/main.py` queda como **shim** de
+compatibilidad (`uvicorn api.main:app` sigue vivo; el entrypoint canónico es
+`app.main:app`). El **lifespan** abre Motor al arrancar y crea índices:
 
 | Singleton | Tipo | Resiliencia ante fallo |
 |---|---|---|
 | `motor_client` (Cosmos DB) | `AsyncIOMotorClient` + `ensure_indexes` | si falla, `app.state.db_connected = False` y `/api/health` lo reporta; los endpoints que usen DB devuelven 500 |
 
-### 3.2 Routers (`api/routes/`)
+### 3.2 Routers (`app/features/*/router.py`)
 
 | Router | Prefijo | Auth | Responsabilidad |
 |---|---|---|---|
@@ -106,22 +114,26 @@ routers. El **lifespan** abre Motor al arrancar y crea índices:
 | `auth` | `/api/auth/*` | público (`/login`, `/logout`); `/me` con cookie | login / logout / me con cookie `modeler-auth` |
 | `projects` | `/api/projects/*` | `AuthUserDep` (admin para POST/DELETE) | CRUD de proyectos + su jerarquía embebida (engines/layers/domains) |
 | `canvas` | `/api/projects/{id}/canvas`, `/api/projects/{id}/positions` | `AuthUserDep` + `check_project_access` | hidratar y reemplazar tablas+relaciones; persistir posiciones |
-| `admin` | `/api/admin/users/*` | `AdminDep` | gestión de usuarios y permisos (solo admin) |
+| `users` | `/api/admin/users/*` | `AdminDep` | gestión de usuarios y permisos (solo admin) |
 | `excel_import` | `/api/excel-import/preview` | `AuthUserDep` | preview normalizado de un `.xlsx` |
 
 > No hay router `models`: el canvas reemplazó a la antigua colección `models`
 > y sus colecciones hijas.
 
-### 3.3 Capa de servicios (`src/api/`)
+### 3.3 Infraestructura compartida (`app/core/`) + auth
 
 ```
-src/api/
-├── auth.py             # JWT sign/verify (HS256), bcrypt, bootstrap admin
-├── dependencies.py     # FastAPI Depends + helpers de permisos (project-scope)
-└── response_builder.py # envelope ok({...}) → {success: true, data: ...}
+app/core/
+├── security/jwt.py        # JWT sign/verify (HS256) + cookie modeler-auth
+├── security/passwords.py  # bcrypt hash/verify
+├── api/envelope.py        # ok({...}) → {success: true, data: ...}
+├── db/{client,indexes}.py # Motor singleton + ensure_indexes
+└── config.py · logging.py · models.py (DOC_CONFIG · TagDoc compartido)
 ```
 
-`dependencies.py` es el wiring de autorización: lee la cookie `modeler-auth`,
+El bootstrap del admin vive en `app/features/auth/bootstrap.py`. El wiring de
+autorización vive en `app/features/auth/dependencies.py` (API pública de la
+feature `auth`): lee la cookie `modeler-auth`,
 valida el JWT, **recarga `UserDoc` desde Cosmos en cada request** (un cambio de
 permisos toma efecto al instante) y expone:
 
@@ -135,15 +147,17 @@ permisos toma efecto al instante) y expone:
 
 Replican el contrato de `web-data-model-hub/src/lib/auth/permissions.ts`.
 
-### 3.4 Capa de datos (`src/db/`)
+### 3.4 Capa de datos — repositorios por feature
+
+Cada feature tiene su `repository.py` (CRUD en Cosmos) y su `models.py` (Pydantic
+v2, espejo de las interfaces TS del frontend, `extra="ignore"`):
 
 ```
-src/db/
-├── motor_client.py     # singleton AsyncIOMotorClient + ensure_indexes
-├── db_models.py        # Pydantic v2 — espejo de las interfaces TS del frontend
-├── projects_db.py      # CRUD proyectos (soft-delete + cascade al canvas)
-├── canvas_db.py        # tablas + relaciones (get / replace / positions / delete)
-└── users_db.py         # CRUD usuarios (hard-delete; isActive=false para lock-out)
+app/features/projects/{models,repository}.py   # proyectos (soft-delete + cascade)
+app/features/canvas/{models,repository}.py      # tablas + relaciones (get/replace/positions/delete)
+app/features/users/{models,repository}.py       # usuarios (hard-delete; isActive=false = lock-out)
+app/features/metadata/{models,repository}.py    # Semantic Types / UDP (catálogo global)
+app/core/db/client.py                           # singleton AsyncIOMotorClient + get_db
 ```
 
 **Colecciones e índices** (creados idempotentemente al arranque):
