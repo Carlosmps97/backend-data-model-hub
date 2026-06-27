@@ -1,45 +1,76 @@
-"""Endpoints CRUD de proyectos.
-
-GET    /api/projects          — lista (filtrada por rol)
-POST   /api/projects          — crea (admin)
-GET    /api/projects/{id}     — obtiene (acceso view)
-PUT    /api/projects/{id}     — actualiza (acceso edit)
-DELETE /api/projects/{id}     — borra + cascada (admin)
-"""
-
+"""Endpoints de Projects + Subject Areas (estructura estilo Erwin)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.core.api.envelope import ok
-from app.features.auth import AdminDep, AuthUserDep
 
 from . import service
-from .schemas import CreateProjectRequest, UpdateProjectRequest
+from .schemas import DrawingsBody, LayoutBody, ProjectBody, SubjectAreaBody, TablesBody
 
-router = APIRouter(prefix="/api/projects", tags=["projects"])
-
-
-@router.get("")
-async def list_projects(user: AuthUserDep):
-    return ok(await service.list_for_user(user))
+router = APIRouter(prefix="/api", tags=["projects"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-async def create_new_project(body: CreateProjectRequest, user: AdminDep):
-    return ok(await service.create(body))
+@router.get("/projects")
+async def list_projects():
+    return ok(await service.list_projects())
 
 
-@router.get("/{project_id}")
-async def get_one_project(project_id: str, user: AuthUserDep):
-    return ok(await service.get_one(project_id, user))
+@router.post("/projects", status_code=status.HTTP_201_CREATED)
+async def create_project(body: ProjectBody):
+    return ok(await service.create_project(body))
 
 
-@router.put("/{project_id}")
-async def update_one_project(project_id: str, body: UpdateProjectRequest, user: AuthUserDep):
-    return ok(await service.update(project_id, body, user))
+@router.put("/projects/{pid}")
+async def update_project(pid: str, body: ProjectBody):
+    return ok(await service.update_project(pid, body))
 
 
-@router.delete("/{project_id}")
-async def delete_one_project(project_id: str, user: AdminDep):
-    return ok(await service.delete(project_id))
+@router.delete("/projects/{pid}")
+async def delete_project(pid: str):
+    return ok(await service.delete_project(pid))
+
+
+@router.get("/projects/{pid}/subject-areas")
+async def list_subject_areas(pid: str, folderId: str | None = Query(default=None)):
+    return ok(await service.list_subject_areas(pid, folderId))
+
+
+@router.post("/subject-areas", status_code=status.HTTP_201_CREATED)
+async def create_subject_area(body: SubjectAreaBody):
+    return ok(await service.create_subject_area(body))
+
+
+@router.put("/subject-areas/{sa_id}")
+async def update_subject_area(sa_id: str, body: SubjectAreaBody):
+    return ok(await service.update_subject_area(sa_id, body))
+
+
+@router.put("/subject-areas/{sa_id}/tables")
+async def set_tables(sa_id: str, body: TablesBody):
+    return ok(await service.set_tables(sa_id, body.tableIds))
+
+
+@router.put("/subject-areas/{sa_id}/layout")
+async def set_layout(sa_id: str, body: LayoutBody):
+    return ok(await service.set_layout(sa_id, body.layout))
+
+
+@router.put("/subject-areas/{sa_id}/drawings")
+async def set_drawings(sa_id: str, body: DrawingsBody):
+    return ok(await service.set_drawings(sa_id, body.drawings))
+
+
+@router.delete("/subject-areas/{sa_id}")
+async def delete_subject_area(sa_id: str):
+    return ok(await service.delete_subject_area(sa_id))
+
+
+@router.get("/subject-areas/{sa_id}")
+async def get_subject_area(sa_id: str):
+    return ok(await service.get_subject_area(sa_id))
+
+
+@router.get("/subject-areas/{sa_id}/diagram")
+async def diagram(sa_id: str):
+    return ok(await service.diagram(sa_id))

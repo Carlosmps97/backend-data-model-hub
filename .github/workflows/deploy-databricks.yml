@@ -1,0 +1,46 @@
+name: Deploy to Databricks Apps (backend)
+
+# Auto-deploy en cada push a `main`; también disparable a mano (workflow_dispatch).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy backend
+    runs-on: ubuntu-latest
+    # Auth por PAT: define DATABRICKS_HOST y DATABRICKS_TOKEN como
+    # GitHub Actions secrets (Settings → Secrets and variables → Actions).
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validate bundle
+        run: databricks bundle validate --target prod
+
+      - name: Deploy bundle (sube el código + crea/actualiza la app)
+        run: databricks bundle deploy --target prod
+
+      - name: Deploy & (re)start app
+        run: databricks bundle run backend --target prod
+
+      - name: Wait for app RUNNING
+        env:
+          APP_NAME: bknd-data-model-hub
+        run: |
+          for i in $(seq 1 20); do
+            STATE=$(databricks apps get "$APP_NAME" --output json | jq -r '.app_status.state')
+            echo "Attempt $i/20: state=$STATE"
+            [ "$STATE" = "RUNNING" ] && exit 0
+            sleep 15
+          done
+          echo "App no llegó a RUNNING en ~5 min" >&2; exit 1

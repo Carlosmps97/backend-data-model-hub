@@ -1,104 +1,98 @@
-"""CRUD async de la colección `projects` (Motor / Cosmos DB).
-
-Soft-delete: `flgactive: false` + `deletedAt` (nunca borra físico). El borrado
-cascadea al canvas del proyecto vía `canvas.repository.delete_canvas`.
-
-Un proyecto embebe sus arrays `engines` / `layers` (ModelLevels) / `domains`; los
-datos hijos pesados (tablas + relaciones) viven en `project_tables` /
-`project_relationships` (ver la feature `canvas`).
-"""
-
+"""CRUD async de `projects` + `subject_areas`."""
 from __future__ import annotations
 
-import re
+import uuid
 from datetime import datetime, timezone
 
 from pymongo import ReturnDocument
 
 from app.core.db.client import get_db
 
-from .models import ProjectDoc
+from .models import ProjectDoc, SubjectAreaDoc
 
+PROJECTS = "projects"
+SUBJECT_AREAS = "subject_areas"
 
-# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def generate_project_id(name: str) -> str:
-    """Slug legible usado como `_id` del proyecto (p. ej. "programa-ia-credicorp"),
-    para que las URLs lean `/projects/<slug>/…` en vez de un UUID. Cae a `project`
-    y agrega `-2`, `-3`… ante colisión con un id existente."""
-    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-") or "project"
-    db = await get_db()
-    if not await db["projects"].find_one({"_id": base}, {"_id": 1}):
-        return base
-    n = 2
-    while await db["projects"].find_one({"_id": f"{base}-{n}"}, {"_id": 1}):
-        n += 1
-    return f"{base}-{n}"
-
-
-def _to_project(doc: dict) -> ProjectDoc:
+def _to(doc: dict) -> dict:
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
-    return ProjectDoc.model_validate(doc)
+    for k in ("flgactive", "deletedAt", "updatedAt", "createdAt"):
+        doc.pop(k, None)
+    return doc
 
 
-# ── CRUD ───────────────────────────────────────────────────────────────────
-
-async def get_projects() -> list[ProjectDoc]:
+# ── Projects ──
+async def list_projects() -> list[dict]:
     db = await get_db()
-    docs = await db["projects"].find({"flgactive": {"$ne": False}}).to_list(None)
-    # Cosmos DB RU rechaza .sort() en campos sin índice — ordenar en Python.
-    docs.sort(key=lambda d: d.get("updatedAt") or "", reverse=True)
-    return [_to_project(d) for d in docs]
+    docs = await db[PROJECTS].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs.sort(key=lambda d: (d.get("name") or "").lower())
+    return [ProjectDoc.model_validate(_to(d)).model_dump() for d in docs]
 
 
-async def get_project(project_id: str) -> ProjectDoc | None:
+async def create_project(data: dict) -> dict:
     db = await get_db()
-    doc = await db["projects"].find_one(
-        {"_id": project_id, "flgactive": {"$ne": False}}
-    )
-    return _to_project(doc) if doc else None
+    p = ProjectDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})
+    await db[PROJECTS].insert_one({"_id": p.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
+                                   **{k: v for k, v in p.model_dump().items() if k != "id"}})
+    return p.model_dump()
 
 
-async def create_project(project: ProjectDoc) -> ProjectDoc:
+async def update_project(pid: str, data: dict) -> dict | None:
     db = await get_db()
-    data = project.model_dump(exclude={"id"})
-    await db["projects"].insert_one({"_id": project.id, **data})
-    return project
+    data = {k: v for k, v in data.items() if k not in ("id", "_id")}
+    res = await db[PROJECTS].find_one_and_update(
+        {"_id": pid, "flgactive": {"$ne": False}}, {"$set": {**data, "updatedAt": _now()}},
+        return_document=ReturnDocument.AFTER)
+    return ProjectDoc.model_validate(_to(res)).model_dump() if res else None
 
 
-async def update_project(
-    project_id: str,
-    updates: dict,
-) -> ProjectDoc | None:
+async def delete_project(pid: str) -> bool:
     db = await get_db()
-    updates.pop("id", None)
-    updates["updatedAt"] = _now()
-    result = await db["projects"].find_one_and_update(
-        {"_id": project_id},
-        {"$set": updates},
-        return_document=ReturnDocument.AFTER,
-    )
-    return _to_project(result) if result else None
+    await db[SUBJECT_AREAS].update_many({"projectId": pid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    res = await db[PROJECTS].update_one({"_id": pid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    return res.modified_count > 0
 
 
-async def delete_project(project_id: str) -> bool:
-    """Soft-delete del proyecto + cascada a su canvas (tablas + relaciones)."""
-    # Import local para no acoplar a load-time entre features.
-    from app.features.canvas.repository import delete_canvas  # noqa: PLC0415
-
+# ── Subject Areas ──
+async def list_subject_areas(project_id: str, folder_id: str | None = None) -> list[dict]:
     db = await get_db()
-    now = _now()
+    query: dict = {"projectId": project_id, "flgactive": {"$ne": False}}
+    if folder_id is not None:
+        query["folderId"] = folder_id  # agrupar canvases por carpeta (aditivo)
+    docs = await db[SUBJECT_AREAS].find(query).to_list(None)
+    docs.sort(key=lambda d: (d.get("name") or "").lower())
+    return [SubjectAreaDoc.model_validate(_to(d)).model_dump() for d in docs]
 
-    # Cascada: soft-delete de toda tabla + relación del proyecto.
-    await delete_canvas(project_id)
 
-    result = await db["projects"].update_one(
-        {"_id": project_id},
-        {"$set": {"flgactive": False, "deletedAt": now, "updatedAt": now}},
-    )
-    return result.modified_count > 0
+async def get_subject_area(sa_id: str) -> dict | None:
+    db = await get_db()
+    doc = await db[SUBJECT_AREAS].find_one({"_id": sa_id, "flgactive": {"$ne": False}})
+    return SubjectAreaDoc.model_validate(_to(doc)).model_dump() if doc else None
+
+
+async def create_subject_area(data: dict) -> dict:
+    db = await get_db()
+    sa = SubjectAreaDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})
+    await db[SUBJECT_AREAS].insert_one({"_id": sa.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
+                                        **{k: v for k, v in sa.model_dump().items() if k != "id"}})
+    return sa.model_dump()
+
+
+async def update_subject_area(sa_id: str, fields: dict) -> dict | None:
+    db = await get_db()
+    fields = {k: v for k, v in fields.items() if k not in ("id", "_id")}
+    res = await db[SUBJECT_AREAS].find_one_and_update(
+        {"_id": sa_id, "flgactive": {"$ne": False}}, {"$set": {**fields, "updatedAt": _now()}},
+        return_document=ReturnDocument.AFTER)
+    return SubjectAreaDoc.model_validate(_to(res)).model_dump() if res else None
+
+
+async def delete_subject_area(sa_id: str) -> bool:
+    db = await get_db()
+    res = await db[SUBJECT_AREAS].update_one({"_id": sa_id}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    return res.modified_count > 0

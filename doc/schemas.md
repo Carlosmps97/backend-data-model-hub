@@ -1,28 +1,21 @@
 # Schemas (Pydantic v2)
 
-> El backend de plataforma tiene **dos familias** de schemas Pydantic:
->
-> - `src/db/db_models.py` → **modelos de persistencia** (Cosmos DB),
->   espejo exacto de las interfaces TypeScript del frontend en
->   `web-data-model-hub/src/types/model.ts` y `types/auth.ts`.
-> - `src/excel_import/schemas.py` → **contrato HTTP** del endpoint de
->   preview del Excel-import.
->
-> Los request/response de los demás endpoints viven inline en cada
-> router (`api/routes/*.py`) como clases Pydantic locales.
+> Los **modelos de persistencia** (Cosmos DB) viven por feature en
+> `app/features/<x>/models.py`, espejo de las interfaces TypeScript del frontend
+> (`web-data-model-hub/src/types/model.ts`). Los **DTOs HTTP** (request/response)
+> viven en `app/features/<x>/schemas.py`.
 
 Todos los modelos de persistencia usan `ConfigDict(extra="ignore",
-populate_by_name=True)`:
+populate_by_name=True)` (`app/core/models.py::DOC_CONFIG`):
 
 - `extra="ignore"` — los campos internos de Mongo (`flgactive`, `deletedAt`,
-  `_id`, `projectId` en los hijos) y los campos legacy (p. ej. `scope`/`modelId`
-  en permisos) se ignoran silenciosamente al validar.
+  `_id`, `projectId` en los hijos) y campos legacy se ignoran al validar.
 - `populate_by_name=True` — permite construir con el nombre Python *o* el alias
   JSON (necesario para `sql_schema` ↔ `"schema"`).
 
 ---
 
-## 1. Jerarquía embebida en el proyecto
+## 1. Jerarquía embebida en el proyecto (`app/features/projects/models.py`)
 
 ### 1.1 `ModelLevelDoc` — un "Modelo (nivel)"
 
@@ -54,8 +47,7 @@ class DomainDoc(BaseModel):
     layers: list[str] = []           # ids de ModelLevel que el dominio atraviesa
 ```
 
-`sensitivity` se guarda como `str` (no `Literal`) por resiliencia ante valores
-legacy / escritos por el agente.
+`sensitivity` se guarda como `str` (no `Literal`) por resiliencia ante valores legacy.
 
 ### 1.3 `ProjectDoc` (colección `projects`)
 
@@ -72,14 +64,13 @@ class ProjectDoc(BaseModel):
 ```
 
 `engines`, `layers` y `domains` son arreglos chicos **embebidos** (siempre se
-leen con el proyecto y nunca se consultan por separado). Se editan vía
-`PUT /api/projects/{id}`.
+leen con el proyecto). Se editan vía `PUT /api/projects/{id}`.
 
 ---
 
-## 2. Canvas: tablas y relaciones
+## 2. Canvas: tablas y relaciones (`app/features/canvas/models.py`)
 
-### 2.1 `TagDoc`
+### 2.1 `TagDoc` (`app/core/models.py`)
 
 ```python
 class TagDoc(BaseModel):
@@ -87,9 +78,8 @@ class TagDoc(BaseModel):
     value: str = ""
 ```
 
-Pares key-value libres. El validator `_coerce_tags` convierte la forma legacy
-`list[str]` a `{key: "", value: <str>}` para que docs antiguos carguen sin
-migración.
+Pares key-value libres. El validator `coerce_tags` convierte la forma legacy
+`list[str]` a `{key: "", value: <str>}` para que docs antiguos carguen sin migración.
 
 ### 2.2 `TableColumnDoc`
 
@@ -123,8 +113,8 @@ classDiagram
 > **Punto crítico**: `id` es un identificador **estable** que sobrevive a
 > renames. Los endpoints de relación (`RelEndpointDoc.column`) apuntan a este
 > `id`, **no a `name`**. `default_factory=lambda: str(uuid.uuid4())` garantiza id
-> en código; `canvas_db._ensure_column_ids` hace además un backfill defensivo
-> sobre cualquier dict que llegue sin id.
+> en código; `canvas/repository._ensure_column_ids` hace además un backfill
+> defensivo sobre cualquier dict que llegue sin id.
 
 ### 2.3 `ViewDoc` (embebida en la tabla)
 
@@ -138,9 +128,8 @@ class ViewDoc(BaseModel):
     where: str = ""          # multilínea: condiciones unidas con AND
 ```
 
-Las vistas son proyecciones SQL por rol. **No están en una colección aparte**:
-se embeben en `TableDoc.views[]`. No forman parte del diagrama ER; se exportan
-con el DDL.
+Las vistas son proyecciones SQL por rol. **No están en una colección aparte**: se
+embeben en `TableDoc.views[]`. No forman parte del diagrama ER; se exportan con el DDL.
 
 ### 2.4 `TableDoc` (colección `project_tables`)
 
@@ -183,8 +172,7 @@ class RelationshipDoc(BaseModel):
 ```
 
 Forma **anidada** `source`/`target`. Puede cruzar capas y dominios; las banderas
-`crossLayer`/`skip` se **derivan en el frontend** del orden de los niveles y
-**no se persisten**.
+`crossLayer`/`skip` se **derivan en el frontend** y **no se persisten**.
 
 ```mermaid
 flowchart LR
@@ -200,43 +188,12 @@ flowchart LR
 
 ---
 
-## 3. Usuarios y permisos
+## 3. Schemas del Excel-import (`app/features/excel_import/schemas.py`)
 
-```python
-class PermissionDoc(BaseModel):
-    projectId: str
-    level: Literal["view", "edit"]
+Definen el contrato HTTP del preview. Usan `ConfigDict(extra="forbid",
+populate_by_name=True)` — más estricto que los modelos de DB.
 
-class UserDoc(BaseModel):
-    id: str
-    username: str
-    passwordHash: str
-    role: Literal["admin", "editor", "viewer"]
-    isActive: bool
-    permissions: list[PermissionDoc] = []
-    createdAt: str
-    statusUpdatedAt: str
-    lastLoginAt: str | None = None
-```
-
-| Campo | Notas |
-|---|---|
-| `passwordHash` | bcrypt con `gensalt(rounds=10)`. **Nunca sale del backend** — `_public_user` (admin) y `_user_payload` (auth) lo omiten. |
-| `role` | rol "global"; los permisos finos viven en `permissions`. |
-| `isActive` | desactivar bloquea inmediatamente — `require_user` revalida en cada request. |
-| `permissions` | grants **por proyecto** (`{projectId, level}`). El scope-modelo legacy (`scope`/`modelId`) se ignora con `extra="ignore"`. |
-
-`role=admin` cortocircuita los permisos (`is_admin` → `edit` en todo).
-
----
-
-## 4. Schemas del Excel-import (`src/excel_import/schemas.py`)
-
-Centralizados porque definen el contrato HTTP del preview. Usan
-`ConfigDict(extra="forbid", populate_by_name=True)` — más estricto que los
-modelos de DB.
-
-### 4.1 `PreviewColumn`
+### 3.1 `PreviewColumn`
 
 ```python
 class PreviewColumn(BaseModel):
@@ -258,7 +215,7 @@ class PreviewColumn(BaseModel):
 | `unknown` | nada superó el `FUZZY_THRESHOLD` | badge naranja (corregir) |
 | `empty` | celda vacía; default a `varchar` | badge naranja |
 
-### 4.2 `PreviewTable` y `ExcelPreview`
+### 3.2 `PreviewTable` y `ExcelPreview`
 
 ```python
 class PreviewTable(BaseModel):
@@ -279,20 +236,9 @@ lista avisos no fatales (hojas vacías, descripciones huérfanas).
 
 ---
 
-## 5. Request/response schemas inline (por router)
+## 4. Request/response schemas inline (por feature)
 
-### `api/routes/auth.py`
-
-```python
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-```
-
-Response del login: `_user_payload(user)` (dict sin `passwordHash`) envuelto en
-`ok(...)`.
-
-### `api/routes/projects.py`
+### `app/features/projects/schemas.py`
 
 ```python
 class CreateProjectRequest(BaseModel):
@@ -307,10 +253,10 @@ class UpdateProjectRequest(BaseModel):  # todos opcionales
 ```
 
 `layers`/`domains` se tipan como `list[dict]` y se validan con
-`ProjectDoc.model_validate` en el handler (deja que el frontend mande el JSON
+`ProjectDoc.model_validate` en el service (deja que el frontend mande el JSON
 completo de la jerarquía sin disparar 422 prematuros).
 
-### `api/routes/canvas.py`
+### `app/features/canvas/schemas.py`
 
 ```python
 class CanvasReplaceRequest(BaseModel):
@@ -326,32 +272,15 @@ class PatchPositionsRequest(BaseModel):
 ```
 
 `PUT /canvas` exige al menos uno de `tables` / `relationships` (400 si ambos son
-`None`). Las listas son `list[dict]`: la validación estricta la hacen
-`TableDoc` / `RelationshipDoc` dentro de `replace_canvas`.
+`None`). La validación estricta la hacen `TableDoc` / `RelationshipDoc` dentro de
+`replace_canvas`.
 
-### `api/routes/admin.py`
+### `app/features/metadata/schemas.py`
 
-```python
-class PermissionPayload(BaseModel):
-    projectId: str
-    level: str                  # "view" | "edit"
+`SemanticTypeBody` y `UdpBody` — DTOs del catálogo transversal (Semantic Types /
+UDP). Lecturas y escrituras abiertas (MVP sin permisos).
 
-class CreateUserRequest(BaseModel):
-    username: str
-    password: str
-    role: str                   # "admin" | "editor" | "viewer"
-    isActive: bool = True
-    permissions: list[PermissionPayload] = []
-
-class UpdateUserRequest(BaseModel):  # todos opcionales
-    ...
-```
-
-`_validate_role` y `_validate_permissions` levantan **400** con mensajes
-específicos (mejor que un 422 genérico de Pydantic). Para `role=admin`,
-`permissions` se ignora (acceso total).
-
-### `api/routes/health.py`
+### `app/features/health/router.py`
 
 ```python
 class HealthResponse(BaseModel):
@@ -362,9 +291,9 @@ class HealthResponse(BaseModel):
 
 ---
 
-## 6. Envelope de respuesta
+## 5. Envelope de respuesta
 
-Todos los endpoints CRUD usan `ok(...)` de `src/api/response_builder.py`:
+Todos los endpoints CRUD usan `ok(...)` de `app/core/api/envelope.py`:
 
 ```python
 def ok(data: Any = None) -> dict[str, Any]:
@@ -372,7 +301,4 @@ def ok(data: Any = None) -> dict[str, Any]:
 ```
 
 El frontend espera siempre `{success: bool, data?, error?}`. Los errores se
-levantan con `HTTPException(status, detail)` (FastAPI → `{"detail": "..."}`),
-salvo `login` / `me`, que devuelven explícitamente
-`{"success": False, "error": "...", "code"?: "..."}` para diferenciar
-`unauthenticated` de `inactive`.
+levantan con `HTTPException(status, detail)` (FastAPI → `{"detail": "..."}`).

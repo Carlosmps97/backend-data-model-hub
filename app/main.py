@@ -5,13 +5,16 @@ acotadas:
 - Configurar logging.
 - Lifespan: abrir/cerrar la conexión a Cosmos DB (Motor async).
 - Middleware: logueo estructurado de cada request.
-- CORS para el frontend Next.js (con credenciales — comparte cookie
-  `modeler-auth`).
-- Montar los routers de `health`, `auth`, `projects`, `canvas`, `excel_import`,
-  `metadata`, `users`.
+- CORS para el frontend Next.js (origen distinto en desarrollo local).
+- Montar los routers de cada feature: `health`, `identity`, `excel_import`,
+  `domains`, `dictionary`, `catalog`, `changesets`, `projects` (+ subject areas),
+  `folders`, `relationships`, `views`, `summary` (counts del Home), `reporting`
+  (agregación tabular de metadata, solo lectura) y `settings` (naming_config:
+  separador/case por scope).
 
-El servicio de agentes vive en `app-agents-modeler` y se invoca desde el
-frontend directamente — el backend no lo proxea.
+Identidad por seam conmutable (`app/core/identity`, modo local/databricks). El
+modelo de permisos por rol se reintroducirá al final como una matriz robusta. El
+agente de modelado conversacional vive en `app-agents-modeler` (fuera de este MVP).
 """
 
 from __future__ import annotations
@@ -27,13 +30,24 @@ from starlette.responses import Response
 
 from app.core.db import client as db_client
 from app.core.logging import configure_logging, get_logger
-from app.features.auth.router import router as auth_router
-from app.features.canvas.router import router as canvas_router
+from app.features.catalog.router import router as catalog_router
+from app.features.dictionary.router import router as dictionary_router
+from app.features.domains.router import router as domains_router
 from app.features.excel_import.router import router as excel_import_router
+from app.features.folders.router import router as folders_router
 from app.features.health.router import router as health_router
-from app.features.metadata.router import router as metadata_router
+from app.features.identity.router import router as identity_router
+from app.features.changesets.router import (
+    requests_router,
+    router as changesets_router,
+    versions_router,
+)
 from app.features.projects.router import router as projects_router
-from app.features.users.router import router as users_router
+from app.features.relationships.router import router as relationships_router
+from app.features.reporting.router import router as reporting_router
+from app.features.settings.router import router as settings_router
+from app.features.summary.router import router as summary_router
+from app.features.views.router import router as views_router
 
 configure_logging()
 log = get_logger("app.main")
@@ -69,17 +83,18 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Data Modeler Platform Backend",
         description=(
-            "API REST de plataforma del Data Modeler. Maneja autenticación, "
-            "permisos, proyectos, modelos y la persistencia en Cosmos DB. "
-            "El agente de modelado conversacional vive en `app-agents-modeler`."
+            "API REST de plataforma del Data Modeler. Maneja proyectos, modelos "
+            "y la persistencia en Cosmos DB. MVP sin auth (abierto/anónimo); el "
+            "agente conversacional vive en `app-agents-modeler`."
         ),
         version="1.0.0",
         lifespan=lifespan,
     )
 
     # ─── CORS ───────────────────────────────────────────────────────────
-    # Allowlist explícita; `allow_credentials=True` porque el frontend envía
-    # la cookie de sesión `modeler-auth` con cada request.
+    # Allowlist explícita para el frontend Next.js (origen distinto en dev).
+    # MVP sin identidad propia: no hay cookies; `allow_credentials=True` es no-op
+    # y se deja por compatibilidad.
     cors_env = os.getenv("CORS_ORIGINS", "").strip()
     cors_origins = (
         [o.strip() for o in cors_env.split(",") if o.strip()]
@@ -122,12 +137,21 @@ def create_app() -> FastAPI:
 
     # ─── Routers de features ────────────────────────────────────────────
     app.include_router(health_router)
-    app.include_router(auth_router)
-    app.include_router(projects_router)
-    app.include_router(canvas_router)
+    app.include_router(identity_router)
     app.include_router(excel_import_router)
-    app.include_router(metadata_router)
-    app.include_router(users_router)
+    app.include_router(domains_router)
+    app.include_router(dictionary_router)
+    app.include_router(catalog_router)
+    app.include_router(changesets_router)
+    app.include_router(versions_router)
+    app.include_router(requests_router)
+    app.include_router(projects_router)
+    app.include_router(folders_router)
+    app.include_router(relationships_router)
+    app.include_router(views_router)
+    app.include_router(summary_router)
+    app.include_router(reporting_router)
+    app.include_router(settings_router)
 
     return app
 

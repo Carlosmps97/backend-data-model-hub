@@ -9,8 +9,7 @@
 > que el usuario revise/corrija y luego persiste las tablas resultantes
 > con `PUT /api/projects/{id}/canvas`.
 
-**Endpoint**: `POST /api/excel-import/preview` (multipart/form-data)
-**Auth**: `AuthUserDep`
+**Endpoint**: `POST /api/excel-import/preview` (multipart/form-data) — abierto (MVP sin auth)
 **Tope de upload**: 10 MB (`_MAX_UPLOAD_BYTES`)
 **Extensiones aceptadas**: `.xlsx`, `.xlsm`
 
@@ -20,15 +19,15 @@
 
 ```mermaid
 flowchart LR
-    REQ["POST /api/excel-import/preview<br/>(multipart)"] --> VAL["api/routes/excel_import.py<br/>· valida extensión<br/>· cap 10 MB<br/>· lee bytes a memoria"]
+    REQ["POST /api/excel-import/preview<br/>(multipart)"] --> VAL["app/features/excel_import/router.py<br/>· valida extensión<br/>· cap 10 MB<br/>· lee bytes a memoria"]
     VAL --> PARSE["service.parse_workbook(bytes)"]
 
-    subgraph PIPE["src/excel_import/"]
-        PARSE --> RD["workbook_reader.read_workbook<br/>(openpyxl read-only)"]
+    subgraph PIPE["app/features/excel_import/"]
+        PARSE --> RD["reader.read_workbook<br/>(openpyxl read-only)"]
         RD --> RAW["RawWorkbook<br/>{sheets, table_descriptions, warnings}"]
         RAW --> BUILD["Por cada hoja → _build_preview_table"]
         BUILD --> SPLIT["_split_sheet_name<br/>(schema.table)"]
-        BUILD --> NORM["type_normalizer.normalize_type<br/>(tokenize → exact → alias → fuzzy)"]
+        BUILD --> NORM["normalizer.normalize_type<br/>(tokenize → exact → alias → fuzzy)"]
         BUILD --> MATCH["_match_table_description<br/>(case-insensitive)"]
         SPLIT --> EP["ExcelPreview"]
         NORM --> EP
@@ -42,7 +41,7 @@ flowchart LR
 
 ---
 
-## 2. Paso 1 — Lectura cruda (`workbook_reader.read_workbook`)
+## 2. Paso 1 — Lectura cruda (`reader.read_workbook`)
 
 Responsabilidad acotada: abrir el archivo con `openpyxl` en modo
 read-only y devolver estructuras simples (`RawSheet`, `RawColumnRow`,
@@ -311,7 +310,7 @@ el mismo archivo dos veces produce exactamente el mismo preview.
 | Entrada de `TablesDescriptions` sin match | 200 con warning; la entrada se ignora |
 | Tipo `variant` (Snowflake-only) | 200 con `matched_via="unknown"`; el usuario corrige en el modal |
 
-El backend nunca propaga excepciones al cliente — `api/routes/excel_import.py`
+El backend nunca propaga excepciones al cliente — `app/features/excel_import/router.py`
 las captura todas como `400 Could not parse Excel file: <exc>` y loguea
 el stack con `log.exception`.
 
@@ -325,7 +324,7 @@ source backend-data-model-hub/.venv/bin/activate
 
 # 2. Probar normalize_type sin levantar servidor
 python -c "
-from src.excel_import import normalize_type
+from app.features.excel_import import normalize_type
 for raw in ['BIGINT', 'int', 'decimal(10,2)', 'decximam(10,2)', 'datatime', 'variant', '']:
     n = normalize_type(raw)
     print(f'{raw!r:30s} → canonical={n.canonical:12s} via={n.matched_via:8s} conf={n.confidence:6.1f} len={n.length} scale={n.scale}')
@@ -333,7 +332,7 @@ for raw in ['BIGINT', 'int', 'decimal(10,2)', 'decximam(10,2)', 'datatime', 'var
 
 # 3. Probar parse_workbook con un archivo real
 python -c "
-from src.excel_import import parse_workbook
+from app.features.excel_import import parse_workbook
 with open('/tmp/test.xlsx', 'rb') as f:
     preview = parse_workbook(f.read())
 print(preview.model_dump_json(by_alias=True, indent=2))

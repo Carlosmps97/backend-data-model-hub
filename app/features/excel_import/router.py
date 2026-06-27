@@ -1,4 +1,4 @@
-"""Endpoint de import de Excel.
+"""Endpoint de import de Excel (MVP abierto).
 
 POST /api/excel-import/preview — recibe un .xlsx por multipart/form-data y
 devuelve una previsualización ya normalizada. No persiste nada — el frontend
@@ -11,7 +11,6 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.core.api.envelope import ok
 from app.core.logging import get_logger
-from app.features.auth import AuthUserDep
 
 from .service import parse_workbook
 
@@ -25,10 +24,7 @@ _ALLOWED_EXTENSIONS: tuple[str, ...] = (".xlsx", ".xlsm")
 
 
 @router.post("/preview")
-async def preview_excel_import(
-    user: AuthUserDep,
-    file: UploadFile = File(...),
-):
+async def preview_excel_import(file: UploadFile = File(...)):
     """Devuelve la previsualización del workbook subido."""
     _ensure_valid_filename(file.filename)
     payload = await _read_upload(file)

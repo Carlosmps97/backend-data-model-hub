@@ -1,0 +1,19 @@
+# Databricks Apps — runtime del backend (FastAPI).
+# Docs: https://learn.microsoft.com/en-us/azure/databricks/dev-tools/databricks-apps/app-runtime
+#
+# uvicorn recibe automáticamente UVICORN_HOST=0.0.0.0 y UVICORN_PORT=$DATABRICKS_APP_PORT
+# (Databricks los inyecta para FastAPI/uvicorn), así que no hace falta pasar host/puerto.
+command: ['uvicorn', 'app.main:app']
+
+env:
+  - name: LOG_FORMAT
+    value: 'json'
+  # Orígenes CORS = URL de la app frontend.
+  - name: CORS_ORIGINS
+    value: 'https://frnt-data-model-hub-3871428306507680.0.azure.databricksapps.com'
+  - name: COSMOS_DATABASE
+    value: 'db_modeler'
+  # Connection string de Cosmos desde el recurso `cosmos_secret` (declarado en
+  # databricks.yml → scope kv-scope-datacraft, key conn-str-cosmos).
+  - name: COSMOS_CONNECTION_STRING
+    valueFrom: cosmos_secret

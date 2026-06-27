@@ -76,17 +76,17 @@ invoca (el script de migración). No se ejecuta solo; lo usa
 
 > Los scripts legacy `backfill_column_ids.py` y `prune_dangling_relationships.py`
 > fueron eliminados: la safety-net de ids vive ahora en runtime
-> (`canvas_db._ensure_column_ids`) y la migración project-centric purga las
+> (`canvas/repository._ensure_column_ids`) y la migración project-centric purga las
 > relaciones huérfanas como parte del proceso.
 
 ---
 
-## 2. Pipeline determinista del Excel-import (`src/excel_import/`)
+## 2. Pipeline determinista del Excel-import (`app/features/excel_import/`)
 
 Funciones puras que el endpoint `/api/excel-import/preview` invoca para producir
 el preview. Sin LLM, sin estado entre requests.
 
-### 2.1 `workbook_reader.read_workbook(file_stream)`
+### 2.1 `reader.read_workbook(file_stream)`
 
 Lee un xlsx con `openpyxl` en modo read-only y devuelve `RawWorkbook`
 (`sheets`, `table_descriptions`, `warnings`).
@@ -99,7 +99,7 @@ Lee un xlsx con `openpyxl` en modo read-only y devuelve `RawWorkbook`
   `dict[name → description]`.
 - Filas con celda A vacía se saltan; hojas vacías producen `warnings` (no abortan).
 
-### 2.2 `type_normalizer.normalize_type(raw)`
+### 2.2 `normalizer.normalize_type(raw)`
 
 Pipeline determinista en 4 pasos: `tokenize → exact → alias → fuzzy`.
 
@@ -147,12 +147,12 @@ Ver `doc/workflow.md` para el detalle completo del pipeline.
 ## 4. Cómo agregar un alias / tipo canónico nuevo
 
 1. **Frontend** — agregar el tipo a `web-data-model-hub/src/types/model.ts::COLUMN_DATA_TYPES`.
-2. **Backend canonical** — agregar en `src/excel_import/type_normalizer.py::CANONICAL_TYPES`.
+2. **Backend canonical** — agregar en `app/features/excel_import/normalizer.py::CANONICAL_TYPES`.
 3. **Backend alias** (si aplica) — agregar en `ALIASES` solo si es un sinónimo NO
    ambiguo (las variantes con typo las atrapa el paso fuzzy).
 4. **Verificar**:
    ```bash
-   .venv/bin/python -c "from src.excel_import import normalize_type; print(normalize_type('tu_tipo_nuevo'))"
+   .venv/bin/python -c "from app.features.excel_import import normalize_type; print(normalize_type('tu_tipo_nuevo'))"
    # → matched_via='exact', confidence=100
    ```
 

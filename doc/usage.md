@@ -1,8 +1,9 @@
 # Guía de uso
 
-> Este backend se opera **exclusivamente como API HTTP**. Toda la
-> interacción real ocurre desde el frontend Next.js o llamando directo
-> a los endpoints REST con `curl` / Postman / etc.
+> Este backend se opera **exclusivamente como API HTTP**. Toda la interacción
+> real ocurre desde el frontend Next.js o llamando directo a los endpoints REST
+> con `curl` / Postman. **MVP sin auth**: los endpoints son abiertos (no hay
+> login ni cookies).
 
 ---
 
@@ -11,24 +12,18 @@
 ### Desarrollo
 
 ```bash
-# 1. Crear venv con Python 3.12 (una sola vez)
-/opt/homebrew/bin/python3.12 -m venv .venv
-source .venv/bin/activate
+# 1. venv con Python 3.12 (una sola vez)
+/opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Configurar .env (ver doc/configuration.md)
-cp .env.example .env
-$EDITOR .env
-# Variables críticas: COSMOS_CONNECTION_STRING + AUTH_SECRET
+# 2. .env (ver doc/configuration.md) — solo COSMOS_CONNECTION_STRING es crítico
+cp .env.example .env && $EDITOR .env
 
 # 3. Arrancar con autoreload
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
-# o equivalente:
-python -m api.main
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Por defecto escucha en `0.0.0.0:8000`. La OpenAPI auto-generada queda en
-`http://localhost:8000/docs`.
+Escucha en `0.0.0.0:8000`. OpenAPI auto-generada en `http://localhost:8000/docs`.
 
 ### Verificación rápida
 
@@ -37,33 +32,30 @@ curl http://localhost:8000/api/health
 # → {"status":"ok","version":"1.0.0","db_connected":true}
 ```
 
-Si `db_connected: false`, los endpoints que toquen Cosmos devuelven 500.
-Verifica `COSMOS_CONNECTION_STRING` en `.env` y reiniciá el proceso.
+Si `db_connected: false`, los endpoints que toquen Cosmos devuelven 500. Verifica
+`COSMOS_CONNECTION_STRING` y reiniciá el proceso.
 
 ---
 
-## 2. Mapa de endpoints
+## 2. Mapa de endpoints (todos abiertos)
 
-| Método | Ruta | Auth | Qué hace |
-|---|---|---|---|
-| GET | `/api/health` | público | liveness + `db_connected` |
-| POST | `/api/auth/login` | público | login → `Set-Cookie modeler-auth` |
-| POST | `/api/auth/logout` | público | limpia la cookie |
-| GET | `/api/auth/me` | cookie | usuario actual (401 si no hay sesión) |
-| GET | `/api/projects` | sesión | proyectos visibles (filtrado por permisos) |
-| POST | `/api/projects` | **admin** | crea proyecto (+ engines/layers/domains opcionales) |
-| GET | `/api/projects/{id}` | view | proyecto con su jerarquía embebida |
-| PUT | `/api/projects/{id}` | edit | actualiza nombre/descr y **engines/layers/domains** |
-| DELETE | `/api/projects/{id}` | **admin** | soft-delete + cascade al canvas |
-| GET | `/api/projects/{id}/canvas` | view | `{ tables, relationships }` hidratado |
-| PUT | `/api/projects/{id}/canvas` | edit | reemplaza tablas y/o relaciones en bloque |
-| PATCH | `/api/projects/{id}/positions` | edit | persiste posiciones `{tableId: {x,y}}` |
-| GET | `/api/admin/users` | **admin** | lista usuarios |
-| POST/PUT/DELETE | `/api/admin/users[/{id}]` | **admin** | CRUD usuarios + permisos |
-| POST | `/api/excel-import/preview` | sesión | preview normalizado de un `.xlsx` |
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET | `/api/health` | liveness + `db_connected` |
+| GET | `/api/projects` | lista todos los proyectos |
+| POST | `/api/projects` | crea proyecto (+ engines/layers/domains opcionales) |
+| GET | `/api/projects/{id}` | proyecto con su jerarquía embebida |
+| PUT | `/api/projects/{id}` | actualiza nombre/descr y **engines/layers/domains** |
+| DELETE | `/api/projects/{id}` | soft-delete + cascade al canvas |
+| GET | `/api/projects/{id}/canvas` | `{ tables, relationships }` hidratado |
+| PUT | `/api/projects/{id}/canvas` | reemplaza tablas y/o relaciones en bloque |
+| PATCH | `/api/projects/{id}/positions` | persiste posiciones `{tableId: {x,y}}` |
+| GET/POST/PUT/DELETE | `/api/metadata/semantic-types[/{id}]` | catálogo de Semantic Types |
+| GET/POST/PUT/DELETE | `/api/metadata/udps[/{id}]` | catálogo de UDPs |
+| POST | `/api/excel-import/preview` | preview normalizado de un `.xlsx` |
 
-> No hay `/api/models*`: el canvas del proyecto reemplazó a la antigua
-> colección `models`.
+> No hay `/api/auth/*`, `/api/admin/users*` ni `/api/models*`: la auth/permisos se
+> quitaron (MVP abierto) y el canvas reemplazó a la antigua colección `models`.
 
 ---
 
@@ -73,13 +65,7 @@ Verifica `COSMOS_CONNECTION_STRING` en `.env` y reiniciá el proceso.
 sequenceDiagram
     participant U as Usuario (browser)
     participant FE as Frontend Next.js
-    participant API as backend-data-model-hub (:8000)
-
-    Note over U,API: 0. Login (una vez por jornada)
-    U->>FE: abre /login + credenciales
-    FE->>API: POST /api/auth/login
-    API-->>FE: 200 + Set-Cookie modeler-auth
-    FE->>API: GET /api/auth/me (hidrata useAuthStore)
+    participant API as backend-data-model-hub
 
     Note over U,API: 1. Abrir un proyecto
     U->>FE: abre Project hub / editor
@@ -105,60 +91,31 @@ sequenceDiagram
 
 ## 4. Llamadas con `curl` (para diagnóstico)
 
-> Los ejemplos asumen un `cookies.txt` con el cookie `modeler-auth`.
-
-### 4.1 Auth
+### 4.1 Proyectos
 
 ```bash
-# Login (escribe el cookie en cookies.txt)
-curl -c cookies.txt -X POST http://localhost:8000/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"dogadmin2019"}'
+# Listar
+curl http://localhost:8000/api/projects
 
-curl -b cookies.txt http://localhost:8000/api/auth/me
-curl -b cookies.txt -X POST http://localhost:8000/api/auth/logout
-```
-
-### 4.2 Proyectos
-
-```bash
-# Listar proyectos visibles
-curl -b cookies.txt http://localhost:8000/api/projects
-
-# Crear proyecto (admin) — engines/layers/domains opcionales
-curl -b cookies.txt -X POST http://localhost:8000/api/projects \
+# Crear — engines/layers/domains opcionales
+curl -X POST http://localhost:8000/api/projects \
   -H 'Content-Type: application/json' \
   -d '{"name":"Lakehouse","description":"Repo de datos","engines":["databricks_sql"]}'
 
-# Detalle (incluye layers/domains embebidos)
-curl -b cookies.txt http://localhost:8000/api/projects/<uuid>
-
-# Actualizar jerarquía (niveles + dominios)
-curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid> \
+# Detalle / actualizar jerarquía / borrar
+curl http://localhost:8000/api/projects/<uuid>
+curl -X PUT http://localhost:8000/api/projects/<uuid> \
   -H 'Content-Type: application/json' \
-  -d '{
-        "layers":[
-          {"id":"rdv","name":"RDV","full":"Raw Data Vault","color":"#0e7490","order":0,"engine":"databricks_sql"},
-          {"id":"udv","name":"UDV","full":"Unified Data Vault","color":"#4f46e5","order":1}
-        ],
-        "domains":[
-          {"id":"finanzas","name":"Finanzas","color":"#0d9488","owner":"M. Torres",
-           "sensitivity":"Confidential","subdomains":["Tarjetas","Savings"],"layers":["rdv","udv"]}
-        ]
-      }'
-
-# Borrar (admin — cascade al canvas)
-curl -b cookies.txt -X DELETE http://localhost:8000/api/projects/<uuid>
+  -d '{"layers":[{"id":"rdv","name":"RDV","full":"Raw Data Vault","order":0}]}'
+curl -X DELETE http://localhost:8000/api/projects/<uuid>
 ```
 
-### 4.3 Canvas (tablas + relaciones)
+### 4.2 Canvas (tablas + relaciones)
 
 ```bash
-# Hidratar el canvas
-curl -b cookies.txt http://localhost:8000/api/projects/<uuid>/canvas
+curl http://localhost:8000/api/projects/<uuid>/canvas
 
-# Reemplazar tablas + relaciones en bloque
-curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid>/canvas \
+curl -X PUT http://localhost:8000/api/projects/<uuid>/canvas \
   -H 'Content-Type: application/json' \
   -d '{
         "tables":[
@@ -169,17 +126,25 @@ curl -b cookies.txt -X PUT http://localhost:8000/api/projects/<uuid>/canvas \
         "relationships":[]
       }'
 
-# Persistir posiciones del canvas (endpoint liviano)
-curl -b cookies.txt -X PATCH http://localhost:8000/api/projects/<uuid>/positions \
+curl -X PATCH http://localhost:8000/api/projects/<uuid>/positions \
   -H 'Content-Type: application/json' \
   -d '{"tables":{"t1":{"x":120,"y":80}}}'
+```
+
+### 4.3 Metadata (Semantic Types / UDP)
+
+```bash
+curl http://localhost:8000/api/metadata/semantic-types
+curl http://localhost:8000/api/metadata/udps
+curl -X POST http://localhost:8000/api/metadata/semantic-types \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Monto","dataType":"decimal","tags":[]}'
 ```
 
 ### 4.4 Excel-import
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:8000/api/excel-import/preview \
-  -F "file=@./tablas.xlsx"
+curl -X POST http://localhost:8000/api/excel-import/preview -F "file=@./tablas.xlsx"
 ```
 
 Response (resumen):
@@ -202,36 +167,12 @@ Response (resumen):
 }
 ```
 
-### 4.5 Admin de usuarios
-
-```bash
-curl -b cookies.txt http://localhost:8000/api/admin/users
-
-# Crear usuario con permiso por PROYECTO
-curl -b cookies.txt -X POST http://localhost:8000/api/admin/users \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "username":"alice","password":"s3cret123","role":"editor","isActive":true,
-        "permissions":[{"projectId":"<uuid>","level":"edit"}]
-      }'
-
-# Actualizar (password queda igual si se omite)
-curl -b cookies.txt -X PUT http://localhost:8000/api/admin/users/<userId> \
-  -H 'Content-Type: application/json' -d '{"isActive": false}'
-
-# Hard-delete (no se puede borrar uno mismo)
-curl -b cookies.txt -X DELETE http://localhost:8000/api/admin/users/<userId>
-```
-
 ---
 
 ## 5. Formato del Excel para `/api/excel-import/preview`
 
-### 5.1 Reglas
-
-- **Cada hoja es una tabla**. El nombre de la hoja puede llevar schema con `.`:
-  `dbo.Customer` → schema=`dbo`, table=`Customer`; `a.b.c` → `("a","b.c")`
-  (solo el primer `.` separa).
+- **Cada hoja es una tabla**. El nombre puede llevar schema con `.`:
+  `dbo.Customer` → schema=`dbo`, table=`Customer` (solo el primer `.` separa).
 - **La primera fila es header obligatoria** (se descarta).
 - **Lectura por posición**: A=nombre, B=tipo (con o sin paréntesis), C=descripción (opcional).
 
@@ -240,13 +181,8 @@ curl -b cookies.txt -X DELETE http://localhost:8000/api/admin/users/<userId>
 | customer_id | BIGINT | Identificador único |
 | amount | decimal(10, 2) | Monto de la operación |
 
-### 5.2 Hoja opcional `TablesDescriptions`
-
-Si existe (case-insensitive), el backend la lee y matchea cada fila con su tabla
-(por `sheetName`, `schema.table` o `table`). Las entradas sin match se reportan
-en `warnings`.
-
-### 5.3 Normalización de tipos
+Hoja opcional `TablesDescriptions` (case-insensitive): se matchea con cada tabla;
+las entradas sin match van a `warnings`.
 
 | Input | Resultado |
 |---|---|
@@ -254,7 +190,6 @@ en `warnings`.
 | `int` | `integer` (alias) |
 | `decimal(10, 2)` | `decimal`, len=10, scale=2 (exact) |
 | `decximam(10,2)` | `decimal` (fuzzy, conf≈86) |
-| `variant` (Snowflake) | `variant` (unknown, conf=0) |
 | `(vacío)` | `varchar` (empty) |
 
 Los `unknown` no rompen el import — el usuario corrige en el modal antes de
@@ -277,38 +212,18 @@ request loguea inicio/fin con `request_id` (también devuelto en `X-Request-ID`)
 
 ## 7. Troubleshooting
 
-### "Login se queda colgado / 401 silencioso"
-Causa típica: `AUTH_SECRET` distinto entre los dos `.env`.
-
-```bash
-grep -E '^AUTH_SECRET' web-data-model-hub/.env backend-data-model-hub/.env
-```
-
-Ambos valores deben ser idénticos.
-
-### `403 Forbidden` en `/api/projects/{id}` (o su canvas)
-El usuario está autenticado pero no tiene un `permissions` con ese `projectId`.
-Como admin, asignalo en `/admin/users`, o directo en Cosmos:
-
-```javascript
-db.users.updateOne(
-  { username: "<user>" },
-  { $push: { permissions: { projectId: "<uuid>", level: "edit" } } }
-)
-```
-
 ### `500` en cualquier endpoint que toque DB
 `GET /api/health` → `db_connected: false`. Verifica, en orden:
-1. `COSMOS_CONNECTION_STRING` completo (incluye `tls=true` y `authMechanism=SCRAM-SHA-256`).
-2. La IP del servidor habilitada en el firewall de Cosmos (vCore).
+1. `COSMOS_CONNECTION_STRING` completo (`tls=true`, `authMechanism=SCRAM-SHA-256`).
+2. La red del servidor habilitada en el firewall de Cosmos (vCore). En Databricks
+   Apps con Cosmos abierto a todas las redes, no aplica.
 3. La connection string no expiró (rotación de keys).
 
 Después de corregir, **reiniciá el proceso** (la conexión se intenta solo en el lifespan).
 
+### `{"detail":"Not Found"}` al abrir `/`
+Es normal: no hay ruta en `/`. La API vive en `/api/*` (probá `/api/health`).
+
 ### `400 Could not parse Excel file: ...`
 Archivo corrupto, protegido con contraseña, o `.xlsb` (no soportado por openpyxl).
 Re-exportar como `.xlsx` estándar.
-
-### Bootstrap admin no aparece en DB
-Se dispara solo en el handler de `/api/auth/login`. Hacé un login con
-`admin / dogadmin2019` y se crea en ese mismo request.

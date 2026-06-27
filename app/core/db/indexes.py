@@ -28,18 +28,22 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
                 raise
 
     await asyncio.gather(
-        # users
-        _try("users", [("username", 1)], unique=True),
-        # projects
-        _try("projects", [("updatedAt", -1)]),
-        # project_tables (shard key projectId)
-        _try("project_tables", [("projectId", 1)]),
-        _try("project_tables", [("projectId", 1), ("layer", 1)]),
-        _try("project_tables", [("projectId", 1), ("domain", 1)]),
-        # project_relationships (shard key projectId)
-        _try("project_relationships", [("projectId", 1)]),
-        # UDP / Semantic Type catalog (transversal, global)
-        _try("semantic_types", [("flgactive", 1)]),
-        _try("udps", [("flgactive", 1)]),
+        # ── Modelo canónico (M1) ────────────────────────────────
+        _try("parent_domains", [("flgactive", 1)]),
+        _try("abbreviation_dict", [("flgactive", 1)]),
+        _try("canonical_tables", [("flgactive", 1)]),
+        _try("canonical_columns", [("tableId", 1)]),
+        _try("canonical_columns", [("parentDomainId", 1)]),
+        # ── Changesets (M2a) ────────────────────────────────────
+        _try("changesets", [("updatedAt", -1)]),
+        # ── M3a: Projects + Subject Areas + Relationships + Views ──
+        _try("projects", [("flgactive", 1)]),
+        _try("subject_areas", [("projectId", 1)]),
+        _try("relationships", [("flgactive", 1)]),
+        _try("views", [("flgactive", 1)]),
+        # ── R1a: Folders (jerarquía del Model Explorer) ──────────
+        _try("folders", [("projectId", 1)]),
+        # ── R1c: naming_config (1 doc por scope; _id = scope) ────
+        _try("naming_config", [("scope", 1)]),
     )
     log.info("motor indexes ensured")

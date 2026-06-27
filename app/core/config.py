@@ -4,8 +4,8 @@ Solo expone la conexión a Cosmos DB y la ruta raíz del proyecto. Las
 variables de Azure AI Foundry / OpenAI / embeddings / engines viven en el
 servicio de agentes (`app-agents-modeler`).
 
-La autenticación lee `AUTH_SECRET` directamente desde `os.getenv` en
-`app/core/security/jwt.py` — no se expone acá para evitar leakage accidental.
+MVP sin auth: no hay secretos de autenticación (la identidad/permisos vuelven al
+final como matriz robusta).
 """
 
 import os
@@ -28,6 +28,14 @@ class Settings:
     # administra `column_catalog`.
     COSMOS_CONNECTION_STRING: str = os.getenv("COSMOS_CONNECTION_STRING", "")
     COSMOS_DATABASE: str = os.getenv("COSMOS_DATABASE", "db_modeler")
+
+    # ─── Identidad / Auth seam ─────────────────────────────────
+    # "local"  → usuario fake configurable (desarrollo sin Databricks).
+    # "databricks" → identidad reenviada por el proxy SSO (headers OBO).
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "local")
+    LOCAL_DEV_USER: str = os.getenv("LOCAL_DEV_USER", "dev@local")
+    LOCAL_DEV_USERNAME: str = os.getenv("LOCAL_DEV_USERNAME", "")
+    LOCAL_DEV_DISPLAY_NAME: str = os.getenv("LOCAL_DEV_DISPLAY_NAME", "")
 
     # ─── Ruta raíz del proyecto ────────────────────────────────
     PROJECT_ROOT: Path = _PROJECT_ROOT

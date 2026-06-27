@@ -1,32 +1,27 @@
 # Arquitectura — `backend-data-model-hub`
 
-> Backend **de plataforma** del Data Modeler. Resuelve autenticación,
-> permisos, CRUD de **proyectos** (con su jerarquía embebida), persistencia
-> del **canvas** (tablas + relaciones), administración de usuarios y la
-> previsualización del import desde Excel. **No** ejecuta agentes LLM: el
-> modelado conversacional vive en el servicio separado `app-agents-modeler`.
+> Backend **de plataforma** del Data Modeler. Resuelve el CRUD de **proyectos**
+> (con su jerarquía embebida), la persistencia del **canvas** (tablas +
+> relaciones), el catálogo de **metadata** (Semantic Types / UDP) y la
+> previsualización del **import desde Excel**. **MVP sin auth ni permisos**
+> (abierto/anónimo). **No** ejecuta agentes LLM: el modelado conversacional vive
+> en el servicio separado `app-agents-modeler` (fuera del MVP).
 
 ## 1. Visión general
 
 ```mermaid
 flowchart LR
-    subgraph Browser["Browser · Next.js (:3000)"]
+    subgraph Browser["Browser · Next.js"]
         UI["React UI<br/>Zustand stores"]
-        PXY["proxy.ts<br/>(verifica JWT por request)"]
         SVC["src/services/*"]
     end
 
-    subgraph Platform["backend-data-model-hub (:8000)"]
+    subgraph Platform["backend-data-model-hub"]
         H["/api/health"]
-        AUTH["/api/auth/*"]
         PRJ["/api/projects/*"]
         CNV["/api/projects/{id}/canvas<br/>/api/projects/{id}/positions"]
-        ADM["/api/admin/users/*"]
+        MTD["/api/metadata/*"]
         XLS["/api/excel-import/preview"]
-    end
-
-    subgraph Agent["app-agents-modeler (servicio aparte)"]
-        AGT["modelado conversacional<br/>(desacoplado)"]
     end
 
     subgraph Cloud["Azure"]
@@ -34,37 +29,35 @@ flowchart LR
     end
 
     UI --> SVC
-    SVC -.cookie modeler-auth.-> AUTH
     SVC --> PRJ
     SVC --> CNV
-    SVC --> ADM
+    SVC --> MTD
     SVC --> XLS
-    PXY -. verifica firma .- AUTH
-    AUTH --> COSMOS
     PRJ --> COSMOS
     CNV --> COSMOS
-    ADM --> COSMOS
-    AGT -. column_catalog .-> COSMOS
+    MTD --> COSMOS
 ```
 
-**Stack**: Python 3.12 · FastAPI · Pydantic v2 · Motor (async MongoDB) ·
-bcrypt · PyJWT · openpyxl · rapidfuzz · Azure Cosmos DB for MongoDB.
+**Stack**: Python 3.12 (Databricks Apps usa 3.11) · FastAPI · Pydantic v2 ·
+Motor (async MongoDB) · openpyxl · rapidfuzz · Azure Cosmos DB for MongoDB.
 
-**Procesos en juego**: 1 proceso FastAPI por deploy + 1 cuenta de Cosmos DB.
-No hay broker de colas, ni caché Redis, ni dependencia de Azure AI Foundry
-(eso vive solo en `app-agents-modeler`). El backend arranca en segundos y
-tiene huella de RAM baja.
+**Procesos en juego**: 1 proceso FastAPI por deploy + 1 cuenta de Cosmos DB. No
+hay broker de colas, ni caché Redis, ni dependencia de Azure AI Foundry (eso vive
+solo en `app-agents-modeler`). El backend arranca en segundos, tiene huella de RAM
+baja y es **stateless** (encaja en Databricks Apps).
 
 ### Topología de colecciones (`db_modeler`)
 
 | Servicio | Colecciones que toca |
 |---|---|
-| `backend-data-model-hub` (este repo) | `users`, `projects`, `project_tables`, `project_relationships` |
+| `backend-data-model-hub` (este repo) | `projects`, `project_tables`, `project_relationships`, `semantic_types`, `udps` |
 | `app-agents-modeler` | `column_catalog` (diccionario semántico del agente) |
 
-Ambos apuntan al **mismo cluster y database** pero tocan colecciones
-disjuntas — no hay carreras de escritura entre ellos. Este backend **no toca**
-`column_catalog`.
+Ambos apuntan al **mismo cluster y database** pero tocan colecciones disjuntas.
+Este backend **no toca** `column_catalog`.
+
+> La colección `users` puede existir con datos legacy, pero este backend **ya no
+> la administra**: la auth/permisos se quitaron en el MVP (vuelven al final).
 
 ---
 
@@ -106,46 +99,32 @@ compatibilidad (`uvicorn api.main:app` sigue vivo; el entrypoint canónico es
 |---|---|---|
 | `motor_client` (Cosmos DB) | `AsyncIOMotorClient` + `ensure_indexes` | si falla, `app.state.db_connected = False` y `/api/health` lo reporta; los endpoints que usen DB devuelven 500 |
 
-### 3.2 Routers (`app/features/*/router.py`)
+### 3.2 Routers (`app/features/*/router.py`) — todos abiertos (MVP sin auth)
 
-| Router | Prefijo | Auth | Responsabilidad |
-|---|---|---|---|
-| `health` | `/api/health` | público | liveness + flag `db_connected` |
-| `auth` | `/api/auth/*` | público (`/login`, `/logout`); `/me` con cookie | login / logout / me con cookie `modeler-auth` |
-| `projects` | `/api/projects/*` | `AuthUserDep` (admin para POST/DELETE) | CRUD de proyectos + su jerarquía embebida (engines/layers/domains) |
-| `canvas` | `/api/projects/{id}/canvas`, `/api/projects/{id}/positions` | `AuthUserDep` + `check_project_access` | hidratar y reemplazar tablas+relaciones; persistir posiciones |
-| `users` | `/api/admin/users/*` | `AdminDep` | gestión de usuarios y permisos (solo admin) |
-| `excel_import` | `/api/excel-import/preview` | `AuthUserDep` | preview normalizado de un `.xlsx` |
+| Router | Prefijo | Responsabilidad |
+|---|---|---|
+| `health` | `/api/health` | liveness + flag `db_connected` |
+| `projects` | `/api/projects/*` | CRUD de proyectos + su jerarquía embebida (engines/layers/domains) |
+| `canvas` | `/api/projects/{id}/canvas`, `/api/projects/{id}/positions` | hidratar y reemplazar tablas+relaciones; persistir posiciones |
+| `metadata` | `/api/metadata/*` | catálogo transversal de Semantic Types / UDP |
+| `excel_import` | `/api/excel-import/preview` | preview normalizado de un `.xlsx` |
 
-> No hay router `models`: el canvas reemplazó a la antigua colección `models`
-> y sus colecciones hijas.
+> No hay routers `auth` / `users` / `models`: la auth y los permisos se quitaron
+> (MVP abierto) y el canvas reemplazó a la antigua colección `models`.
 
-### 3.3 Infraestructura compartida (`app/core/`) + auth
+### 3.3 Infraestructura compartida (`app/core/`)
 
 ```
 app/core/
-├── security/jwt.py        # JWT sign/verify (HS256) + cookie modeler-auth
-├── security/passwords.py  # bcrypt hash/verify
 ├── api/envelope.py        # ok({...}) → {success: true, data: ...}
 ├── db/{client,indexes}.py # Motor singleton + ensure_indexes
 └── config.py · logging.py · models.py (DOC_CONFIG · TagDoc compartido)
 ```
 
-El bootstrap del admin vive en `app/features/auth/bootstrap.py`. El wiring de
-autorización vive en `app/features/auth/dependencies.py` (API pública de la
-feature `auth`): lee la cookie `modeler-auth`,
-valida el JWT, **recarga `UserDoc` desde Cosmos en cada request** (un cambio de
-permisos toma efecto al instante) y expone:
-
-| Helper | Qué hace |
-|---|---|
-| `project_access_level(user, projectId)` | `"edit"` / `"view"` / `None` (admin → siempre `"edit"`) |
-| `can_view_project` / `can_edit_project` | booleanos derivados del anterior |
-| `visible_project_ids(user)` | conjunto de proyectos que el usuario puede ver (admin → todos) |
-| `check_project_access(user, projectId, level)` | lanza 403/404 si no cumple |
-| `require_user` / `require_admin` | dependencies `AuthUserDep` / `AdminDep` |
-
-Replican el contrato de `web-data-model-hub/src/lib/auth/permissions.ts`.
+> **Identidad / permisos**: el MVP es **abierto/anónimo** — no hay capa de auth
+> ni guards de permisos (se quitaron las features `auth`/`users` y `core/security`).
+> Cuando se reintroduzcan (matriz robusta), la identidad vendrá del proxy de
+> Databricks Apps (cabecera `X-Forwarded-Email`). Ver `../plan-migracion-databricks.md`.
 
 ### 3.4 Capa de datos — repositorios por feature
 
@@ -155,7 +134,6 @@ v2, espejo de las interfaces TS del frontend, `extra="ignore"`):
 ```
 app/features/projects/{models,repository}.py   # proyectos (soft-delete + cascade)
 app/features/canvas/{models,repository}.py      # tablas + relaciones (get/replace/positions/delete)
-app/features/users/{models,repository}.py       # usuarios (hard-delete; isActive=false = lock-out)
 app/features/metadata/{models,repository}.py    # Semantic Types / UDP (catálogo global)
 app/core/db/client.py                           # singleton AsyncIOMotorClient + get_db
 ```
@@ -164,73 +142,34 @@ app/core/db/client.py                           # singleton AsyncIOMotorClient +
 
 | Colección | Shard / PK | Índices |
 |---|---|---|
-| `users` | `_id` (uuid) | único en `username`; hard-delete |
 | `projects` | `_id` (uuid) | soft-delete `flgactive`; embebe `engines`/`layers`/`domains`; cascade al canvas |
 | `project_tables` | `projectId` | `(projectId)`, `(projectId, layer)`, `(projectId, domain)`; embebe `views[]` |
 | `project_relationships` | `projectId` | `(projectId)`; forma anidada `source`/`target`/`cardinality` |
+| `semantic_types`, `udps` | `_id` | `(flgactive)`; catálogo transversal |
 
-`canvas_db._replace_entities` hace **soft-delete + bulkWrite `ReplaceOne(upsert)`**:
+`canvas/repository._replace_entities` hace **soft-delete + bulkWrite `ReplaceOne(upsert)`**:
 marca los docs viejos del proyecto como `flgactive=false` y luego upserta los
 nuevos, evitando `E11000` sobre filas previamente soft-eliminadas. `projectId`
 se **inyecta al escribir y se elimina al leer** (no es campo de `TableDoc` /
 `RelationshipDoc`). `_ensure_column_ids` stampa un UUID en cualquier columna que
 llegue sin `id` (safety-net, ver §6).
 
-### 3.5 Feature Excel-import — `src/excel_import/`
+### 3.5 Feature Excel-import — `app/features/excel_import/`
 
 Módulo aislado (sin estado compartido) montado en `/api/excel-import/preview`.
-Pipeline 100 % determinista (sin LLM): bytes → `workbook_reader` → `service` →
-`type_normalizer` → `ExcelPreview`. Ver `doc/workflow.md`.
+Pipeline 100 % determinista (sin LLM): bytes → `reader` → `service` →
+`normalizer` → `ExcelPreview`. Ver `doc/workflow.md`.
 
 ---
 
-## 4. Autenticación
+## 4. Identidad (MVP abierto)
 
-```mermaid
-sequenceDiagram
-    participant U as Browser
-    participant PX as Next.js proxy.ts
-    participant FA as backend-data-model-hub
-    participant DB as Cosmos DB
-
-    U->>FA: POST /api/auth/login {username, password}
-    FA->>FA: ensure_bootstrap_admin (idempotent)
-    FA->>DB: get_user_by_username
-    DB-->>FA: UserDoc
-    FA->>FA: bcrypt.checkpw + sign_token (HS256, 10h)
-    FA->>DB: mark_login_success (best-effort)
-    FA-->>U: 200 + Set-Cookie modeler-auth (HttpOnly, SameSite=Lax)
-
-    U->>PX: GET /projects/abc (navegación HTML)
-    PX->>PX: jose.jwtVerify(cookie)
-    alt token válido
-        PX-->>U: render page
-    else token inválido o ausente
-        PX-->>U: redirect /login?next=...
-    end
-
-    U->>FA: GET /api/projects (XHR con cookie)
-    FA->>FA: verify_token
-    FA->>DB: get_user_by_id (recarga viva)
-    DB-->>FA: UserDoc actualizado
-    FA->>FA: filtrar por permissions (visible_project_ids)
-    FA-->>U: lista filtrada
-```
-
-**Detalles importantes**:
-
-- **`AUTH_SECRET` compartido** entre `web-data-model-hub/.env` y este `.env`. El
-  proxy de Next.js usa `jose` (Edge) y este backend usa `PyJWT`, ambos HS256 y
-  10 h de vida. Si divergen → 401 silencioso en todas las requests (causa #1 de
-  "el login se queda colgado").
-- **Bootstrap admin**: el primer `POST /api/auth/login` crea `admin / dogadmin2019`
-  si no existe ningún usuario `admin`. Idempotente (`src/api/auth.py::ensure_bootstrap_admin`).
-- **Recarga viva por request**: `get_current_user` relee `UserDoc` desde DB; no
-  confía en los claims del JWT, así que desactivar un usuario o cambiar permisos
-  toma efecto sin esperar a que expire la cookie.
-- **Permisos** (`src/api/dependencies.py`): granularidad **scope-proyecto**,
-  niveles `view` / `edit`. Admin tiene `edit` total. (El antiguo scope-modelo
-  desapareció: hay un canvas por proyecto, el proyecto es la unidad de acceso.)
+El MVP **no tiene autenticación ni permisos**: todos los endpoints son públicos
+y la app es anónima. El modelo de roles (`admin/editor/viewer`) y los permisos
+por proyecto se **reintroducirán al final** como una matriz robusta; entonces la
+identidad la proveerá el proxy de **Databricks Apps** (OBO, cabecera
+`X-Forwarded-Email`), mapeada a una colección de usuarios. Detalle en
+`../plan-migracion-databricks.md` (§6) y `../DEPLOY-databricks.md`.
 
 ---
 
@@ -286,14 +225,13 @@ sequenceDiagram
 El modelado conversacional (LLM) tiene un perfil de recursos muy distinto:
 Azure AI Foundry, tokens-por-minuto, semáforos de concurrencia, dependencias
 pesadas. Mantenerlo en `app-agents-modeler` permite escalar y desplegar ambos
-de forma independiente. Este backend solo depende de Cosmos DB y del
-`AUTH_SECRET` compartido con el frontend.
+de forma independiente. Este backend solo depende de Cosmos DB.
 
 ### Por qué project-centric (y no "models")
 El rediseño Aurora unificó el modelo: un proyecto tiene un único canvas, con sus
 niveles y dominios embebidos. Re-shardear las tablas/relaciones por `projectId`
 da hidratación con latencia constante y elimina la capa intermedia "modelo =
-diagrama" que antes complicaba permisos y navegación.
+diagrama" que antes complicaba la navegación.
 
 ### Por qué `_ensure_column_ids` es defensivo
 Los `id` estables de columna sobreviven a renames y son la base de las

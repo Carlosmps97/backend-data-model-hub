@@ -1,25 +1,27 @@
-"""DTOs HTTP de la feature `projects`."""
-
+"""DTOs de `projects` / `subject_areas`."""
 from __future__ import annotations
-
-from typing import Any
 
 from pydantic import BaseModel
 
 
-class CreateProjectRequest(BaseModel):
+class ProjectBody(BaseModel):
     name: str
     description: str | None = None
-    # Jerarquía Aurora — arrays chicos embebidos. Normalmente vacíos al crear;
-    # el hub del proyecto los llena luego vía PUT.
-    engines: list[str] | None = None
-    layers: list[dict[str, Any]] | None = None
-    domains: list[dict[str, Any]] | None = None
 
 
-class UpdateProjectRequest(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    engines: list[str] | None = None
-    layers: list[dict[str, Any]] | None = None
-    domains: list[dict[str, Any]] | None = None
+class SubjectAreaBody(BaseModel):
+    projectId: str
+    name: str
+    folderId: str | None = None  # ubica el canvas en el Model Explorer (aditivo)
+
+
+class TablesBody(BaseModel):
+    tableIds: list[str]
+
+
+class LayoutBody(BaseModel):
+    layout: dict  # { tableId: {x, y} }
+
+
+class DrawingsBody(BaseModel):
+    drawings: list[dict]  # capa DRAWING (debajo de los nodos): formas/texto con estilo + posición
