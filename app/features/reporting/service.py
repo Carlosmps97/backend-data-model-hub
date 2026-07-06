@@ -63,28 +63,32 @@ def _matches(row: dict, project_ids: set[str], filters: dict) -> bool:
 
 def table_rows(
     tables: list[dict],
-    columns: list[dict],
+    column_counts: dict[str, int],
     relationships: list[dict],
     subject_areas: list[dict],
     projects: list[dict],
     filters: dict | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
-    """Construye las filas del reporte por tabla. Puro. Ver docstring del módulo."""
+    """Construye las filas del reporte por tabla. Puro. Ver docstring del módulo.
+
+    `column_counts` = {tableId: nº columnas activas}, YA agregado server-side
+    (no se materializan las columnas — ver `repository.column_counts`).
+    `limit` (opcional) acota la cantidad de filas DESPUÉS de ordenar (carga
+    inicial liviana del front); `None` = sin tope.
+    """
     filters = filters or {}
     tables_to_canvases = _index_tables_to_canvases(subject_areas)
     projects_by_id = {p["id"]: (p.get("name") or "") for p in projects}
 
-    col_count: dict[str, int] = {}
-    for c in columns:
-        tid = c.get("tableId")
-        if tid is not None:
-            col_count[tid] = col_count.get(tid, 0) + 1
+    col_count: dict[str, int] = column_counts or {}
 
     rel_count: dict[str, int] = {}
     for r in relationships:
-        for tid in (r.get("sourceTableId"), r.get("targetTableId")):
-            if tid is not None:
-                rel_count[tid] = rel_count.get(tid, 0) + 1
+        # set(): una relación auto-referencial (source == target, p.ej.
+        # empleado.jefe_id → empleado.id) cuenta UNA vez para esa tabla, no dos.
+        for tid in {r.get("sourceTableId"), r.get("targetTableId")} - {None}:
+            rel_count[tid] = rel_count.get(tid, 0) + 1
 
     rows: list[dict] = []
     for t in tables:
@@ -107,6 +111,8 @@ def table_rows(
             rows.append(row)
 
     rows.sort(key=lambda r: (r.get("physicalName") or "").lower())
+    if limit is not None and limit >= 0:
+        rows = rows[:limit]
     return rows
 
 
@@ -139,21 +145,40 @@ def column_rows(columns: list[dict], parent_domains: list[dict]) -> list[dict]:
     return rows
 
 
-async def list_table_rows(filters: dict | None = None) -> list[dict]:
-    """Filas del reporte por tabla (todas las tablas, filtradas en Python)."""
+async def list_table_rows(filters: dict | None = None, limit: int | None = None) -> list[dict]:
+    """Filas del reporte por tabla (todas las tablas, filtradas en Python).
+
+    Fast-path de la carga inicial: con `limit` y SIN filtros se traen sólo las
+    primeras `limit` tablas (orden físico) + sus conteos, en vez de barrer las
+    10k/400k (`report_inputs_page`)."""
+    if limit is not None and limit >= 0 and not (filters or {}):
+        data = await repository.report_inputs_page(limit)
+        return table_rows(
+            data["tables"], data["columnCounts"], data["relationships"],
+            data["subjectAreas"], data["projects"], filters, limit,
+        )
     data = await repository.report_inputs()
     return table_rows(
         data["tables"],
-        data["columns"],
+        data["columnCounts"],
         data["relationships"],
         data["subjectAreas"],
         data["projects"],
         filters,
+        limit,
     )
 
 
-async def list_column_rows(table_id: str | None = None) -> list[dict]:
-    """Detalle a nivel columna; todas o las de una tabla (`tableId`)."""
-    columns = await repository.columns(table_id)
+# Tope de seguridad del export de columnas SIN filtro (evita volcar 400k ~91MB).
+UNFILTERED_COLUMNS_CAP = 20000
+
+
+async def list_column_rows(table_id: str | None = None, table_ids: list[str] | None = None,
+                           limit: int | None = None) -> list[dict]:
+    """Detalle a nivel columna; todas, las de una tabla o de un lote de tablas.
+    Sin filtro de tabla se aplica un tope (`limit` o `UNFILTERED_COLUMNS_CAP`)."""
+    if not table_id and not table_ids:
+        limit = limit or UNFILTERED_COLUMNS_CAP
+    columns = await repository.columns(table_id, table_ids, limit)
     parent_domains = await repository.parent_domains()
     return column_rows(columns, parent_domains)

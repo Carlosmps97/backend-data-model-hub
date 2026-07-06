@@ -1,14 +1,17 @@
 """Endpoints de configuración de naming (separador/case) por scope."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.features.auth.deps import write_guard
 
 from app.core.api.envelope import ok
 
 from . import service
 from .schemas import NamingConfigBody
 
-router = APIRouter(prefix="/api/settings", tags=["settings"])
+router = APIRouter(prefix="/api/settings", tags=["settings"],
+                   dependencies=[Depends(write_guard("standards.edit"))])
 
 
 @router.get("/naming")

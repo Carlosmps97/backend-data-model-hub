@@ -53,9 +53,18 @@ async def update_project(pid: str, data: dict) -> dict | None:
 
 async def delete_project(pid: str) -> bool:
     db = await get_db()
-    await db[SUBJECT_AREAS].update_many({"projectId": pid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
-    res = await db[PROJECTS].update_one({"_id": pid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
-    return res.modified_count > 0
+    # Borra el proyecto sólo si está activo (idempotencia → 404 en el 2º delete),
+    # y cascada el soft-delete a sus canvases Y sus carpetas (antes las folders
+    # quedaban huérfanas y seguían accesibles).
+    res = await db[PROJECTS].update_one(
+        {"_id": pid, "flgactive": {"$ne": False}},
+        {"$set": {"flgactive": False, "deletedAt": _now()}})
+    if res.modified_count == 0:
+        return False
+    stamp = {"$set": {"flgactive": False, "deletedAt": _now()}}
+    await db[SUBJECT_AREAS].update_many({"projectId": pid}, stamp)
+    await db["folders"].update_many({"projectId": pid}, stamp)
+    return True
 
 
 # ── Subject Areas ──
@@ -94,5 +103,9 @@ async def update_subject_area(sa_id: str, fields: dict) -> dict | None:
 
 async def delete_subject_area(sa_id: str) -> bool:
     db = await get_db()
-    res = await db[SUBJECT_AREAS].update_one({"_id": sa_id}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    # Filtra flgactive: un id inexistente o un doble-delete → modified_count 0 →
+    # False → 404 (antes re-tocaba deletedAt y devolvía True falsamente).
+    res = await db[SUBJECT_AREAS].update_one(
+        {"_id": sa_id, "flgactive": {"$ne": False}},
+        {"$set": {"flgactive": False, "deletedAt": _now()}})
     return res.modified_count > 0

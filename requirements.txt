@@ -5,12 +5,11 @@ python-dotenv
 # API Server
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
-python-multipart>=0.0.9   # required by FastAPI for multipart uploads
 
 # Cosmos DB (Motor async + pymongo for type compat)
 pymongo>=4.0
 motor>=3.3.0
 
-# Excel import
-openpyxl>=3.1
-rapidfuzz>=3.6
+# Auth propia (login usuario/contraseña + token de sesión)
+bcrypt>=4.0        # hash de contraseñas
+pyjwt>=2.8         # token de sesión firmado (HS256)

@@ -9,6 +9,7 @@ class CanonicalTableBody(BaseModel):
     physicalName: str | None = None
     sql_schema: str | None = Field(default=None, alias="schema")
     description: str | None = None
+    udpValues: dict[str, str] | None = None   # etiquetas UDP asignadas a la tabla
 
 
 class CanonicalColumnBody(BaseModel):
@@ -23,3 +24,4 @@ class CanonicalColumnBody(BaseModel):
     isPartition: bool = False
     description: str | None = None
     ordinal: int = 0
+    udpValues: dict[str, str] | None = None   # etiquetas UDP asignadas a la columna

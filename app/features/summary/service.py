@@ -82,13 +82,19 @@ def count_global(
     }
 
 
-async def summary(project_id: str | None = None) -> dict:
-    """Resuelve los 5 contadores del Home; global o acotado a un proyecto."""
-    if project_id:
-        subject_areas = await repository.subject_areas_for_project(project_id)
+async def summary(project_ids: list[str] | None = None) -> dict:
+    """Resuelve los 5 contadores del Home; global o acotado a uno o varios
+    proyectos (unión deduplicada de su alcance)."""
+    ids = [pid for pid in dict.fromkeys(project_ids or []) if pid]  # dedup, orden
+    if ids:
+        subject_areas: list[dict] = []
+        for pid in ids:
+            subject_areas.extend(await repository.subject_areas_for_project(pid))
         views = await repository.views_with_table()
         relationships = await repository.relationships_min()
-        return count_for_project(subject_areas, views, relationships)
+        counts = count_for_project(subject_areas, views, relationships)
+        counts["projects"] = len(ids)  # nº de proyectos seleccionados (no 1)
+        return counts
 
     return count_global(
         await repository.count_active("canonical_tables"),

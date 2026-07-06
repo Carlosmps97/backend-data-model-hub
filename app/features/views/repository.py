@@ -58,5 +58,6 @@ async def update(vid: str, data: dict) -> dict | None:
 
 async def delete(vid: str) -> bool:
     db = await get_db()
-    res = await db[COLL].update_one({"_id": vid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    res = await db[COLL].update_one({"_id": vid, "flgactive": {"$ne": False}},
+                                    {"$set": {"flgactive": False, "deletedAt": _now()}})
     return res.modified_count > 0

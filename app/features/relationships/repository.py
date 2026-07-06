@@ -30,6 +30,19 @@ async def list_all() -> list[dict]:
     return [RelationshipDoc.model_validate(_to(d)).model_dump() for d in docs]
 
 
+async def list_for_tables(table_ids: list[str]) -> list[dict]:
+    """Relaciones que tocan alguna de las tablas dadas (`$in` en ambos extremos):
+    el canvas no debe cargar TODAS las relaciones del sistema para filtrar."""
+    if not table_ids:
+        return []
+    db = await get_db()
+    docs = await db[COLL].find({
+        "flgactive": {"$ne": False},
+        "$or": [{"sourceTableId": {"$in": table_ids}}, {"targetTableId": {"$in": table_ids}}],
+    }).to_list(None)
+    return [RelationshipDoc.model_validate(_to(d)).model_dump() for d in docs]
+
+
 async def create(data: dict) -> dict:
     db = await get_db()
     r = RelationshipDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})
@@ -49,5 +62,6 @@ async def update(rid: str, data: dict) -> dict | None:
 
 async def delete(rid: str) -> bool:
     db = await get_db()
-    res = await db[COLL].update_one({"_id": rid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+    res = await db[COLL].update_one({"_id": rid, "flgactive": {"$ne": False}},
+                                    {"$set": {"flgactive": False, "deletedAt": _now()}})
     return res.modified_count > 0

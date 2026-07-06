@@ -1,19 +1,27 @@
 """Endpoints del catálogo canónico (tablas + columnas universales)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, Query, status
+
+from app.features.auth.deps import write_guard
 
 from app.core.api.envelope import ok
 
 from . import service
 from .schemas import CanonicalColumnBody, CanonicalTableBody
 
-router = APIRouter(prefix="/api/catalog", tags=["catalog"])
+router = APIRouter(prefix="/api/catalog", tags=["catalog"],
+                   dependencies=[Depends(write_guard("model.edit"))])
 
 
 @router.get("/tables")
-async def list_tables():
-    return ok(await service.list_tables())
+async def list_tables(
+    q: str | None = Query(default=None, description="búsqueda por nombre (contains, case-insensitive)"),
+    limit: int | None = Query(default=None, ge=1, le=500),
+):
+    """Pool canónico. `q`+`limit` = búsqueda server-side (modales de catálogo);
+    sin parámetros, la lista completa (compat)."""
+    return ok(await service.list_tables(q, limit))
 
 
 @router.post("/tables", status_code=status.HTTP_201_CREATED)

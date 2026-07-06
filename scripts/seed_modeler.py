@@ -40,9 +40,13 @@ MODELER_COLLECTIONS: list[str] = [
     "relationships",
     "views",
     "parent_domains",
-    "abbreviation_dict",
+    "glossary_terms",
     "naming_config",
     "changesets",
+    "changeset_changes",  # un doc POR CAMBIO (el dict embebido topaba 2MB/doc)
+    "users",              # auth propia (login usuario/contraseña)
+    "roles",              # RBAC data-driven (matriz de permisos)
+    "standards_versions", # versionado independiente de Data Standards (baseline)
 ]
 PROTECTED_COLLECTION = "column_catalog"  # agente — preservar siempre
 
@@ -129,8 +133,8 @@ _DICT_TABLE: list[tuple[str, str, str | None]] = [
 ]
 
 
-def build_abbreviation_dict() -> list[dict]:
-    """`abbreviation_dict`: scopes 'column' y 'table', con `wordType`."""
+def build_glossary_terms() -> list[dict]:
+    """`glossary_terms`: scopes 'column' y 'table', con `wordType`."""
     out: list[dict] = []
     for scope, entries in (("column", _DICT_COLUMN), ("table", _DICT_TABLE)):
         for term, abbrev, word_type in entries:
@@ -187,11 +191,28 @@ _PROJECTS: list[tuple[str, str, str]] = [
      "Vista unificada del cliente: productos, tarjetas y contacto."),
     ("proj-risk-analytics", "Risk Analytics",
      "Analítica de riesgo crediticio: exposición, scoring y préstamos."),
+    # — proyectos extra (más data dummy para el Home) —
+    ("proj-marketing", "Marketing Analytics",
+     "Campañas, leads, segmentación e interacciones de clientes."),
+    ("proj-hr", "Human Resources",
+     "Empleados, departamentos, puestos, nómina y asistencia."),
+    ("proj-payments", "Payments",
+     "Pagos, transferencias, beneficiarios y canales de pago."),
+    ("proj-digital", "Digital Banking",
+     "Banca digital: usuarios, sesiones, dispositivos y notificaciones."),
+    ("proj-treasury", "Treasury",
+     "Tesorería: posiciones, instrumentos, contrapartes y límites."),
+    ("proj-fraud", "Fraud Detection",
+     "Señales de fraude sobre pagos y transferencias."),
+    ("proj-wealth", "Wealth Management",
+     "Gestión patrimonial e inversiones (proyecto nuevo, sin canvas)."),
+    ("proj-governance", "Data Governance",
+     "Catálogo, linaje y calidad de datos (proyecto nuevo, sin canvas)."),
 ]
 
 
 def build_projects() -> list[dict]:
-    """`projects`: Core Banking, Customer 360, Risk Analytics."""
+    """`projects`: 3 base + 8 extra (para ver el Home con muchos proyectos)."""
     return [
         {"_id": pid, "name": name, "description": desc,
          "flgactive": True, "createdAt": _now(), "updatedAt": _now()}
@@ -388,6 +409,135 @@ def _tables_spec() -> list[dict]:
                  "Mes de la exposición (columna de partición)."),
             ],
         },
+    ] + _extra_tables_spec()
+
+
+def _extra_tables_spec() -> list[dict]:
+    """20 tablas extra (marketing/hr/payments/digital/treasury) para poblar
+    Reporting y los proyectos nuevos con más data dummy."""
+    ID, COD, IMP, FEC = "pd-identificador", "pd-codigo", "pd-importe", "pd-fecha"
+    PK = (True, False, False, False)    # pk, fk, nullable, partition
+    FK = (False, True, False, False)
+    FKN = (False, True, True, False)    # FK nullable
+    A = (False, False, True, False)     # atributo nullable
+    R = (False, False, False, False)    # atributo requerido
+    P = (False, False, False, True)     # columna de partición
+
+    def tb(tid: str, logical: str, schema: str, desc: str, cols: list) -> dict:
+        return {"id": tid, "logical": logical, "schema": schema, "desc": desc, "cols": cols}
+
+    return [
+        # ── Marketing ──
+        tb("ct-campania", "campania", "marketing", "Campañas de marketing y promociones.", [
+            ("id_campania", "identificador campania", ID, *PK, "Id de campaña (PK)."),
+            ("nombre", "nombre campania", COD, *R, "Nombre de la campaña."),
+            ("fecha_inicio", "fecha inicio", FEC, *A, "Fecha de inicio."),
+            ("presupuesto", "monto presupuesto", IMP, *A, "Presupuesto asignado."),
+        ]),
+        tb("ct-lead", "lead comercial", "marketing", "Prospectos/leads generados por campañas.", [
+            ("id_lead", "identificador lead", ID, *PK, "Id de lead (PK)."),
+            ("id_cliente", "identificador cliente", ID, *FKN, "Cliente convertido (FK→cliente)."),
+            ("id_campania", "identificador campania", ID, *FK, "Campaña origen (FK→campania)."),
+            ("estado", "estado lead", COD, *R, "Estado del lead (NUEVO/GANADO/PERDIDO)."),
+        ]),
+        tb("ct-segmento", "segmento cliente", "marketing", "Segmentos comerciales de clientes.", [
+            ("id_segmento", "identificador segmento", ID, *PK, "Id de segmento (PK)."),
+            ("nombre", "nombre segmento", COD, *R, "Nombre del segmento."),
+            ("descripcion", "descripcion segmento", COD, *A, "Descripción del segmento."),
+        ]),
+        tb("ct-interaccion", "interaccion cliente", "marketing", "Interacciones de clientes con campañas.", [
+            ("id_interaccion", "identificador interaccion", ID, *PK, "Id de interacción (PK)."),
+            ("id_campania", "identificador campania", ID, *FK, "Campaña (FK→campania)."),
+            ("fecha", "fecha interaccion", FEC, *P, "Fecha de la interacción (partición)."),
+            ("tipo", "tipo interaccion", COD, *R, "Tipo (EMAIL/CLICK/CALL)."),
+        ]),
+        # ── Human Resources ──
+        tb("ct-departamento", "departamento", "hr", "Departamentos/áreas de la organización.", [
+            ("id_departamento", "identificador departamento", ID, *PK, "Id de departamento (PK)."),
+            ("nombre", "nombre departamento", COD, *R, "Nombre del departamento."),
+        ]),
+        tb("ct-puesto", "puesto laboral", "hr", "Catálogo de puestos.", [
+            ("id_puesto", "identificador puesto", ID, *PK, "Id de puesto (PK)."),
+            ("id_departamento", "identificador departamento", ID, *FK, "Departamento (FK)."),
+            ("nombre", "nombre puesto", COD, *R, "Nombre del puesto."),
+        ]),
+        tb("ct-nomina", "nomina empleado", "hr", "Liquidaciones de nómina por empleado.", [
+            ("id_nomina", "identificador nomina", ID, *PK, "Id de nómina (PK)."),
+            ("id_empleado", "identificador empleado", ID, *FK, "Empleado (FK→empleado)."),
+            ("monto", "monto nomina", IMP, *R, "Importe liquidado."),
+            ("fecha", "fecha nomina", FEC, *P, "Período de liquidación (partición)."),
+        ]),
+        tb("ct-asistencia", "asistencia empleado", "hr", "Registro de asistencia de empleados.", [
+            ("id_asistencia", "identificador asistencia", ID, *PK, "Id de asistencia (PK)."),
+            ("id_empleado", "identificador empleado", ID, *FK, "Empleado (FK→empleado)."),
+            ("fecha", "fecha asistencia", FEC, *P, "Fecha (partición)."),
+        ]),
+        # ── Payments ──
+        tb("ct-canal", "canal pago", "payments", "Canales de pago disponibles.", [
+            ("id_canal", "identificador canal", ID, *PK, "Id de canal (PK)."),
+            ("nombre", "nombre canal", COD, *R, "Nombre del canal."),
+        ]),
+        tb("ct-beneficiario", "beneficiario", "payments", "Beneficiarios de transferencias.", [
+            ("id_beneficiario", "identificador beneficiario", ID, *PK, "Id de beneficiario (PK)."),
+            ("id_cliente", "identificador cliente", ID, *FKN, "Cliente dueño (FK→cliente)."),
+            ("nombre", "nombre beneficiario", COD, *R, "Nombre del beneficiario."),
+        ]),
+        tb("ct-pago", "pago", "payments", "Pagos realizados por clientes.", [
+            ("id_pago", "identificador pago", ID, *PK, "Id de pago (PK)."),
+            ("id_cliente", "identificador cliente", ID, *FK, "Cliente pagador (FK→cliente)."),
+            ("id_canal", "identificador canal", ID, *FK, "Canal de pago (FK→canal)."),
+            ("monto", "monto pago", IMP, *R, "Importe pagado."),
+            ("fecha", "fecha pago", FEC, *P, "Fecha del pago (partición)."),
+        ]),
+        tb("ct-transferencia", "transferencia", "payments", "Transferencias entre cuentas/beneficiarios.", [
+            ("id_transferencia", "identificador transferencia", ID, *PK, "Id de transferencia (PK)."),
+            ("id_pago", "identificador pago", ID, *FK, "Pago asociado (FK→pago)."),
+            ("id_beneficiario", "identificador beneficiario", ID, *FKN, "Beneficiario (FK→beneficiario)."),
+            ("monto", "monto transferencia", IMP, *R, "Importe transferido."),
+        ]),
+        # ── Digital Banking ──
+        tb("ct-usuario-digital", "usuario digital", "digital", "Usuarios de banca digital.", [
+            ("id_usuario", "identificador usuario", ID, *PK, "Id de usuario (PK)."),
+            ("id_cliente", "identificador cliente", ID, *FK, "Cliente asociado (FK→cliente)."),
+            ("estado", "estado usuario", COD, *R, "Estado (ACTIVO/BLOQUEADO)."),
+        ]),
+        tb("ct-sesion", "sesion digital", "digital", "Sesiones de los usuarios digitales.", [
+            ("id_sesion", "identificador sesion", ID, *PK, "Id de sesión (PK)."),
+            ("id_usuario", "identificador usuario", ID, *FK, "Usuario (FK→usuario digital)."),
+            ("fecha", "fecha sesion", FEC, *P, "Fecha de la sesión (partición)."),
+        ]),
+        tb("ct-dispositivo", "dispositivo", "digital", "Dispositivos registrados por usuario.", [
+            ("id_dispositivo", "identificador dispositivo", ID, *PK, "Id de dispositivo (PK)."),
+            ("id_usuario", "identificador usuario", ID, *FKN, "Usuario (FK→usuario digital)."),
+            ("tipo", "tipo dispositivo", COD, *R, "Tipo (MOBILE/WEB)."),
+        ]),
+        tb("ct-notificacion", "notificacion", "digital", "Notificaciones enviadas a usuarios.", [
+            ("id_notificacion", "identificador notificacion", ID, *PK, "Id de notificación (PK)."),
+            ("id_usuario", "identificador usuario", ID, *FK, "Usuario destino (FK→usuario digital)."),
+            ("fecha", "fecha notificacion", FEC, *P, "Fecha de envío (partición)."),
+        ]),
+        # ── Treasury ──
+        tb("ct-contraparte", "contraparte", "treasury", "Contrapartes de operaciones de tesorería.", [
+            ("id_contraparte", "identificador contraparte", ID, *PK, "Id de contraparte (PK)."),
+            ("nombre", "nombre contraparte", COD, *R, "Nombre de la contraparte."),
+        ]),
+        tb("ct-instrumento", "instrumento financiero", "treasury", "Instrumentos financieros negociados.", [
+            ("id_instrumento", "identificador instrumento", ID, *PK, "Id de instrumento (PK)."),
+            ("nombre", "nombre instrumento", COD, *R, "Nombre del instrumento."),
+            ("tipo", "tipo instrumento", COD, *A, "Tipo (BONO/FX/SWAP)."),
+        ]),
+        tb("ct-posicion", "posicion tesoreria", "treasury", "Posiciones de tesorería por instrumento.", [
+            ("id_posicion", "identificador posicion", ID, *PK, "Id de posición (PK)."),
+            ("id_instrumento", "identificador instrumento", ID, *FK, "Instrumento (FK→instrumento)."),
+            ("id_contraparte", "identificador contraparte", ID, *FKN, "Contraparte (FK→contraparte)."),
+            ("monto", "monto posicion", IMP, *R, "Valor de la posición."),
+            ("fecha", "fecha posicion", FEC, *P, "Fecha de la posición (partición)."),
+        ]),
+        tb("ct-limite-tesoreria", "limite tesoreria", "treasury", "Límites de exposición por contraparte.", [
+            ("id_limite", "identificador limite", ID, *PK, "Id de límite (PK)."),
+            ("id_contraparte", "identificador contraparte", ID, *FK, "Contraparte (FK→contraparte)."),
+            ("limite", "limite tesoreria", IMP, *R, "Límite de exposición asignado."),
+        ]),
     ]
 
 
@@ -479,6 +629,24 @@ _RELATIONSHIPS: list[tuple[str, str, str, str, str, str, str, bool]] = [
      "many", "one", False),
     ("rel-exposicion-producto", "ct-exposicion", "id_producto", "ct-producto", "id_producto",
      "many", "zero-one", False),
+    # — relaciones de las tablas extra (data dummy ampliada) —
+    ("rel-lead-cliente", "ct-lead", "id_cliente", "ct-cliente", "id_cliente", "many", "zero-one", False),
+    ("rel-lead-campania", "ct-lead", "id_campania", "ct-campania", "id_campania", "many", "one", True),
+    ("rel-interaccion-campania", "ct-interaccion", "id_campania", "ct-campania", "id_campania", "many", "one", True),
+    ("rel-puesto-departamento", "ct-puesto", "id_departamento", "ct-departamento", "id_departamento", "many", "one", True),
+    ("rel-nomina-empleado", "ct-nomina", "id_empleado", "ct-empleado", "id_empleado", "many", "one", True),
+    ("rel-asistencia-empleado", "ct-asistencia", "id_empleado", "ct-empleado", "id_empleado", "many", "one", True),
+    ("rel-pago-cliente", "ct-pago", "id_cliente", "ct-cliente", "id_cliente", "many", "one", True),
+    ("rel-pago-canal", "ct-pago", "id_canal", "ct-canal", "id_canal", "many", "one", False),
+    ("rel-transferencia-pago", "ct-transferencia", "id_pago", "ct-pago", "id_pago", "many", "one", True),
+    ("rel-beneficiario-cliente", "ct-beneficiario", "id_cliente", "ct-cliente", "id_cliente", "many", "zero-one", False),
+    ("rel-usuario-cliente", "ct-usuario-digital", "id_cliente", "ct-cliente", "id_cliente", "many", "one", True),
+    ("rel-sesion-usuario", "ct-sesion", "id_usuario", "ct-usuario-digital", "id_usuario", "many", "one", True),
+    ("rel-dispositivo-usuario", "ct-dispositivo", "id_usuario", "ct-usuario-digital", "id_usuario", "many", "zero-one", False),
+    ("rel-notificacion-usuario", "ct-notificacion", "id_usuario", "ct-usuario-digital", "id_usuario", "many", "one", False),
+    ("rel-posicion-instrumento", "ct-posicion", "id_instrumento", "ct-instrumento", "id_instrumento", "many", "one", True),
+    ("rel-posicion-contraparte", "ct-posicion", "id_contraparte", "ct-contraparte", "id_contraparte", "many", "zero-one", False),
+    ("rel-limite-contraparte", "ct-limite-tesoreria", "id_contraparte", "ct-contraparte", "id_contraparte", "many", "one", True),
 ]
 
 
@@ -559,6 +727,61 @@ def _canvases_spec() -> list[dict]:
                 "ct-exposicion": (520, 400), "ct-producto": (940, 240),
             },
         },
+        # — canvases de los proyectos extra (referencian las tablas nuevas) —
+        {
+            "id": "sa-marketing", "project": "proj-marketing", "folder": None,
+            "name": "Marketing & Campaigns",
+            "tables": ["ct-campania", "ct-lead", "ct-segmento", "ct-interaccion", "ct-cliente"],
+            "pos": {
+                "ct-campania": (80, 80), "ct-lead": (480, 80), "ct-segmento": (80, 360),
+                "ct-interaccion": (480, 360), "ct-cliente": (900, 200),
+            },
+        },
+        {
+            "id": "sa-hr", "project": "proj-hr", "folder": None,
+            "name": "People & Payroll",
+            "tables": ["ct-departamento", "ct-puesto", "ct-nomina", "ct-asistencia", "ct-empleado"],
+            "pos": {
+                "ct-departamento": (80, 80), "ct-puesto": (480, 80), "ct-empleado": (900, 80),
+                "ct-nomina": (300, 380), "ct-asistencia": (700, 380),
+            },
+        },
+        {
+            "id": "sa-payments", "project": "proj-payments", "folder": None,
+            "name": "Payments & Transfers",
+            "tables": ["ct-pago", "ct-transferencia", "ct-beneficiario", "ct-canal", "ct-cuenta"],
+            "pos": {
+                "ct-canal": (80, 80), "ct-pago": (480, 80), "ct-cuenta": (900, 80),
+                "ct-transferencia": (300, 380), "ct-beneficiario": (700, 380),
+            },
+        },
+        {
+            "id": "sa-digital", "project": "proj-digital", "folder": None,
+            "name": "Digital Channels",
+            "tables": ["ct-usuario-digital", "ct-sesion", "ct-dispositivo", "ct-notificacion", "ct-cliente"],
+            "pos": {
+                "ct-cliente": (80, 200), "ct-usuario-digital": (480, 200),
+                "ct-sesion": (900, 60), "ct-dispositivo": (900, 300), "ct-notificacion": (900, 540),
+            },
+        },
+        {
+            "id": "sa-treasury", "project": "proj-treasury", "folder": None,
+            "name": "Treasury Positions",
+            "tables": ["ct-posicion", "ct-instrumento", "ct-contraparte", "ct-limite-tesoreria"],
+            "pos": {
+                "ct-instrumento": (80, 80), "ct-contraparte": (80, 380),
+                "ct-posicion": (520, 200), "ct-limite-tesoreria": (920, 200),
+            },
+        },
+        {
+            "id": "sa-fraud", "project": "proj-fraud", "folder": None,
+            "name": "Fraud Signals",
+            "tables": ["ct-pago", "ct-transferencia", "ct-cliente", "ct-cuenta"],
+            "pos": {
+                "ct-cliente": (80, 80), "ct-cuenta": (480, 80),
+                "ct-pago": (80, 380), "ct-transferencia": (480, 380),
+            },
+        },
     ]
 
 
@@ -584,17 +807,15 @@ def build_subject_areas() -> list[dict]:
 def build_changesets() -> list[dict]:
     """`changesets`: v14 publicada (producción actual) + 2 requests en revisión.
 
-    Los `changes` de los requests upsertan tablas/columnas que referencian ids
-    de tablas YA publicadas, para que el diff estructurado y el cálculo de
-    impacto (tablas tocadas + afectadas vía relationships) tengan contenido.
+    Los changesets son SOLO cabecera (estado/decisiones): los cambios viven en
+    `changeset_changes` (ver `build_changeset_changes`), un doc por cambio.
     """
-    # v14 — producción actual (approved). `changes` vacío: refleja el publicado.
+    # v14 — producción actual (approved). Sin cambios: refleja el publicado.
     v14 = {
         "_id": "cs-v14",
         "title": "Baseline modelo Core",
         "owner": "mr",
         "status": "approved",
-        "changes": {},
         "description": "Versión base publicada del modelo (Core/Cards/Risk).",
         "versionLabel": "v14",
         "projectIds": ["proj-core-banking", "proj-customer-360", "proj-risk-analytics"],
@@ -608,11 +829,62 @@ def build_changesets() -> list[dict]:
         ],
         "createdAt": _now(), "updatedAt": _now(),
         "submittedAt": _now(), "reviewedBy": "beto", "reviewedAt": _now(),
+        # Marcador de apply completo: approved SIN appliedAt = publish
+        # interrumpido (current_production lo excluye).
+        "appliedAt": _now(),
         "flgactive": True,
     }
 
-    # v15 — request en revisión: agrega tabla `garantia` (lending) + una columna
-    # nueva a `prestamo` (toca ct-prestamo → impacto vía relationships).
+    v15 = {
+        "_id": "cs-v15",
+        "title": "Garantías de préstamos",
+        "owner": "ana",
+        "status": "submitted",
+        "description": "Nueva entidad `garantia` y FK desde `prestamo`.",
+        "versionLabel": "v15",
+        "projectIds": ["proj-core-banking"],
+        "reviewers": ["beto", "mr"],
+        "approvals": {
+            "beto": {"status": "approved", "note": "Modelo correcto.", "at": _now()},
+        },
+        "comments": [
+            {"author": "ana", "text": "Agrego garantías para el flujo de lending.", "at": _now()},
+            {"author": "beto", "text": "Falta confirmar nulabilidad de la FK.", "at": _now()},
+        ],
+        "createdAt": _now(), "updatedAt": _now(), "submittedAt": _now(),
+        "flgactive": True,
+    }
+
+    v16 = {
+        "_id": "cs-v16",
+        "title": "Atributos de cliente y tarjeta",
+        "owner": "beto",
+        "status": "submitted",
+        "description": "Segmento de cliente + límite obligatorio en tarjeta.",
+        "versionLabel": "v16",
+        "projectIds": ["proj-customer-360", "proj-core-banking"],
+        "reviewers": ["ana"],
+        "approvals": {},
+        "comments": [
+            {"author": "beto", "text": "Revisar impacto del segmento en reporting.", "at": _now()},
+        ],
+        "createdAt": _now(), "updatedAt": _now(), "submittedAt": _now(),
+        "flgactive": True,
+    }
+
+    return [v14, v15, v16]
+
+
+def build_changeset_changes() -> list[dict]:
+    """`changeset_changes`: los cambios de los requests en revisión, UN doc por
+    cambio (`_id = {csId}::{collection}::{entityId}`, como escribe el repo).
+
+    Upsertan tablas/columnas que referencian ids de tablas YA publicadas, para
+    que el diff estructurado y el cálculo de impacto (tablas tocadas + afectadas
+    vía relationships) tengan contenido.
+    """
+    # v15 — agrega tabla `garantia` (lending) + una columna nueva a `prestamo`
+    # (toca ct-prestamo → impacto vía relationships).
     v15_changes = {
         "canonical_tables": {
             "ct-garantia": {"op": "upsert", "payload": {
@@ -641,29 +913,8 @@ def build_changesets() -> list[dict]:
             }},
         },
     }
-    v15 = {
-        "_id": "cs-v15",
-        "title": "Garantías de préstamos",
-        "owner": "ana",
-        "status": "submitted",
-        "changes": v15_changes,
-        "description": "Nueva entidad `garantia` y FK desde `prestamo`.",
-        "versionLabel": "v15",
-        "projectIds": ["proj-core-banking"],
-        "reviewers": ["beto", "mr"],
-        "approvals": {
-            "beto": {"status": "approved", "note": "Modelo correcto.", "at": _now()},
-        },
-        "comments": [
-            {"author": "ana", "text": "Agrego garantías para el flujo de lending.", "at": _now()},
-            {"author": "beto", "text": "Falta confirmar nulabilidad de la FK.", "at": _now()},
-        ],
-        "createdAt": _now(), "updatedAt": _now(), "submittedAt": _now(),
-        "flgactive": True,
-    }
-
-    # v16 — request en revisión: edita `tarjeta` (límite) + agrega columna a
-    # `cliente` (toca ct-cliente → muchas tablas afectadas vía relationships).
+    # v16 — edita `tarjeta` (límite) + agrega columna a `cliente`
+    # (toca ct-cliente → muchas tablas afectadas vía relationships).
     v16_changes = {
         "canonical_columns": {
             "ct-tarjeta.limite": {"op": "upsert", "payload": {
@@ -682,25 +933,115 @@ def build_changesets() -> list[dict]:
             }},
         },
     }
-    v16 = {
-        "_id": "cs-v16",
-        "title": "Atributos de cliente y tarjeta",
-        "owner": "beto",
-        "status": "submitted",
-        "changes": v16_changes,
-        "description": "Segmento de cliente + límite obligatorio en tarjeta.",
-        "versionLabel": "v16",
-        "projectIds": ["proj-customer-360", "proj-core-banking"],
-        "reviewers": ["ana"],
-        "approvals": {},
-        "comments": [
-            {"author": "beto", "text": "Revisar impacto del segmento en reporting.", "at": _now()},
-        ],
-        "createdAt": _now(), "updatedAt": _now(), "submittedAt": _now(),
-        "flgactive": True,
-    }
+    out: list[dict] = []
+    for cs_id, changes in (("cs-v15", v15_changes), ("cs-v16", v16_changes)):
+        for collection, col_changes in changes.items():
+            for eid, ch in col_changes.items():
+                doc = {
+                    "_id": f"{cs_id}::{collection}::{eid}",
+                    "csId": cs_id,
+                    "collection": collection,
+                    "entityId": eid,
+                    "op": ch["op"],
+                    "at": _now(),
+                    "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
+                }
+                if ch["op"] != "delete":
+                    doc["payload"] = ch.get("payload") or {}
+                out.append(doc)
+    return out
 
-    return [v14, v15, v16]
+
+# ── Auth: roles + users (RBAC data-driven, login usuario/contraseña) ─────────
+from app.core.security import hash_password  # noqa: E402
+from app.features.auth.models import PERMISSIONS  # noqa: E402
+
+_DEMO_PASSWORD = "123456789"   # demo para todos los usuarios sembrados (mock 13)
+# Passwords por usuario (override del demo). `admin` es el atajo de dev.
+_PASSWORD_OVERRIDES: dict[str, str] = {"admin": "admin"}
+
+# Matriz de permisos por rol (pantalla 14 + fila Data Standards, R10).
+# `standards.edit` = solo Administrador en el seed (editable desde Admin).
+_ROLE_GRANTS: dict[str, tuple[str, str, set[str]]] = {
+    "administrador": ("Administrador", "Control total · gestiona usuarios", set(PERMISSIONS)),
+    "modelador": ("Modelador", "Crea y edita tablas · envía a revisión",
+                  {"model.view", "model.edit", "export"}),
+    "revisor": ("Revisor", "Aprueba o rechaza solicitudes",
+                {"model.view", "review.decide", "publish", "export"}),
+    "lector": ("Lector", "Solo lectura · exporta metadata", {"model.view", "export"}),
+}
+
+
+def build_roles() -> list[dict]:
+    out = []
+    for key, (name, desc, grants) in _ROLE_GRANTS.items():
+        out.append({
+            "_id": key, "name": name, "description": desc,
+            "permissions": {p: (p in grants) for p in PERMISSIONS},
+            "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
+        })
+    return out
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in name.split() if p]
+    if not parts:
+        return "?"
+    return (parts[0][:2] if len(parts) == 1 else parts[0][0] + parts[-1][0]).upper()
+
+
+# (username, name, email, role, projectIds[]|None=Todos, status)
+_USERS: list[tuple] = [
+    ("admin", "Admin", "admin@empresa.com", "administrador", None, "active"),   # atajo de dev · pass "admin"
+    ("maria.rojas", "María Rojas", "maria.rojas@empresa.com", "administrador", None, "active"),
+    ("juan.castillo", "Juan Castillo", "juan.castillo@empresa.com", "modelador",
+     ["proj-core-banking", "proj-risk-analytics"], "active"),
+    ("ana.lopez", "Ana López", "ana.lopez@empresa.com", "revisor", ["proj-core-banking"], "active"),
+    ("diego.torres", "Diego Torres", "diego.torres@empresa.com", "lector", ["proj-customer-360"], "active"),
+    ("sofia.paredes", "Sofía Paredes", "sofia.paredes@empresa.com", "lector", ["proj-risk-analytics"], "invited"),
+    # Actores simulados del flujo de aprobación previo (para seguir probándolo).
+    ("mr", "María Rey", "mr@empresa.com", "administrador", None, "active"),
+    ("ana", "Ana Gomez", "ana@empresa.com", "revisor", None, "active"),
+    ("beto", "Beto Diaz", "beto@empresa.com", "revisor", None, "active"),
+    ("carla", "Carla Ruiz", "carla@empresa.com", "modelador", None, "active"),
+    ("qa", "QA Tester", "qa@empresa.com", "revisor", None, "active"),
+]
+
+
+def build_users() -> list[dict]:
+    """Usuarios con contraseña demo (hash bcrypt). `projectIds=[]` = todos."""
+    out = []
+    for username, name, email, role, project_ids, status in _USERS:
+        out.append({
+            "_id": username, "email": email, "name": name, "role": role,
+            "projectIds": project_ids or [], "status": status,
+            "initials": _initials(name), "passwordHash": hash_password(_PASSWORD_OVERRIDES.get(username, _DEMO_PASSWORD)),
+            "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
+        })
+    return out
+
+
+def build_standards_versions() -> list[dict]:
+    """Baseline v1: snapshot del estado sembrado de estándares (dominios +
+    diccionario + naming_config). Punto de retorno para rollbacks."""
+    domains = [{"id": d["_id"], "name": d["name"], "defaultDataType": d["defaultDataType"],
+                "namingTerm": d.get("namingTerm"), "description": d.get("description")}
+               for d in build_parent_domains()]
+    terms = [{"id": e["_id"], "term": e["term"], "abbrev": e["abbrev"],
+              "scope": e["scope"], "wordType": e.get("wordType")}
+             for e in build_glossary_terms()]
+    naming = {d["_id"]: {"separator": d["separator"], "case": d["case"]}
+              for d in build_naming_config()}
+    snapshot = {"domains": domains, "dict": terms,
+                "namingConfig": {"column": naming.get("column"), "table": naming.get("table")}}
+    return [{
+        "_id": "sv-v1", "seq": 1, "label": "v1", "kind": "baseline",
+        "title": "Baseline · initial standards import", "description": None,
+        "author": "system", "createdAt": _now(), "appliedAt": _now(), "status": "baseline",
+        "diff": {"added": [], "edited": [], "removed": []},
+        "impact": {"tables": 0, "columns": 0}, "snapshot": snapshot, "revertsSeq": None,
+        "flgactive": True,
+    }]
 
 
 # ── Ensamblado completo ──────────────────────────────────────────────────────
@@ -715,9 +1056,13 @@ def build_all() -> dict[str, list[dict]]:
         "relationships": build_relationships(),
         "views": build_views(),
         "parent_domains": build_parent_domains(),
-        "abbreviation_dict": build_abbreviation_dict(),
+        "glossary_terms": build_glossary_terms(),
         "naming_config": build_naming_config(),
         "changesets": build_changesets(),
+        "changeset_changes": build_changeset_changes(),
+        "roles": build_roles(),
+        "users": build_users(),
+        "standards_versions": build_standards_versions(),
     }
 
 
@@ -734,10 +1079,14 @@ async def main() -> None:
     data = build_all()
 
     # 1) Wipe SOLO las colecciones del modeler (nunca `column_catalog`).
+    #    `drop()` (no `delete_many`): remueve docs Y **índices legacy** — p.ej. un
+    #    unique `username_1` de un backend previo choca con el esquema nuevo
+    #    (usamos `_id` como username, sin campo `username`). Recreamos los índices
+    #    correctos al final con `ensure_indexes`.
     assert PROTECTED_COLLECTION not in MODELER_COLLECTIONS, "no borrar column_catalog"
     for coll in MODELER_COLLECTIONS:
-        await db[coll].delete_many({})
-    print(f"wiped {len(MODELER_COLLECTIONS)} modeler collections "
+        await db[coll].drop()
+    print(f"dropped {len(MODELER_COLLECTIONS)} modeler collections "
           f"(preserved '{PROTECTED_COLLECTION}')")
 
     # 2) Insert por colección.
@@ -753,7 +1102,12 @@ async def main() -> None:
     for coll in data:
         print(f"  {coll:<20} {counts[coll]}")
 
-    # 3) Guardrail: `column_catalog` intacta.
+    # 3) Recrear los índices correctos (los `drop()` se llevaron los legacy).
+    from app.core.db.indexes import ensure_indexes
+    await ensure_indexes(db)
+    print("indexes ensured")
+
+    # 4) Guardrail: `column_catalog` intacta.
     after = await db[PROTECTED_COLLECTION].count_documents({})
     status = "OK" if before == after else "⚠️  MISMATCH"
     print(f"column_catalog: before={before} after={after}  [{status}]")

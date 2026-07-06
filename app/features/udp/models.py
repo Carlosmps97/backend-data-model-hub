@@ -1,0 +1,31 @@
+"""Modelos de la feature `udp` (User Defined Properties): etiquetas key-value
+DEFINIDAS en Data Standards y asignadas a tablas/columnas para clasificar el dato.
+
+Una *definición* es la KEY (name) + su tipo + valor default + valores permitidos
+(enum) + a qué niveles aplica. Los *valores* asignados viven embebidos en cada
+tabla/columna (`udpValues: {defId: value}`), no acá.
+"""
+from __future__ import annotations
+
+import uuid
+
+from pydantic import BaseModel, Field
+
+from app.core.models import DOC_CONFIG
+
+# Tipos de dato soportados para una key UDP.
+UDP_TYPES = ("string", "number", "boolean", "date", "list")
+# Niveles a los que se puede asignar (por ahora tabla y columna; base de datos → fase siguiente).
+UDP_LEVELS = ("table", "column")
+
+
+class UdpDefinitionDoc(BaseModel):
+    model_config = DOC_CONFIG
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str                              # la KEY, p.ej. "Clasificación del Dato"
+    dataType: str = "string"               # string | number | boolean | date | list
+    defaultValue: str | None = None        # valor por defecto al asignar
+    allowedValues: list[str] = []          # para dataType='list' (enum: [DAC, NO DAC, ...])
+    appliesTo: list[str] = []              # niveles: subconjunto de UDP_LEVELS
+    description: str | None = None

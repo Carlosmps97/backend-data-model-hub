@@ -1,14 +1,17 @@
 """Endpoints de Parent Domains."""
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
+
+from app.features.auth.deps import write_guard
 
 from app.core.api.envelope import ok
 
 from . import service
 from .schemas import ParentDomainBody
 
-router = APIRouter(prefix="/api/domains", tags=["domains"])
+router = APIRouter(prefix="/api/domains", tags=["domains"],
+                   dependencies=[Depends(write_guard("standards.edit"))])
 
 
 @router.get("")

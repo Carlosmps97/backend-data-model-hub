@@ -68,18 +68,52 @@ async def delete_subject_area(sa_id: str) -> bool:
     return await repository.delete_subject_area(sa_id)
 
 
-async def diagram(sa_id: str) -> dict | None:
+async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
+    """Diagrama completo del canvas en 4 queries batched (`$in`) — reemplaza el
+    camino viejo (pool COMPLETO de tablas + una query POR tabla + todas las
+    relaciones del sistema), inviable a 15k tablas.
+
+    Con `changeset_id` aplica el overlay del working copy SERVER-SIDE (acotado
+    al slice del canvas), de modo que el frontend arma el canvas con UNA sola
+    request tanto en modo publicado como en modo edición/visor."""
+    from app.core.versioning import overlay
     from app.features.catalog import repository as catalog_repo
+    from app.features.changesets import repository as cs_repo
     from app.features.relationships import repository as rel_repo
 
     sa = await repository.get_subject_area(sa_id)
     if not sa:
         return None
-    tables = tables_in_area(await catalog_repo.list_tables(), sa["tableIds"])
-    columns: list[dict] = []
-    for t in tables:
-        columns.extend(await catalog_repo.list_columns(t["id"]))
-    rels = await rel_repo.list_all()
-    ids = set(sa["tableIds"])
-    visible = [r for r in rels if r["sourceTableId"] in ids and r["targetTableId"] in ids]
+    ids: list[str] = sa.get("tableIds") or []
+    id_set = set(ids)
+    tables = await catalog_repo.list_tables_by_ids(ids)
+    columns = await catalog_repo.list_columns_for_tables(ids)
+    rels = await rel_repo.list_for_tables(ids)
+
+    if changeset_id:
+        ch = await cs_repo.changes_map(
+            changeset_id, ["canonical_tables", "canonical_columns", "relationships"]
+        )
+        if ch:
+            # Cambios acotados al slice del canvas: entidades ya presentes, o
+            # nuevas cuyo payload apunta a tablas del canvas (una columna nueva
+            # de OTRA tabla no debe colarse en este diagrama).
+            tbl_ch = {e: c for e, c in (ch.get("canonical_tables") or {}).items() if e in id_set}
+            col_ids = {c["id"] for c in columns}
+            col_ch = {e: c for e, c in (ch.get("canonical_columns") or {}).items()
+                      if e in col_ids or ((c.get("payload") or {}).get("tableId") in id_set)}
+            rel_ids = {r["id"] for r in rels}
+            rel_ch = {e: c for e, c in (ch.get("relationships") or {}).items()
+                      if e in rel_ids
+                      or (((c.get("payload") or {}).get("sourceTableId") in id_set)
+                          and ((c.get("payload") or {}).get("targetTableId") in id_set))}
+            tables = overlay(tables, tbl_ch)
+            columns = overlay(columns, col_ch)
+            rels = overlay(rels, rel_ch)
+            # El overlay pierde el orden de lectura: restaurar el contrato
+            # (tablas por nombre físico; columnas por tabla + ordinal).
+            tables.sort(key=lambda t: (t.get("physicalName") or "").lower())
+            columns.sort(key=lambda c: (c.get("tableId") or "", c.get("ordinal") or 0))
+
+    visible = [r for r in rels if r.get("sourceTableId") in id_set and r.get("targetTableId") in id_set]
     return {"subjectArea": sa, "tables": tables, "columns": columns, "relationships": visible}

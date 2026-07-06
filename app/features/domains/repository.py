@@ -44,9 +44,15 @@ async def create_domain(data: dict) -> dict:
     return payload
 
 
-async def update_domain(domain_id: str, data: dict, cascade_query: dict | None) -> dict | None:
+async def update_domain(domain_id: str, data: dict, cascade: bool = True) -> dict | None:
     db = await get_db()
     data = {k: v for k, v in data.items() if k not in ("id", "_id")}
+    # Estado PREVIO: el tipo viejo del dominio define qué columnas "mantienen" la
+    # conexión (las que aún tienen ese tipo). Se lee antes de actualizar.
+    old = await db[COLL].find_one({"_id": domain_id, "flgactive": {"$ne": False}})
+    if not old:
+        return None
+    old_type = old.get("defaultDataType")
     res = await db[COLL].find_one_and_update(
         {"_id": domain_id, "flgactive": {"$ne": False}},
         {"$set": {**data, "updatedAt": _now()}},
@@ -54,10 +60,16 @@ async def update_domain(domain_id: str, data: dict, cascade_query: dict | None) 
     )
     if not res:
         return None
-    # Cascada (req 4): re-deriva el tipo de las columnas sin override.
-    if cascade_query is not None and "defaultDataType" in data:
+    new_type = data.get("defaultDataType")
+    # Cascada RESPETANDO EL OVERRIDE MANUAL: solo re-tipa columnas que MANTIENEN
+    # el tipo viejo del dominio (`dataType == old_type`) y no fueron editadas a
+    # mano (`typeOverridden != True`). Una columna cuyo tipo se cambió
+    # manualmente (rompió la conexión) queda excluida — aunque su flag venga mal.
+    if cascade and new_type is not None and new_type != old_type:
         await db[COLUMNS].update_many(
-            cascade_query, {"$set": {"dataType": data["defaultDataType"], "updatedAt": _now()}}
+            {"parentDomainId": domain_id, "typeOverridden": {"$ne": True},
+             "dataType": old_type, "flgactive": {"$ne": False}},
+            {"$set": {"dataType": new_type, "updatedAt": _now()}},
         )
     return ParentDomainDoc.model_validate(_to_doc(res)).model_dump()
 

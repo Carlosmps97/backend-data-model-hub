@@ -1,4 +1,4 @@
-"""Modelo de la feature `changesets` (working copy + flujo de aprobación).
+"""Modelos de la feature `changesets` (working copy + flujo de aprobación).
 
 Un changeset es la unidad de versionado/cambio del modelo. Empieza como `draft`
 (working copy editable: las lecturas hacen overlay de publicado+changeset), pasa
@@ -8,10 +8,12 @@ a `submitted` al crear el *publish request* (se asignan revisores), y termina en
 Es **cross-project**: un changeset puede tocar tablas de varios proyectos, por
 eso lleva `projectIds[]` (chips de proyecto en el UI).
 
-Campos nuevos (R1b, aditivos con default — invariante §2.6):
-- `description`, `versionLabel`, `projectIds[]`, `reviewers[]`,
-  `approvals{userId:{status,note?,at}}`, `comments[{author,text,at}]`.
-Se conservan `status`, `owner`, `changes`, `reviewedBy/At/Note` (compat M-series).
+Los cambios en sí NO viven en el documento del changeset: cada cambio es UN
+documento de la colección `changeset_changes` ({@link ChangeDoc}). El viejo dict
+embebido `changes` topaba el límite de 2MB/doc de Cosmos RU con ~2-4k entidades
+tocadas — un changeset grande dejaba de poder guardarse a mitad del trabajo.
+Docs legacy con `changes` embebido se ignoran al leer (`extra="ignore"`);
+`scripts/migrate_changes_to_collection.py` los migra one-shot.
 """
 from __future__ import annotations
 
@@ -22,6 +24,24 @@ from pydantic import BaseModel, Field
 from app.core.models import DOC_CONFIG
 
 
+class ChangeDoc(BaseModel):
+    """UN cambio de un changeset (doc de `changeset_changes`).
+
+    `id` es determinista — `{csId}::{collection}::{entityId}` — de modo que el
+    upsert por `_id` conserva la semántica del viejo dot-path: por entidad gana
+    la última escritura, sin poder duplicarse."""
+
+    model_config = DOC_CONFIG
+
+    id: str
+    csId: str
+    collection: str
+    entityId: str
+    op: str  # upsert | delete
+    payload: dict | None = None
+    at: str | None = None  # ISO-8601: baseline de conflicto vs producción
+
+
 class ChangesetDoc(BaseModel):
     model_config = DOC_CONFIG
 
@@ -29,7 +49,6 @@ class ChangesetDoc(BaseModel):
     title: str
     owner: str
     status: str = "draft"  # draft | submitted | approved | rejected
-    changes: dict = Field(default_factory=dict)
     # ── Versionado / publish request (R1b, aditivos) ──────────────────────
     description: str | None = None
     versionLabel: str | None = None          # p.ej. "v15" (autoincremental)
@@ -45,3 +64,8 @@ class ChangesetDoc(BaseModel):
     reviewedBy: str | None = None
     reviewedAt: str | None = None
     reviewNote: str | None = None
+    # Timestamp de aplicación EXITOSA a las colecciones publicadas. `approved`
+    # sin `appliedAt` = el proceso murió entre el claim y el apply (o a mitad):
+    # detectable, y recuperable con `scripts/reapply_changeset.py` (el apply es
+    # idempotente — upserts por _id).
+    appliedAt: str | None = None

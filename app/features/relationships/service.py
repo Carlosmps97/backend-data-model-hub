@@ -9,6 +9,11 @@ async def list_all() -> list[dict]:
     return await repository.list_all()
 
 
+async def list_for_table(table_id: str) -> list[dict]:
+    """Relaciones que tocan una tabla (cualquiera de los dos extremos)."""
+    return await repository.list_for_tables([table_id])
+
+
 async def create(body: RelationshipBody) -> dict:
     return await repository.create(body.model_dump())
 

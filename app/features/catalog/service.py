@@ -1,7 +1,7 @@
 """Negocio de `catalog`: deriva físico (vía diccionario) + dataType (vía dominio)."""
 from __future__ import annotations
 
-from app.features.dictionary import service as dictionary_service
+from app.features.glossary import service as glossary_service
 
 from . import repository
 from .schemas import CanonicalColumnBody, CanonicalTableBody
@@ -18,14 +18,14 @@ def derive_column(logical: str, physical: str, domain_default: str | None,
     }
 
 
-async def list_tables() -> list[dict]:
-    return await repository.list_tables()
+async def list_tables(q: str | None = None, limit: int | None = None) -> list[dict]:
+    return await repository.list_tables(q, limit)
 
 
 async def create_table(body: CanonicalTableBody) -> dict:
     data = body.model_dump(exclude_none=True, by_alias=True)
     if not data.get("physicalName"):
-        data["physicalName"] = await dictionary_service.physicalize_name(body.logicalName)
+        data["physicalName"] = await glossary_service.physicalize_name(body.logicalName)
     return await repository.create_table(data)
 
 
@@ -34,7 +34,7 @@ async def list_columns(table_id: str) -> list[dict]:
 
 
 async def create_column(table_id: str, body: CanonicalColumnBody) -> dict:
-    physical = body.physicalName or await dictionary_service.physicalize_name(body.logicalName)
+    physical = body.physicalName or await glossary_service.physicalize_name(body.logicalName)
     default = await repository.domain_default(body.parentDomainId) if body.parentDomainId else None
     derived = derive_column(body.logicalName, physical, default, body.dataType)
     return await repository.create_column({
@@ -47,5 +47,6 @@ async def create_column(table_id: str, body: CanonicalColumnBody) -> dict:
         "isPartition": body.isPartition,
         "description": body.description,
         "ordinal": body.ordinal,
+        "udpValues": body.udpValues or {},
         **derived,
     })

@@ -20,7 +20,7 @@ class SnapshotBody(BaseModel):
 
 
 class ChangeBody(BaseModel):
-    collection: str            # parent_domains | abbreviation_dict | canonical_tables | canonical_columns
+    collection: str            # parent_domains | glossary_terms | canonical_tables | canonical_columns
     entityId: str
     op: Literal["upsert", "delete"]
     payload: dict[str, Any] | None = None
@@ -32,10 +32,12 @@ class ReviewBody(BaseModel):
 
 
 class SubmitBody(BaseModel):
-    """Publish request: asigna revisores, título y descripción."""
+    """Publish request: asigna revisores, título y descripción.
+    `reviewers=None` (no enviado) PRESERVA los revisores del ciclo anterior;
+    con el viejo default `[]` cualquier submit sin body los borraba."""
     title: str | None = None
     description: str | None = None
-    reviewers: list[str] = []
+    reviewers: list[str] | None = None
     projectIds: list[str] | None = None
 
 

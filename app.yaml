@@ -17,3 +17,13 @@ env:
   # databricks.yml → scope kv-scope-datacraft, key conn-str-cosmos).
   - name: COSMOS_CONNECTION_STRING
     valueFrom: cosmos_secret
+  # ── Auth (OBLIGATORIO en prod) ──────────────────────────────────────────
+  # Login obligatorio: sin token válido → 401 (sin esto, el header X-Dev-User
+  # permitiría suplantar a cualquier usuario, incluido admin).
+  - name: REQUIRE_AUTH
+    value: 'true'
+  # Clave de firma del token de sesión (JWT HS256). Con el default de
+  # desarrollo la app NO arranca en prod (assert_secure_config). Secreto en el
+  # mismo scope KV que Cosmos, key `session-secret-key`.
+  - name: SECRET_KEY
+    valueFrom: session_secret

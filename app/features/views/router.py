@@ -1,14 +1,17 @@
 """Endpoints de Views (vistas SQL)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.features.auth.deps import write_guard
 
 from app.core.api.envelope import ok
 
 from . import service
 from .schemas import ViewBody
 
-router = APIRouter(prefix="/api/views", tags=["views"])
+router = APIRouter(prefix="/api/views", tags=["views"],
+                   dependencies=[Depends(write_guard("model.edit"))])
 
 
 @router.get("")
@@ -23,9 +26,14 @@ async def create(body: ViewBody):
 
 @router.put("/{vid}")
 async def update(vid: str, body: ViewBody):
-    return ok(await service.update(vid, body))
+    res = await service.update(vid, body)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Vista no encontrada.")
+    return ok(res)
 
 
 @router.delete("/{vid}")
 async def delete(vid: str):
-    return ok(await service.delete(vid))
+    if not await service.delete(vid):
+        raise HTTPException(status_code=404, detail="Vista no encontrada.")
+    return ok({"id": vid})

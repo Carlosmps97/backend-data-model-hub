@@ -6,14 +6,17 @@ Listar admite dos formas equivalentes (ambas por requerimiento):
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
+
+from app.features.auth.deps import write_guard
 
 from app.core.api.envelope import ok
 
 from . import service
 from .schemas import FolderCreateBody, FolderRenameBody
 
-router = APIRouter(prefix="/api", tags=["folders"])
+router = APIRouter(prefix="/api", tags=["folders"],
+                   dependencies=[Depends(write_guard("model.edit"))])
 
 
 @router.get("/projects/{project_id}/folders")

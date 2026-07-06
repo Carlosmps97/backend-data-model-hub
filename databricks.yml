@@ -21,6 +21,15 @@ resources:
             scope: kv-scope-datacraft
             key: conn-str-cosmos
             permission: READ
+        # Clave de firma del token de sesión (JWT HS256). Sin ella la app no
+        # arranca en prod (REQUIRE_AUTH=true). Generá un valor aleatorio fuerte
+        # (p.ej. `openssl rand -hex 32`) y guardalo en KV como `session-secret-key`.
+        - name: session_secret
+          description: "SECRET_KEY para firmar tokens de sesión (Key Vault-backed)."
+          secret:
+            scope: kv-scope-datacraft
+            key: session-secret-key
+            permission: READ
       permissions:
         - level: CAN_USE
           group_name: users       # todos los usuarios del workspace pueden abrir la app

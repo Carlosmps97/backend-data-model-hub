@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/summary", tags=["summary"])
 
 
 @router.get("")
-async def get_summary(projectId: str | None = Query(default=None)):
-    """Contadores del Home. Sin `projectId` = totales globales activos; con
-    `projectId` = alcance del proyecto (ver semántica en `service`)."""
+async def get_summary(projectId: list[str] | None = Query(default=None)):
+    """Contadores del Home. Sin `projectId` = totales globales activos; con uno o
+    varios `projectId` (repetible) = unión de su alcance (ver `service`)."""
     return ok(await service.summary(projectId))

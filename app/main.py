@@ -6,8 +6,8 @@ acotadas:
 - Lifespan: abrir/cerrar la conexión a Cosmos DB (Motor async).
 - Middleware: logueo estructurado de cada request.
 - CORS para el frontend Next.js (origen distinto en desarrollo local).
-- Montar los routers de cada feature: `health`, `identity`, `excel_import`,
-  `domains`, `dictionary`, `catalog`, `changesets`, `projects` (+ subject areas),
+- Montar los routers de cada feature: `health`, `identity`, `domains`,
+  `dictionary`, `catalog`, `changesets`, `projects` (+ subject areas),
   `folders`, `relationships`, `views`, `summary` (counts del Home), `reporting`
   (agregación tabular de metadata, solo lectura) y `settings` (naming_config:
   separador/case por scope).
@@ -26,14 +26,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.responses import JSONResponse, Response
 
 from app.core.db import client as db_client
 from app.core.logging import configure_logging, get_logger
+from app.features.admin.router import router as admin_router
+from app.features.auth.router import router as auth_router
 from app.features.catalog.router import router as catalog_router
-from app.features.dictionary.router import router as dictionary_router
+from app.features.data_standards.router import router as data_standards_router
+from app.features.glossary.router import router as glossary_router
 from app.features.domains.router import router as domains_router
-from app.features.excel_import.router import router as excel_import_router
+from app.features.udp.router import router as udp_router
 from app.features.folders.router import router as folders_router
 from app.features.health.router import router as health_router
 from app.features.identity.router import router as identity_router
@@ -80,6 +84,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Factory de la app FastAPI (CORS + middleware + routers de features)."""
+    # Falla-cerrado: no arrancar en prod con el SECRET_KEY de desarrollo.
+    from app.core.config import assert_secure_config
+    assert_secure_config()
+
     app = FastAPI(
         title="Data Modeler Platform Backend",
         description=(
@@ -109,6 +117,39 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # ─── GZip ─────────────────────────────────────────────────────────────
+    # Los payloads de metadata (claves repetidas, nombres) comprimen 5-10×;
+    # a escala (diagramas de 100 tablas, diffs) es la diferencia entre cientos
+    # de KB y varios MB por request.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # ─── Excepciones no controladas → envelope de error consistente ──────
+    # Sin esto, un crash (Cosmos caído, doc inválido) devolvía el 500 crudo de
+    # Starlette (texto plano) y el frontend mostraba errores ilegibles. El
+    # traceback ya lo loguea el middleware de requests.
+    #
+    # CORS a mano: el handler de `Exception` corre en ServerErrorMiddleware,
+    # el middleware MÁS EXTERNO — la respuesta NO pasa por CORSMiddleware, y
+    # sin Access-Control-Allow-Origin el browser bloquea la lectura y el
+    # frontend ve "Failed to fetch" en vez del envelope.
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        log.exception(
+            "unhandled exception",
+            extra={"method": request.method, "path": request.url.path},
+        )
+        origin = request.headers.get("origin")
+        headers = (
+            {"Access-Control-Allow-Origin": origin, "Vary": "Origin",
+             "Access-Control-Allow-Credentials": "true"}
+            if origin and origin in cors_origins else {}
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Error interno del servidor. Revisá los logs con el X-Request-ID."},
+            headers=headers,
+        )
+
     # ─── Middleware: logueo de requests ─────────────────────────────────
     @app.middleware("http")
     async def request_logging_middleware(request: Request, call_next) -> Response:
@@ -137,10 +178,13 @@ def create_app() -> FastAPI:
 
     # ─── Routers de features ────────────────────────────────────────────
     app.include_router(health_router)
+    app.include_router(auth_router)
+    app.include_router(admin_router)
     app.include_router(identity_router)
-    app.include_router(excel_import_router)
     app.include_router(domains_router)
-    app.include_router(dictionary_router)
+    app.include_router(udp_router)
+    app.include_router(glossary_router)
+    app.include_router(data_standards_router)
     app.include_router(catalog_router)
     app.include_router(changesets_router)
     app.include_router(versions_router)

@@ -36,6 +36,11 @@ async def connect() -> None:
     _client = AsyncIOMotorClient(
         settings.COSMOS_CONNECTION_STRING,
         serverSelectionTimeoutMS=15_000,
+        # Sin estos timeouts, un socket colgado bloquea el request por el
+        # default del SO (minutos) y con varios usuarios se agota el pool.
+        connectTimeoutMS=10_000,
+        socketTimeoutMS=60_000,
+        maxPoolSize=50,
     )
     db = _client[settings.COSMOS_DATABASE]
     await ensure_indexes(db)

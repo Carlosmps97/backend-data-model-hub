@@ -16,6 +16,10 @@ class CanonicalTableDoc(BaseModel):
     logicalName: str
     sql_schema: str | None = Field(default=None, alias="schema")
     description: str | None = None
+    # UDP: valores de las etiquetas key-value asignadas a esta tabla
+    # ({udpDefId: value}). Aditivo (invariante §2.6): las keys se definen en Data
+    # Standards; acá viven los valores elegidos para clasificar el dato.
+    udpValues: dict[str, str] = Field(default_factory=dict)
 
 
 class CanonicalColumnDoc(BaseModel):
@@ -36,3 +40,5 @@ class CanonicalColumnDoc(BaseModel):
     isPartition: bool = False
     description: str | None = None
     ordinal: int = 0
+    # UDP: valores de las etiquetas key-value asignadas a esta columna.
+    udpValues: dict[str, str] = Field(default_factory=dict)

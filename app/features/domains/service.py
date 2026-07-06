@@ -6,8 +6,10 @@ from .schemas import ParentDomainBody
 
 
 def cascade_filter(domain_id: str) -> dict:
-    """Query de cascada: columnas de este dominio SIN override manual."""
-    return {"parentDomainId": domain_id, "typeOverridden": {"$ne": True}}
+    """Query de cascada: columnas ACTIVAS de este dominio SIN override manual
+    (el filtro flgactive evita re-tipar columnas soft-deleted y sub-contarlas)."""
+    return {"parentDomainId": domain_id, "typeOverridden": {"$ne": True},
+            "flgactive": {"$ne": False}}
 
 
 def summarize_impact(columns: list[dict]) -> dict:
@@ -42,9 +44,9 @@ async def create_domain(body: ParentDomainBody) -> dict:
 
 
 async def update_domain(domain_id: str, body: ParentDomainBody) -> dict | None:
-    return await repository.update_domain(
-        domain_id, body.model_dump(exclude_none=True), cascade_filter(domain_id)
-    )
+    # La cascada (respetando override manual) la resuelve el repositorio con el
+    # tipo VIEJO del dominio; ver `repository.update_domain`.
+    return await repository.update_domain(domain_id, body.model_dump(exclude_none=True), cascade=True)
 
 
 async def delete_domain(domain_id: str) -> bool:
