@@ -27,10 +27,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, Response
 
+from app.core.config import settings
 from app.core.db import client as db_client
 from app.core.logging import configure_logging, get_logger
+from app.core.ratelimit import limiter
 from app.features.admin.router import router as admin_router
 from app.features.auth.router import router as auth_router
 from app.features.catalog.router import router as catalog_router
@@ -49,6 +54,7 @@ from app.features.changesets.router import (
 from app.features.projects.router import router as projects_router
 from app.features.relationships.router import router as relationships_router
 from app.features.reporting.router import router as reporting_router
+from app.features.reporting.query.router import router as reporting_query_router
 from app.features.settings.router import router as settings_router
 from app.features.summary.router import router as summary_router
 from app.features.views.router import router as views_router
@@ -97,7 +103,23 @@ def create_app() -> FastAPI:
         ),
         version="1.0.0",
         lifespan=lifespan,
+        # Postura de producción (REQUIRE_AUTH): ocultar la doc interactiva y el
+        # schema OpenAPI reduce fingerprinting y superficie de ataque.
+        docs_url=None if settings.REQUIRE_AUTH else "/docs",
+        redoc_url=None if settings.REQUIRE_AUTH else "/redoc",
+        openapi_url=None if settings.REQUIRE_AUTH else "/openapi.json",
     )
+
+    # ─── Rate limiting (slowapi) ─────────────────────────────────────────
+    # Se aplica por-ruta (el login lleva el límite estricto). RateLimitExceeded
+    # → 429 con Retry-After. Estado en memoria: ver app/core/ratelimit.py.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # ─── Host allowlist (solo si ALLOWED_HOSTS está definido: producción) ──
+    allowed_hosts = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if allowed_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     # ─── CORS ───────────────────────────────────────────────────────────
     # Allowlist explícita para el frontend Next.js (origen distinto en dev).
@@ -109,12 +131,15 @@ def create_app() -> FastAPI:
         if cors_env
         else ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
+    # Auth token-first (Bearer, sin cookies) → allow_credentials=False; métodos y
+    # headers acotados en vez de wildcard (superficie mínima).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+        max_age=600,
     )
 
     # ─── GZip ─────────────────────────────────────────────────────────────
@@ -140,8 +165,7 @@ def create_app() -> FastAPI:
         )
         origin = request.headers.get("origin")
         headers = (
-            {"Access-Control-Allow-Origin": origin, "Vary": "Origin",
-             "Access-Control-Allow-Credentials": "true"}
+            {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
             if origin and origin in cors_origins else {}
         )
         return JSONResponse(
@@ -174,6 +198,15 @@ def create_app() -> FastAPI:
             extra={"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code, "ms": elapsed_ms},
         )
         response.headers["X-Request-ID"] = request_id
+        # ─── Security headers (defensa en profundidad) ───────────────────
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # HSTS SOLO sobre HTTPS (no romper el dev local en http). Detrás de proxy
+        # se detecta por X-Forwarded-Proto.
+        if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
     # ─── Routers de features ────────────────────────────────────────────
@@ -195,6 +228,7 @@ def create_app() -> FastAPI:
     app.include_router(views_router)
     app.include_router(summary_router)
     app.include_router(reporting_router)
+    app.include_router(reporting_query_router)
     app.include_router(settings_router)
 
     return app

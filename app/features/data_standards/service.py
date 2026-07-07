@@ -49,8 +49,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
             for scope in ("column", "table")
         },
         "udp": [
-            {k: u.get(k) for k in ("id", "name", "dataType", "defaultValue",
-                                   "allowedValues", "appliesTo", "description")}
+            {k: u.get(k) for k in ("id", "name", "level", "dataType", "defaultValue",
+                                   "allowedValues", "description")}
             for u in (udp or [])
         ],
     }

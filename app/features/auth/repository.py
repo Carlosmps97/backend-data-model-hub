@@ -4,7 +4,7 @@
 `passwordHash` (el hash solo lo lee `get_user_with_hash` para el login)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
 
@@ -83,6 +83,40 @@ async def upsert_user(username: str, fields: dict) -> dict:
         return_document=ReturnDocument.AFTER,
     )
     return _to_user(doc)
+
+
+# ── Lockout de login (campos internos, NO pasan por UserDoc/_to_user) ────────
+async def get_login_record(username: str) -> dict | None:
+    """Datos CRUDOS para el login: hash + estado + contadores de lockout. No pasa
+    por UserDoc (los campos de lockout son internos, no se exponen al frontend)."""
+    db = await get_db()
+    return await db[USERS].find_one(
+        {"_id": username, "flgactive": {"$ne": False}},
+        {"passwordHash": 1, "status": 1, "failedAttempts": 1, "lockedUntil": 1},
+    )
+
+
+async def register_failed_login(username: str, threshold: int, lock_minutes: int) -> None:
+    """$inc atómico de failedAttempts; si alcanza el umbral, bloquea (lockedUntil)."""
+    db = await get_db()
+    doc = await db[USERS].find_one_and_update(
+        {"_id": username, "flgactive": {"$ne": False}},
+        {"$inc": {"failedAttempts": 1}, "$set": {"updatedAt": _now()}},
+        projection={"failedAttempts": 1},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc and doc.get("failedAttempts", 0) >= threshold:
+        until = (datetime.now(timezone.utc) + timedelta(minutes=lock_minutes)).isoformat()
+        await db[USERS].update_one({"_id": username}, {"$set": {"lockedUntil": until}})
+
+
+async def clear_failed_login(username: str) -> None:
+    """Éxito de login → resetea el contador y quita el bloqueo."""
+    db = await get_db()
+    await db[USERS].update_one(
+        {"_id": username, "flgactive": {"$ne": False}},
+        {"$set": {"failedAttempts": 0}, "$unset": {"lockedUntil": ""}},
+    )
 
 
 async def set_password_hash(username: str, password_hash: str) -> bool:

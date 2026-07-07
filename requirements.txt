@@ -13,3 +13,5 @@ motor>=3.3.0
 # Auth propia (login usuario/contraseña + token de sesión)
 bcrypt>=4.0        # hash de contraseñas
 pyjwt>=2.8         # token de sesión firmado (HS256)
+sqlglot>=25  # parser SQL→QuerySpec del reporting (F2)
+slowapi>=0.1.9  # rate limiting (login + global) — 07 hardening

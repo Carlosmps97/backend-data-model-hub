@@ -416,35 +416,38 @@ def s12_glossary_udp() -> Suite:
     s.eq("GET /api/glossary responde", admin.get("/api/glossary?scope=column").status, 200)
     s.eq("GET /api/dictionary (viejo) → 404", admin.get("/api/dictionary").status, 404)
 
-    # UDP: definir una key versionada (kind='udp')
-    name = f"{TAG} Clasif"
+    # UDP: definir keys versionadas (kind='udp'), segmentadas por nivel (Class):
+    # una a nivel COLUMNA y otra a nivel TABLA.
+    cname, tname = f"{TAG} ClasifCol", f"{TAG} DomTbl"
     d = admin.post("/api/standards/apply", {"kind": "udp", "udpUpsert": [
-        {"name": name, "dataType": "list", "allowedValues": ["DAC", "NO DAC"],
-         "defaultValue": "NO DAC", "appliesTo": ["table", "column"]}]})
-    s.check("UDP key definida (versión kind=udp)", d.status == 200 and (d.data or {}).get("kind") == "udp",
+        {"name": cname, "level": "column", "dataType": "list", "allowedValues": ["DAC", "NO DAC"], "defaultValue": "NO DAC"},
+        {"name": tname, "level": "table", "dataType": "string"}]})
+    s.check("UDP keys definidas (versión kind=udp)", d.status == 200 and (d.data or {}).get("kind") == "udp",
             f"v={(d.data or {}).get('label')}")
     defs = admin.get("/api/udp").data or []
-    mine = [x for x in defs if x["name"] == name]
-    s.check("aparece en GET /api/udp con allowedValues", len(mine) == 1 and mine[0]["allowedValues"] == ["DAC", "NO DAC"])
-    defid = mine[0]["id"] if mine else "x"
-    if mine:
-        H._track("udp_definitions", defid)
+    cdef = next((x for x in defs if x["name"] == cname), None)
+    tdef = next((x for x in defs if x["name"] == tname), None)
+    s.check("UDP columna con level+allowedValues", bool(cdef) and cdef["level"] == "column" and cdef["allowedValues"] == ["DAC", "NO DAC"])
+    s.check("UDP tabla con level=table (Text)", bool(tdef) and tdef["level"] == "table" and tdef["dataType"] == "string")
+    cdid = cdef["id"] if cdef else "x"; tdid = tdef["id"] if tdef else "y"
+    if cdef: H._track("udp_definitions", cdid)
+    if tdef: H._track("udp_definitions", tdid)
 
-    # Asignar valores UDP a una COLUMNA y a la TABLA VÍA CHANGESET (el path real
-    # del frontend: upsert por id) → publicar → verificar ambos.
+    # Asignar valores UDP a una COLUMNA (def col) y a la TABLA (def tabla) VÍA
+    # CHANGESET (el path real del frontend: upsert por id) → publicar → verificar.
     pid = mod.create_project(); tid = mod.create_table(logical=f"{TAG} udp"); cid = mod.add_column(tid, "col", "STRING")
     cdoc = next((c for c in mod.get(f"/api/catalog/tables/{tid}/columns").data if c["id"] == cid), {})
     tdoc = next((t for t in mod.get("/api/catalog/tables").data if t["id"] == tid), {})
     cs = mod.snapshot([pid], title=f"{TAG} udp")
-    r = _cs_change(mod, cs, "canonical_columns", cid, {**cdoc, "udpValues": {defid: "DAC"}})
+    r = _cs_change(mod, cs, "canonical_columns", cid, {**cdoc, "udpValues": {cdid: "DAC"}})
     s.eq("add_change columna con udpValues", r.status, 200)
-    _cs_change(mod, cs, "canonical_tables", tid, {**tdoc, "udpValues": {defid: "NO DAC"}})
+    _cs_change(mod, cs, "canonical_tables", tid, {**tdoc, "udpValues": {tdid: "ref_x"}})
     mod.post(f"/api/changesets/{cs}/submit", {"reviewers": [rev.user]})
     rev.post(f"/api/changesets/{cs}/review", {"decision": "approve"})
     pub = next((c for c in mod.get(f"/api/catalog/tables/{tid}/columns").data if c["id"] == cid), {})
-    s.check("columna publicada con udpValues", (pub.get("udpValues") or {}).get(defid) == "DAC", f"{pub.get('udpValues')}")
+    s.check("columna publicada con udpValues (col)", (pub.get("udpValues") or {}).get(cdid) == "DAC", f"{pub.get('udpValues')}")
     pubt = next((t for t in mod.get("/api/catalog/tables").data if t["id"] == tid), {})
-    s.check("tabla publicada con udpValues", (pubt.get("udpValues") or {}).get(defid) == "NO DAC", f"{pubt.get('udpValues')}")
+    s.check("tabla publicada con udpValues (tabla)", (pubt.get("udpValues") or {}).get(tdid) == "ref_x", f"{pubt.get('udpValues')}")
 
     # Rollback de la definición UDP: fast-path (no re-physicaliza las 400k; restore
     # bulk). Debe quitar la key sin barrer el catálogo.
@@ -452,7 +455,8 @@ def s12_glossary_udp() -> Suite:
     target = vers[-2]["seq"] if len(vers) >= 2 else None
     t0 = _t.monotonic(); rb = admin.post("/api/standards/rollback", {"targetSeq": target}); dt = (_t.monotonic() - t0) * 1000
     after = admin.get("/api/udp").data or []
-    s.check("rollback UDP quita la key", rb.status == 200 and not any(x["name"] == name for x in after))
+    gone = not any(x["name"] in (cname, tname) for x in after)
+    s.check("rollback UDP quita las keys nuevas", rb.status == 200 and gone)
     s.check("rollback UDP NO barre 400k (impact columns=0)",
             (rb.data or {}).get("impact", {}).get("columns") == 0, f"impact={(rb.data or {}).get('impact')} · {dt:.0f}ms")
     return s

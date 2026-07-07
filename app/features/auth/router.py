@@ -6,10 +6,11 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
+from app.core.ratelimit import limiter
 
 from . import service
 from .schemas import LoginBody
@@ -18,7 +19,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login")
-async def login(body: LoginBody):
+@limiter.limit("5/minute")  # anti fuerza bruta / credential stuffing (por IP)
+async def login(request: Request, body: LoginBody):
     result = await service.login(body.username.strip(), body.password)
     if result is None:
         raise HTTPException(

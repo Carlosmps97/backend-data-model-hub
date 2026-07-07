@@ -5,6 +5,8 @@ mapa de permisos efectivo. El resto orquesta repository + security + audit.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.core.audit import audit
 from app.core.security import create_access_token, hash_password, verify_password
 
@@ -14,6 +16,11 @@ from .models import PERMISSIONS
 # Hash real (bcrypt) para verificar SIEMPRE aunque el usuario no exista: evita el
 # oráculo de timing (usuario inexistente respondía más rápido → enumeración).
 _DUMMY_HASH = hash_password("__no_such_user__")
+
+# Lockout: tras N fallos consecutivos la cuenta se bloquea M minutos (complementa
+# el rate limiting por IP contra ataques distribuidos / botnets).
+_LOCK_THRESHOLD = 8
+_LOCK_MINUTES = 15
 
 
 def effective_permissions(role: dict | None) -> dict[str, bool]:
@@ -65,14 +72,26 @@ async def has_permission(username: str, perm: str) -> bool:
 
 async def login(username: str, password: str) -> dict | None:
     """Verifica credenciales; devuelve `{token, user}` o None si fallan.
-    Audita `login` / `login_failed`. Verifica el hash SIEMPRE (con un dummy si el
-    usuario no existe) para no filtrar por timing qué usuarios existen."""
-    record = await repository.get_user(username, with_hash=True)
+    Audita `login` / `login_failed` / `login_locked`. Verifica el hash SIEMPRE
+    (con un dummy si el usuario no existe) para no filtrar por timing qué usuarios
+    existen. Aplica lockout tras `_LOCK_THRESHOLD` fallos consecutivos."""
+    record = await repository.get_login_record(username)
     hashed = (record or {}).get("passwordHash") or _DUMMY_HASH
+    # Cuenta bloqueada por intentos fallidos → rechazar sin más (comparación de
+    # ISO-8601 UTC, lexicográficamente correcta con el mismo formato).
+    locked_until = (record or {}).get("lockedUntil")
+    if record and locked_until and locked_until > datetime.now(timezone.utc).isoformat():
+        await audit(username, "login_locked")
+        return None
     ok = verify_password(password, hashed)
     if not record or record.get("status") == "disabled" or not ok:
+        # Sólo contamos fallos de cuentas EXISTENTES y activas (no se crea doc
+        # para usuarios inexistentes → sin oráculo de existencia por lockout).
+        if record and record.get("status") != "disabled":
+            await repository.register_failed_login(username, _LOCK_THRESHOLD, _LOCK_MINUTES)
         await audit(username, "login_failed")
         return None
+    await repository.clear_failed_login(username)
     user = await resolve_session_user(username)
     token = create_access_token(
         username, extra={"email": user.get("email"), "name": user.get("name"), "role": user.get("role")}

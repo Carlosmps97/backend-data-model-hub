@@ -27,12 +27,13 @@ def _to_doc(doc: dict) -> dict:
 
 
 def _clean(data: dict) -> dict:
-    """Normaliza una definición: tipo/niveles válidos, allowedValues solo si es
+    """Normaliza una definición: tipo/nivel válidos, allowedValues solo si es
     'list'. Puro-ish (no toca DB)."""
     data = dict(data)
     if data.get("dataType") not in UDP_TYPES:
         data["dataType"] = "string"
-    data["appliesTo"] = [lv for lv in (data.get("appliesTo") or []) if lv in UDP_LEVELS] or ["table", "column"]
+    if data.get("level") not in UDP_LEVELS:
+        data["level"] = "column"
     if data.get("dataType") != "list":
         data["allowedValues"] = []
     return data

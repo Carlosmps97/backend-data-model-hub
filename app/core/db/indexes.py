@@ -39,6 +39,16 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("canonical_tables", [("physicalName", 1)]),
         _try("canonical_columns", [("tableId", 1)]),
         _try("canonical_columns", [("parentDomainId", 1)]),
+        # ── Motor de consulta del reporting (07) ────────────────
+        # keyset/orden por physicalName (Cosmos rechaza .sort() sin índice) +
+        # filtro/group por dataType.
+        _try("canonical_columns", [("physicalName", 1)]),
+        _try("canonical_columns", [("dataType", 1)]),
+        # WILDCARD sobre el mapa embebido de UDP: cubre TODAS las keys UDP
+        # presentes Y futuras (el usuario crea UDP en runtime) → filtrar por
+        # cualquier UDP hace seek, sin DDL por-key. En tablas y columnas.
+        _try("canonical_columns", [("udpValues.$**", 1)]),
+        _try("canonical_tables", [("udpValues.$**", 1)]),
         # ── Changesets (M2a) ────────────────────────────────────
         _try("changesets", [("updatedAt", -1)]),
         _try("changesets", [("status", 1)]),

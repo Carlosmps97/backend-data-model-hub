@@ -15,7 +15,9 @@ from app.core.models import DOC_CONFIG
 
 # Tipos de dato soportados para una key UDP.
 UDP_TYPES = ("string", "number", "boolean", "date", "list")
-# Niveles a los que se puede asignar (por ahora tabla y columna; base de datos → fase siguiente).
+# Nivel/jerarquía ("Class" en Erwin) al que pertenece una key UDP. Cada UDP vive
+# en UN nivel (segmentado, no multi-nivel): así puede crecer a otras jerarquías
+# (base de datos, modelo de datos, …) sin ambigüedad.
 UDP_LEVELS = ("table", "column")
 
 
@@ -24,8 +26,8 @@ class UdpDefinitionDoc(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str                              # la KEY, p.ej. "Clasificación del Dato"
+    level: str = "column"                  # Class: 'table' | 'column' (extensible)
     dataType: str = "string"               # string | number | boolean | date | list
     defaultValue: str | None = None        # valor por defecto al asignar
     allowedValues: list[str] = []          # para dataType='list' (enum: [DAC, NO DAC, ...])
-    appliesTo: list[str] = []              # niveles: subconjunto de UDP_LEVELS
     description: str | None = None
