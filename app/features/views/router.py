@@ -15,8 +15,11 @@ router = APIRouter(prefix="/api/views", tags=["views"],
 
 
 @router.get("")
-async def list_all(tableId: str | None = None):
-    return ok(await service.list_all(tableId))
+async def list_all(tableId: str | None = None, tableIds: str | None = None):
+    # `tableIds` (CSV) trae en UNA request las vistas de todas las tablas de un
+    # canvas (p.ej. para el Export DDL), sin N llamadas por tabla.
+    ids = [i for i in (tableIds.split(",") if tableIds else []) if i]
+    return ok(await service.list_all(tableId, ids or None))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

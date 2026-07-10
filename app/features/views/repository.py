@@ -29,11 +29,13 @@ def _dump(v: ViewDoc) -> dict:
     return v.model_dump(by_alias=True)
 
 
-async def list_all(table_id: str | None = None) -> list[dict]:
+async def list_all(table_id: str | None = None, table_ids: list[str] | None = None) -> list[dict]:
     db = await get_db()
     query: dict = {"flgactive": {"$ne": False}}
     if table_id is not None:
         query["tableId"] = table_id
+    elif table_ids:
+        query["tableId"] = {"$in": table_ids}
     docs = await db[COLL].find(query).to_list(None)
     return [_dump(ViewDoc.model_validate(_to(d))) for d in docs]
 

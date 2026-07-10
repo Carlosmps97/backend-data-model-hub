@@ -5,8 +5,8 @@ from . import repository
 from .schemas import ViewBody
 
 
-async def list_all(table_id: str | None = None) -> list[dict]:
-    return await repository.list_all(table_id)
+async def list_all(table_id: str | None = None, table_ids: list[str] | None = None) -> list[dict]:
+    return await repository.list_all(table_id, table_ids)
 
 
 async def create(body: ViewBody) -> dict:
