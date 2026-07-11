@@ -3,9 +3,26 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.models import DOC_CONFIG
+
+
+def normalize_source_tables(data: dict) -> dict:
+    """Normaliza el par canónico/legacy de fuentes (contrato F3). Pura.
+
+    - `sourceTableIds` presentes → `tableId` = primera fuente (compat con
+      lectores legacy que siguen mirando `tableId`).
+    - Solo `tableId` (docs pre-migración) → `sourceTableIds = [tableId]`.
+    - Sin fuentes → tal cual (exigir ≥1 fuente es del create, en el router).
+    """
+    src = data.get("sourceTableIds") or []
+    if src:
+        return {**data, "tableId": src[0]}
+    tid = data.get("tableId")
+    if tid:
+        return {**data, "sourceTableIds": [tid]}
+    return data
 
 
 class ViewDoc(BaseModel):
@@ -24,7 +41,26 @@ class ViewDoc(BaseModel):
     sql_schema: str | None = Field(default=None, alias="schema")
     tags: list[str] = []
     filter: str | None = None
-    # Cada source: {table, outputAlias?, expression?}.
+    # Cada source: {column?, tableId?, outputAlias?, expression?, castType?}.
+    # `tableId` = de qué fuente viene la columna (F3 multi-fuente);
+    # `castType` = override de tipo (el DDL del front emite CAST(...) AS).
     sources: list[dict] = []
     outputAlias: str | None = None
     expression: str | None = None
+    # ── F3 (10-PRECISIONES §3-5): vistas multi-fuente en canvas ──
+    # Canónico de fuentes; `tableId` (arriba) queda = sourceTableIds[0] por
+    # compat. Normalización bidireccional en `_normalize_sources`.
+    sourceTableIds: list[str] = []
+    # D3: flag GLOBAL por vista — aparece en todo canvas con ≥1 fuente.
+    # NO afecta el export DDL.
+    showOnCanvas: bool = False
+    # Condición de JOIN manual (2+ fuentes sin relación modelada, u override
+    # de la inferida). El backend NO la valida: la consume el DDL del front.
+    joinOverride: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_sources(cls, data: object) -> object:
+        # Read path (docs Mongo no migrados) Y write path del create quedan
+        # normalizados sin tocar a los callers.
+        return normalize_source_tables(dict(data)) if isinstance(data, dict) else data
