@@ -75,6 +75,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("views", [("flgactive", 1)]),
         # Las vistas se listan por tabla (PropertiesPanel · tab Views).
         _try("views", [("tableId", 1)]),
+        # F3: match canónico por fuentes (multi-fuente) — lo usan list_all
+        # ($or contains/$in) y la query del diagrama (showOnCanvas + $in).
+        _try("views", [("sourceTableIds", 1)]),
         # ── R1a: Folders (jerarquía del Model Explorer) ──────────
         _try("folders", [("projectId", 1)]),
         # ── R1c: naming_config (1 doc por scope; _id = scope) ────
