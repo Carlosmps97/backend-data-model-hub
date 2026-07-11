@@ -29,14 +29,24 @@ def _dump(v: ViewDoc) -> dict:
     return v.model_dump(by_alias=True)
 
 
-async def list_all(table_id: str | None = None, table_ids: list[str] | None = None) -> list[dict]:
-    db = await get_db()
+def build_query(table_id: str | None = None, table_ids: list[str] | None = None) -> dict:
+    """Query de `list_all`. Pura (testeable sin DB).
+
+    F3: el match canónico es contra `sourceTableIds` (igualdad sobre array =
+    contains; `$in` = intersección). El OR con `tableId` cubre docs legacy
+    aún no migrados por `scripts/migrate_view_source_tables.py`."""
     query: dict = {"flgactive": {"$ne": False}}
     if table_id is not None:
-        query["tableId"] = table_id
+        query["$or"] = [{"sourceTableIds": table_id}, {"tableId": table_id}]
     elif table_ids:
-        query["tableId"] = {"$in": table_ids}
-    docs = await db[COLL].find(query).to_list(None)
+        query["$or"] = [{"sourceTableIds": {"$in": table_ids}},
+                        {"tableId": {"$in": table_ids}}]
+    return query
+
+
+async def list_all(table_id: str | None = None, table_ids: list[str] | None = None) -> list[dict]:
+    db = await get_db()
+    docs = await db[COLL].find(build_query(table_id, table_ids)).to_list(None)
     return [_dump(ViewDoc.model_validate(_to(d))) for d in docs]
 
 
