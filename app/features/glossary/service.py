@@ -33,14 +33,36 @@ async def list_entries(scope: str | None = None) -> list[dict]:
 
 
 async def create_entry(body: AbbreviationBody) -> dict:
+    # Enforcement F2 #1: el término nuevo no puede duplicar el glosario del
+    # scope ni aparecer como frase completa en los nombres lógicos publicados.
+    await ensure_term_valid(body.term, body.scope)
     return await repository.create_entry(body.model_dump())
 
 
 async def update_entry(entry_id: str, body: AbbreviationBody) -> dict | None:
+    existing = await repository.get_entry(entry_id)
+    if existing is None:
+        return None
+    if existing.get("locked"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"El término '{existing['term']}' está bloqueado por ADMIN; "
+                    "desbloquealo antes de editarlo."))
+    # Solo se re-valida si CAMBIA el texto del término (editar la abreviatura o
+    # el wordType no dispara el chequeo de corpus). Se excluye a sí mismo del
+    # chequeo de duplicados.
+    if body.term.strip().lower() != (existing.get("term") or "").strip().lower():
+        await ensure_term_valid(body.term, body.scope, exclude_id=entry_id)
     return await repository.update_entry(entry_id, body.model_dump())
 
 
 async def delete_entry(entry_id: str) -> bool:
+    existing = await repository.get_entry(entry_id)
+    if existing is not None and existing.get("locked"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"El término '{existing['term']}' está bloqueado por ADMIN; "
+                    "desbloquealo antes de eliminarlo."))
     return await repository.delete_entry(entry_id)
 
 
