@@ -85,18 +85,6 @@ async def delete_domain(domain_id: str) -> bool:
 # ── Cascade directa de Parent Domain (p4b, retroactiva, fuera de publish) ──
 
 
-async def columns_using(domain_id: str) -> list[dict]:
-    """Columnas activas con `parentDomainId == domain_id` (proyección mínima
-    para el cómputo de impacto). Ordenadas en Python."""
-    db = await get_db()
-    docs = await db[COLUMNS].find(
-        {"parentDomainId": domain_id, "flgactive": {"$ne": False}},
-        {"_id": 1, "physicalName": 1, "tableId": 1, "typeOverridden": 1},
-    ).to_list(None)
-    docs.sort(key=lambda d: (d.get("physicalName") or "").lower())
-    return docs
-
-
 async def get_default_data_type(domain_id: str) -> str | None:
     """`defaultDataType` ACTUAL del dominio (None si no existe/borrado)."""
     db = await get_db()

@@ -12,26 +12,40 @@ def cascade_filter(domain_id: str) -> dict:
             "flgactive": {"$ne": False}}
 
 
-def summarize_impact(columns: list[dict]) -> dict:
-    """Resumen de impacto puro (testeable) a partir de las columnas que usan el
-    dominio. `willUpdate` = columnas sin override (se re-derivan al propagar);
-    `overridden` = columnas con override manual (se saltan). Incluye una lista
-    plana de las afectadas para la UI."""
-    affected = [
-        {
-            "id": c.get("id"),
-            "physicalName": c.get("physicalName"),
-            "tableId": c.get("tableId"),
-            "overridden": bool(c.get("typeOverridden")),
-        }
-        for c in columns
-    ]
-    overridden = sum(1 for c in affected if c["overridden"])
+def summarize_impact(groups: list[dict], names: dict[str, dict], models_affected: int,
+                     q: str | None = None, offset: int = 0, limit: int = 200) -> dict:
+    """Resumen de impacto AGRUPADO POR TABLA (F2 #2). Puro (testeable).
+
+    `groups` = salida del $group por tableId sobre canonical_columns
+    (`{_id, columns, overridden}`); `names` = tableId → {schema, physicalName,
+    logicalName} (join batch, NO $lookup). Los TOTALES de columnas y de modelos
+    son GLOBALES (no dependen de q); `totalTables` cuenta las tablas que
+    matchean `q` (sin q = todas) para que la UI pagine la lista filtrada."""
+    columns_using = sum(g.get("columns", 0) for g in groups)
+    overridden = sum(g.get("overridden", 0) for g in groups)
+    rows = []
+    for g in groups:
+        t = names.get(g["_id"]) or {}
+        rows.append({
+            "tableId": g["_id"],
+            "schema": t.get("schema"),
+            "physicalName": t.get("physicalName") or "",
+            "logicalName": t.get("logicalName") or "",
+            "columns": g.get("columns", 0),
+            "overridden": g.get("overridden", 0),
+        })
+    if q and q.strip():
+        needle = q.strip().lower()
+        rows = [r for r in rows if needle in r["physicalName"].lower()
+                or needle in r["logicalName"].lower()]
+    rows.sort(key=lambda r: (r["physicalName"].lower(), r["tableId"]))
     return {
-        "columnsUsing": len(affected),
-        "willUpdate": len(affected) - overridden,
+        "columnsUsing": columns_using,
+        "willUpdate": columns_using - overridden,
         "overridden": overridden,
-        "columns": affected,
+        "totalTables": len(rows),
+        "modelsAffected": models_affected,
+        "tables": rows[offset:offset + limit],
     }
 
 
@@ -53,13 +67,16 @@ async def delete_domain(domain_id: str) -> bool:
     return await repository.delete_domain(domain_id)
 
 
-async def impact(domain_id: str) -> dict:
-    """Impacto de propagar el tipo del dominio: cuántas columnas se actualizarán
-    (sin override) vs se saltarán (con override). No muta nada."""
-    raw = await repository.columns_using(domain_id)
-    # Normaliza `_id`→`id` (proyección Mongo) antes del resumen puro.
-    cols = [{**c, "id": str(c.get("_id", c.get("id")))} for c in raw]
-    return summarize_impact(cols)
+async def impact(domain_id: str, q: str | None = None,
+                 offset: int = 0, limit: int = 200) -> dict:
+    """Impacto DETALLADO de propagar el tipo del dominio (F2 #2): totales de
+    columnas + tablas agrupadas (búsqueda `q` server-side + paginación) + nº de
+    modelos (canvases) afectados. No muta nada."""
+    groups = await repository.impact_groups(domain_id)
+    table_ids = [g["_id"] for g in groups if g.get("_id")]
+    names = await repository.tables_by_ids(table_ids)
+    models = await repository.models_affected(table_ids)
+    return summarize_impact(groups, names, models, q=q, offset=offset, limit=limit)
 
 
 async def propagate(domain_id: str) -> dict:

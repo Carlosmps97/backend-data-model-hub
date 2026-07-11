@@ -1,7 +1,7 @@
 """Endpoints de Parent Domains."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 
 from app.features.auth.deps import write_guard
 
@@ -35,10 +35,15 @@ async def delete_domain(domain_id: str):
 
 
 @router.get("/{domain_id}/impact")
-async def domain_impact(domain_id: str):
-    """Impacto de propagar el tipo del dominio (p4b): columnas que lo usan,
-    cuántas se actualizarán (sin override) y cuántas se saltarán (override)."""
-    return ok(await service.impact(domain_id))
+async def domain_impact(
+    domain_id: str,
+    q: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """Impacto detallado del dominio (F2 #2): totales globales + tablas
+    agrupadas con búsqueda server-side por nombre (`q`) y paginación."""
+    return ok(await service.impact(domain_id, q=q, offset=offset, limit=limit))
 
 
 @router.post("/{domain_id}/propagate")
