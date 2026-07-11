@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import re
 
+from fastapi import HTTPException
+
 from app.core.naming import logicalize, physicalize
 from app.features.settings import service as settings_service
 
@@ -91,6 +93,33 @@ def find_glossary_duplicate(term: str, entries: list[dict],
         if (e.get("term") or "").strip().lower() == needle:
             return {"id": e["id"], "term": e["term"], "abbrev": e["abbrev"]}
     return None
+
+
+async def validate_term(term: str, scope: str, exclude_id: str | None = None) -> dict:
+    """Contrato del POST /api/glossary/validate (F2 #1). Chequeo 1: duplicado
+    exacto case-insensitive en el glosario del scope. Chequeo 2: frase completa
+    contigua en los nombres lógicos publicados (muestra cap 50 + total).
+    `total` = corpus + 1 si hay duplicado."""
+    entries = await repository.list_entries(scope)
+    dup = find_glossary_duplicate(term, entries, exclude_id)
+    corpus, corpus_total = await repository.corpus_conflicts(corpus_regex(term))
+    total = corpus_total + (1 if dup else 0)
+    return {"ok": total == 0,
+            "conflicts": {"glossaryDuplicate": dup, "corpus": corpus, "total": total}}
+
+
+async def ensure_term_valid(term: str, scope: str, exclude_id: str | None = None) -> None:
+    """Enforcement server-side: 409 si el término tiene conflictos. La regla
+    vive acá (writes del router); el botón Validar del front es cortesía."""
+    result = await validate_term(term, scope, exclude_id)
+    if not result["ok"]:
+        total = result["conflicts"]["total"]
+        raise HTTPException(
+            status_code=409,
+            detail=(f"El término '{term}' ya existe en el glosario o aparece en "
+                    f"nombres lógicos del catálogo ({total} conflicto"
+                    f"{'s' if total != 1 else ''})."),
+        )
 
 
 # ── Re-physicalize retroactivo (R5): recomputa physicalName desde logicalName ──

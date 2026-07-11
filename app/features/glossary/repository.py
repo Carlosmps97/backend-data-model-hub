@@ -73,6 +73,60 @@ async def delete_entry(entry_id: str) -> bool:
     return res.modified_count > 0
 
 
+# ── Validación de términos (F2 #1): corpus de nombres lógicos publicados ──
+
+CORPUS_SAMPLE_CAP = 50
+TABLES_COLL = "canonical_tables"
+COLUMNS_COLL = "canonical_columns"
+
+
+async def get_entry(entry_id: str) -> dict | None:
+    """Término activo por id (None si no existe o está soft-deleted)."""
+    db = await get_db()
+    doc = await db[COLL].find_one({"_id": entry_id, "flgactive": {"$ne": False}})
+    return AbbreviationDoc.model_validate(_to_doc(doc)).model_dump() if doc else None
+
+
+async def corpus_conflicts(pattern: str) -> tuple[list[dict], int]:
+    """Apariciones del patrón (frase completa) en `logicalName` de tablas y
+    columnas ACTIVAS. Devuelve (muestra cap 50, conteo total). El regex corre
+    case-insensitive server-side; es un scan aceptable como acción on-demand
+    (botón Validar / save), no per-keystroke (riesgo medido en el doc 10)."""
+    db = await get_db()
+    flt = {"logicalName": {"$regex": pattern, "$options": "i"},
+           "flgactive": {"$ne": False}}
+    total_tables = await db[TABLES_COLL].count_documents(flt)
+    total_columns = await db[COLUMNS_COLL].count_documents(flt)
+
+    sample: list[dict] = []
+    t_docs = await db[TABLES_COLL].find(
+        flt, {"_id": 1, "physicalName": 1, "logicalName": 1},
+    ).limit(CORPUS_SAMPLE_CAP).to_list(None)
+    for t in t_docs:
+        sample.append({"entity": "table", "tableName": t.get("physicalName") or "",
+                       "columnName": None, "logicalName": t.get("logicalName") or ""})
+
+    remaining = CORPUS_SAMPLE_CAP - len(sample)
+    if remaining > 0 and total_columns > 0:
+        c_docs = await db[COLUMNS_COLL].find(
+            flt, {"physicalName": 1, "logicalName": 1, "tableId": 1},
+        ).limit(remaining).to_list(None)
+        # Nombres de tabla en batch (NO $lookup: Cosmos).
+        table_ids = list({c.get("tableId") for c in c_docs if c.get("tableId")})
+        names: dict[str, str] = {}
+        if table_ids:
+            for t in await db[TABLES_COLL].find(
+                {"_id": {"$in": table_ids}}, {"physicalName": 1},
+            ).to_list(None):
+                names[t["_id"]] = t.get("physicalName") or ""
+        for c in c_docs:
+            sample.append({"entity": "column",
+                           "tableName": names.get(c.get("tableId"), ""),
+                           "columnName": c.get("physicalName"),
+                           "logicalName": c.get("logicalName") or ""})
+    return sample, total_tables + total_columns
+
+
 # ── Re-physicalize retroactivo (R5): re-deriva physicalName desde logicalName ──
 
 
