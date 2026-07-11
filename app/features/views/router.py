@@ -24,6 +24,12 @@ async def list_all(tableId: str | None = None, tableIds: str | None = None):
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create(body: ViewBody):
+    if not (body.sourceTableIds or body.tableId):
+        # F3: una vista sin tabla fuente no puede derivar nada (ni DDL ni
+        # canvas). Con 2+ fuentes SIN joinOverride SÍ se permite guardar:
+        # el JOIN se infiere de las relaciones al generar el DDL en el front.
+        raise HTTPException(status_code=409,
+                            detail="La vista necesita al menos una tabla fuente.")
     return ok(await service.create(body))
 
 
