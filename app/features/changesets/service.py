@@ -15,7 +15,7 @@ from app.core.versioning import overlay, summarize_diff
 
 from . import repository, validation
 from .repository import VERSIONED
-from .validation import InvalidPayloadError
+from .validation import DuplicateEntityError, InvalidPayloadError
 
 log = get_logger("app.changesets")
 
@@ -290,6 +290,40 @@ async def snapshot(actor: str, title: str | None, description: str | None,
     return await repository.create(title or version_label, actor, extra=fields)
 
 
+def _table_dup_filter(payload: dict) -> dict:
+    """Filtro Mongo del chequeo de unicidad de tabla: (schema, physicalName)
+    por regex anclado case-insensitive — usa el índice compuesto
+    schema+physicalName de canonical_tables. Sin schema matchea null/''. Puro."""
+    name = str(payload.get("physicalName") or "").strip()
+    schema = str(payload.get("schema") or payload.get("sql_schema") or "").strip()
+    return {
+        "schema": ({"$regex": f"^{re.escape(schema)}$", "$options": "i"}
+                   if schema else {"$in": [None, ""]}),
+        "physicalName": {"$regex": f"^{re.escape(name)}$", "$options": "i"},
+    }
+
+
+async def _duplicate_error(cs_id: str, collection: str, entity_id: str,
+                           op: str, payload: dict | None) -> str | None:
+    """Chequeo de unicidad de un upsert (spec 10 §9) contra el publicado
+    ACTIVO (slice indexado: tablas por schema+physicalName, columnas por
+    tableId) + los upserts PENDIENTES del mismo changeset. None si pasa o no
+    aplica (deletes / otras colecciones)."""
+    if op == "delete" or collection not in ("canonical_tables", "canonical_columns"):
+        return None
+    p = payload or {}
+    if not str(p.get("physicalName") or "").strip():
+        return None
+    if collection == "canonical_tables":
+        pub = await repository.published(collection, _table_dup_filter(p))
+    else:
+        if not p.get("tableId"):
+            return None
+        pub = await repository.published(collection, {"tableId": p["tableId"]})
+    pending = (await repository.changes_map(cs_id, [collection])).get(collection, {})
+    return validation.duplicate_error(collection, entity_id, p, pub, pending)
+
+
 async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op: str, payload: dict | None) -> dict | str | None:
     """Graba un cambio como documento propio (`changeset_changes`), sólo si el
     changeset sigue en `draft` (protocolo con compensación en el repository).
@@ -311,6 +345,12 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     err = validation.payload_error(collection, entity_id, op, payload)
     if err:
         raise InvalidPayloadError(err)
+    # Unicidad de nombres (spec 10 §9): tablas por (schema, physicalName) y
+    # columnas por physicalName dentro de su tableId — contra publicado activo
+    # + pendientes de ESTE changeset. El router lo convierte en 409.
+    dup = await _duplicate_error(cs_id, collection, entity_id, op, payload)
+    if dup:
+        raise DuplicateEntityError(dup)
     updated = await repository.set_change(cs_id, collection, entity_id, op, payload)
     if updated is not None:
         return updated

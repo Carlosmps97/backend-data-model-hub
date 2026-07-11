@@ -23,7 +23,7 @@ from . import service
 _can_edit = require_permission("model.edit")
 _can_decide = require_permission("review.decide")
 from .repository import VERSIONED
-from .validation import InvalidPayloadError
+from .validation import DuplicateEntityError, InvalidPayloadError
 from .schemas import (
     ChangeBody,
     ChangesetCreate,
@@ -70,6 +70,10 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         raise HTTPException(status_code=422, detail=f"Colección no versionada: {body.collection!r}.")
     try:
         res = await service.add_change(cs_id, user["username"], body.collection, body.entityId, body.op, body.payload)
+    except DuplicateEntityError as exc:
+        # Unicidad de nombres (spec 10 §9): el Save queda bloqueado ACÁ, en el
+        # router — el publish queda protegido transitivamente (y re-chequeado).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidPayloadError as exc:
         # El upsert terminaría aplicado tal cual a la colección publicada:
         # payload que no valida contra el modelo NO entra al changeset.
