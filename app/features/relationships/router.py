@@ -20,6 +20,14 @@ async def list_all(tableId: str | None = Query(default=None)):
     return ok(await service.list_for_table(tableId) if tableId else await service.list_all())
 
 
+@router.get("/impact")
+async def impact(columnId: str = Query(...), changesetId: str | None = Query(default=None)):
+    """Impacto GLOBAL de eliminar una columna (spec 10 §8): relaciones activas
+    (publicadas + overlay del changeset) donde es extremo, enriquecidas con el
+    otro extremo (tabla.columna) y los canvases donde la relación es visible."""
+    return ok(await service.column_impact(columnId, changesetId))
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create(body: RelationshipBody):
     return ok(await service.create(body))
