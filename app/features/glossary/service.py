@@ -12,6 +12,8 @@ hoy; se mantiene simple). Sin `scope` ⇒ 'column' (compat con el endpoint previ
 """
 from __future__ import annotations
 
+import re
+
 from app.core.naming import logicalize, physicalize
 from app.features.settings import service as settings_service
 
@@ -59,6 +61,36 @@ async def physicalize_name(
 async def logicalize_name(physical: str) -> str:
     mappings = to_mappings(await repository.list_entries())
     return logicalize(physical, mappings)
+
+
+# ── Validación de términos (F2 #1): glosario + corpus de nombres lógicos ──
+
+# Límite de "palabra" para la frase completa: cualquier char que NO sea letra
+# del español (incluye acentos y ñ) ni dígito. `\b` de re no sirve acá porque
+# trata á/é/í/ó/ú/ñ como no-word chars y cortaría dentro de una palabra.
+_BOUNDARY = r"[^a-záéíóúñ0-9]"
+
+
+def corpus_regex(term: str) -> str:
+    """Patrón (el caller aplica case-insensitive) que matchea el término como
+    FRASE COMPLETA contigua dentro de un nombre lógico. Término escapado con
+    re.escape. Puro."""
+    esc = re.escape(term.strip())
+    return rf"(^|{_BOUNDARY}){esc}({_BOUNDARY}|$)"
+
+
+def find_glossary_duplicate(term: str, entries: list[dict],
+                            exclude_id: str | None = None) -> dict | None:
+    """Duplicado EXACTO case-insensitive dentro de los términos del scope
+    (`entries` ya viene filtrado por scope). `exclude_id` permite que un update
+    no choque contra sí mismo. Puro."""
+    needle = term.strip().lower()
+    for e in entries:
+        if exclude_id is not None and e.get("id") == exclude_id:
+            continue
+        if (e.get("term") or "").strip().lower() == needle:
+            return {"id": e["id"], "term": e["term"], "abbrev": e["abbrev"]}
+    return None
 
 
 # ── Re-physicalize retroactivo (R5): recomputa physicalName desde logicalName ──
