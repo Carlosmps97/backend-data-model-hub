@@ -37,6 +37,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         # top-N se ordena en Mongo por physicalName, y Cosmos RU rechaza
         # `.sort()` sobre campos sin índice (500 en todas las búsquedas).
         _try("canonical_tables", [("physicalName", 1)]),
+        # §9 control de duplicados (F1): chequeo de (schema, physicalName) en
+        # add_change/publish por regex anclado case-insensitive. NO-unique a
+        # propósito: Cosmos no permite índices únicos sobre colecciones
+        # pobladas — la garantía vive en el router. El campo persistido es
+        # `schema` (alias del Pydantic `sql_schema`).
+        _try("canonical_tables", [("schema", 1), ("physicalName", 1)]),
         _try("canonical_columns", [("tableId", 1)]),
         _try("canonical_columns", [("parentDomainId", 1)]),
         # ── Motor de consulta del reporting (07) ────────────────
@@ -62,6 +68,10 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         # El canvas resuelve relaciones por extremos ($in por tabla).
         _try("relationships", [("sourceTableId", 1)]),
         _try("relationships", [("targetTableId", 1)]),
+        # §8 warning de eliminación (F1): GET /api/relationships/impact busca
+        # relaciones por COLUMNA extremo.
+        _try("relationships", [("sourceColumnId", 1)]),
+        _try("relationships", [("targetColumnId", 1)]),
         _try("views", [("flgactive", 1)]),
         # Las vistas se listan por tabla (PropertiesPanel · tab Views).
         _try("views", [("tableId", 1)]),
