@@ -65,3 +65,31 @@ async def delete(rid: str) -> bool:
     res = await db[COLL].update_one({"_id": rid, "flgactive": {"$ne": False}},
                                     {"$set": {"flgactive": False, "deletedAt": _now()}})
     return res.modified_count > 0
+
+
+async def list_for_column(column_id: str) -> list[dict]:
+    """Relaciones ACTIVAS donde la columna es extremo (origen o destino) —
+    spec 10 §8. Usa los índices sourceColumnId/targetColumnId."""
+    if not column_id:
+        return []
+    db = await get_db()
+    docs = await db[COLL].find({
+        "flgactive": {"$ne": False},
+        "$or": [{"sourceColumnId": column_id}, {"targetColumnId": column_id}],
+    }).to_list(None)
+    return [RelationshipDoc.model_validate(_to(d)).model_dump() for d in docs]
+
+
+async def canvases_containing(table_id: str) -> list[dict]:
+    """Subject areas activas cuyos `tableIds` contienen la tabla — para saber
+    en qué canvases es visible una relación. Devuelve `[{id, name, tableIds}]`
+    (proyección: no baja layouts/drawings)."""
+    if not table_id:
+        return []
+    db = await get_db()
+    docs = await db["subject_areas"].find(
+        {"flgactive": {"$ne": False}, "tableIds": table_id},
+        {"name": 1, "tableIds": 1},
+    ).to_list(None)
+    return [{"id": str(d["_id"]), "name": d.get("name") or "", "tableIds": d.get("tableIds") or []}
+            for d in docs]
