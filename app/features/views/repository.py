@@ -73,3 +73,22 @@ async def delete(vid: str) -> bool:
     res = await db[COLL].update_one({"_id": vid, "flgactive": {"$ne": False}},
                                     {"$set": {"flgactive": False, "deletedAt": _now()}})
     return res.modified_count > 0
+
+
+def build_canvas_query(table_ids: list[str]) -> dict:
+    """Query de vistas visibles en un canvas (F3): showOnCanvas=True y ≥1
+    fuente presente. Pura. Matchea SOLO `sourceTableIds` (indexado): el flag
+    nace en F3a, todo doc con True pasó por el write path nuevo que normaliza
+    las fuentes — no hace falta fallback legacy aquí."""
+    return {"flgactive": {"$ne": False}, "showOnCanvas": True,
+            "sourceTableIds": {"$in": table_ids}}
+
+
+async def list_for_canvas(table_ids: list[str]) -> list[dict]:
+    """Vistas a dibujar en el canvas (D3: flag global, aparece en todo canvas
+    que contenga ≥1 tabla fuente)."""
+    if not table_ids:
+        return []
+    db = await get_db()
+    docs = await db[COLL].find(build_canvas_query(table_ids)).to_list(None)
+    return [_dump(ViewDoc.model_validate(_to(d))) for d in docs]

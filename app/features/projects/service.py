@@ -80,6 +80,7 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
     from app.features.catalog import repository as catalog_repo
     from app.features.changesets import repository as cs_repo
     from app.features.relationships import repository as rel_repo
+    from app.features.views import repository as views_repo
 
     sa = await repository.get_subject_area(sa_id)
     if not sa:
@@ -89,6 +90,9 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
     tables = await catalog_repo.list_tables_by_ids(ids)
     columns = await catalog_repo.list_columns_for_tables(ids)
     rels = await rel_repo.list_for_tables(ids)
+    # F3: vistas visibles en este canvas (showOnCanvas + ≥1 fuente presente).
+    # Las vistas NO son changeset-aware (REST directo): sin overlay.
+    views = await views_repo.list_for_canvas(ids)
 
     if changeset_id:
         ch = await cs_repo.changes_map(
@@ -116,4 +120,5 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
             columns.sort(key=lambda c: (c.get("tableId") or "", c.get("ordinal") or 0))
 
     visible = [r for r in rels if r.get("sourceTableId") in id_set and r.get("targetTableId") in id_set]
-    return {"subjectArea": sa, "tables": tables, "columns": columns, "relationships": visible}
+    return {"subjectArea": sa, "tables": tables, "columns": columns,
+            "relationships": visible, "views": views}
