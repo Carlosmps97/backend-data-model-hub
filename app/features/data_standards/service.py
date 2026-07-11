@@ -166,9 +166,10 @@ async def apply(actor: str, body) -> dict:
     before_udp = {u["id"]: u for u in await udp_repo.list_udp()}
 
     # F2 #1: guards del glosario ANTES de mutar nada (fail-fast, sin estado a
-    # medias). Entradas bloqueadas (D4) → 409 para todos; términos AÑADIDOS se
-    # validan contra glosario + corpus de nombres lógicos (misma regla que el
-    # CRUD directo — el botón Validar del front es cortesía).
+    # medias). Entradas bloqueadas (D4) → 409 para todos; validación contra
+    # glosario + corpus de nombres lógicos (misma regla que el CRUD directo:
+    # altas y renombres de texto validan (renombres con exclude_id); edits de
+    # abbrev/wordType no. El botón Validar del front es cortesía).
     for tid in body.termsDelete:
         prev = before_terms.get(tid)
         if prev and prev.get("locked"):
@@ -185,6 +186,9 @@ async def apply(actor: str, body) -> dict:
                         "desbloquealo antes de editarlo."))
         if prev is None:  # término AÑADIDO (id nuevo o inexistente)
             await dict_svc.ensure_term_valid(t.term, t.scope)
+        elif (t.term or "").strip().lower() != (prev.get("term") or "").strip().lower():
+            # renombre de TEXTO de un término existente → valida excluyéndose.
+            await dict_svc.ensure_term_valid(t.term, t.scope, exclude_id=t.id)
 
     # Impacto de dominios (columnas re-tipadas): se cuenta ANTES de aplicar,
     # sobre las columnas sin override cuyo tipo cambia.
