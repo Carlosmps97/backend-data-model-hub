@@ -147,6 +147,13 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
     único de decisión — /review, /approve y /reject pasan por acá."""
     try:
         res = await service.review(cs_id, actor, decision, note)
+    except DuplicateEntityError as exc:
+        # Carrera entre changesets (spec 10 §9): otro publish ganó el nombre.
+        # El claim ya se revirtió (producción intacta); el request sigue en revisión.
+        raise HTTPException(
+            status_code=409,
+            detail=f"No se pudo publicar: {exc}. El owner debe retirar la versión (Withdraw), corregir y re-enviar.",
+        ) from exc
     except InvalidPayloadError as exc:
         # Gate autoritativo del apply: el claim se revirtió, producción intacta.
         raise HTTPException(

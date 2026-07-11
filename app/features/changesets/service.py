@@ -461,6 +461,42 @@ async def submit(cs_id: str, actor: str, title: str | None = None, description: 
     return await repository.transition(cs_id, "draft", fields)
 
 
+async def _publish_duplicates(changes: dict) -> list[str]:
+    """Re-chequeo COMPLETO de unicidad al publicar (spec 10 §9): cubre la
+    carrera entre changesets concurrentes. Dos queries acotadas: tablas por
+    $or de filtros indexados (schema+physicalName), columnas por $in de los
+    tableIds tocados. Devuelve la lista de conflictos (vacía = ok)."""
+    errors: list[str] = []
+
+    tbl_changes = changes.get("canonical_tables") or {}
+    tbl_upserts = {
+        eid: ch for eid, ch in tbl_changes.items()
+        if ch.get("op") != "delete"
+        and str((ch.get("payload") or {}).get("physicalName") or "").strip()
+    }
+    if tbl_upserts:
+        flt = {"$or": [_table_dup_filter(ch.get("payload") or {}) for ch in tbl_upserts.values()]}
+        pub = await repository.published("canonical_tables", flt)
+        for eid, ch in tbl_upserts.items():
+            err = validation.duplicate_error("canonical_tables", eid, ch.get("payload") or {}, pub, tbl_changes)
+            if err and err not in errors:
+                errors.append(err)
+
+    col_changes = changes.get("canonical_columns") or {}
+    col_upserts = {
+        eid: ch for eid, ch in col_changes.items()
+        if ch.get("op") != "delete" and (ch.get("payload") or {}).get("tableId")
+    }
+    if col_upserts:
+        tids = sorted({(ch.get("payload") or {})["tableId"] for ch in col_upserts.values()})
+        pub = await repository.published("canonical_columns", {"tableId": {"$in": tids}})
+        for eid, ch in col_upserts.items():
+            err = validation.duplicate_error("canonical_columns", eid, ch.get("payload") or {}, pub, col_changes)
+            if err and err not in errors:
+                errors.append(err)
+    return errors
+
+
 async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None) -> dict | None:
     """Cierra el request y aplica el changeset a las colecciones publicadas
     (+ cascada de dominios). Orden y garantías:
@@ -498,6 +534,16 @@ async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None
         raise InvalidPayloadError(
             "el request contiene cambios inválidos y no se puede publicar — "
             + " | ".join(invalid[:5])
+        )
+    # Re-chequeo de unicidad (spec 10 §9): otro changeset pudo publicar el
+    # nombre entre el add_change y este apply. Mismo protocolo que el gate de
+    # validación: revierte el claim y la producción queda intacta.
+    dups = await _publish_duplicates(changes)
+    if dups:
+        await repository.transition(cs_id, fields.get("status", "approved"), _revert)
+        raise DuplicateEntityError(
+            "el request contiene nombres duplicados contra lo ya publicado — "
+            + " | ".join(dups[:5])
         )
     try:
         counts = await repository.apply_changes(apply_plan(changes))
