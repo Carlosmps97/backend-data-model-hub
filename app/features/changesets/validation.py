@@ -70,3 +70,70 @@ def validate_changes(changes: dict) -> list[str]:
             if err:
                 errors.append(err)
     return errors
+
+
+# ── Unicidad de nombres (spec 10 §9) ───────────────────────────────────────
+# Tablas: (schema, physicalName) case-insensitive contra publicado activo +
+# upserts pendientes del mismo changeset. Columnas: physicalName dentro de su
+# tableId. La comparación es sobre el estado EFECTIVO del slice (los deletes
+# pendientes del changeset LIBERAN el nombre). Cosmos no permite índices
+# únicos sobre colecciones pobladas → la garantía vive en el router.
+
+
+class DuplicateEntityError(ValueError):
+    """Upsert que viola la unicidad de nombres (tabla o columna).
+    El router la convierte en 409 (el mensaje ya es legible)."""
+
+
+def _norm(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _table_key(doc: dict) -> tuple[str, str]:
+    """Clave de unicidad de tabla. El campo persistido en Mongo es `schema`
+    (alias del atributo Pydantic `sql_schema`)."""
+    return (_norm(doc.get("schema") or doc.get("sql_schema")), _norm(doc.get("physicalName")))
+
+
+def _column_key(doc: dict) -> tuple[str, str]:
+    return (str(doc.get("tableId") or ""), _norm(doc.get("physicalName")))
+
+
+def _effective_docs(published: list[dict], pending: dict, exclude_id: str) -> list[dict]:
+    """Estado efectivo del slice: publicado + upserts pendientes del changeset
+    (que PISAN al publicado homónimo por id), sin los borrados pendientes y sin
+    la propia entidad chequeada. Puro."""
+    docs = {d["id"]: d for d in published}
+    for eid, ch in (pending or {}).items():
+        if ch.get("op") == "delete":
+            docs.pop(eid, None)
+        else:
+            docs[eid] = {**(ch.get("payload") or {}), "id": eid}
+    docs.pop(exclude_id, None)
+    return list(docs.values())
+
+
+def duplicate_error(collection: str, entity_id: str, payload: dict | None,
+                    published: list[dict], pending: dict) -> str | None:
+    """Mensaje de duplicado si el upsert viola la unicidad; None si pasa (o la
+    colección no chequea unicidad). Puro.
+
+    - `published`: slice publicado relevante (mismo nombre / misma tabla).
+    - `pending`: cambios pendientes de la MISMA colección en el changeset.
+    """
+    p = payload or {}
+    if collection == "canonical_tables":
+        key = _table_key(p)
+        if not key[1]:
+            return None
+        if any(_table_key(d) == key for d in _effective_docs(published, pending, entity_id)):
+            schema = str(p.get("schema") or p.get("sql_schema") or "").strip()
+            name = str(p.get("physicalName") or "").strip()
+            return f"Ya existe la tabla {f'{schema}.{name}' if schema else name}"
+    elif collection == "canonical_columns":
+        key = _column_key(p)
+        if not (key[0] and key[1]):
+            return None
+        if any(_column_key(d) == key for d in _effective_docs(published, pending, entity_id)):
+            return f"Ya existe la columna {str(p.get('physicalName') or '').strip()} en esta tabla"
+    return None
