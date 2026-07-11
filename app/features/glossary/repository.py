@@ -127,6 +127,22 @@ async def corpus_conflicts(pattern: str) -> tuple[list[dict], int]:
     return sample, total_tables + total_columns
 
 
+async def set_lock(entry_id: str, locked: bool, actor: str) -> dict | None:
+    """Bloquea/desbloquea la entrada (D4). Devuelve el doc actualizado o None
+    si no existe/está soft-deleted."""
+    db = await get_db()
+    fields = {"locked": locked,
+              "lockedBy": actor if locked else None,
+              "lockedAt": _now() if locked else None,
+              "updatedAt": _now()}
+    res = await db[COLL].find_one_and_update(
+        {"_id": entry_id, "flgactive": {"$ne": False}},
+        {"$set": fields},
+        return_document=ReturnDocument.AFTER,
+    )
+    return AbbreviationDoc.model_validate(_to_doc(res)).model_dump() if res else None
+
+
 # ── Re-physicalize retroactivo (R5): re-deriva physicalName desde logicalName ──
 
 

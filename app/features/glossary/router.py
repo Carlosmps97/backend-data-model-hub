@@ -1,7 +1,7 @@
 """Endpoints del diccionario de abreviaturas + conversión lógico↔físico."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.api.envelope import ok
 from app.features.auth.deps import require_permission
@@ -20,6 +20,8 @@ from .schemas import (
 # modelador para previsualizar nombres; no mutan).
 router = APIRouter(prefix="/api/glossary", tags=["glossary"])
 _std = require_permission("standards.edit")
+# Lock/unlock del glosario: SOLO admin (D4) — no alcanza standards.edit.
+_admin = require_permission("admin.manage")
 
 
 @router.get("")
@@ -78,3 +80,24 @@ async def validate_term(body: ValidateTermBody):
         return ok({"ok": True,
                    "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
     return ok(await service.validate_term(term, body.scope))
+
+
+@router.post("/{entry_id}/lock")
+async def lock_entry(entry_id: str, user: dict = Depends(_admin)):
+    """F2 #1 (D4): bloquea la entrada — intocable para TODOS (409 en editar/
+    eliminar, CRUD o apply) hasta que un admin la desbloquee. Audita."""
+    entry = await service.set_lock(entry_id, True, user["username"])
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="El término no existe.")
+    return ok(entry)
+
+
+@router.post("/{entry_id}/unlock")
+async def unlock_entry(entry_id: str, user: dict = Depends(_admin)):
+    """F2 #1 (D4): desbloquea la entrada. Audita."""
+    entry = await service.set_lock(entry_id, False, user["username"])
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="El término no existe.")
+    return ok(entry)

@@ -16,6 +16,7 @@ import re
 
 from fastapi import HTTPException
 
+from app.core.audit import audit
 from app.core.naming import logicalize, physicalize
 from app.features.settings import service as settings_service
 
@@ -142,6 +143,16 @@ async def ensure_term_valid(term: str, scope: str, exclude_id: str | None = None
                     f"nombres lógicos del catálogo ({total} conflicto"
                     f"{'s' if total != 1 else ''})."),
         )
+
+
+async def set_lock(entry_id: str, locked: bool, actor: str) -> dict | None:
+    """Bloquea/desbloquea una entrada (solo ADMIN vía router). Audita la acción
+    (D4: bloqueada = intocable para todos hasta desbloquear). None si no existe."""
+    entry = await repository.set_lock(entry_id, locked, actor)
+    if entry is not None:
+        await audit(actor, "glossary.lock" if locked else "glossary.unlock",
+                    target=entry["term"], target_type="glossary_entry")
+    return entry
 
 
 # ── Re-physicalize retroactivo (R5): recomputa physicalName desde logicalName ──
