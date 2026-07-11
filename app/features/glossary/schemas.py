@@ -28,3 +28,9 @@ class LogicalizeBody(BaseModel):
 class RephysicalizeBody(BaseModel):
     # R5: re-physicalize retroactivo. Sin scope ⇒ ambos ('table' y 'column').
     scope: str | None = None
+
+
+class ValidateTermBody(BaseModel):
+    # F2 #1: validación on-demand de un término/frase antes de agregarlo.
+    term: str
+    scope: str = "column"  # 'column' | 'table'

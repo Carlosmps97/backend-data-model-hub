@@ -12,6 +12,7 @@ from .schemas import (
     LogicalizeBody,
     PhysicalizeBody,
     RephysicalizeBody,
+    ValidateTermBody,
 )
 
 # Editar términos del diccionario ES editar estándares → standards.edit. Los
@@ -62,3 +63,18 @@ async def rephysicalize(body: RephysicalizeBody, user: dict = Depends(_std)):
     entidades del scope desde su `logicalName`. Sin scope ⇒ tablas y columnas.
     Update directo (fuera de publish). Devuelve `{updated: {tables, columns}}`."""
     return ok(await service.rephysicalize(body.scope))
+
+
+@router.post("/validate")
+async def validate_term(body: ValidateTermBody):
+    """F2 #1: valida un término NUEVO contra el glosario del scope (duplicado
+    exacto) y contra los nombres lógicos publicados (frase completa, muestra
+    cap 50 + total). No muta; el enforcement real vive en los writes
+    (POST/PUT de este router y standards/apply)."""
+    # Término vacío/whitespace: `corpus_regex('')` es laxo, así que cortamos acá
+    # y devolvemos el contrato 'sin conflictos' sin tocar el service/DB.
+    term = body.term.strip()
+    if not term:
+        return ok({"ok": True,
+                   "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
+    return ok(await service.validate_term(term, body.scope))
