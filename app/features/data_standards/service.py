@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from fastapi import HTTPException
+
 from app.core.audit import audit
 from app.core.logging import get_logger
 from app.features.glossary import repository as dict_repo, service as dict_svc
@@ -162,6 +164,27 @@ async def apply(actor: str, body) -> dict:
     before_domains = {d["id"]: d for d in await dom_repo.list_domains()}
     before_terms = {t["id"]: t for t in await dict_repo.list_entries(None)}
     before_udp = {u["id"]: u for u in await udp_repo.list_udp()}
+
+    # F2 #1: guards del glosario ANTES de mutar nada (fail-fast, sin estado a
+    # medias). Entradas bloqueadas (D4) → 409 para todos; términos AÑADIDOS se
+    # validan contra glosario + corpus de nombres lógicos (misma regla que el
+    # CRUD directo — el botón Validar del front es cortesía).
+    for tid in body.termsDelete:
+        prev = before_terms.get(tid)
+        if prev and prev.get("locked"):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
+                        "desbloquealo antes de eliminarlo."))
+    for t in body.termsUpsert:
+        prev = before_terms.get(t.id) if t.id else None
+        if prev and prev.get("locked"):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
+                        "desbloquealo antes de editarlo."))
+        if prev is None:  # término AÑADIDO (id nuevo o inexistente)
+            await dict_svc.ensure_term_valid(t.term, t.scope)
 
     # Impacto de dominios (columnas re-tipadas): se cuenta ANTES de aplicar,
     # sobre las columnas sin override cuyo tipo cambia.
