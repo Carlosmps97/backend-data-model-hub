@@ -19,3 +19,10 @@ class AbbreviationDoc(BaseModel):
     # Default 'column' = compat con docs/clientes previos a R1c.
     scope: str = "column"  # 'column' | 'table'
     wordType: str | None = None  # 'prime' | 'class' | 'modifier'
+    # F2 #1 (D4): lock por ADMIN — una entrada bloqueada es intocable para
+    # TODOS (editar/eliminar → 409, tanto CRUD directo como standards/apply)
+    # hasta que un admin la desbloquee. Round-trip: estas keys viajan también
+    # en el snapshot de standards_versions y en el TS SnapshotTerm.
+    locked: bool = False
+    lockedBy: str | None = None
+    lockedAt: str | None = None

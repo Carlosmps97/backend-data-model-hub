@@ -40,7 +40,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
             for d in domains
         ],
         "dict": [
-            {k: t.get(k) for k in ("id", "term", "abbrev", "scope", "wordType")}
+            {k: t.get(k) for k in ("id", "term", "abbrev", "scope", "wordType",
+                                   "locked", "lockedBy", "lockedAt")}
             for t in terms
         ],
         "namingConfig": {
