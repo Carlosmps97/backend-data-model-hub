@@ -114,3 +114,54 @@ async def propagate_type(cascade_query: dict, data_type: str) -> int:
         cascade_query, {"$set": {"dataType": data_type, "updatedAt": _now()}}
     )
     return res.modified_count
+
+
+# ── Impacto agrupado por tabla (F2 #2) ─────────────────────────────────────
+
+TABLES = "canonical_tables"
+SUBJECT_AREAS = "subject_areas"
+
+
+def impact_pipeline(domain_id: str) -> list[dict]:
+    """Pipeline del impacto: columnas ACTIVAS del dominio agrupadas por tabla
+    (nº afectadas + nº con override manual). Puro (testeable sin DB)."""
+    return [
+        {"$match": {"parentDomainId": domain_id, "flgactive": {"$ne": False}}},
+        {"$group": {
+            "_id": "$tableId",
+            "columns": {"$sum": 1},
+            "overridden": {"$sum": {"$cond": [{"$eq": ["$typeOverridden", True]}, 1, 0]}},
+        }},
+    ]
+
+
+async def impact_groups(domain_id: str) -> list[dict]:
+    """`$match` + `$group` por tableId sobre canonical_columns (patrón probado
+    a 400k columnas en el motor de reporting; NO $lookup: Cosmos)."""
+    db = await get_db()
+    return await db[COLUMNS].aggregate(impact_pipeline(domain_id)).to_list(None)
+
+
+async def tables_by_ids(table_ids: list[str]) -> dict[str, dict]:
+    """Join batch: tableId → {schema, physicalName, logicalName} desde
+    canonical_tables (proyección mínima, un solo $in)."""
+    if not table_ids:
+        return {}
+    db = await get_db()
+    docs = await db[TABLES].find(
+        {"_id": {"$in": table_ids}},
+        {"schema": 1, "physicalName": 1, "logicalName": 1},
+    ).to_list(None)
+    return {str(d["_id"]): {"schema": d.get("schema"),
+                            "physicalName": d.get("physicalName"),
+                            "logicalName": d.get("logicalName")} for d in docs}
+
+
+async def models_affected(table_ids: list[str]) -> int:
+    """Nº de canvases (`subject_areas`) cuyos `tableIds` intersectan las tablas
+    afectadas = "modelos de datos" impactados (spec #2)."""
+    if not table_ids:
+        return 0
+    db = await get_db()
+    return await db[SUBJECT_AREAS].count_documents(
+        {"tableIds": {"$in": table_ids}, "flgactive": {"$ne": False}})
