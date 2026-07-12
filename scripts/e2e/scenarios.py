@@ -355,15 +355,15 @@ def s10_admin() -> Suite:
     H._track("users", uname); H._track("roles", rkey)
     # crear usuario (rol lector)
     r = admin.post("/api/admin/users", {"username": uname, "email": f"{uname}@e.com",
-        "name": "E2E User", "role": "lector", "password": "temp12345"})
+        "name": "E2E User", "role": "lector", "password": "temp1234567"})
     s.check("crear usuario", r.status in (200, 201), f"status={r.status} {str(r.raw)[:120]}")
-    lr = admin.http.post("/api/auth/login", json={"username": uname, "password": "temp12345"})
+    lr = admin.http.post("/api/auth/login", json={"username": uname, "password": "temp1234567"})
     s.eq("nuevo usuario loguea", lr.status_code, 200)
     # cambiar rol
     s.eq("cambiar rol a modelador", admin.put(f"/api/admin/users/{uname}", {"role": "modelador"}).status, 200)
     # deshabilitar → login bloqueado (revoca acceso)
     admin.put(f"/api/admin/users/{uname}", {"status": "disabled"})
-    lr = admin.http.post("/api/auth/login", json={"username": uname, "password": "temp12345"})
+    lr = admin.http.post("/api/auth/login", json={"username": uname, "password": "temp1234567"})
     s.eq("usuario deshabilitado no loguea", lr.status_code, 401)
     # re-habilitar + asignar a un rol DESCARTABLE
     admin.put(f"/api/admin/users/{uname}", {"status": "active"})
@@ -462,6 +462,366 @@ def s12_glossary_udp() -> Suite:
     return s
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Lote "precisiones de modelamiento" (spec doc 10) — s13..s18
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ══ S13 · #9 Duplicados: tabla (schema+nombre) y columna (por tabla) → 409 ═══
+def s13_guardas_duplicados() -> Suite:
+    s = Suite("s13_guardas_duplicados")
+    mod, rev = Client("modelador"), Client("revisor")
+
+    pid = mod.create_project()
+    phys = f"{TAG}_DUP_BASE".upper()
+    tid = mod.create_table(logical=f"{TAG} dup base", schema="e2e", physical=phys)
+    cid = mod.add_column(tid, "codigo cliente", "STRING", ordinal=0)
+    col_phys = next((c["physicalName"] for c in mod.get(f"/api/catalog/tables/{tid}/columns").data
+                     if c["id"] == cid), None)
+    s.check("fixture publicado (tabla+columna)", bool(col_phys), f"col={col_phys}")
+
+    cs = mod.snapshot([pid], title=f"{TAG} s13")
+    # 1) misma schema+physicalName EXACTA contra publicado → 409
+    nid = _uid("tdup")
+    r = _cs_change(mod, cs, "canonical_tables", nid,
+                   {"id": nid, "logicalName": f"{TAG} otra", "physicalName": phys, "schema": "e2e"})
+    s.eq("tabla duplicada exacta → 409", r.status, 409)
+    # 2) case-insensitive → 409
+    r = _cs_change(mod, cs, "canonical_tables", nid,
+                   {"id": nid, "logicalName": f"{TAG} otra", "physicalName": phys.lower(), "schema": "E2E"})
+    s.eq("tabla duplicada case-insensitive → 409", r.status, 409)
+    # 3) mismo nombre en OTRO schema → permitido
+    r = _cs_change(mod, cs, "canonical_tables", nid,
+                   {"id": nid, "logicalName": f"{TAG} otra", "physicalName": phys, "schema": "e2e_otro"})
+    s.eq("mismo nombre en otro schema → OK", r.status, 200)
+    # 4) pendiente-vs-pendiente en el MISMO changeset → 409
+    nid2 = _uid("tdup2")
+    r = _cs_change(mod, cs, "canonical_tables", nid2,
+                   {"id": nid2, "logicalName": f"{TAG} tercera", "physicalName": phys, "schema": "e2e_otro"})
+    s.eq("duplicado contra pendiente del mismo draft → 409", r.status, 409)
+    # 5) columna duplicada dentro de la misma tabla (case-insensitive) → 409
+    ncid = f"{tid}.dupcol"
+    r = _cs_change(mod, cs, "canonical_columns", ncid,
+                   {"id": ncid, "tableId": tid, "logicalName": "codigo cliente bis",
+                    "physicalName": col_phys.lower(), "dataType": "STRING", "ordinal": 9})
+    s.eq("columna duplicada (case-insensitive) → 409", r.status, 409)
+    # 6) columna con nombre nuevo → OK
+    r = _cs_change(mod, cs, "canonical_columns", ncid,
+                   {"id": ncid, "tableId": tid, "logicalName": "columna sana",
+                    "physicalName": f"{TAG}_SANA", "dataType": "STRING", "ordinal": 9})
+    s.eq("columna con nombre libre → OK", r.status, 200)
+
+    # 7) carrera entre changesets: cs2 mete el mismo nombre ANTES de publicar cs1
+    #    → el re-chequeo del publish (approve) del segundo debe fallar con 409.
+    csA = mod.snapshot([pid], title=f"{TAG} s13-A")
+    csB = mod.snapshot([pid], title=f"{TAG} s13-B")
+    race = f"{TAG}_RACE".upper()
+    idA, idB = _uid("raceA"), _uid("raceB")
+    s.eq("csA registra tabla RACE", _cs_change(mod, csA, "canonical_tables", idA,
+         {"id": idA, "logicalName": f"{TAG} race A", "physicalName": race, "schema": "e2e"}).status, 200)
+    s.eq("csB registra tabla RACE (aún sin conflicto publicado)", _cs_change(mod, csB, "canonical_tables", idB,
+         {"id": idB, "logicalName": f"{TAG} race B", "physicalName": race, "schema": "e2e"}).status, 200)
+    H._track("canonical_tables", idA); H._track("canonical_tables", idB)
+    mod.post(f"/api/changesets/{csA}/submit", {"reviewers": [rev.user]})
+    r = rev.post(f"/api/changesets/{csA}/review", {"decision": "approve"})
+    s.eq("csA publica OK", r.status, 200)
+    mod.post(f"/api/changesets/{csB}/submit", {"reviewers": [rev.user]})
+    r = rev.post(f"/api/changesets/{csB}/review", {"decision": "approve"})
+    s.check("re-chequeo del publish atrapa la carrera → 409", r.status == 409,
+            f"status={r.status} {str(r.raw)[:120]}")
+    return s
+
+
+# ══ S14 · #8 Impacto global al eliminar columna con relaciones ═══════════════
+def s14_impacto_eliminacion() -> Suite:
+    s = Suite("s14_impacto_eliminacion")
+    mod = Client("modelador")
+
+    pid = mod.create_project()
+    t1 = mod.create_table(logical=f"{TAG} cliente", schema="e2e")
+    c1 = mod.add_column(t1, "id cliente", "BIGINT", pk=True, ordinal=0)
+    t2 = mod.create_table(logical=f"{TAG} cuenta", schema="e2e")
+    c2 = mod.add_column(t2, "id cliente", "BIGINT", ordinal=1)
+    rid = mod.create_relationship(t2, c2, t1, c1)
+    ca = mod.create_canvas(pid, name=f"{TAG} imp-canvas")
+    mod.put(f"/api/subject-areas/{ca}/tables", {"tableIds": [t1, t2]})
+
+    # impacto de la columna PK referenciada: 1 relación, otro extremo = t2.c2
+    imp = mod.get(f"/api/relationships/impact?columnId={c1}")
+    s.eq("impact responde 200", imp.status, 200)
+    data = imp.data or {}
+    s.eq("total = 1 relación", data.get("total"), 1)
+    rels = data.get("relationships") or []
+    other_ok = bool(rels) and rels[0].get("otherTableName") and rels[0].get("otherColumnName")
+    s.check("enriquecido con tabla.columna del otro extremo", other_ok, f"{rels[:1]}")
+    s.check("lista los canvases donde la relación es visible",
+            any(TAG.lower() in (c.get("name") or "").lower()
+                for r0 in rels for c in (r0.get("canvases") or [])),
+            f"canvases={[r0.get('canvases') for r0 in rels]}")
+    # columna sin relaciones → impacto vacío
+    imp0 = mod.get(f"/api/relationships/impact?columnId={c2}x-no-existe")
+    s.eq("columna sin relaciones → total 0", (imp0.data or {}).get("total"), 0)
+    # overlay de changeset: relación agregada SOLO en el draft también cuenta
+    cs = mod.snapshot([pid], title=f"{TAG} s14")
+    t3 = mod.create_table(logical=f"{TAG} riesgo", schema="e2e")
+    c3 = mod.add_column(t3, "id cliente", "BIGINT", ordinal=0)
+    nrid = _uid("rel")
+    r = _cs_change(mod, cs, "relationships", nrid,
+                   {"id": nrid, "sourceTableId": t3, "sourceColumnId": c3,
+                    "targetTableId": t1, "targetColumnId": c1, "cardinality": "N:1"})
+    s.eq("relación nueva en draft", r.status, 200)
+    H._track("relationships", nrid)
+    imp2 = mod.get(f"/api/relationships/impact?columnId={c1}&changesetId={cs}")
+    s.eq("impact con overlay del draft = 2", (imp2.data or {}).get("total"), 2)
+    imp3 = mod.get(f"/api/relationships/impact?columnId={c1}")
+    s.eq("impact SIN draft sigue = 1 (aislamiento)", (imp3.data or {}).get("total"), 1)
+    return s
+
+
+# ══ S15 · #1 Glosario: validación frase completa + lock ADMIN (D1/D4) ════════
+def s15_glosario_validacion_lock() -> Suite:
+    s = Suite("s15_glosario_validacion_lock")
+    admin, mod = Client("admin"), Client("modelador")
+    marker = f"zx{uuid.uuid4().hex[:6]}"      # palabra única, imposible en corpus
+
+    # corpus: tabla publicada cuyo nombre lógico contiene la palabra marcador
+    tid = mod.create_table(logical=f"{TAG} {marker} prestamo", schema="e2e")
+    mod.add_column(tid, f"codigo {marker}", "STRING", ordinal=0)
+
+    # 1) palabra que SÍ existe en nombres lógicos → conflicto
+    r = admin.post("/api/glossary/validate", {"term": marker, "scope": "column"})
+    conf = (r.data or {}).get("conflicts") or {}
+    s.check("palabra existente en corpus → conflicto", r.status == 200 and (r.data or {}).get("ok") is False,
+            f"total={conf.get('total')}")
+    s.check("conflictos traen tabla/columna/nombre lógico",
+            all(k in (conf.get("corpus") or [{}])[0] for k in ("tableName", "logicalName")),
+            f"{(conf.get('corpus') or [None])[0]}")
+    # 2) frase completa que NO existe → pasa (caso 'codigo de análisis' de la spec)
+    r = admin.post("/api/glossary/validate", {"term": f"{marker} de analisis", "scope": "column"})
+    s.check("frase completa inexistente → OK", (r.data or {}).get("ok") is True, f"{r.data}")
+    # 3) substring que no es palabra completa NO conflictúa (zx… ≠ zx…pre)
+    r = admin.post("/api/glossary/validate", {"term": marker[:4], "scope": "column"})
+    s.check("substring parcial (no palabra completa) → OK", (r.data or {}).get("ok") is True,
+            f"term={marker[:4]} {str(r.data)[:80]}")
+
+    # 4) enforcement server-side: POST /api/glossary con término en corpus → 409
+    r = admin.post("/api/glossary", {"term": marker, "abbrev": "zzz", "scope": "column"})
+    s.eq("crear término en conflicto → 409", r.status, 409)
+    # 5) crear término limpio → 201; duplicado exacto en glosario → 409
+    clean = f"{marker}g"
+    r = admin.post("/api/glossary", {"term": clean, "abbrev": "zzg", "scope": "column"})
+    gid = (r.data or {}).get("id")
+    s.check("término limpio se crea", r.status == 201 and bool(gid), f"status={r.status}")
+    if gid: H._track("glossary_terms", gid)
+    r = admin.post("/api/glossary", {"term": clean.upper(), "abbrev": "zzh", "scope": "column"})
+    s.eq("duplicado exacto en glosario (case-insens) → 409", r.status, 409)
+    # 6) enforcement vía standards/apply (added) → 409
+    r = admin.post("/api/standards/apply", {"kind": "glossary", "termsUpsert": [
+        {"term": marker, "abbrev": "zzq", "scope": "column"}]})
+    s.eq("apply con término en corpus → 409", r.status, 409)
+
+    # 7) lock por ADMIN (D4): intocable para TODOS hasta unlock
+    r = admin.post(f"/api/glossary/{gid}/lock")
+    s.check("admin bloquea", r.status == 200 and (r.data or {}).get("locked") is True, f"{r.data}")
+    s.eq("modelador NO puede bloquear (admin.manage) → 403",
+         mod.post(f"/api/glossary/{gid}/lock").status, 403)
+    r = admin.put(f"/api/glossary/{gid}", {"term": clean, "abbrev": "zzz2", "scope": "column"})
+    s.eq("editar bloqueado → 409 incluso ADMIN", r.status, 409)
+    s.eq("eliminar bloqueado → 409", admin.delete(f"/api/glossary/{gid}").status, 409)
+    r = admin.post("/api/standards/apply", {"kind": "glossary", "termsUpsert": [
+        {"id": gid, "term": clean, "abbrev": "zzz3", "scope": "column"}]})
+    s.eq("apply sobre bloqueado → 409", r.status, 409)
+    # unlock → editable de nuevo
+    admin.post(f"/api/glossary/{gid}/unlock")
+    r = admin.put(f"/api/glossary/{gid}", {"term": clean, "abbrev": "zzz4", "scope": "column"})
+    s.eq("tras unlock se puede editar", r.status, 200)
+    # auditoría del lock
+    entries = admin.get("/api/admin/audit?limit=100").data or []
+    acts = {e.get("action") for e in entries}
+    s.check("lock/unlock auditados", any("lock" in (a or "") for a in acts), f"{[a for a in acts if a and 'lock' in a]}")
+    return s
+
+
+# ══ S16 · #2 Parent Domain: impacto detallado con tablas + búsqueda ══════════
+def s16_domain_impact() -> Suite:
+    s = Suite("s16_domain_impact")
+    admin, mod = Client("admin"), Client("modelador")
+    pid = mod.create_project()
+    dom = admin.create_domain(f"{TAG} Importe", "DECIMAL(18,2)")  # domains = standards.edit
+
+    t1 = mod.create_table(logical=f"{TAG} saldos", schema="e2e")
+    t2 = mod.create_table(logical=f"{TAG} movimientos", schema="e2e")
+    # 2 columnas HEREDAN el tipo del dominio (dtype=None); 1 con override manual
+    mod.add_column(t1, "saldo actual", None, domain=dom, ordinal=0)
+    mod.add_column(t1, "saldo anterior", None, domain=dom, ordinal=1)
+    mod.add_column(t2, "importe", "STRING", domain=dom, ordinal=0)  # override deliberado
+    ca = mod.create_canvas(pid, name=f"{TAG} dom-canvas")
+    mod.put(f"/api/subject-areas/{ca}/tables", {"tableIds": [t1]})
+
+    imp = mod.get(f"/api/domains/{dom}/impact")
+    s.eq("impact responde 200", imp.status, 200)
+    d = imp.data or {}
+    s.eq("columnsUsing = 3", d.get("columnsUsing"), 3)
+    s.eq("willUpdate = 2 (excluye override manual)", d.get("willUpdate"), 2)
+    s.eq("overridden = 1 (no cambiará)", d.get("overridden"), 1)
+    s.eq("totalTables = 2", d.get("totalTables"), 2)
+    s.check("cuenta modelos afectados (canvas)", (d.get("modelsAffected") or 0) >= 1,
+            f"modelsAffected={d.get('modelsAffected')}")
+    tables = d.get("tables") or []
+    s.check("lista tablas con nombre+columnas+overridden", bool(tables) and
+            all(k in t for t in tables for k in ("physicalName", "columns", "overridden")),
+            f"{[(t.get('physicalName'), t.get('columns'), t.get('overridden')) for t in tables]}")
+    # búsqueda server-side `q`: filtra la LISTA; los conteos globales no cambian
+    name1 = next((t.get("physicalName") for t in tables if t.get("tableId") == t1), "")
+    imp_q = mod.get(f"/api/domains/{dom}/impact?q={name1}")
+    dq = imp_q.data or {}
+    tq = dq.get("tables") or []
+    s.check("q filtra a la tabla buscada", len(tq) == 1 and tq[0].get("tableId") == t1,
+            f"q={name1} → {[t.get('physicalName') for t in tq]}")
+    s.eq("conteo global de columnas NO cambia con q", dq.get("columnsUsing"), 3)
+    s.eq("totalTables con q = matches (pagina la lista filtrada)", dq.get("totalTables"), 1)
+    # paginación
+    imp_p = mod.get(f"/api/domains/{dom}/impact?limit=1")
+    s.eq("limit=1 devuelve 1 tabla", len((imp_p.data or {}).get("tables") or []), 1)
+    return s
+
+
+# ══ S17 · #3-5 Vistas: multi-fuente, showOnCanvas, diagrama, compat legacy ═══
+def s17_vistas_multifuente() -> Suite:
+    s = Suite("s17_vistas_multifuente")
+    mod = Client("modelador")
+    pid = mod.create_project()
+    t1 = mod.create_table(logical=f"{TAG} cliente", schema="e2e")
+    c1 = mod.add_column(t1, "id cliente", "BIGINT", pk=True, ordinal=0)
+    mod.add_column(t1, "nombre cliente", "VARCHAR(120)", ordinal=1)
+    t2 = mod.create_table(logical=f"{TAG} cuenta", schema="e2e")
+    mod.add_column(t2, "id cuenta", "BIGINT", pk=True, ordinal=0)
+    c2 = mod.add_column(t2, "id cliente", "BIGINT", ordinal=1)
+    mod.add_column(t2, "saldo actual", "DECIMAL(18,2)", ordinal=2)
+    mod.create_relationship(t2, c2, t1, c1)
+    ca = mod.create_canvas(pid, name=f"{TAG} vw-canvas")
+    mod.put(f"/api/subject-areas/{ca}/tables", {"tableIds": [t1, t2]})
+
+    # 1) crear vista MULTI-FUENTE con columnas propias (alias + cast) + flag canvas
+    vname = _uid("VW_CLIENTE_360")
+    body = {"name": vname, "schema": "e2e", "sql": "",
+            "sourceTableIds": [t1, t2], "showOnCanvas": True,
+            "joinOverride": "t1.id_cliente = t2.id_cliente",
+            "sources": [
+                {"tableId": t1, "column": "nombre_cliente", "outputAlias": "nombre"},
+                {"tableId": t2, "column": "saldo_actual", "castType": "DECIMAL(18,2)",
+                 "outputAlias": "saldo_total"}]}
+    r = mod.post("/api/views", body)
+    vid = (r.data or {}).get("id")
+    s.check("vista multi-fuente creada", r.status in (200, 201) and bool(vid), f"status={r.status}")
+    if vid: H._track("views", vid)
+    v = r.data or {}
+    s.eq("tableId legacy = primera fuente", v.get("tableId"), t1)
+    s.eq("sourceTableIds completo", v.get("sourceTableIds"), [t1, t2])
+    s.check("sources conservan castType/alias",
+            any(x.get("castType") == "DECIMAL(18,2)" for x in v.get("sources") or []))
+    fresh = next((x for x in (mod.get(f"/api/views?tableId={t1}").data or []) if x["id"] == vid), {})
+    s.eq("joinOverride round-trip (Mongo)", fresh.get("joinOverride"), "t1.id_cliente = t2.id_cliente")
+
+    # 2) GET ?tableId= matchea por CUALQUIER fuente (no solo la primera)
+    for t in (t1, t2):
+        found = any(x["id"] == vid for x in (mod.get(f"/api/views?tableId={t}").data or []))
+        s.check(f"listado por fuente {'principal' if t == t1 else 'secundaria'} la incluye", found)
+
+    # 3) diagrama: la vista aparece con showOnCanvas=True
+    diag = mod.get(f"/api/subject-areas/{ca}/diagram").data or {}
+    dviews = {x["id"]: x for x in diag.get("views") or []}
+    s.check("diagrama incluye la vista (showOnCanvas)", vid in dviews, f"views={list(dviews)}")
+    s.check("payload de vista trae fuentes para derivaciones",
+            set((dviews.get(vid) or {}).get("sourceTableIds") or []) == {t1, t2})
+
+    # 4) canvas parcial (D3): con UNA sola fuente presente también aparece
+    ca2 = mod.create_canvas(pid, name=f"{TAG} vw-parcial")
+    mod.put(f"/api/subject-areas/{ca2}/tables", {"tableIds": [t2]})
+    diag2 = mod.get(f"/api/subject-areas/{ca2}/diagram").data or {}
+    s.check("canvas con 1 fuente también muestra la vista (D3)",
+            any(x["id"] == vid for x in diag2.get("views") or []))
+
+    # 5) apagar showOnCanvas vía PUT estilo LEGACY (solo tableId, sin sourceTableIds)
+    #    — regresión F3a T5/T6: la normalización del update no debe perder fuentes.
+    legacy_body = {"name": vname, "schema": "e2e", "sql": "", "tableId": t1,
+                   "showOnCanvas": False, "sources": v.get("sources") or []}
+    r = mod.put(f"/api/views/{vid}", legacy_body)
+    s.eq("PUT legacy responde 200", r.status, 200)
+    diag = mod.get(f"/api/subject-areas/{ca}/diagram").data or {}
+    s.check("apagado el flag, desaparece del canvas",
+            not any(x["id"] == vid for x in diag.get("views") or []))
+    got = next((x for x in (mod.get(f"/api/views?tableId={t1}").data or []) if x["id"] == vid), {})
+    s.check("normalización tras PUT legacy (sourceTableIds=[t1])",
+            got.get("sourceTableIds") == [t1] and got.get("showOnCanvas") is False, f"{got.get('sourceTableIds')}")
+
+    # 6) compat: crear vista SOLO con tableId (flujo viejo) → sourceTableIds=[t]
+    vid2 = mod.create_view(_uid("VW_LEGACY"), "SELECT 1", table_id=t2)
+    got2 = next((x for x in (mod.get(f"/api/views?tableId={t2}").data or []) if x["id"] == vid2), {})
+    s.eq("vista legacy queda normalizada", got2.get("sourceTableIds"), [t2])
+    s.check("vista legacy NO sale en canvas (showOnCanvas default False)",
+            not any(x["id"] == vid2 for x in (mod.get(f"/api/subject-areas/{ca2}/diagram").data or {}).get("views") or []))
+
+    # 7) PUT es full-replace (contrato): el body legacy SIN joinOverride lo limpia
+    s.eq("PUT full-replace limpia joinOverride omitido (contrato)", got.get("joinOverride"), None)
+    return s
+
+
+# ══ S18 · #10 UDP de canvas (Modelo de Datos) + reporting `models` ═══════════
+def s18_udp_canvas_models() -> Suite:
+    s = Suite("s18_udp_canvas_models")
+    admin, mod, lector = Client("admin"), Client("modelador"), Client("lector")
+    pid = mod.create_project()
+    tid = mod.create_table(logical=f"{TAG} m1", schema="e2e")
+    ca = mod.create_canvas(pid, name=f"{TAG} modelo-riesgos")
+    mod.put(f"/api/subject-areas/{ca}/tables", {"tableIds": [tid]})
+
+    # 1) definición UDP nivel canvas vía standards/apply (versionada)
+    key = f"{TAG} Criticidad"
+    r = admin.post("/api/standards/apply", {"kind": "udp", "udpUpsert": [
+        {"name": key, "level": "canvas", "dataType": "list",
+         "allowedValues": ["alta", "media", "baja"], "defaultValue": "media"}]})
+    s.eq("definición UDP level=canvas aplicada", r.status, 200)
+    cdef = next((x for x in (admin.get("/api/udp").data or []) if x["name"] == key), None)
+    s.check("definición visible con level=canvas", bool(cdef) and cdef["level"] == "canvas", f"{cdef}")
+    if cdef: H._track("udp_definitions", cdef["id"])
+    kid = (cdef or {}).get("id", "x")
+
+    # 2) asignación al canvas: PUT /udp (mutación directa, model.edit)
+    r = mod.put(f"/api/subject-areas/{ca}/udp", {"udpValues": {kid: "alta"}})
+    s.eq("modelador asigna UDP al canvas", r.status, 200)
+    s.eq("lector NO puede (model.edit) → 403",
+         lector.put(f"/api/subject-areas/{ca}/udp", {"udpValues": {kid: "baja"}}).status, 403)
+    sas = mod.get(f"/api/projects/{pid}/subject-areas").data or []
+    got = next((x for x in sas if x["id"] == ca), {})
+    s.eq("round-trip udpValues del canvas", (got.get("udpValues") or {}).get(kid), "alta")
+
+    # 3) reporting: entidad `models` consulta el UDP de canvas
+    q = {"from": "models", "select": ["name", f"udp.{kid}"],
+         "where": {"op": "and", "conditions": [{"field": f"udp.{kid}", "op": "eq", "value": "alta"}]},
+         "limit": 50}
+    r = mod.post("/api/reporting/query", q)
+    rows = (r.data or {}).get("rows") or []
+    s.check("query models filtra por udp de canvas", r.status == 200 and
+            any(x.get("name") == f"{TAG} modelo-riesgos" for x in rows),
+            f"status={r.status} rows={len(rows)}")
+    # 4) catálogo: models presente; tableCount derived (ops vacíos)
+    cat = mod.get("/api/reporting/catalog?from=models").data or {}
+    fields = cat.get("fields") or []
+    tc = next((f for f in fields if f.get("key") == "tableCount"), None)
+    s.check("catálogo expone models.tableCount derived sin ops",
+            bool(tc) and tc.get("derived") is True and not tc.get("ops"), f"{tc}")
+    # 5) filtrar por derived → 422 (backstop del motor)
+    bad = {"from": "models", "select": ["name"],
+           "where": {"op": "and", "conditions": [{"field": "tableCount", "op": "gt", "value": 1}]}}
+    s.eq("filtro sobre derived → 422", mod.post("/api/reporting/query", bad).status, 422)
+    # 6) insight de cobertura incluye el nivel canvas
+    cov = admin.get("/api/reporting/insights/udp-coverage").data or []
+    s.check("udp-coverage lista la key de canvas",
+            any(x.get("level") == "canvas" and x.get("name") == key for x in cov),
+            f"{[x.get('name') for x in cov if x.get('level') == 'canvas'][:5]}")
+    return s
+
+
 ALL = {
     "s01_rbac": s01_rbac, "s02_version_lifecycle": s02_version_lifecycle,
     "s03_convergence": s03_convergence, "s04_domain_cascade": s04_domain_cascade,
@@ -469,4 +829,11 @@ ALL = {
     "s07_relationships": s07_relationships, "s08_views": s08_views,
     "s09_reporting": s09_reporting, "s10_admin": s10_admin, "s11_audit": s11_audit,
     "s12_glossary_udp": s12_glossary_udp,
+    # Lote precisiones de modelamiento (doc 10)
+    "s13_guardas_duplicados": s13_guardas_duplicados,
+    "s14_impacto_eliminacion": s14_impacto_eliminacion,
+    "s15_glosario_validacion_lock": s15_glosario_validacion_lock,
+    "s16_domain_impact": s16_domain_impact,
+    "s17_vistas_multifuente": s17_vistas_multifuente,
+    "s18_udp_canvas_models": s18_udp_canvas_models,
 }
