@@ -189,6 +189,13 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
     fd = cat.get(field)
     if fd is None:
         raise HTTPException(400, f"Campo desconocido: {field}")
+    if fd.hydrate == "derived":
+        # Defensa en profundidad (mismo criterio que el compiler en where/
+        # groupBy/agregaciones): los campos calculados post-fetch no existen en
+        # Mongo — facetarlos agruparía por su path fuente (p.ej. el array
+        # tableIds) y devolvería basura. El builder ya no los ofrece (ops=[]);
+        # esto cubre clientes no-browser.
+        raise HTTPException(422, f"El campo {fd.key} es calculado y no admite facetas")
     db = await get_db()
     if fd.enumValues:
         vals = [v for v in fd.enumValues if not q or q.lower() in v.lower()][:limit]
