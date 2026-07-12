@@ -177,6 +177,7 @@ async def apply(actor: str, body) -> dict:
                 status_code=409,
                 detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
                         "desbloquealo antes de eliminarlo."))
+    claimed: set[tuple[str, str]] = set()  # (término normalizado, scope) que ESTE batch da de alta/renombra
     for t in body.termsUpsert:
         prev = before_terms.get(t.id) if t.id else None
         if prev and prev.get("locked"):
@@ -184,9 +185,24 @@ async def apply(actor: str, body) -> dict:
                 status_code=409,
                 detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
                         "desbloquealo antes de editarlo."))
+        renamed = prev is not None and (
+            (t.term or "").strip().lower() != (prev.get("term") or "").strip().lower())
+        if prev is None or renamed:
+            # Duplicado INTRA-batch: ensure_term_valid valida contra el estado
+            # PRE-batch, así que dos altas (o renombres) al mismo término+scope
+            # dentro de UN apply pasaban las dos y se escribían ambas. Seen-set
+            # batch-efectivo → colisión dentro del batch = mismo 409, sin mutar.
+            key = ((t.term or "").strip().lower(), t.scope)
+            if key in claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"El término '{t.term}' aparece más de una vez en este "
+                            f"batch (scope '{t.scope}'); quitá el duplicado antes "
+                            "de aplicar."))
+            claimed.add(key)
         if prev is None:  # término AÑADIDO (id nuevo o inexistente)
             await dict_svc.ensure_term_valid(t.term, t.scope)
-        elif (t.term or "").strip().lower() != (prev.get("term") or "").strip().lower():
+        elif renamed:
             # renombre de TEXTO de un término existente → valida excluyéndose.
             await dict_svc.ensure_term_valid(t.term, t.scope, exclude_id=t.id)
 
