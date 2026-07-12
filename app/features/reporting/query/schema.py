@@ -44,11 +44,17 @@ class FieldDef:
         return OPS_BY_TYPE.get(self.type, OPS_BY_TYPE["string"])
 
     def to_public(self) -> dict:
+        # Los campos `derived` (calculados post-fetch, p.ej. tableCount) NO existen
+        # en Mongo: el compiler los rechaza en where/groupBy/agg (defensa en fondo).
+        # Publicamos ops=[] + derived=True para que el builder NO los ofrezca como
+        # filtro ni dispare facets (valores inútiles) — solo son seleccionables.
+        derived = self.hydrate == "derived"
         return {
-            "key": self.key, "label": self.label, "type": self.type, "ops": list(self.ops),
+            "key": self.key, "label": self.label, "type": self.type,
+            "ops": [] if derived else list(self.ops),
             "sortable": self.sortable, "groupable": self.groupable, "indexed": self.indexed,
             "enumValues": self.enumValues, "udp": self.udpDefId is not None,
-            "hydrated": self.hydrate is not None,
+            "hydrated": self.hydrate is not None, "derived": derived,
         }
 
 
