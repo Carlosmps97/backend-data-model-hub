@@ -64,6 +64,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         # ── M3a: Projects + Subject Areas + Relationships + Views ──
         _try("projects", [("flgactive", 1)]),
         _try("subject_areas", [("projectId", 1)]),
+        # F5 — UDP del Modelo de Datos: wildcard sobre el mapa embebido (mismo
+        # patrón que canonical_columns/tables, líneas de arriba) → filtrar por
+        # cualquier UDP de canvas hace seek. `name` soporta el sort/keyset de
+        # la entidad `models` del reporting (Cosmos rechaza sort sin índice).
+        _try("subject_areas", [("udpValues.$**", 1)]),
+        _try("subject_areas", [("name", 1)]),
         _try("relationships", [("flgactive", 1)]),
         # El canvas resuelve relaciones por extremos ($in por tabla).
         _try("relationships", [("sourceTableId", 1)]),
