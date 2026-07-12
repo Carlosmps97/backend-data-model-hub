@@ -92,13 +92,18 @@ async def udp_coverage() -> list[dict]:
     defs = await db["udp_definitions"].find(ACTIVE).to_list(None)
     col_total = await db["canonical_columns"].count_documents(ACTIVE)
     tbl_total = await db["canonical_tables"].count_documents(ACTIVE)
-    col_pairs, tbl_pairs = await asyncio.gather(
-        _coverage_pairs("canonical_columns"), _coverage_pairs("canonical_tables"))
+    sa_total = await db["subject_areas"].count_documents(ACTIVE)
+    col_pairs, tbl_pairs, sa_pairs = await asyncio.gather(
+        _coverage_pairs("canonical_columns"), _coverage_pairs("canonical_tables"),
+        _coverage_pairs("subject_areas"))
+    # Fuente por nivel (F5: 'canvas' = subject_areas). Fallback: tablas.
+    pairs_of = {"column": col_pairs, "table": tbl_pairs, "canvas": sa_pairs}
+    total_of = {"column": col_total, "table": tbl_total, "canvas": sa_total}
     rows = []
     for d in defs:
         did, level = str(d["_id"]), d.get("level")
-        pairs = (col_pairs if level == "column" else tbl_pairs).get(did, {})
-        total = col_total if level == "column" else tbl_total
+        pairs = pairs_of.get(level, tbl_pairs).get(did, {})
+        total = total_of.get(level, tbl_total)
         set_count = sum(pairs.values())
         allowed = set(d.get("allowedValues") or [])
         invalid = sum(n for v, n in pairs.items() if allowed and v not in allowed)
