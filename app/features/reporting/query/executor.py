@@ -17,7 +17,11 @@ from .schema import FieldDef, build_catalog
 from .spec import Condition, QuerySpec, WhereGroup
 
 COLL_OF = {"columns": "canonical_columns", "tables": "canonical_tables",
-           "relationships": "relationships", "views": "views"}
+           "relationships": "relationships", "views": "views",
+           "models": "subject_areas"}
+# Campo de orden por defecto del row-query (keyset). `subject_areas` no tiene
+# physicalName: la entidad `models` ordena por `name` (indexado en indexes.py).
+DEFAULT_SORT_FIELD = {"models": "name"}
 ACTIVE = {"flgactive": {"$ne": False}}
 MAX_TIME_MS = 15000
 
@@ -88,6 +92,11 @@ def _row(doc: dict, select: list[FieldDef], maps: dict) -> dict:
     for fd in select:
         if fd.hydrate == "domain":
             out[fd.key] = maps.get("domain", {}).get(doc.get(fd.path))
+        elif fd.hydrate == "derived":
+            # Campo calculado post-fetch (F5: tableCount = len(tableIds)). No
+            # se computa en Mongo: $size en projection de find() no es portable
+            # a Cosmos RU; el path proyecta la fuente (array) y acá se cuenta.
+            out[fd.key] = len(doc.get(fd.path) or [])
         elif fd.udpDefId:
             out[fd.key] = (doc.get("udpValues") or {}).get(fd.udpDefId)
         elif fd.key == "schema" and fd.entity == "table":
@@ -120,7 +129,7 @@ async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
                 "meta": {"grouped": True, "warnings": compiled.warnings}}
 
     # ── Filas: keyset sobre el primer campo de orden (+ _id de desempate) ──
-    sort = list(compiled.sort) or [("physicalName", 1)]
+    sort = list(compiled.sort) or [(DEFAULT_SORT_FIELD.get(spec.from_, "physicalName"), 1)]
     sort_path, sort_dir = sort[0]
     full_sort = [(sort_path, sort_dir), ("_id", 1)]
     if cursor:

@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # tipo del campo). `contains`/`startsWith` usan re.escape en el compiler.
 OPS = ("eq", "ne", "in", "nin", "contains", "startsWith",
        "gt", "gte", "lt", "lte", "between", "exists", "isnull")
-FROMS = ("columns", "tables", "relationships", "views")
+FROMS = ("columns", "tables", "relationships", "views", "models")
 AGG_FNS = ("count", "countDistinct", "sum", "avg", "min", "max")
 
 

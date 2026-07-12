@@ -89,10 +89,22 @@ _VIEWS = [
     _s("schema", "Schema", indexed=True),
     _s("tableId", "Base table id", indexed=True),
 ]
-_STATIC = {"columns": _COLUMNS, "tables": _TABLES, "relationships": _RELATIONSHIPS, "views": _VIEWS}
+# F5 — entidad `models` (Modelo de Datos = subject_areas). `tableCount` es
+# CALCULADO post-fetch (len(tableIds) en el executor): path = la FUENTE
+# proyectada; hydrate='derived' hace que el compiler lo rechace en
+# where/groupBy/agregaciones (no existe como campo en Mongo).
+_MODELS = [
+    _s("name", "Model name", sortable=True, indexed=True),
+    _s("projectId", "Project id", indexed=True),
+    _s("folderId", "Folder id"),
+    FieldDef("tableCount", "Table count", "tableIds", type="number",
+             groupable=False, hydrate="derived"),
+]
+_STATIC = {"columns": _COLUMNS, "tables": _TABLES, "relationships": _RELATIONSHIPS,
+           "views": _VIEWS, "models": _MODELS}
 
 # En qué vista aparece cada nivel de UDP.
-_UDP_VIEW_BY_LEVEL = {"column": "columns", "table": "tables"}
+_UDP_VIEW_BY_LEVEL = {"column": "columns", "table": "tables", "canvas": "models"}
 
 
 def _udp_type(dt: str) -> str:

@@ -57,6 +57,8 @@ def _coerce(fd: FieldDef, value):
 
 def _predicate(fd: FieldDef, op: str, value) -> dict:
     p = fd.path
+    if fd.hydrate == "derived":
+        raise QueryError(f"El campo {fd.key} es calculado y no admite filtros", code=422)
     if op not in fd.ops:
         raise QueryError(f"Op {op!r} no permitida para {fd.key} ({fd.type})", code=422)
     if op == "eq":
@@ -119,6 +121,12 @@ def compile_spec(spec: QuerySpec, catalog: dict[str, FieldDef]) -> Compiled:
     warnings: list[str] = []
 
     if spec.is_grouped:
+        # Campos derived (calculados post-fetch) no existen en Mongo: no pueden
+        # ser dimensión de groupBy ni entrada de una agregación.
+        for k in [*spec.groupBy, *[a.field for a in spec.aggregations if a.field]]:
+            if _field(catalog, k).hydrate == "derived":
+                raise QueryError(
+                    f"El campo {k!r} es calculado y no admite groupBy/agregación", code=422)
         # _id = dimensiones del groupBy (con $ifNull → "(sin valor)" para nulos).
         gid = {gb: {"$ifNull": ["$" + _field(catalog, gb).path, None]} for gb in spec.groupBy} or None
         accs, project = {}, {"_id": 0}
