@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from app.core.logging import get_logger
 from app.core.versioning import overlay, summarize_diff
+from app.features.views.models import normalize_source_tables
 
 from . import repository, validation
 from .repository import VERSIONED
@@ -38,6 +39,14 @@ def apply_plan(changes: dict) -> list[tuple]:
     for collection in ordered:
         for eid, ch in changes[collection].items():
             payload = ch.get("payload") if ch.get("op") != "delete" else None
+            if collection == "views" and payload:
+                # F3a: una vista publicada VÍA changeset debe quedar normalizada
+                # igual que POST/PUT (tableId↔sourceTableIds) — el payload crudo
+                # saltearía normalize_source_tables y un doc showOnCanvas=true
+                # con solo `tableId` legacy sería invisible en todo canvas
+                # (build_canvas_query matchea SOLO sourceTableIds). También
+                # sanea drafts pendientes legacy.
+                payload = normalize_source_tables(payload)
             plan.append((collection, eid, ch.get("op"), payload))
     return plan
 
