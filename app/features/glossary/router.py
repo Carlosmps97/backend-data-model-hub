@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.api.envelope import ok
+from app.core.identity import Principal, current_principal
 from app.features.auth.deps import require_permission
 
 from . import service
@@ -68,11 +69,14 @@ async def rephysicalize(body: RephysicalizeBody, user: dict = Depends(_std)):
 
 
 @router.post("/validate")
-async def validate_term(body: ValidateTermBody):
+async def validate_term(body: ValidateTermBody,
+                        principal: Principal = Depends(current_principal)):
     """F2 #1: valida un término NUEVO contra el glosario del scope (duplicado
     exacto) y contra los nombres lógicos publicados (frase completa, muestra
     cap 50 + total). No muta; el enforcement real vive en los writes
-    (POST/PUT de este router y standards/apply)."""
+    (POST/PUT de este router y standards/apply). Exige SESIÓN (lee el catálogo:
+    en prod un anónimo no debe enumerar tablas/columnas) pero NO standards.edit
+    — el botón Validar del front lo usan también usuarios sin ese permiso."""
     # Término vacío/whitespace: `corpus_regex('')` es laxo, así que cortamos acá
     # y devolvemos el contrato 'sin conflictos' sin tocar el service/DB.
     term = body.term.strip()
