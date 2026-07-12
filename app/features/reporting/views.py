@@ -116,7 +116,9 @@ async def udp_coverage() -> list[dict]:
             "coveragePct": round(set_count / (total or 1), 4),
             "distinctValueCount": len(pairs), "valueBreakdown": breakdown, "invalidCount": invalid,
         })
-    rows.sort(key=lambda r: (r["level"], (r["name"] or "").lower()))
+    # `level or ""`: los defs salen de Mongo CRUDOS (sin validar por modelo) —
+    # uno sin `level` (script/consola) no debe tirar 500 a todo Insights.
+    rows.sort(key=lambda r: (r["level"] or "", (r["name"] or "").lower()))
     return rows
 
 
