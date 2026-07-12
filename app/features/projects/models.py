@@ -36,3 +36,7 @@ class SubjectAreaDoc(BaseModel):
     tableIds: list[str] = Field(default_factory=list)
     layout: dict[str, NodePosDoc] = Field(default_factory=dict)
     drawings: list[dict] = Field(default_factory=list)
+    # F5 — UDP del Modelo de Datos: valores {defId: value} de las definiciones
+    # level='canvas'. Aditivo con default (invariante §2.6: declarado acá Y en
+    # el TS SubjectArea, o el dato desaparece al recargar).
+    udpValues: dict[str, str] = Field(default_factory=dict)
