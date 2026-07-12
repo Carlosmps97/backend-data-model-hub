@@ -120,6 +120,24 @@ def _domains_key(snap: dict):
     return sorted((snap.get("domains") or []), key=lambda d: d.get("id") or "")
 
 
+def locked_terms_touched(snap_terms: list[dict], cur_terms: list[dict]) -> list[str]:
+    """Términos actualmente BLOQUEADOS (D4) que restaurar `snap_terms` pisaría o
+    eliminaría: no están en el snapshot (→ el restore los soft-deletea) o
+    difieren en algún campo (→ los sobreescribe; con un snapshot pre-bloqueo el
+    lock se esfumaría). Idénticos en el snapshot = no-op → permitidos. Ambas
+    listas en la forma de `snapshot_of`. Puro."""
+    keys = ("term", "abbrev", "scope", "wordType", "locked", "lockedBy", "lockedAt")
+    snap_by_id = {e.get("id"): e for e in snap_terms if e.get("id")}
+    touched: list[str] = []
+    for cur in cur_terms:
+        if not cur.get("locked"):
+            continue
+        snap = snap_by_id.get(cur.get("id"))
+        if snap is None or any(snap.get(k) != cur.get(k) for k in keys):
+            touched.append(cur.get("term"))
+    return touched
+
+
 def _title_for(body, diff: dict) -> str:
     if body.title:
         return body.title
@@ -277,6 +295,20 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     # re-physicalizar (a 400k columnas eso son ~seg/decenas de seg). Un rollback
     # de solo-UDP o solo-dominios NO toca nombres físicos → se evita el barrido.
     cur = await current_snapshot()
+
+    # D4: el restore deja `glossary_terms` EXACTAMENTE como el snapshot — sin
+    # este guard pisaría/eliminaría entradas HOY bloqueadas y el lock se
+    # esfumaría en silencio (los snapshots pre-bloqueo traen locked=False).
+    # Bloqueado = intocable para TODOS hasta desbloquear primero (unlock
+    # admin-only y auditado): mismo 409 que CRUD/apply, con la lista.
+    locked = locked_terms_touched(snap.get("dict") or [], cur.get("dict") or [])
+    if locked:
+        names = ", ".join(f"'{t}'" for t in locked)
+        raise HTTPException(
+            status_code=409,
+            detail=(f"El rollback pisaría o eliminaría términos bloqueados por "
+                    f"ADMIN ({names}); desbloquealos antes de restaurar."))
+
     naming_changed = (_naming_key(snap) != _naming_key(cur))
     domains_changed = (_domains_key(snap) != _domains_key(cur))
 
