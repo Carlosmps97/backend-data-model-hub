@@ -189,7 +189,13 @@ def main():
     }})
 
     # ── UDP a nivel canvas (#10) ─────────────────────────────────────────────
-    defs = {d["name"]: d for d in _data(admin.get("/api/udp"))}
+    # OJO: lookup por nombre Y NIVEL — existe una "Dominio de Negocio" level=table
+    # preexistente; tomarla por nombre asignaría una key de nivel equivocado a
+    # los canvases (causa raíz del hallazgo C8 del audit, 2026-07-12).
+    def _canvas_defs():
+        return {d["name"]: d for d in _data(admin.get("/api/udp"))
+                if d.get("level") == "canvas"}
+    defs = _canvas_defs()
     ups = []
     if "Dominio de Negocio" not in defs:
         ups.append({"name": "Dominio de Negocio", "level": "canvas", "dataType": "list",
@@ -200,7 +206,7 @@ def main():
     if ups:
         admin.post("/api/standards/apply",
                    json={"kind": "udp", "title": "UDP de Modelo (demo doc 10)", "udpUpsert": ups})
-        defs = {d["name"]: d for d in _data(admin.get("/api/udp"))}
+        defs = _canvas_defs()
         print(f"  + defs UDP canvas: {[u['name'] for u in ups]}")
     dom_id, cri_id = defs["Dominio de Negocio"]["id"], defs["Criticidad del Modelo"]["id"]
 
