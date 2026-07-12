@@ -25,3 +25,8 @@ class LayoutBody(BaseModel):
 
 class DrawingsBody(BaseModel):
     drawings: list[dict]  # capa DRAWING (debajo de los nodos): formas/texto con estilo + posición
+
+
+class UdpValuesBody(BaseModel):
+    """F5 — UDP del Modelo de Datos: mapa COMPLETO {defId: value} (reemplaza)."""
+    udpValues: dict[str, str]

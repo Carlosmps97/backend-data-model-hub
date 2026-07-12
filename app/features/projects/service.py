@@ -1,6 +1,8 @@
 """Negocio de `projects` / `subject_areas`. `merge_layout` y `tables_in_area` son puros."""
 from __future__ import annotations
 
+from app.core.audit import audit
+
 from . import repository
 from .schemas import ProjectBody, SubjectAreaBody
 
@@ -62,6 +64,15 @@ async def set_layout(sa_id: str, updates: dict) -> dict | None:
 async def set_drawings(sa_id: str, drawings: list[dict]) -> dict | None:
     """Persiste la capa DRAWING del canvas (formas/texto). Reemplaza el array completo."""
     return await repository.update_subject_area(sa_id, {"drawings": drawings})
+
+
+async def set_udp_values(sa_id: str, values: dict[str, str], actor: str) -> dict | None:
+    """F5 — persiste el mapa completo de UDP del canvas (mutación DIRECTA, mismo
+    régimen que layout/drawings: sin changeset) y audita con verbo específico."""
+    sa = await repository.update_subject_area(sa_id, {"udpValues": values})
+    if sa is not None:
+        await audit(actor, "canvas.udp.update", target=sa_id, target_type="subject_area")
+    return sa
 
 
 async def delete_subject_area(sa_id: str) -> bool:

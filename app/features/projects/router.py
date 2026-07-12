@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.core.identity import Principal, current_principal
 from app.features.auth.deps import write_guard
 
 
@@ -16,7 +17,14 @@ def _found(x, what: str = "Recurso"):
 from app.core.api.envelope import ok
 
 from . import service
-from .schemas import DrawingsBody, LayoutBody, ProjectBody, SubjectAreaBody, TablesBody
+from .schemas import (
+    DrawingsBody,
+    LayoutBody,
+    ProjectBody,
+    SubjectAreaBody,
+    TablesBody,
+    UdpValuesBody,
+)
 
 router = APIRouter(prefix="/api", tags=["projects"],
                    dependencies=[Depends(write_guard("model.edit"))])
@@ -70,6 +78,14 @@ async def set_layout(sa_id: str, body: LayoutBody):
 @router.put("/subject-areas/{sa_id}/drawings")
 async def set_drawings(sa_id: str, body: DrawingsBody):
     return ok(_found(await service.set_drawings(sa_id, body.drawings), "Canvas"))
+
+
+@router.put("/subject-areas/{sa_id}/udp")
+async def set_udp(sa_id: str, body: UdpValuesBody,
+                  principal: Principal = Depends(current_principal)):
+    """F5 — UDP del Modelo de Datos. Escritura gateada por `model.edit` (el
+    write_guard del router); audita 'canvas.udp.update' desde el service."""
+    return ok(_found(await service.set_udp_values(sa_id, body.udpValues, principal.username), "Canvas"))
 
 
 @router.delete("/subject-areas/{sa_id}")

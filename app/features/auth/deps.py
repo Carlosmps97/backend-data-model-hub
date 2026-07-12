@@ -17,7 +17,9 @@ from . import service
 # Sufijos de escrituras de ALTA FRECUENCIA (guardados del canvas al arrastrar):
 # no se auditan para no inundar el log; sí se auditan crear/editar/borrar
 # entidades (tablas, columnas, vistas, relaciones, proyectos, canvases, estándares).
-_NO_AUDIT = ("/layout", "/drawings", "/tables")
+# "/udp" se excluye porque su service ya audita con verbo específico
+# ('canvas.udp.update') — auditar acá duplicaría la entrada.
+_NO_AUDIT = ("/layout", "/drawings", "/tables", "/udp")
 
 
 def write_guard(perm: str):
