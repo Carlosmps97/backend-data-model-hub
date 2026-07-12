@@ -28,7 +28,7 @@ class NamingEdit(BaseModel):
 class UdpEdit(BaseModel):
     id: str | None = None            # None = definición UDP nueva
     name: str
-    level: str = "column"            # Class: 'table' | 'column' (extensible)
+    level: str = "column"            # Class: 'table' | 'column' | 'canvas'
     dataType: str = "string"         # string | number | boolean | date | list
     defaultValue: str | None = None
     allowedValues: list[str] = []    # para dataType='list' (enum)
