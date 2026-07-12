@@ -102,10 +102,14 @@ async def restore_domains(domains: list[dict]) -> None:
         await db[DOMAINS].bulk_write(ops, ordered=False)
 
 
-async def restore_dict(entries: list[dict]) -> None:
-    """Deja `glossary_terms` EXACTAMENTE como el snapshot."""
+async def restore_dict(entries: list[dict], preserve_ids: set[str] | None = None) -> None:
+    """Deja `glossary_terms` EXACTAMENTE como el snapshot, salvo `preserve_ids`
+    (D4): entradas HOY bloqueadas con contenido idéntico al snapshot — se
+    conservan TAL CUAL (ni soft-delete ni upsert), así el restore no revierte
+    el lock vigente (los snapshots pre-bloqueo traen locked=False)."""
     db = await get_db()
-    keep = {e["id"] for e in entries if e.get("id")}
+    preserve = preserve_ids or set()
+    keep = {e["id"] for e in entries if e.get("id")} | preserve
     await db[DICT].update_many(
         {"flgactive": {"$ne": False}, "_id": {"$nin": list(keep)}},
         {"$set": {"flgactive": False, "deletedAt": _now()}},
@@ -116,7 +120,7 @@ async def restore_dict(entries: list[dict]) -> None:
         {"_id": e["id"]},
         {"$set": {**{k: v for k, v in e.items() if k != "id"}, "flgactive": True, "updatedAt": _now()},
          "$setOnInsert": {"createdAt": _now()}}, upsert=True)
-        for e in entries if e.get("id")]
+        for e in entries if e.get("id") and e["id"] not in preserve]
     if ops:
         await db[DICT].bulk_write(ops, ordered=False)
 

@@ -120,22 +120,44 @@ def _domains_key(snap: dict):
     return sorted((snap.get("domains") or []), key=lambda d: d.get("id") or "")
 
 
+# D4 protege el CONTENIDO de la entrada; los campos de lock (locked/lockedBy/
+# lockedAt) NO cuentan en la comparación — el lock vigente nunca lo revierte un
+# rollback (los snapshots pre-bloqueo traen locked=False: compararlos daba 409
+# a TODO rollback con términos bloqueados, aunque el contenido fuera idéntico).
+_TERM_CONTENT_KEYS = ("term", "abbrev", "scope", "wordType")
+
+
 def locked_terms_touched(snap_terms: list[dict], cur_terms: list[dict]) -> list[str]:
     """Términos actualmente BLOQUEADOS (D4) que restaurar `snap_terms` pisaría o
     eliminaría: no están en el snapshot (→ el restore los soft-deletea) o
-    difieren en algún campo (→ los sobreescribe; con un snapshot pre-bloqueo el
-    lock se esfumaría). Idénticos en el snapshot = no-op → permitidos. Ambas
-    listas en la forma de `snapshot_of`. Puro."""
-    keys = ("term", "abbrev", "scope", "wordType", "locked", "lockedBy", "lockedAt")
+    difieren en el CONTENIDO (→ los sobreescribe). Contenido idéntico = no-op →
+    permitidos (esa entrada se preserva entera, ver `locked_ids_preserved`).
+    Ambas listas en la forma de `snapshot_of`. Puro."""
     snap_by_id = {e.get("id"): e for e in snap_terms if e.get("id")}
     touched: list[str] = []
     for cur in cur_terms:
         if not cur.get("locked"):
             continue
         snap = snap_by_id.get(cur.get("id"))
-        if snap is None or any(snap.get(k) != cur.get(k) for k in keys):
+        if snap is None or any(snap.get(k) != cur.get(k) for k in _TERM_CONTENT_KEYS):
             touched.append(cur.get("term"))
     return touched
+
+
+def locked_ids_preserved(snap_terms: list[dict], cur_terms: list[dict]) -> set[str]:
+    """Ids de entradas HOY bloqueadas con contenido idéntico en el snapshot: el
+    restore las SALTA por completo (ni upsert ni soft-delete) — contenido y lock
+    vigente sobreviven tal cual. Complemento de `locked_terms_touched` (una
+    bloqueada o se toca → 409, o se preserva acá). Puro."""
+    snap_by_id = {e.get("id"): e for e in snap_terms if e.get("id")}
+    preserved: set[str] = set()
+    for cur in cur_terms:
+        if not cur.get("locked") or not cur.get("id"):
+            continue
+        snap = snap_by_id.get(cur["id"])
+        if snap is not None and all(snap.get(k) == cur.get(k) for k in _TERM_CONTENT_KEYS):
+            preserved.add(cur["id"])
+    return preserved
 
 
 def _title_for(body, diff: dict) -> str:
@@ -297,9 +319,10 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     cur = await current_snapshot()
 
     # D4: el restore deja `glossary_terms` EXACTAMENTE como el snapshot — sin
-    # este guard pisaría/eliminaría entradas HOY bloqueadas y el lock se
-    # esfumaría en silencio (los snapshots pre-bloqueo traen locked=False).
-    # Bloqueado = intocable para TODOS hasta desbloquear primero (unlock
+    # este guard pisaría/eliminaría entradas HOY bloqueadas. Solo cuenta el
+    # CONTENIDO (los campos de lock no): con contenido idéntico el restore es
+    # no-op y la entrada se PRESERVA entera (el lock vigente nunca se revierte).
+    # Bloqueado + contenido tocado = intocable hasta desbloquear primero (unlock
     # admin-only y auditado): mismo 409 que CRUD/apply, con la lista.
     locked = locked_terms_touched(snap.get("dict") or [], cur.get("dict") or [])
     if locked:
@@ -308,12 +331,13 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
             status_code=409,
             detail=(f"El rollback pisaría o eliminaría términos bloqueados por "
                     f"ADMIN ({names}); desbloquealos antes de restaurar."))
+    preserve = locked_ids_preserved(snap.get("dict") or [], cur.get("dict") or [])
 
     naming_changed = (_naming_key(snap) != _naming_key(cur))
     domains_changed = (_domains_key(snap) != _domains_key(cur))
 
     await repository.restore_domains(snap.get("domains") or [])
-    await repository.restore_dict(snap.get("dict") or [])
+    await repository.restore_dict(snap.get("dict") or [], preserve_ids=preserve)
     await repository.restore_naming(snap.get("namingConfig") or {})
     # Definiciones UDP: restaura las del snapshot (snapshots viejos sin 'udp' → []).
     await udp_repo.restore_udp(snap.get("udp") or [])
