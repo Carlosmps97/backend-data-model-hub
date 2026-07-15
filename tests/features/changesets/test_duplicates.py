@@ -1,0 +1,78 @@
+"""Unicidad de nombres (spec 10 §9) — funciones puras de `validation.py`.
+
+Tablas: (schema, physicalName) case-insensitive. Columnas: physicalName
+case-insensitive dentro de su tableId. El estado comparado es el EFECTIVO:
+publicado + upserts pendientes del mismo changeset, menos sus deletes.
+"""
+from __future__ import annotations
+
+from app.features.changesets.validation import duplicate_error
+
+PUB_T = [{"id": "t1", "physicalName": "CLIENTE", "logicalName": "cliente", "schema": "core"}]
+PUB_C = [{"id": "c1", "tableId": "t1", "physicalName": "ID_CTA", "logicalName": "id", "dataType": "BIGINT"}]
+
+
+def test_tabla_duplicada_contra_publicado_case_insensitive():
+    err = duplicate_error("canonical_tables", "t9",
+                          {"physicalName": "cliente", "logicalName": "x", "schema": "CORE"},
+                          PUB_T, {})
+    assert err == "Ya existe la tabla CORE.cliente"
+
+
+def test_tabla_misma_entidad_no_conflicta():
+    # Re-save / rename de la MISMA tabla: su doc publicado se excluye por id.
+    assert duplicate_error("canonical_tables", "t1",
+                           {"physicalName": "CLIENTE", "logicalName": "cliente v2", "schema": "core"},
+                           PUB_T, {}) is None
+
+
+def test_tabla_otro_schema_no_conflicta():
+    assert duplicate_error("canonical_tables", "t9",
+                           {"physicalName": "CLIENTE", "logicalName": "x", "schema": "stage"},
+                           PUB_T, {}) is None
+
+
+def test_tabla_duplicada_contra_pendiente_del_changeset():
+    pending = {"t8": {"op": "upsert", "payload": {"physicalName": "NUEVA", "logicalName": "n", "schema": "core"}}}
+    err = duplicate_error("canonical_tables", "t9",
+                          {"physicalName": "nueva", "logicalName": "x", "schema": "CORE"},
+                          [], pending)
+    assert err is not None
+
+
+def test_delete_pendiente_libera_el_nombre():
+    # El changeset borra la tabla publicada homónima: el nombre queda libre.
+    pending = {"t1": {"op": "delete"}}
+    assert duplicate_error("canonical_tables", "t9",
+                           {"physicalName": "CLIENTE", "logicalName": "x", "schema": "core"},
+                           PUB_T, pending) is None
+
+
+def test_tabla_sin_schema_matchea_sin_schema():
+    pub = [{"id": "t1", "physicalName": "CLIENTE", "logicalName": "cliente"}]
+    err = duplicate_error("canonical_tables", "t9",
+                          {"physicalName": "cliente", "logicalName": "x"}, pub, {})
+    assert err == "Ya existe la tabla cliente"
+
+
+def test_columna_duplicada_en_misma_tabla():
+    err = duplicate_error("canonical_columns", "c9",
+                          {"tableId": "t1", "physicalName": "id_cta", "logicalName": "x", "dataType": "STRING"},
+                          PUB_C, {})
+    assert err == "Ya existe la columna id_cta en esta tabla"
+
+
+def test_columna_misma_entidad_no_conflicta():
+    assert duplicate_error("canonical_columns", "c1",
+                           {"tableId": "t1", "physicalName": "ID_CTA", "logicalName": "id v2", "dataType": "BIGINT"},
+                           PUB_C, {}) is None
+
+
+def test_columna_mismo_nombre_en_otra_tabla_pasa():
+    assert duplicate_error("canonical_columns", "c9",
+                           {"tableId": "t2", "physicalName": "ID_CTA", "logicalName": "x", "dataType": "STRING"},
+                           [], {}) is None
+
+
+def test_otras_colecciones_no_chequean():
+    assert duplicate_error("relationships", "r1", {"sourceTableId": "a"}, [], {}) is None

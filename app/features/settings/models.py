@@ -6,9 +6,12 @@ from pydantic import BaseModel
 from app.core.models import DOC_CONFIG
 
 # Defaults por scope (sembrados cuando el doc no existe todavía).
+# Regla corporativa: join (sin separador) + UPPER en AMBOS scopes — así se
+# derivan los físicos reales del catálogo (CODCLAVESUJETOCLI). La UI muestra
+# las otras opciones pero deshabilitadas.
 SCOPES = ("column", "table")
 DEFAULTS: dict[str, dict[str, str]] = {
-    "column": {"separator": "_", "case": "upper"},
+    "column": {"separator": "", "case": "upper"},
     "table": {"separator": "", "case": "upper"},
 }
 
@@ -19,5 +22,5 @@ class NamingConfigDoc(BaseModel):
     model_config = DOC_CONFIG
 
     scope: str  # 'column' | 'table'
-    separator: str = "_"
+    separator: str = ""
     case: str = "upper"  # 'upper' | 'lower' | 'camel'

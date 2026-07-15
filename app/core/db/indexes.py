@@ -19,13 +19,20 @@ log = logging.getLogger(__name__)
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     """Crea los índices de las colecciones del backend de plataforma."""
 
+    # Cosmos (tier RU) tumba con TooManyLogicalSessions (261) si se crean ~30
+    # índices en paralelo sobre una BD recién vaciada (cada create_index abre su
+    # sesión lógica). Acotamos la concurrencia con un semáforo: sigue siendo
+    # concurrente/rápido, sin reventar el límite de sesiones del worker.
+    sem = asyncio.Semaphore(5)
+
     async def _try(col_name: str, keys: list[tuple], **kwargs: object) -> None:
-        try:
-            await db[col_name].create_index(keys, **kwargs)
-        except Exception as exc:  # noqa: BLE001
-            code = getattr(exc, "code", None)
-            if code not in (48, 11000):
-                raise
+        async with sem:
+            try:
+                await db[col_name].create_index(keys, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                if code not in (48, 11000):
+                    raise
 
     await asyncio.gather(
         # ── Modelo canónico (M1) ────────────────────────────────

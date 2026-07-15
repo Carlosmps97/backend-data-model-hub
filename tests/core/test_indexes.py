@@ -1,0 +1,62 @@
+"""Índices F1 (spec 10 §8/§9) declarados en `ensure_indexes` — db fake, sin Cosmos."""
+from __future__ import annotations
+
+import asyncio
+
+from app.core.db.indexes import ensure_indexes
+
+
+class _FakeColl:
+    def __init__(self, name: str, calls: list):
+        self._name = name
+        self._calls = calls
+
+    async def create_index(self, keys, **kwargs):
+        self._calls.append((self._name, tuple(keys)))
+
+
+class _FakeDb:
+    def __init__(self):
+        self.calls: list = []
+
+    def __getitem__(self, name: str):
+        return _FakeColl(name, self.calls)
+
+
+def test_f1_indexes_declarados():
+    db = _FakeDb()
+    asyncio.run(ensure_indexes(db))
+    # §9: chequeo de duplicados de tabla por (schema, physicalName). El campo
+    # persistido es `schema` (alias del Pydantic `sql_schema`).
+    assert ("canonical_tables", (("schema", 1), ("physicalName", 1))) in db.calls
+    # §8: impact busca relaciones por columna extremo.
+    assert ("relationships", (("sourceColumnId", 1),)) in db.calls
+    assert ("relationships", (("targetColumnId", 1),)) in db.calls
+
+
+# ── F5 — índices de `subject_areas` para reporting a nivel Modelo de Datos:
+# wildcard de udpValues (seek en filtros UDP) + name (sort/keyset; Cosmos RU
+# rechaza .sort() sin índice). Fake db que captura create_index (con kwargs) —
+# sin Mongo. Fakes propios para no chocar con los _Fake* de arriba (que
+# capturan 2-tuplas sin kwargs).
+class _FakeCollF5:
+    def __init__(self, name: str, calls: list):
+        self._name, self._calls = name, calls
+
+    async def create_index(self, keys, **kwargs):
+        self._calls.append((self._name, tuple(keys), kwargs))
+
+
+class _FakeDbF5:
+    def __init__(self):
+        self.calls: list = []
+
+    def __getitem__(self, name: str) -> _FakeCollF5:
+        return _FakeCollF5(name, self.calls)
+
+
+def test_subject_areas_indices_f5():
+    db = _FakeDbF5()
+    asyncio.run(ensure_indexes(db))
+    assert ("subject_areas", (("udpValues.$**", 1),), {}) in db.calls
+    assert ("subject_areas", (("name", 1),), {}) in db.calls

@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 .DS_Store
-tests/
+#tests/
 # Migration backups (contain data + password hashes — never commit)
 scripts/_backup_*.json
+.superpowers/
+.pytest_cache/
+standards_out/
