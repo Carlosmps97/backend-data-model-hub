@@ -37,3 +37,10 @@ async def list_columns(table_id: str):
 @router.post("/tables/{table_id}/columns", status_code=status.HTTP_201_CREATED)
 async def create_column(table_id: str, body: CanonicalColumnBody):
     return ok(await service.create_column(table_id, body))
+
+
+@router.get("/tables/{table_id}/usage")
+async def table_usage(table_id: str, changesetId: str | None = Query(default=None)):
+    """Dónde se usa la tabla (V3, doc 19 §12b): canvases que la referencian con
+    carpeta y proyecto; con `changesetId` aplica el overlay del draft."""
+    return ok(await service.table_usage(table_id, changesetId))

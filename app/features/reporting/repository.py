@@ -33,7 +33,8 @@ async def _find_active(collection: str, projection: dict | None = None) -> list[
 # los campos PESADOS de `subject_areas` (`layout`/`drawings` de un canvas de 100
 # tablas son varios KB — 150 canvases eran ~1.7s sólo por el tamaño del doc).
 _SA_LITE = {"name": 1, "projectId": 1, "tableIds": 1}
-_REL_LITE = {"sourceTableId": 1, "targetTableId": 1}
+_REL_LITE = {"parentTableId": 1, "childTableId": 1,
+             "sourceTableId": 1, "targetTableId": 1}  # legacy: docs pre-backfill
 
 
 async def _subject_areas(ids: list[str] | None = None) -> list[dict]:
@@ -48,14 +49,18 @@ async def _subject_areas(ids: list[str] | None = None) -> list[dict]:
 
 
 async def _relationships(ids: list[str] | None = None) -> list[dict]:
-    """Relaciones (proyectadas a source/target). Si `ids`, sólo las que tocan
-    alguna de esas tablas."""
+    """Relaciones (proyectadas a los dos extremos parent/child, con fallback a
+    los campos legacy source/target). Si `ids`, sólo las que tocan alguna de
+    esas tablas."""
     db = await get_db()
     query = dict(ACTIVE)
     if ids is not None:
-        query["$or"] = [{"sourceTableId": {"$in": ids}}, {"targetTableId": {"$in": ids}}]
+        query["$or"] = [{"parentTableId": {"$in": ids}}, {"childTableId": {"$in": ids}},
+                        {"sourceTableId": {"$in": ids}}, {"targetTableId": {"$in": ids}}]
     docs = await db["relationships"].find(query, _REL_LITE).to_list(None)
-    return [_strip(d) for d in docs]
+    return [{"parentTableId": d.get("parentTableId") or d.get("targetTableId"),
+             "childTableId": d.get("childTableId") or d.get("sourceTableId")}
+            for d in docs]
 
 
 async def column_counts() -> dict[str, int]:
@@ -127,3 +132,40 @@ async def columns(table_id: str | None = None, table_ids: list[str] | None = Non
 async def parent_domains() -> list[dict]:
     """Parent domains activos (para resolver nombre del dominio en el export)."""
     return await _find_active("parent_domains")
+
+
+async def udp_definitions() -> list[dict]:
+    """Defs UDP activas (para traducir `udpValues` {defId: valor} a nombres
+    legibles en las filas del reporte/export)."""
+    return await _find_active("udp_definitions")
+
+
+async def views_for_tables(table_ids: list[str] | None = None,
+                           limit: int | None = None,
+                           schema: str | None = None) -> list[dict]:
+    """Vistas activas; con `table_ids`, solo las que derivan de alguna de esas
+    tablas (`sourceTableIds` canónico, `tableId` legacy); con `schema`, solo
+    las de ese esquema (Database Explorer, doc 18). Docs completos: el export
+    necesita `sources` (alias/cast/expresión), `filter`, `sql`…"""
+    db = await get_db()
+    query = dict(ACTIVE)
+    if table_ids:
+        query["$or"] = [{"sourceTableIds": {"$in": table_ids}},
+                        {"tableId": {"$in": table_ids}}]
+    if schema:
+        query["schema"] = schema
+    cur = db["views"].find(query)
+    if limit:
+        cur = cur.limit(limit)
+    docs = await cur.to_list(limit or None)
+    return [_strip(d) for d in docs]
+
+
+async def table_names(ids: list[str]) -> dict[str, dict]:
+    """{tableId: {physicalName, schema}} para resolver fuentes de vistas."""
+    if not ids:
+        return {}
+    db = await get_db()
+    docs = await db["canonical_tables"].find(
+        {"_id": {"$in": ids}}, {"physicalName": 1, "schema": 1}).to_list(None)
+    return {str(d["_id"]): d for d in docs}

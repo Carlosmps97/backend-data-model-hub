@@ -25,7 +25,7 @@ async def login(request: Request, body: LoginBody):
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuario o contraseña incorrectos.",
+            detail="Incorrect username or password.",
         )
     return ok(result)
 

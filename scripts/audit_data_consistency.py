@@ -143,10 +143,17 @@ def main():
     # ── C4/C5 · vistas ───────────────────────────────────────────────────────
     rel_pairs: set[frozenset] = set()
     rels = list(db.relationships.find(ACTIVE, {
-        "_id": 1, "sourceTableId": 1, "sourceColumnId": 1,
+        "_id": 1, "parentTableId": 1, "childTableId": 1, "pairs": 1,
+        "sourceTableId": 1, "sourceColumnId": 1,
         "targetTableId": 1, "targetColumnId": 1}))
+
+    def _rel_ends(r: dict) -> tuple:
+        """(padre, hijo) con fallback a los campos legacy pre-v2."""
+        return (r.get("parentTableId") or r.get("targetTableId"),
+                r.get("childTableId") or r.get("sourceTableId"))
+
     for r in rels:
-        rel_pairs.add(frozenset((r.get("sourceTableId"), r.get("targetTableId"))))
+        rel_pairs.add(frozenset(_rel_ends(r)))
 
     v_dead_src = v_fix_tid = v_fix_sources = v_orphan = 0
     multi_nojoin: list[str] = []
@@ -197,14 +204,70 @@ def main():
            len(multi_nojoin), f"{multi_nojoin[:5]}")
 
     # ── C6 · relaciones huérfanas ────────────────────────────────────────────
-    orphans = [r["_id"] for r in rels
-               if r.get("sourceTableId") not in active_tids
-               or r.get("targetTableId") not in active_tids
-               or r.get("sourceColumnId") not in active_cids
-               or r.get("targetColumnId") not in active_cids]
+    def _rel_orphan(r: dict) -> bool:
+        parent_t, child_t = _rel_ends(r)
+        if parent_t not in active_tids or child_t not in active_tids:
+            return True
+        prs = r.get("pairs")
+        if prs:  # v2: cualquier par con columna muerta = huérfana
+            return any(p.get("parentColumnId") not in active_cids
+                       or p.get("childColumnId") not in active_cids for p in prs)
+        return (r.get("sourceColumnId") not in active_cids
+                or r.get("targetColumnId") not in active_cids)
+
+    orphans = [r["_id"] for r in rels if _rel_orphan(r)]
     report("C6 relaciones huérfanas (extremo muerto)", len(orphans))
     bulk("relationships", [UpdateOne({"_id": rid}, {"$set": {
         "flgactive": False, "deletedAt": now()}}) for rid in orphans])
+
+    # ── C6b/C6c · orientación (INFORME, no auto-fix): en cada par el padre
+    # debería ser PK y el hijo FK (doc 19). Un conteo alto delata relaciones
+    # invertidas o flags de columna sin sincronizar.
+    key_flags = {c["_id"]: c for c in db.canonical_columns.find(
+        ACTIVE, {"isPrimaryKey": 1, "isForeignKey": 1})}
+    bad_parent = bad_child = 0
+    for r in rels:
+        for p in (r.get("pairs") or []):
+            pf, cf = key_flags.get(p.get("parentColumnId")), key_flags.get(p.get("childColumnId"))
+            if pf is not None and not pf.get("isPrimaryKey"):
+                bad_parent += 1
+            if cf is not None and not cf.get("isForeignKey"):
+                bad_child += 1
+    report("C6b pares con columna padre sin PK (INFORME, no auto-fix)", bad_parent)
+    report("C6c pares con columna hija sin FK (INFORME, no auto-fix)", bad_child)
+
+    # ── C10 · partición: UDP PART_nn vs orden físico y flag nativo (INFORME) ──
+    # Política 07-17 (migración): isPartition se marca desde el UDP "Particion"
+    # SOLO si el correlativo respeta el orden físico (el DDL emite PARTITIONED
+    # BY en orden físico). Acá se vigila que la BD siga congruente después de
+    # reordenes/ediciones. Incongruencias = decisión del owner, no auto-fix.
+    from scripts.erwin_migration import policies as pol
+    part_def = db.udp_definitions.find_one(
+        {**ACTIVE, "name": "Particion", "level": "column"}, {"_id": 1})
+    part_bad: list[str] = []
+    part_unmarked = 0
+    if part_def:
+        updk = f"udpValues.{part_def['_id']}"
+        per_table: dict[str, list] = {}
+        for c in db.canonical_columns.find(
+                {**ACTIVE, updk: {"$exists": True}},
+                {"tableId": 1, "ordinal": 1, "isPartition": 1, "physicalName": 1, updk: 1}):
+            corr = pol.partition_correlative((c.get("udpValues") or {}).get(part_def["_id"]))
+            if corr is not None:
+                per_table.setdefault(c["tableId"], []).append((corr, c))
+        tnames = {t["_id"]: t.get("physicalName") or t["_id"]
+                  for t in db.canonical_tables.find(
+                      {"_id": {"$in": list(per_table)}}, {"physicalName": 1})}
+        for tid, entries in per_table.items():
+            entries.sort(key=lambda e: e[1].get("ordinal", 0))  # orden físico
+            nums = [n for n, _ in entries]
+            if len(nums) != len(set(nums)) or nums != sorted(nums):
+                part_bad.append(f"{tnames.get(tid, tid)}: correlativos en orden físico {nums}")
+            else:
+                part_unmarked += sum(1 for _, c in entries if not c.get("isPartition"))
+    report("C10 partición UDP incongruente con orden físico (INFORME, decisión owner)",
+           len(part_bad), f"{part_bad[:5]}")
+    report("C10b columnas PART_nn congruentes SIN isPartition (INFORME)", part_unmarked)
 
     # ── C8 · udpValues: keys muertas / valores fuera de enum ────────────────
     defs = {d["_id"]: d for d in db.udp_definitions.find(ACTIVE)}
@@ -251,9 +314,8 @@ def main():
     report("C9b canvases con layout de nodos inexistentes", n_layout)
     bulk("subject_areas", ops)
 
-    bad = sum(n for code, n in ISSUES.items() if not code.startswith(("C5", "C8b")))
-    info = ISSUES.get("C5 multi-fuente sin join NI relación (INFORME, no auto-fix)", 0) \
-        + ISSUES.get("C8b valores UDP fuera de allowedValues (INFORME)", 0)
+    bad = sum(n for code, n in ISSUES.items() if "INFORME" not in code)
+    info = sum(n for code, n in ISSUES.items() if "INFORME" in code)
     print(f"\n== {'APLICADO' if FIX else 'HALLADO'}: {bad} fixable · {info} informativos ==")
     return 0 if (FIX or bad == 0) else 1
 

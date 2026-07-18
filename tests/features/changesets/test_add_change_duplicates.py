@@ -27,7 +27,7 @@ def test_upsert_tabla_duplicada_levanta_duplicate(monkeypatch):
         published=[{"id": "t1", "physicalName": "CLIENTE", "logicalName": "cliente", "schema": "core"}],
         changes_map={},
     )
-    with pytest.raises(DuplicateEntityError, match="Ya existe la tabla"):
+    with pytest.raises(DuplicateEntityError, match="already exists"):
         asyncio.run(service.add_change(
             "c1", "ana", "canonical_tables", "t9", "upsert",
             {"physicalName": "cliente", "logicalName": "otro", "schema": "CORE"}))
@@ -54,7 +54,7 @@ def test_upsert_columna_duplicada_en_tabla(monkeypatch):
                     "logicalName": "id", "dataType": "BIGINT"}],
         changes_map={},
     )
-    with pytest.raises(DuplicateEntityError, match="Ya existe la columna"):
+    with pytest.raises(DuplicateEntityError, match="already exists in this table"):
         asyncio.run(service.add_change(
             "c1", "ana", "canonical_columns", "c9", "upsert",
             {"tableId": "t1", "physicalName": "id_cta", "logicalName": "otra",

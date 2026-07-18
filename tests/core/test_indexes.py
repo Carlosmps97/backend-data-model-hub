@@ -29,9 +29,12 @@ def test_f1_indexes_declarados():
     # §9: chequeo de duplicados de tabla por (schema, physicalName). El campo
     # persistido es `schema` (alias del Pydantic `sql_schema`).
     assert ("canonical_tables", (("schema", 1), ("physicalName", 1))) in db.calls
-    # §8: impact busca relaciones por columna extremo.
-    assert ("relationships", (("sourceColumnId", 1),)) in db.calls
-    assert ("relationships", (("targetColumnId", 1),)) in db.calls
+    # §8: impact busca relaciones por columna de algún par (v2, doc 19).
+    assert ("relationships", (("pairs.parentColumnId", 1),)) in db.calls
+    assert ("relationships", (("pairs.childColumnId", 1),)) in db.calls
+    # El canvas resuelve relaciones por extremos parent/child.
+    assert ("relationships", (("parentTableId", 1),)) in db.calls
+    assert ("relationships", (("childTableId", 1),)) in db.calls
 
 
 # ── F5 — índices de `subject_areas` para reporting a nivel Modelo de Datos:

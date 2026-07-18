@@ -25,7 +25,7 @@ def test_publish_duplicates_detecta_conflicto_con_publicado(monkeypatch):
     changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {
         "physicalName": "cliente", "logicalName": "n", "schema": "CORE"}}}}
     errors = asyncio.run(service._publish_duplicates(changes))
-    assert errors == ["Ya existe la tabla CORE.cliente"]
+    assert errors == ["Table CORE.cliente already exists"]
 
 
 def test_publish_duplicates_sin_conflictos(monkeypatch):
@@ -47,7 +47,7 @@ def test_publish_duplicates_columna_contra_publicado(monkeypatch):
     changes = {"canonical_columns": {"c9": {"op": "upsert", "payload": {
         "tableId": "t1", "physicalName": "id_cta", "logicalName": "x", "dataType": "STRING"}}}}
     assert asyncio.run(service._publish_duplicates(changes)) == [
-        "Ya existe la columna id_cta en esta tabla"]
+        "Column id_cta already exists in this table"]
 
 
 def test_apply_and_finalize_revierte_claim_ante_duplicados(monkeypatch):

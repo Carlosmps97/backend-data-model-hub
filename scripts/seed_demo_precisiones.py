@@ -63,13 +63,15 @@ def col_id(tid: str, physical: str) -> str:
     return d["_id"] if d else ""
 
 
-def ensure_rel(cli, s_tid, s_cid, t_tid, t_cid):
-    if _db.relationships.find_one({"sourceTableId": s_tid, "sourceColumnId": s_cid,
-                                   "targetTableId": t_tid, "targetColumnId": t_cid,
+def ensure_rel(cli, p_tid, p_cid, c_tid, c_cid):
+    """v2 (doc 19): primer par = padre, segundo = hijo."""
+    if _db.relationships.find_one({"parentTableId": p_tid, "childTableId": c_tid,
+                                   "pairs.parentColumnId": p_cid, "pairs.childColumnId": c_cid,
                                    "flgactive": {"$ne": False}}):
         return
-    cli.post("/api/relationships", json={"sourceTableId": s_tid, "sourceColumnId": s_cid,
-                                         "targetTableId": t_tid, "targetColumnId": t_cid})
+    cli.post("/api/relationships", json={
+        "parentTableId": p_tid, "childTableId": c_tid,
+        "pairs": [{"parentColumnId": p_cid, "childColumnId": c_cid}]})
 
 
 def main():

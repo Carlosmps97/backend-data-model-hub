@@ -78,13 +78,15 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("subject_areas", [("udpValues.$**", 1)]),
         _try("subject_areas", [("name", 1)]),
         _try("relationships", [("flgactive", 1)]),
-        # El canvas resuelve relaciones por extremos ($in por tabla).
-        _try("relationships", [("sourceTableId", 1)]),
-        _try("relationships", [("targetTableId", 1)]),
+        # El canvas resuelve relaciones por extremos ($in por tabla) — v2
+        # parent/child (doc 19). Los índices legacy source*/target* de BDs
+        # viejas quedan huérfanos (inofensivos) hasta droparse a mano.
+        _try("relationships", [("parentTableId", 1)]),
+        _try("relationships", [("childTableId", 1)]),
         # §8 warning de eliminación (F1): GET /api/relationships/impact busca
-        # relaciones por COLUMNA extremo.
-        _try("relationships", [("sourceColumnId", 1)]),
-        _try("relationships", [("targetColumnId", 1)]),
+        # relaciones por columna DE ALGÚN PAR (multikey por dotted path).
+        _try("relationships", [("pairs.parentColumnId", 1)]),
+        _try("relationships", [("pairs.childColumnId", 1)]),
         _try("views", [("flgactive", 1)]),
         # Las vistas se listan por tabla (PropertiesPanel · tab Views).
         _try("views", [("tableId", 1)]),
@@ -93,6 +95,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("views", [("sourceTableIds", 1)]),
         # ── R1a: Folders (jerarquía del Model Explorer) ──────────
         _try("folders", [("projectId", 1)]),
+        # ── Esquemas como entidad versionada (doc 18) ────────────
+        # `name` soporta el chequeo de unicidad por regex anclado (NO-unique:
+        # Cosmos no permite índices únicos sobre colecciones pobladas — la
+        # garantía vive en service/changesets, como canonical_tables).
+        _try("schemas", [("flgactive", 1)]),
+        _try("schemas", [("name", 1)]),
         # ── R1c: naming_config (1 doc por scope; _id = scope) ────
         _try("naming_config", [("scope", 1)]),
         # ── Auth propia + RBAC + auditoría (2026-07-04) ──────────

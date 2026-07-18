@@ -1782,7 +1782,7 @@ Respuesta (`data`):
   "subjectArea": { "id": "sa-1", "name": "Ventas core", "tableIds": ["t-1","t-2"], "layout": {"t-1":{"x":40,"y":80}} },
   "tables": [ {"id":"t-1","physicalName":"DIM_CLIENTE","schema":"ventas"} ],
   "columns": [ {"id":"c-1","tableId":"t-1","physicalName":"CLIENTE_ID","ordinal":0} ],
-  "relationships": [ {"id":"r-1","sourceTableId":"t-1","targetTableId":"t-2","identifying":true} ]
+  "relationships": [ {"id":"r-1","parentTableId":"t-1","childTableId":"t-2","pairs":[{"parentColumnId":"c-1","childColumnId":"c-2","roleName":null}],"parentCardinality":"one","childCardinality":"zero-many","identifying":true} ]
 }
 ```
 
@@ -1814,14 +1814,17 @@ Relación ER (PK/FK entre tablas canónicas). Modelo:
 ```python
 class RelationshipDoc:
     id: str
-    sourceTableId: str
-    sourceColumnId: str
-    targetTableId: str
-    targetColumnId: str
-    sourceCardinality: str = "one"   # one | many | one-only | zero-one | one-many | zero-many
-    targetCardinality: str = "many"
-    identifying: bool = False        # True = la FK migra a la PK del hijo (línea sólida)
+    parentTableId: str
+    childTableId: str
+    pairs: list[RelationshipPairDoc]  # [{parentColumnId, childColumnId, roleName?}] — min 1 (v2, doc 19)
+    parentCardinality: str = "one"        # one | many | one-only | zero-one | one-many | zero-many
+    childCardinality: str = "zero-many"
+    identifying: bool = False        # sólida; la FK es parte de la PK del hijo
 ```
+
+Compat: los payloads legacy (`sourceTableId/targetTableId` + 1 par) se
+normalizan automáticamente en el validator (orientación por cardinalidad;
+ambiguo → source=hijo). No usar el shape viejo en clientes nuevos.
 
 ### 5.1 GET /api/relationships
 
@@ -1838,18 +1841,17 @@ Propósito: crea una relación. Body `RelationshipBody`:
 
 | Campo | Tipo | Default |
 |---|---|---|
-| `sourceTableId` | string | requerido |
-| `sourceColumnId` | string | requerido |
-| `targetTableId` | string | requerido |
-| `targetColumnId` | string | requerido |
-| `sourceCardinality` | string | `"one"` |
-| `targetCardinality` | string | `"many"` |
+| `parentTableId` | string | requerido |
+| `childTableId` | string | requerido |
+| `pairs` | `[{parentColumnId, childColumnId, roleName?}]` | requerido (min 1) |
+| `parentCardinality` | string | `"one"` |
+| `childCardinality` | string | `"zero-many"` |
 | `identifying` | bool | `false` |
 
 ```bash
 curl -X POST http://localhost:8000/api/relationships \
   -H "Content-Type: application/json" \
-  -d '{"sourceTableId":"t-1","sourceColumnId":"c-1","targetTableId":"t-2","targetColumnId":"c-5","identifying":true}'
+  -d '{"parentTableId":"t-1","childTableId":"t-2","pairs":[{"parentColumnId":"c-1","childColumnId":"c-5"}],"identifying":true}'
 ```
 
 Respuesta: `201 Created`.

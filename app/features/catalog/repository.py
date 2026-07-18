@@ -71,6 +71,30 @@ async def list_columns_for_tables(table_ids: list[str]) -> list[dict]:
     return [CanonicalColumnDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
 
+async def canvases_with_table(table_id: str) -> list[dict]:
+    """Canvases activos que referencian la tabla (V3, doc 19 §12b) — proyección
+    liviana con `tableIds` (lo necesita el overlay del changeset)."""
+    db = await get_db()
+    docs = await db["subject_areas"].find(
+        {"flgactive": {"$ne": False}, "tableIds": table_id},
+        {"name": 1, "folderId": 1, "projectId": 1, "tableIds": 1},
+    ).to_list(None)
+    return [{"id": str(d["_id"]), "name": d.get("name"), "folderId": d.get("folderId"),
+             "projectId": d.get("projectId"), "tableIds": d.get("tableIds") or []}
+            for d in docs]
+
+
+async def names_by_ids(collection: str, ids: list[str]) -> dict[str, str]:
+    """{id: name} de folders/projects activos (para armar las filas de uso)."""
+    if not ids:
+        return {}
+    db = await get_db()
+    docs = await db[collection].find(
+        {"_id": {"$in": ids}, "flgactive": {"$ne": False}}, {"name": 1}
+    ).to_list(None)
+    return {str(d["_id"]): d.get("name") or str(d["_id"]) for d in docs}
+
+
 async def create_table(data: dict) -> dict:
     db = await get_db()
     t = CanonicalTableDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})

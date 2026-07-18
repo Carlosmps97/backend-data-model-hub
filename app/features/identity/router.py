@@ -7,7 +7,7 @@ GET /api/users → lista fija de usuarios simulados (`{id, name, initials}`) par
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
@@ -24,17 +24,28 @@ async def me(principal: Principal = Depends(current_principal)):
 
 
 @router.get("/users", summary="Usuarios reales (id/name/initials) para asignar revisores.")
-async def users():
+async def users(can: str | None = Query(
+        default=None, description="filtra por permiso del ROL (p.ej. review.decide)")):
     """Usuarios ACTIVOS de la plataforma (colección `users`), no la lista fija
     simulada — así el selector de revisores ve a todos los usuarios existentes.
+    Con `can`, sólo usuarios cuyo rol otorga ese permiso — el selector de
+    revisores usa `can=review.decide`: asignar a alguien que nunca podría
+    votar dejaba el request trabado (la unanimidad jamás se cumplía).
     Fallback a la lista simulada si aún no hay usuarios (dev sin seed)."""
     try:
         real = await auth_repo.list_users()
     except Exception:  # noqa: BLE001 — sin DB (p.ej. tests) → fallback simulados
         real = []
+    if can and real:
+        perms_by_role = {r["id"]: (r.get("permissions") or {})
+                         for r in await auth_repo.list_roles()}
+        real = [u for u in real
+                if perms_by_role.get(u.get("role") or "", {}).get(can)]
     out = [
         {"id": u["id"], "name": u.get("name") or u["id"],
          "initials": u.get("initials") or _initials(u.get("name") or u["id"])}
         for u in real if u.get("status") != "disabled"
     ]
-    return ok(out or list_users())
+    # Con filtro `can`, una lista vacía es una respuesta VÁLIDA (no caer a los
+    # simulados: ninguno podría votar de verdad).
+    return ok(out if (can or out) else list_users())

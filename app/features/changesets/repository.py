@@ -17,11 +17,20 @@ from .models import ChangeDoc, ChangesetDoc
 
 COLL = "changesets"
 CHANGES_COLL = "changeset_changes"
-# Colecciones cuyo cambio pasa por el changeset/aprobación del canvas.
+# Colecciones cuyo cambio pasa por el changeset/aprobación del canvas, en
+# ORDEN DE DEPENDENCIA para el apply (proyectos → folders → canvases → tablas
+# → columnas → relaciones → vistas).
 # `parent_domains` y `glossary_terms` SALIERON (2026-07-04): los estándares
 # (UDP / Parent Domains) se editan y versionan en el módulo Data Standards, con
 # escritura global directa fuera del publish (ver plan-implementacion/03 §4.1).
-VERSIONED = ("canonical_tables", "canonical_columns", "relationships", "views")
+# `projects`/`folders`/`subject_areas` ENTRARON (2026-07-16, doc 16): la
+# ESTRUCTURA creada/editada en una versión draft se escribía directo a las
+# colecciones publicadas y aparecía en producción ANTES de aprobar.
+# `schemas` ENTRÓ (2026-07-16, doc 18): el esquema de BD como entidad — crear/
+# renombrar/eliminar un esquema forma parte de la versión publicable. Va ANTES
+# de canonical_tables (las tablas lo referencian por nombre).
+VERSIONED = ("projects", "folders", "subject_areas", "schemas",
+             "canonical_tables", "canonical_columns", "relationships", "views")
 
 
 def _now() -> str:
@@ -149,6 +158,10 @@ async def changes_map(cs_id: str, collections: list[str] | None = None) -> dict[
         entry: dict = {"op": ch["op"], "at": ch["at"]}
         if ch["op"] != "delete":
             entry["payload"] = ch["payload"] or {}
+        if ch.get("beforeAt"):
+            # Imagen previa capturada en el publish → habilita el rollback.
+            entry["beforeAt"] = ch["beforeAt"]
+            entry["before"] = ch.get("before")
         out.setdefault(ch["collection"], {})[ch["entityId"]] = entry
     return out
 
@@ -205,6 +218,44 @@ async def transition(cs_id: str, from_status: str, fields: dict, expect: dict | 
         return_document=ReturnDocument.AFTER,
     )
     return ChangesetDoc.model_validate(_to_doc(res)).model_dump() if res else None
+
+
+async def capture_before_images(plan: list[tuple]) -> dict[tuple[str, str], dict | None]:
+    """Imagen PREVIA publicada de cada entidad del plan de apply — {(colección,
+    entityId): doc | None}. None = no existe activa (el rollback la borra).
+    Se llama ANTES de `apply_changes` (después ya no hay 'antes')."""
+    out: dict[tuple[str, str], dict | None] = {}
+    by_coll: dict[str, list[str]] = {}
+    for collection, entity_id, _op, _payload in plan:
+        by_coll.setdefault(collection, []).append(entity_id)
+    for collection, ids in by_coll.items():
+        docs = {d["id"]: d for d in await published(collection, {"_id": {"$in": ids}})}
+        for eid in ids:
+            out[(collection, eid)] = docs.get(eid)
+    return out
+
+
+async def store_before_images(cs_id: str, befores: dict[tuple[str, str], dict | None]) -> None:
+    """Estampa la imagen previa en cada doc de cambio. `beforeAt $exists:false`
+    en el filtro: un RE-APPLY tras un fallo parcial no debe re-capturar (la
+    'previa' de ese reintento ya estaría contaminada por el apply a medias)."""
+    db = await get_db()
+    now = _now()
+    for (collection, entity_id), doc in befores.items():
+        await db[CHANGES_COLL].update_one(
+            {"_id": change_key(cs_id, collection, entity_id), "beforeAt": {"$exists": False}},
+            {"$set": {"beforeAt": now, "before": doc}})
+
+
+async def latest_applied_id() -> str | None:
+    """Id del changeset APLICADO más reciente (máximo `appliedAt`) — la única
+    versión directamente reversible (deshacer en orden)."""
+    db = await get_db()
+    docs = await db[COLL].find({"status": "approved", "appliedAt": {"$ne": None}},
+                               {"appliedAt": 1}).to_list(None)
+    if not docs:
+        return None
+    return str(max(docs, key=lambda d: d.get("appliedAt") or "")["_id"])
 
 
 async def published(collection: str, flt: dict | None = None, limit: int | None = None,

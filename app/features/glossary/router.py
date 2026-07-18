@@ -93,7 +93,7 @@ async def lock_entry(entry_id: str, user: dict = Depends(_admin)):
     entry = await service.set_lock(entry_id, True, user["username"])
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="El término no existe.")
+                            detail="The term doesn't exist.")
     return ok(entry)
 
 
@@ -103,5 +103,5 @@ async def unlock_entry(entry_id: str, user: dict = Depends(_admin)):
     entry = await service.set_lock(entry_id, False, user["username"])
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="El término no existe.")
+                            detail="The term doesn't exist.")
     return ok(entry)

@@ -63,7 +63,7 @@ def _now() -> str:
 # ── Colecciones que se BORRAN (todo el modeler; NUNCA column_catalog) ─────────
 PROTECTED = "column_catalog"
 WIPE_COLLECTIONS = [
-    "projects", "folders", "subject_areas", "canonical_tables",
+    "projects", "folders", "subject_areas", "schemas", "canonical_tables",
     "canonical_columns", "relationships", "views", "parent_domains",
     "glossary_terms", "udp_definitions", "naming_config", "changesets",
     "changeset_changes", "users", "roles", "standards_versions", "audit_log",
@@ -310,34 +310,38 @@ class Builder:
                     "parentDomainId": dom_pid, "dataType": col_type,
                     "typeOverridden": overridden,
                     "isPrimaryKey": a.id in e.pk_attr_ids,
+                    "pkPosition": ({aid: k for k, aid in enumerate(e.pk_attr_order)}.get(a.id)),
                     "isForeignKey": bool(a.parent_attr_ref),
                     "isNullable": a.nullable, "isPartition": False,
                     "description": a.definition or a.comment or None,
                     "ordinal": j, "udpValues": self._udp_for(a.id, "column"),
                     "flgactive": True, "createdAt": _now(), "updatedAt": _now()})
 
-    # ---- relaciones (un doc por par FK) ----
+    # ---- relaciones (un doc POR RELACIÓN con sus pares — v2, doc 19) ----
     def relationships(self) -> None:
         pairs = self.m.fk_pairs()
         for r in self.m.relationships.values():
             if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
                 continue
-            src_t = self.table_pid.get(r.child_ref)
-            tgt_t = self.table_pid.get(r.parent_ref)
-            if not src_t or not tgt_t:
+            child_t = self.table_pid.get(r.child_ref)
+            parent_t = self.table_pid.get(r.parent_ref)
+            if not child_t or not parent_t:
                 continue
-            for p_attr, c_attr in pairs.get(r.id, []):
-                s_col, t_col = self.col_pid.get(c_attr), self.col_pid.get(p_attr)
-                if not s_col or not t_col:
-                    continue
-                self.data["relationships"].append({
-                    "_id": f"rel-{uuid.uuid5(pol._NS, r.id + '|' + c_attr).hex[:14]}",
-                    "sourceTableId": src_t, "sourceColumnId": s_col,
-                    "targetTableId": tgt_t, "targetColumnId": t_col,
-                    "sourceCardinality": "many",
-                    "targetCardinality": "one" if r.rel_type == ep.REL_IDENTIFYING else pol.map_cardinality(r.cardinality),
-                    "identifying": r.rel_type == ep.REL_IDENTIFYING,
-                    "flgactive": True, "createdAt": _now(), "updatedAt": _now()})
+            rel_pairs = [
+                {"parentColumnId": p_col, "childColumnId": c_col, "roleName": None}
+                for p_attr, c_attr in pairs.get(r.id, [])
+                if (p_col := self.col_pid.get(p_attr)) and (c_col := self.col_pid.get(c_attr))
+            ]
+            if not rel_pairs:
+                continue
+            self.data["relationships"].append({
+                "_id": f"rel-{uuid.uuid5(pol._NS, r.id).hex[:14]}",
+                "parentTableId": parent_t, "childTableId": child_t,
+                "pairs": rel_pairs,
+                "parentCardinality": "one",
+                "childCardinality": pol.map_cardinality(r.cardinality),
+                "identifying": r.rel_type == ep.REL_IDENTIFYING,
+                "flgactive": True, "createdAt": _now(), "updatedAt": _now()})
 
     # ---- vistas (_vu 1:1, showOnCanvas, sources completos) ----
     def views(self) -> None:
@@ -535,11 +539,23 @@ class Builder:
                          "namingConfig": {"column": naming.get("column"), "table": naming.get("table")}},
             "revertsSeq": None, "flgactive": True})
 
+    def schemas(self) -> None:
+        """Entidad `schemas` (doc 18): un doc por cada esquema usado por las
+        tablas y las vistas (id determinista) — sin esto, un reseed dejaría los
+        dropdowns de esquema vacíos."""
+        names = sorted({d.get("schema") for d in self.data["canonical_tables"] if d.get("schema")}
+                       | {d.get("schema") for d in self.data["views"] if d.get("schema")})
+        for name in names:
+            self.data["schemas"].append({
+                "_id": f"sch-{name}", "name": name, "description": None,
+                "flgactive": True, "createdAt": _now(), "updatedAt": _now()})
+
     def build(self) -> dict[str, list[dict]]:
         self.standards()
         self.tables()
         self.relationships()
         self.views()
+        self.schemas()
         self.canvases()
         self.auth()
         self.governance()
@@ -547,7 +563,7 @@ class Builder:
 
 
 def summarize(data: dict[str, list[dict]]) -> None:
-    order = ["projects", "folders", "subject_areas", "canonical_tables",
+    order = ["projects", "folders", "subject_areas", "schemas", "canonical_tables",
              "canonical_columns", "relationships", "views", "parent_domains",
              "glossary_terms", "udp_definitions", "naming_config", "roles",
              "users", "changesets", "changeset_changes", "standards_versions"]

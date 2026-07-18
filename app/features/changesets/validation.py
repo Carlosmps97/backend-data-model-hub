@@ -18,15 +18,22 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from app.features.catalog.models import CanonicalColumnDoc, CanonicalTableDoc
+from app.features.folders.models import FolderDoc
 from app.features.glossary.models import AbbreviationDoc
 from app.features.domains.models import ParentDomainDoc
+from app.features.projects.models import ProjectDoc, SubjectAreaDoc
 from app.features.relationships.models import RelationshipDoc
+from app.features.schemas.models import SchemaDoc
 from app.features.views.models import ViewDoc
 
 # Colección versionada → modelo de documento (espeja VERSIONED del repository).
 DOC_MODELS = {
     "parent_domains": ParentDomainDoc,
     "glossary_terms": AbbreviationDoc,
+    "projects": ProjectDoc,
+    "folders": FolderDoc,
+    "subject_areas": SubjectAreaDoc,
+    "schemas": SchemaDoc,
     "canonical_tables": CanonicalTableDoc,
     "canonical_columns": CanonicalColumnDoc,
     "relationships": RelationshipDoc,
@@ -81,7 +88,12 @@ def validate_changes(changes: dict) -> list[str]:
 
 
 class DuplicateEntityError(ValueError):
-    """Upsert que viola la unicidad de nombres (tabla o columna).
+    """Upsert que viola la unicidad de nombres (tabla, columna o esquema).
+    El router la convierte en 409 (el mensaje ya es legible)."""
+
+
+class SchemaInUseError(ValueError):
+    """Delete de un esquema que todavía tiene tablas/vistas efectivas (doc 18).
     El router la convierte en 409 (el mensaje ya es legible)."""
 
 
@@ -129,11 +141,17 @@ def duplicate_error(collection: str, entity_id: str, payload: dict | None,
         if any(_table_key(d) == key for d in _effective_docs(published, pending, entity_id)):
             schema = str(p.get("schema") or p.get("sql_schema") or "").strip()
             name = str(p.get("physicalName") or "").strip()
-            return f"Ya existe la tabla {f'{schema}.{name}' if schema else name}"
+            return f"Table {f'{schema}.{name}' if schema else name} already exists"
     elif collection == "canonical_columns":
         key = _column_key(p)
         if not (key[0] and key[1]):
             return None
         if any(_column_key(d) == key for d in _effective_docs(published, pending, entity_id)):
-            return f"Ya existe la columna {str(p.get('physicalName') or '').strip()} en esta tabla"
+            return f"Column {str(p.get('physicalName') or '').strip()} already exists in this table"
+    elif collection == "schemas":
+        key = _norm(p.get("name"))
+        if not key:
+            return None
+        if any(_norm(d.get("name")) == key for d in _effective_docs(published, pending, entity_id)):
+            return f"Schema {str(p.get('name') or '').strip()} already exists"
     return None

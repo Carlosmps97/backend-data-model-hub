@@ -17,8 +17,8 @@ def _fixture():
     # t1=2, t2=1, t3 sin columnas.
     column_counts = {"t1": 2, "t2": 1}
     relationships = [
-        {"sourceTableId": "t1", "targetTableId": "t2"},  # t1+1, t2+1
-        {"sourceTableId": "t2", "targetTableId": "t3"},  # t2+1, t3+1
+        {"parentTableId": "t1", "childTableId": "t2"},  # t1+1, t2+1
+        {"parentTableId": "t2", "childTableId": "t3"},  # t2+1, t3+1
     ]
     subject_areas = [
         {"id": "sa1", "projectId": "p1", "name": "Banking", "tableIds": ["t1", "t2"]},

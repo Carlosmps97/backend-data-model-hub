@@ -52,7 +52,8 @@ def test_list_for_column_filtra_por_ambos_extremos(monkeypatch):
     seen = _patch_db(monkeypatch, {"relationships": [REL]})
     out = asyncio.run(repository.list_for_column("cA"))
     assert [r["id"] for r in out] == ["r1"]
-    assert seen[0]["$or"] == [{"sourceColumnId": "cA"}, {"targetColumnId": "cA"}]
+    assert seen[0]["$or"] == [{"pairs.parentColumnId": "cA"}, {"pairs.childColumnId": "cA"},
+                              {"sourceColumnId": "cA"}, {"targetColumnId": "cA"}]
     assert seen[0]["flgactive"] == {"$ne": False}
 
 

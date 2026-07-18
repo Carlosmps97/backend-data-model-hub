@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 
 from app.core.logging import get_logger
 from app.core.versioning import overlay, summarize_diff
+from app.features.relationships.models import RelationshipDoc
+from app.features.schemas import service as schemas_service
 from app.features.views.models import normalize_source_tables
 
 from . import repository, validation
 from .repository import VERSIONED
-from .validation import DuplicateEntityError, InvalidPayloadError
+from .validation import DuplicateEntityError, InvalidPayloadError, SchemaInUseError
 
 log = get_logger("app.changesets")
 
@@ -197,11 +199,12 @@ def _affected_other_tables(
              for d in published.get("canonical_tables", [])}
     affected: set[str] = set()
     for rel in relationships:
-        src, tgt = rel.get("sourceTableId"), rel.get("targetTableId")
-        if src in touched_table_ids and tgt and tgt not in touched_table_ids:
-            affected.add(tgt)
-        if tgt in touched_table_ids and src and src not in touched_table_ids:
-            affected.add(src)
+        parent = rel.get("parentTableId") or rel.get("targetTableId")
+        child = rel.get("childTableId") or rel.get("sourceTableId")
+        if parent in touched_table_ids and child and child not in touched_table_ids:
+            affected.add(child)
+        if child in touched_table_ids and parent and parent not in touched_table_ids:
+            affected.add(parent)
     return [{"id": tid, "name": names.get(tid)} for tid in sorted(affected)]
 
 
@@ -314,16 +317,22 @@ def _table_dup_filter(payload: dict) -> dict:
 
 async def _duplicate_error(cs_id: str, collection: str, entity_id: str,
                            op: str, payload: dict | None) -> str | None:
-    """Chequeo de unicidad de un upsert (spec 10 §9) contra el publicado
-    ACTIVO (slice indexado: tablas por schema+physicalName, columnas por
-    tableId) + los upserts PENDIENTES del mismo changeset. None si pasa o no
-    aplica (deletes / otras colecciones)."""
-    if op == "delete" or collection not in ("canonical_tables", "canonical_columns"):
+    """Chequeo de unicidad de un upsert (spec 10 §9 + doc 18) contra el
+    publicado ACTIVO (slice indexado: tablas por schema+physicalName, columnas
+    por tableId, esquemas por name) + los upserts PENDIENTES del mismo
+    changeset. None si pasa o no aplica (deletes / otras colecciones)."""
+    if op == "delete" or collection not in ("canonical_tables", "canonical_columns", "schemas"):
         return None
     p = payload or {}
-    if not str(p.get("physicalName") or "").strip():
+    if collection == "schemas":
+        name = str(p.get("name") or "").strip()
+        if not name:
+            return None
+        pub = await repository.published(
+            collection, {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
+    elif not str(p.get("physicalName") or "").strip():
         return None
-    if collection == "canonical_tables":
+    elif collection == "canonical_tables":
         pub = await repository.published(collection, _table_dup_filter(p))
     else:
         if not p.get("tableId"):
@@ -354,6 +363,11 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     err = validation.payload_error(collection, entity_id, op, payload)
     if err:
         raise InvalidPayloadError(err)
+    if collection == "relationships" and op == "upsert" and payload:
+        # Se persiste el dump v2 NORMALIZADO (parent/child + pairs): el overlay
+        # y el apply sirven/escriben el payload tal cual se grabó, así que un
+        # shape legacy (source/target) no debe quedar grabado en el draft.
+        payload = RelationshipDoc.model_validate({**payload, "id": entity_id}).model_dump()
     # Unicidad de nombres (spec 10 §9): tablas por (schema, physicalName) y
     # columnas por physicalName dentro de su tableId — contra publicado activo
     # + pendientes de ESTE changeset. El router lo convierte en 409.
@@ -423,8 +437,17 @@ async def effective(cs_id: str, collection: str,
         flt = {"_id": {"$in": ids}}
     elif table_id is not None:
         # En relationships "por tabla" significa cualquiera de los extremos.
-        flt = ({"$or": [{"sourceTableId": table_id}, {"targetTableId": table_id}]}
-               if collection == "relationships" else {"tableId": table_id})
+        # (Se consultan también los campos legacy source/target por si quedara
+        # algún doc pre-backfill; el overlay+validate del read path normaliza.)
+        if collection == "relationships":
+            flt = {"$or": [{"parentTableId": table_id}, {"childTableId": table_id},
+                           {"sourceTableId": table_id}, {"targetTableId": table_id}]}
+        elif collection == "views":
+            # Vistas versionadas (doc 20): "por tabla" = la tabla es fuente
+            # (sourceTableIds contiene) o la base legacy (tableId).
+            flt = {"$or": [{"tableId": table_id}, {"sourceTableIds": table_id}]}
+        else:
+            flt = {"tableId": table_id}
     pub = await repository.published(collection, flt)
     if flt is not None:
         in_slice = {d["id"] for d in pub}
@@ -435,7 +458,11 @@ async def effective(cs_id: str, collection: str,
             if table_id is None:
                 return False
             if collection == "relationships":
-                return table_id in (p.get("sourceTableId"), p.get("targetTableId"))
+                return table_id in (p.get("parentTableId"), p.get("childTableId"),
+                                    p.get("sourceTableId"), p.get("targetTableId"))
+            if collection == "views":
+                src = p.get("sourceTableIds") or ([p.get("tableId")] if p.get("tableId") else [])
+                return table_id in src
             return p.get("tableId") == table_id
 
         changes = {
@@ -503,7 +530,180 @@ async def _publish_duplicates(changes: dict) -> list[str]:
             err = validation.duplicate_error("canonical_columns", eid, ch.get("payload") or {}, pub, col_changes)
             if err and err not in errors:
                 errors.append(err)
+
+    sch_changes = changes.get("schemas") or {}
+    sch_upserts = {
+        eid: ch for eid, ch in sch_changes.items()
+        if ch.get("op") != "delete"
+        and str((ch.get("payload") or {}).get("name") or "").strip()
+    }
+    if sch_upserts:
+        names = sorted({str((ch.get("payload") or {}).get("name") or "").strip()
+                        for ch in sch_upserts.values()})
+        flt = {"$or": [{"name": {"$regex": f"^{re.escape(n)}$", "$options": "i"}} for n in names]}
+        pub = await repository.published("schemas", flt)
+        for eid, ch in sch_upserts.items():
+            err = validation.duplicate_error("schemas", eid, ch.get("payload") or {}, pub, sch_changes)
+            if err and err not in errors:
+                errors.append(err)
     return errors
+
+
+# ── Entidad `schemas` en el changeset (doc 18) ─────────────────────────────
+
+
+def _overlay_by_schema(published: list[dict], coll_changes: dict | None, name: str) -> list[dict]:
+    """Estado efectivo del slice `schema == name`: publicado + upserts del
+    changeset (docs completos, PISAN al publicado homónimo), sin los deletes
+    pendientes. Incluye entidades que el changeset MUDA hacia el esquema y
+    excluye las que muda fuera. Puro."""
+    docs = {d["id"]: d for d in published}
+    for eid, ch in (coll_changes or {}).items():
+        if ch.get("op") == "delete":
+            docs.pop(eid, None)
+        else:
+            docs[eid] = {**(ch.get("payload") or {}), "id": eid}
+    return [d for d in docs.values() if (d.get("schema") or "") == name]
+
+
+async def _schema_usage(name: str, changes: dict) -> int:
+    """Tablas + vistas EFECTIVAS (publicado + overlay del changeset) que usan
+    el esquema `name`."""
+    total = 0
+    for coll in ("canonical_tables", "views"):
+        pub = await repository.published(coll, {"schema": name})
+        total += len(_overlay_by_schema(pub, changes.get(coll), name))
+    return total
+
+
+async def _publish_schema_deletes(changes: dict) -> list[str]:
+    """Guard del publish (doc 18): un delete de esquema sólo publica si el
+    esquema queda VACÍO en el estado efectivo — el propio changeset puede
+    vaciarlo (borrando/mudando sus tablas) en el mismo request."""
+    per = changes.get("schemas") or {}
+    delete_ids = [eid for eid, ch in per.items() if ch.get("op") == "delete"]
+    if not delete_ids:
+        return []
+    pub = await repository.published("schemas", {"_id": {"$in": delete_ids}})
+    names = {d["id"]: d.get("name") for d in pub}
+    errors: list[str] = []
+    for eid in delete_ids:
+        name = str(names.get(eid) or "").strip()
+        if not name:
+            continue
+        used = await _schema_usage(name, changes)
+        if used:
+            errors.append(f"Schema {name} still has {used} table(s)/view(s)")
+    return errors
+
+
+async def rename_schema(cs_id: str, actor: str, schema_id: str, new_name: str) -> dict | str | None:
+    """Renombra un esquema DENTRO del draft: upsert del schema con el nombre
+    nuevo + un upsert (doc COMPLETO, schema reemplazado) por cada tabla/vista
+    EFECTIVA que lo usa. Server-side a propósito: el effective de tablas es
+    potencialmente enorme para el cliente, y reusar `add_change` hereda los
+    guards de owner/draft/validación/unicidad. Pre-flight de duplicados ANTES
+    de grabar nada (no deja un draft renombrado a medias). Devuelve
+    {tables, views} o la semántica de add_change (None/"forbidden"/"locked")."""
+    err = schemas_service.name_error(new_name)
+    if err:
+        raise InvalidPayloadError(err)
+    new_name = new_name.strip()
+    rows = await effective(cs_id, "schemas", ids=[schema_id])
+    if rows is None:
+        return None
+    cur = next((r for r in rows if r.get("id") == schema_id), None)
+    if cur is None:
+        return None
+    old_name = str(cur.get("name") or "").strip()
+
+    counts = {"tables": 0, "views": 0}
+    tables: list[dict] = []
+    views: list[dict] = []
+    if old_name and old_name != new_name:
+        changes = await repository.changes_map(cs_id, ["canonical_tables", "views"])
+        tables = _overlay_by_schema(
+            await repository.published("canonical_tables", {"schema": old_name}),
+            changes.get("canonical_tables"), old_name)
+        views = _overlay_by_schema(
+            await repository.published("views", {"schema": old_name}),
+            changes.get("views"), old_name)
+        # Pre-flight: si alguna tabla renombrada chocara con una homónima ya
+        # existente en el esquema destino, se rechaza ENTERO con 409.
+        for doc in tables:
+            payload = {**{k: v for k, v in doc.items() if k != "id"}, "schema": new_name}
+            dup = await _duplicate_error(cs_id, "canonical_tables", doc["id"], "upsert", payload)
+            if dup:
+                raise DuplicateEntityError(dup)
+
+    res = await add_change(cs_id, actor, "schemas", schema_id, "upsert",
+                           {**{k: v for k, v in cur.items() if k != "id"}, "name": new_name})
+    if res is None or isinstance(res, str):
+        return res
+    for coll, key, docs in (("canonical_tables", "tables", tables), ("views", "views", views)):
+        for doc in docs:
+            payload = {**{k: v for k, v in doc.items() if k != "id"}, "schema": new_name}
+            r = await add_change(cs_id, actor, coll, doc["id"], "upsert", payload)
+            if r is None or isinstance(r, str):
+                return r
+            counts[key] += 1
+    return counts
+
+
+async def schema_impact(cs_id: str, schema_id: str) -> dict | None:
+    """Impacto EFECTIVO de tocar un esquema (doc 18 v2, para el confirm del
+    front ANTES de guardar): cuántas tablas y vistas usan su nombre, y en
+    cuántos canvases aparecen (subject_areas cuyo tableIds interseca las
+    tablas del esquema o las FUENTES de sus vistas — una vista se muestra en
+    el canvas vía sus tablas fuente)."""
+    rows = await effective(cs_id, "schemas", ids=[schema_id])
+    if rows is None:
+        return None
+    cur = next((r for r in rows if r.get("id") == schema_id), None)
+    if cur is None:
+        return None
+    name = str(cur.get("name") or "").strip()
+    if not name:
+        return {"name": name, "tables": 0, "views": 0, "canvases": 0}
+    changes = await repository.changes_map(
+        cs_id, ["canonical_tables", "views", "subject_areas"])
+    tables = _overlay_by_schema(
+        await repository.published("canonical_tables", {"schema": name}),
+        changes.get("canonical_tables"), name)
+    views = _overlay_by_schema(
+        await repository.published("views", {"schema": name}),
+        changes.get("views"), name)
+    touched = {d["id"] for d in tables}
+    for v in views:
+        srcs = v.get("sourceTableIds") or ([v["tableId"]] if v.get("tableId") else [])
+        touched.update(srcs)
+    canvases = 0
+    if touched:
+        # subject_areas completa (28 canvases hoy): mismo tradeoff aceptado que
+        # el effective de estructura (doc 16 §5 pendientes).
+        sas = overlay(await repository.published("subject_areas"),
+                      changes.get("subject_areas") or {})
+        canvases = sum(1 for sa in sas if touched & set(sa.get("tableIds") or []))
+    return {"name": name, "tables": len(tables), "views": len(views), "canvases": canvases}
+
+
+async def delete_schema_in_changeset(cs_id: str, actor: str, schema_id: str):
+    """Registra el delete del esquema en el draft SÓLO si su estado efectivo
+    está vacío. Devuelve ("in-use", n) si tiene tablas/vistas efectivas, o la
+    semántica de add_change (dict / "forbidden" / "locked" / None)."""
+    rows = await effective(cs_id, "schemas", ids=[schema_id])
+    if rows is None:
+        return None
+    cur = next((r for r in rows if r.get("id") == schema_id), None)
+    if cur is None:
+        return None
+    name = str(cur.get("name") or "").strip()
+    if name:
+        changes = await repository.changes_map(cs_id, ["canonical_tables", "views"])
+        used = await _schema_usage(name, changes)
+        if used:
+            return ("in-use", used)
+    return await add_change(cs_id, actor, "schemas", schema_id, "delete", None)
 
 
 async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None) -> dict | None:
@@ -554,8 +754,22 @@ async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None
             "el request contiene nombres duplicados contra lo ya publicado — "
             + " | ".join(dups[:5])
         )
+    # Guard de esquemas (doc 18): un delete de esquema con tablas/vistas
+    # efectivas no publica — mismo protocolo (revierte el claim, 409).
+    in_use = await _publish_schema_deletes(changes)
+    if in_use:
+        await repository.transition(cs_id, fields.get("status", "approved"), _revert)
+        raise SchemaInUseError(
+            "the request deletes schemas that are still in use — " + " | ".join(in_use[:5])
+        )
     try:
-        counts = await repository.apply_changes(apply_plan(changes))
+        plan = apply_plan(changes)
+        # Rollback (doc 16 §5d): capturar y estampar la imagen PREVIA de cada
+        # entidad ANTES de aplicar — después del apply ya no existe el "antes".
+        # `store_before_images` es no-op sobre cambios ya estampados (re-apply).
+        await repository.store_before_images(
+            cs_id, await repository.capture_before_images(plan))
+        counts = await repository.apply_changes(plan)
         if changes.get("parent_domains"):
             await repository.cascade_domain_types(changes["parent_domains"])
     except Exception:
@@ -568,6 +782,66 @@ async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None
     # de diagnosticar en producción qué aplicó (o dejó de aplicar) una versión.
     log.info("changeset applied", extra={"cs_id": cs_id, "applied": counts})
     return final
+
+
+def rollback_plan(changes: dict) -> tuple[list[dict], list[str]]:
+    """Cambios INVERSOS de un changeset aplicado, a partir de las imágenes
+    previas capturadas en el publish. Puro.
+
+    Por entidad tocada: `before=None` (no existía) → delete; `before=doc` →
+    upsert con el doc previo completo. Devuelve (inversos, faltantes) —
+    `faltantes` = cambios SIN imagen previa (publicados antes de la feature):
+    con cualquiera, el rollback no es reconstruible y se aborta."""
+    inverse: list[dict] = []
+    missing: list[str] = []
+    for coll, per in (changes or {}).items():
+        for eid, ch in per.items():
+            if not ch.get("beforeAt"):
+                missing.append(f"{coll}/{eid}")
+                continue
+            before = ch.get("before")
+            if before is None:
+                inverse.append({"collection": coll, "entityId": eid,
+                                "op": "delete", "payload": None})
+            else:
+                inverse.append({"collection": coll, "entityId": eid,
+                                "op": "upsert",
+                                "payload": {k: v for k, v in before.items() if k != "id"}})
+    return inverse, missing
+
+
+async def rollback(cs_id: str, actor: str) -> dict | str | None:
+    """Crea un DRAFT con los cambios inversos de la ÚLTIMA versión publicada
+    (restaura la imagen previa de cada entidad que tocó). El draft pasa por el
+    flujo normal (submit → review → approve): el rollback también se revisa,
+    se audita y re-valida (unicidad/payloads) — igual que cualquier publish.
+
+    Devuelve el draft creado, o: None (no existe) · "not-applied" (no es una
+    versión publicada) · "not-latest" (solo la última publicada es reversible:
+    deshacer en orden) · "no-before" (publicada antes de la captura de
+    imágenes previas) · "empty" (sin cambios que revertir)."""
+    cs = await repository.get(cs_id)
+    if not cs:
+        return None
+    if cs.get("status") != "approved" or not cs.get("appliedAt"):
+        return "not-applied"
+    if await repository.latest_applied_id() != cs_id:
+        return "not-latest"
+    changes = await repository.changes_map(cs_id)
+    inverse, missing = rollback_plan(changes)
+    if missing:
+        return "no-before"
+    if not inverse:
+        return "empty"
+    label = cs.get("versionLabel") or cs.get("title") or cs_id[:8]
+    draft = await repository.create(
+        f"Rollback de {label}", actor,
+        extra={"description": f"Deshace la publicación {label}: restaura la "
+                              f"imagen previa de {len(inverse)} entidades."})
+    for ch in inverse:
+        await repository.set_change(draft["id"], ch["collection"], ch["entityId"],
+                                    ch["op"], ch["payload"])
+    return await repository.get(draft["id"])
 
 
 async def review(cs_id: str, actor: str, decision: str, note: str | None) -> dict | str | None:
@@ -683,12 +957,14 @@ async def diff(cs_id: str) -> dict | None:
     if touched:
         t = sorted(touched)
         relationships = await repository.published(
-            "relationships", {"$or": [{"sourceTableId": {"$in": t}}, {"targetTableId": {"$in": t}}]}
+            "relationships", {"$or": [{"parentTableId": {"$in": t}}, {"childTableId": {"$in": t}},
+                                      {"sourceTableId": {"$in": t}}, {"targetTableId": {"$in": t}}]}
         )
 
     # Nombres de las tablas AFECTADAS vía relaciones (fuera del slice de tocadas).
     known = {d["id"] for d in published["canonical_tables"]}
-    rel_tids = {r.get("sourceTableId") for r in relationships} | {r.get("targetTableId") for r in relationships}
+    rel_tids = ({r.get("parentTableId") or r.get("targetTableId") for r in relationships}
+                | {r.get("childTableId") or r.get("sourceTableId") for r in relationships})
     missing = [tid for tid in rel_tids if tid and tid not in known]
     if missing:
         published["canonical_tables"] = published["canonical_tables"] + await repository.published(

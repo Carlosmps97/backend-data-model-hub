@@ -36,7 +36,7 @@ def write_guard(perm: str):
         if user is None or not user["permissions"].get(perm):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"No tenés permiso para esta acción ({perm}).",
+                detail=f"You don't have permission for this action ({perm}).",
             )
         # Auditoría de la acción (quién hizo qué): actor + método + ruta, para las
         # métricas de adopción. Best-effort; se saltan los guardados ruidosos.
@@ -54,7 +54,7 @@ def require_permission(perm: str):
         if user is None or not user["permissions"].get(perm):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"No tenés permiso para esta acción ({perm}).",
+                detail=f"You don't have permission for this action ({perm}).",
             )
         return user
 

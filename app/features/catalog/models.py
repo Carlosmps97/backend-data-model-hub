@@ -33,6 +33,11 @@ class CanonicalColumnDoc(BaseModel):
     dataType: str
     typeOverridden: bool = False
     isPrimaryKey: bool | None = None
+    # Posición dentro de la LLAVE primaria (0-based; None si no es PK o si la
+    # PK se marcó a mano sin orden). Es INDEPENDIENTE del `ordinal` físico:
+    # Erwin ordena el bloque PK del diagrama y el PRIMARY KEY(...) del DDL por
+    # el orden de la llave, no por el de las columnas (doc 19 §12b).
+    pkPosition: int | None = None
     isForeignKey: bool | None = None
     # Aditivos (invariante §2.6): nulabilidad, columna de partición y
     # descripción (def funcional a nivel columna).

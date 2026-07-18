@@ -87,8 +87,13 @@ async def main() -> None:
                                t.get("logicalName") or t.get("physicalName") or str(t["_id"]))
 
     print("[3/6] relaciones, vistas (showOnCanvas) y canvases…")
-    rels = [(str(r["_id"]), r.get("sourceTableId"), r.get("targetTableId"))
-            async for r in db["relationships"].find(ACTIVE, {"sourceTableId": 1, "targetTableId": 1})]
+    # v2 parent/child (doc 19) con fallback legacy; la dirección da igual para ELK.
+    rels = [(str(r["_id"]),
+             r.get("childTableId") or r.get("sourceTableId"),
+             r.get("parentTableId") or r.get("targetTableId"))
+            async for r in db["relationships"].find(
+                ACTIVE, {"parentTableId": 1, "childTableId": 1,
+                         "sourceTableId": 1, "targetTableId": 1})]
     views: list[dict] = []
     async for v in db["views"].find({**ACTIVE, "showOnCanvas": True},
                                     {"sourceTableIds": 1, "tableId": 1, "name": 1, "schema": 1, "sources": 1}):

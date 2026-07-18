@@ -29,7 +29,7 @@ async def create(body: ViewBody):
         # canvas). Con 2+ fuentes SIN joinOverride SÍ se permite guardar:
         # el JOIN se infiere de las relaciones al generar el DDL en el front.
         raise HTTPException(status_code=409,
-                            detail="La vista necesita al menos una tabla fuente.")
+                            detail="The view needs at least one source table.")
     return ok(await service.create(body))
 
 
@@ -37,12 +37,12 @@ async def create(body: ViewBody):
 async def update(vid: str, body: ViewBody):
     res = await service.update(vid, body)
     if res is None:
-        raise HTTPException(status_code=404, detail="Vista no encontrada.")
+        raise HTTPException(status_code=404, detail="View not found.")
     return ok(res)
 
 
 @router.delete("/{vid}")
 async def delete(vid: str):
     if not await service.delete(vid):
-        raise HTTPException(status_code=404, detail="Vista no encontrada.")
+        raise HTTPException(status_code=404, detail="View not found.")
     return ok({"id": vid})

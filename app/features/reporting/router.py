@@ -34,3 +34,17 @@ async def report_columns(
     (`limit` o el cap por defecto) para no volcar cientos de miles de columnas."""
     id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
     return ok(await service.list_column_rows(tableId, id_list, limit))
+
+
+@router.get("/views")
+async def report_views(
+    tableIds: str | None = Query(default=None, description="ids separados por coma (export acotado)"),
+    schema: str | None = Query(default=None, description="solo las vistas de este esquema (Database Explorer)"),
+):
+    """Vistas para el export por niveles: fuentes resueltas (`schema.tabla`),
+    filtro, join override, SQL y detalle columna a columna (alias de salida,
+    origen, casteo, expresión). `tableIds` acota a las vistas derivadas de las
+    tablas seleccionadas; `schema` a las de un esquema (Database Explorer);
+    sin filtros aplica un tope de seguridad."""
+    id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
+    return ok(await service.list_view_rows(id_list, schema=schema))

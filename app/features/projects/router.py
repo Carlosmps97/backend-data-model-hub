@@ -7,11 +7,11 @@ from app.core.identity import Principal, current_principal
 from app.features.auth.deps import write_guard
 
 
-def _found(x, what: str = "Recurso"):
+def _found(x, what: str = "Resource"):
     """404 si la entidad no existe / soft-deleted (el servicio devuelve None o
     False) — antes se devolvía 200 con data:null/false, indistinguible de éxito."""
     if x is None or x is False:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{what} no encontrado.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{what} not found.")
     return x
 
 from app.core.api.envelope import ok
@@ -42,12 +42,12 @@ async def create_project(body: ProjectBody):
 
 @router.put("/projects/{pid}")
 async def update_project(pid: str, body: ProjectBody):
-    return ok(_found(await service.update_project(pid, body), "Proyecto"))
+    return ok(_found(await service.update_project(pid, body), "Project"))
 
 
 @router.delete("/projects/{pid}")
 async def delete_project(pid: str):
-    return ok(_found(await service.delete_project(pid), "Proyecto"))
+    return ok(_found(await service.delete_project(pid), "Project"))
 
 
 @router.get("/projects/{pid}/subject-areas")

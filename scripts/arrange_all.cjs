@@ -8,7 +8,24 @@
  *   node arrange_all.cjs <in.json> <out.json>
  */
 const fs = require('fs');
-const ELK = require('/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/web-data-model-hub/node_modules/elkjs/lib/elk.bundled.js');
+const path = require('path');
+
+// elkjs sin dependencia propia: se reusa el bundle del front. Resolución
+// agnóstica a la máquina: env ELKJS_PATH → repo hermano web-data-model-hub
+// (relativo a este script) → require normal (si algún día se instala aquí).
+const CANDIDATES = [
+  process.env.ELKJS_PATH,
+  path.join(__dirname, '..', '..', 'web-data-model-hub', 'node_modules', 'elkjs', 'lib', 'elk.bundled.js'),
+  'elkjs/lib/elk.bundled.js',
+].filter(Boolean);
+let ELK = null;
+for (const c of CANDIDATES) {
+  try { ELK = require(c); break; } catch { /* probar el siguiente candidato */ }
+}
+if (!ELK) {
+  console.error('elkjs no encontrado. Instala el front (web-data-model-hub) o exporta ELKJS_PATH=/ruta/a/elk.bundled.js');
+  process.exit(2);
+}
 
 // Idéntica a elkLayout.ts (mantener en sync).
 const opts = {

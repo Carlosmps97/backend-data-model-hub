@@ -273,7 +273,7 @@ AsyncIOMotorClient(
 | `canonical_columns` | `tableId`, `parentDomainId`, `physicalName`, `dataType`, `udpValues.$**` |
 | `changesets` | `updatedAt` (desc), `status` |
 | `changeset_changes` | compuesto `(csId, collection)` |
-| `relationships` | `flgactive`, `sourceTableId`, `targetTableId` |
+| `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.parentColumnId`, `pairs.childColumnId` |
 | `views` | `flgactive`, `tableId` |
 | `subject_areas` | `projectId` |
 | `folders` | `projectId` |

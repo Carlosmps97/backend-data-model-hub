@@ -55,6 +55,7 @@ from app.features.projects.router import router as projects_router
 from app.features.relationships.router import router as relationships_router
 from app.features.reporting.router import router as reporting_router
 from app.features.reporting.query.router import router as reporting_query_router
+from app.features.schemas.router import router as schemas_router
 from app.features.settings.router import router as settings_router
 from app.features.summary.router import router as summary_router
 from app.features.views.router import router as views_router
@@ -224,6 +225,7 @@ def create_app() -> FastAPI:
     app.include_router(requests_router)
     app.include_router(projects_router)
     app.include_router(folders_router)
+    app.include_router(schemas_router)
     app.include_router(relationships_router)
     app.include_router(views_router)
     app.include_router(summary_router)

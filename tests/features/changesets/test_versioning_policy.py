@@ -266,15 +266,51 @@ def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
     tr2 = AsyncMock(return_value={"id": "c1", "status": "approved"})
     apply2 = AsyncMock(return_value={"canonical_tables": 1})
     st = AsyncMock(return_value={"id": "c1", "status": "approved", "appliedAt": "T9"})
+    # Captura de imágenes previas (rollback, doc 16 §5d): ocurre ANTES del apply.
+    cap = AsyncMock(return_value={("canonical_tables", "t1"): {"id": "t1"}})
+    store = AsyncMock()
     monkeypatch.setattr(service.repository, "transition", tr2)
     monkeypatch.setattr(service.repository, "apply_changes", apply2)
     monkeypatch.setattr(service.repository, "set_status", st)
+    monkeypatch.setattr(service.repository, "capture_before_images", cap)
+    monkeypatch.setattr(service.repository, "store_before_images", store)
     res2 = asyncio.run(service._apply_and_finalize("c1", {"status": "approved"}, "T1"))
     assert res2["appliedAt"] == "T9"
     apply2.assert_awaited_once()
     plan = apply2.await_args.args[0]
     assert plan == [("canonical_tables", "t1", "delete", None)]
     assert "appliedAt" in st.await_args.args[1]
+    store.assert_awaited_once_with("c1", {("canonical_tables", "t1"): {"id": "t1"}})
+
+
+def test_rollback_plan_invierte_con_imagenes_previas():
+    """Inverso por entidad: before=doc → upsert del doc previo; before=None
+    (la entidad se CREÓ en la versión) → delete. Puro."""
+    changes = {
+        "canonical_tables": {
+            "t1": {"op": "upsert", "payload": {"x": 2}, "beforeAt": "T0",
+                   "before": {"id": "t1", "x": 1}},
+            "t2": {"op": "upsert", "payload": {"x": 9}, "beforeAt": "T0", "before": None},
+        },
+        "projects": {"p1": {"op": "delete", "beforeAt": "T0",
+                            "before": {"id": "p1", "name": "P"}}},
+    }
+    inverse, missing = service.rollback_plan(changes)
+    assert missing == []
+    by = {(c["collection"], c["entityId"]): c for c in inverse}
+    assert by[("canonical_tables", "t1")]["op"] == "upsert"
+    assert by[("canonical_tables", "t1")]["payload"] == {"x": 1}   # sin 'id'
+    assert by[("canonical_tables", "t2")]["op"] == "delete"        # creada → borrar
+    assert by[("projects", "p1")]["op"] == "upsert"                # borrada → restaurar
+    assert by[("projects", "p1")]["payload"] == {"name": "P"}
+
+
+def test_rollback_plan_aborta_si_falta_alguna_imagen():
+    """Un solo cambio sin imagen previa (publicado pre-feature) invalida el
+    rollback completo — restaurar a medias dejaría un estado inconsistente."""
+    inverse, missing = service.rollback_plan(
+        {"views": {"v1": {"op": "upsert", "payload": {}}}})
+    assert missing == ["views/v1"]
 
 
 def test_apply_and_finalize_payload_invalido_revierte_y_no_aplica(monkeypatch):

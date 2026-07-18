@@ -12,9 +12,17 @@ Reglas aprobadas:
     Las defs Logical/Physical con el mismo nombre se COLAPSAN en una sola
     (si un objeto tiene valor en ambas, gana la Physical).
   - Glosario: scope='column', wordType=None (defaults de plataforma).
+  - Cardinalidad del lado PADRE: del Null_Option_Type de la relación
+    ("100" nulls allowed → 0..1; "101"/otro → exactamente 1) — 2026-07-17.
+  - Partición (2026-07-17): el UDP de columna "Particion" con valor PART_nn
+    marca `isPartition` NATIVO; el correlativo nn debe coincidir con el orden
+    físico (el DDL de la plataforma ordena la partición por orden físico).
+    Tablas incongruentes (correlativo duplicado u orden distinto) NO se
+    marcan — se reportan para decisión del owner; el valor UDP queda visible.
 """
 from __future__ import annotations
 
+import re
 import uuid
 
 NO_SCHEMA = "No_Definido"
@@ -59,6 +67,50 @@ def dedupe_columns(attrs: list) -> tuple[list, list]:
 def map_cardinality(erwin_code: str) -> str:
     """Código de cardinalidad Erwin → cardinalidad plataforma (lado hijo)."""
     return _CARDINALITY.get(erwin_code, "many")
+
+
+def map_parent_cardinality(null_option: str) -> str:
+    """Null_Option_Type de la relación → cardinalidad del lado PADRE.
+
+    "100" (Nulls Allowed: la FK del hijo admite NULL) → 'zero-one';
+    "101" (No Nulls) u otro/vacío → 'one'. Ver constantes en erwin_parser."""
+    return "zero-one" if null_option.strip() == "100" else "one"
+
+
+# ── Partición nativa desde el UDP de Erwin (convención DDV: PART_01, PART_02…) ─
+
+# Clave COLAPSADA de la def UDP que Erwin usa para particiones (nivel columna).
+PARTITION_UDP_KEY = "column|Particion"
+_PARTITION_RE = re.compile(r"^PART[_-]?(\d+)$", re.IGNORECASE)
+
+
+def partition_correlative(value: str | None) -> int | None:
+    """Valor UDP → correlativo de partición (PART_01 → 1). Valores que no
+    siguen la convención ("No Definido", vacío) NO son partición → None."""
+    m = _PARTITION_RE.match((value or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def partition_marks(vals: list[tuple[str, int]]) -> tuple[set[str], str | None]:
+    """Qué columnas de una tabla marcar `isPartition` a partir de sus UDP.
+
+    `vals` = [(attr_id, correlativo)] EN ORDEN FÍSICO. La plataforma emite el
+    `PARTITIONED BY` en orden físico, así que sólo es seguro marcar cuando el
+    orden por correlativo coincide con el físico y no hay correlativos
+    duplicados (huecos 1..n se toleran: el orden sigue bien definido).
+
+    Devuelve (ids_a_marcar, None) si es congruente, o (set(), motivo) si NO —
+    en ese caso no se marca nada y el motivo va al reporte para el owner."""
+    if not vals:
+        return set(), None
+    nums = [n for _, n in vals]
+    if len(nums) != len(set(nums)):
+        dup = sorted({n for n in nums if nums.count(n) > 1})
+        return set(), f"correlativo duplicado (PART_{dup[0]:02d} aparece {nums.count(dup[0])} veces)"
+    if nums != sorted(nums):
+        return set(), ("orden por correlativo ≠ orden físico "
+                       f"(correlativos en orden físico: {nums})")
+    return {aid for aid, _ in vals}, None
 
 
 def udp_datatype(code: str) -> str:

@@ -62,6 +62,7 @@ class Migrator:
         self.table_pid: dict[str, str] = {}
         self.col_pid: dict[str, str] = {}
         self.view_pid: dict[str, str] = {}
+        self.schemas_used: set[str] = set()    # nombres de schema de tablas/vistas migradas
         self.collapsed = pol.collapse_udp_defs(model.udp_defs)
         self.udp_vals = pol.resolve_udp_values(model.udp_values, self.collapsed)
 
@@ -163,6 +164,7 @@ class Migrator:
                 continue
             taken.add(nat_key)
             self.table_pid[e.id] = pid
+            self.schemas_used.add(schema)
             self._upsert("canonical_tables", pid, {
                 "physicalName": e.physical, "logicalName": e.name,
                 "schema": schema,
@@ -173,6 +175,19 @@ class Migrator:
 
             cols, dropped = pol.dedupe_columns(e.attributes)
             self.stats["columnas duplicadas descartadas"] += len(dropped)
+            pk_pos = {aid: i for i, aid in enumerate(e.pk_attr_order)}
+            current_cpids = {pol.platform_id(a.id) for a in cols}
+            # Partición nativa desde el UDP "Particion" (PART_nn): sólo si el
+            # correlativo es congruente con el orden físico (política 07-17).
+            part_vals = [(a.id, corr) for a in cols
+                         if (corr := pol.partition_correlative(
+                             self.udp_vals.get((a.id, pol.PARTITION_UDP_KEY)))) is not None]
+            part_ids, part_skip = pol.partition_marks(part_vals)
+            if part_skip:
+                self.warnings.append(f"partición NO marcada en {nat_key}: {part_skip}")
+                self.stats["tablas con partición incongruente (sin marcar)"] += 1
+            elif part_ids:
+                self.stats["tablas con partición nativa"] += 1
             for i, a in enumerate(cols):
                 cpid = pol.platform_id(a.id)
                 self.col_pid[a.id] = cpid
@@ -186,41 +201,65 @@ class Migrator:
                     "dataType": a.data_type or "STRING",
                     "typeOverridden": overridden,
                     "isPrimaryKey": a.id in e.pk_attr_ids,
+                    "pkPosition": pk_pos.get(a.id),
                     "isForeignKey": bool(a.parent_attr_ref),
-                    "isNullable": a.nullable, "isPartition": False,
+                    "isNullable": a.nullable, "isPartition": a.id in part_ids,
                     "description": a.definition or a.comment or None,
                     "ordinal": i,
                     "udpValues": self._udp_values_for(a.id, "column"),
                     "erwinLongId": a.id})
                 self.stats["columnas"] += 1
 
+            # Re-runs auto-saneados: columnas MIGRADAS de esta tabla que ya no
+            # vienen en el archivo (duplicado que ahora se dedup-ea distinto,
+            # o atributo eliminado en una versión nueva del XML) → soft-delete.
+            # SOLO docs con erwinLongId — lo creado a mano en la plataforma
+            # jamás se toca.
+            stale = self.db.canonical_columns.find(
+                {"tableId": pid, "flgactive": {"$ne": False},
+                 "erwinLongId": {"$exists": True}, "_id": {"$nin": list(current_cpids)}},
+                {"_id": 1})
+            for d in stale:
+                self.db.canonical_columns.update_one(
+                    {"_id": d["_id"]},
+                    {"$set": {"flgactive": False, "deletedAt": _now(),
+                              "updatedAt": _now()}})
+                self.stats["columnas migradas retiradas (ya no están en el XML)"] += 1
+
     def relationships(self) -> None:
+        """v2 (doc 19): UN doc por relación Erwin, con TODOS sus pares de
+        columnas (las FK compuestas dejan de partirse en N docs). El id de
+        plataforma es determinista por relación (`platform_id(r.id)`)."""
         pairs = self.m.fk_pairs()
         for r in self.m.relationships.values():
             if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
                 continue
-            src_t = self.table_pid.get(r.child_ref)     # hijo = lado FK (source)
-            tgt_t = self.table_pid.get(r.parent_ref)    # padre = lado PK (target)
-            if not src_t or not tgt_t:
+            child_t = self.table_pid.get(r.child_ref)    # hijo = lado FK
+            parent_t = self.table_pid.get(r.parent_ref)  # padre = lado PK
+            if not child_t or not parent_t:
                 self.stats["relaciones omitidas (tabla no migrada)"] += 1
                 continue
-            ok = 0
+            rel_pairs = []
             for p_attr, c_attr in pairs.get(r.id, []):
-                s_col, t_col = self.col_pid.get(c_attr), self.col_pid.get(p_attr)
-                if not s_col or not t_col:
-                    continue
-                self._upsert("relationships", pol.platform_id(f"{r.id}|{c_attr}"), {
-                    "sourceTableId": src_t, "sourceColumnId": s_col,
-                    "targetTableId": tgt_t, "targetColumnId": t_col,
-                    "sourceCardinality": "one",
-                    "targetCardinality": pol.map_cardinality(r.cardinality),
-                    "identifying": r.rel_type == ep.REL_IDENTIFYING,
-                    "erwinLongId": r.id})
-                ok += 1
-            if ok:
-                self.stats["relaciones"] += ok
-            else:
+                p_col, c_col = self.col_pid.get(p_attr), self.col_pid.get(c_attr)
+                if p_col and c_col:
+                    rel_pairs.append({"parentColumnId": p_col,
+                                      "childColumnId": c_col, "roleName": None})
+            if not rel_pairs:
                 self.stats["relaciones omitidas (sin pares FK)"] += 1
+                continue
+            self._upsert("relationships", pol.platform_id(r.id), {
+                "parentTableId": parent_t, "childTableId": child_t,
+                "pairs": rel_pairs,
+                # Lado padre desde Null_Option_Type ("100" = FK nullable →
+                # padre opcional 0..1), como el rombo del diagrama Erwin.
+                "parentCardinality": pol.map_parent_cardinality(r.null_option),
+                "childCardinality": pol.map_cardinality(r.cardinality),
+                "identifying": r.rel_type == ep.REL_IDENTIFYING,
+                "erwinLongId": r.id})
+            self.stats["relaciones"] += 1
+            if len(rel_pairs) > 1:
+                self.stats["relaciones compuestas (2+ pares)"] += 1
 
     def views(self) -> None:
         view_rels = self.m.view_source_rels()
@@ -240,6 +279,7 @@ class Migrator:
                 self.stats["vistas omitidas (conflicto)"] += 1
                 continue
             self.view_pid[v.id] = pid
+            self.schemas_used.add(schema)
 
             cols, dropped = pol.dedupe_columns(v.attributes)
             self.stats["columnas duplicadas descartadas"] += len(dropped)
@@ -258,7 +298,10 @@ class Migrator:
                     **({"castType": cast} if cast else {}),
                 })
             self._upsert("views", pid, {
-                "name": v.name, "schema": schema, "sql": "",
+                # `sql` = el CREATE VIEW ORIGINAL de Erwin (ViewProps.SQL, doc 19
+                # §12). El export DDL sigue generando desde `sources` (estructura);
+                # esto preserva la definición fuente como metadata de referencia.
+                "name": v.name, "schema": schema, "sql": v.sql or "",
                 "description": v.definition or v.comment or None,
                 "tableId": source_pids[0], "sourceTableIds": source_pids,
                 "sources": sources, "tags": [], "filter": None,
@@ -267,6 +310,20 @@ class Migrator:
                 "showOnCanvas": True, "joinOverride": None,
                 "erwinLongId": v.id})
             self.stats["vistas"] += 1
+
+    def schema_docs(self) -> None:
+        """Entidad `schemas` (doc 18): un doc por nombre de schema usado por
+        las tablas/vistas migradas. Reusa por nombre (case-insensitive); ids
+        `sch-<name>` (misma convención que scripts/backfill_schemas.py)."""
+        for name in sorted(self.schemas_used):
+            existing = self.db.schemas.find_one(
+                {"name": re.compile(f"^{re.escape(name)}$", re.I),
+                 "flgactive": {"$ne": False}}, {"_id": 1})
+            if existing:
+                self.stats["schemas reusados"] += 1
+                continue
+            self._upsert("schemas", f"sch-{name}", {"name": name, "description": None})
+            self.stats["schemas creados"] += 1
 
     def canvases(self) -> None:
         # proyecto (reusar por nombre)
@@ -313,6 +370,12 @@ class Migrator:
                 if ref in self.table_pid:
                     table_ids.append(pid)
             cid = pol.platform_id(d.id)
+            # Re-runs NO pisan el layout ya trabajado (ELK/arreglos a mano):
+            # los nodos existentes conservan su posición; la grilla default
+            # solo aplica a nodos NUEVOS de esta corrida.
+            prev = self.db.subject_areas.find_one({"_id": cid}, {"layout": 1})
+            if prev and prev.get("layout"):
+                layout = {k: prev["layout"].get(k, v) for k, v in layout.items()}
             self._upsert("subject_areas", cid, {
                 "projectId": proj_id,
                 "folderId": folder_pid.get(d.subject_area),
@@ -326,6 +389,7 @@ class Migrator:
         self.tables()
         self.relationships()
         self.views()
+        self.schema_docs()
         self.canvases()
 
 

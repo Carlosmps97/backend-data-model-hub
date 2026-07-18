@@ -41,10 +41,10 @@ def test_count_for_project_views_only_within_scope():
 def test_count_for_project_relationships_need_both_ends_inside():
     subject_areas = [{"tableIds": ["t1", "t2", "t3"]}]
     relationships = [
-        {"sourceTableId": "t1", "targetTableId": "t2"},  # ambas dentro → cuenta
-        {"sourceTableId": "t1", "targetTableId": "t9"},  # una fuera → no cuenta
-        {"sourceTableId": "t8", "targetTableId": "t9"},  # ambas fuera → no cuenta
-        {"sourceTableId": "t2", "targetTableId": "t3"},  # ambas dentro → cuenta
+        {"parentTableId": "t1", "childTableId": "t2"},  # ambas dentro → cuenta
+        {"parentTableId": "t1", "childTableId": "t9"},  # una fuera → no cuenta
+        {"parentTableId": "t8", "childTableId": "t9"},  # ambas fuera → no cuenta
+        {"parentTableId": "t2", "childTableId": "t3"},  # ambas dentro → cuenta
     ]
     out = count_for_project(subject_areas, views=[], relationships=relationships)
     assert out["relationships"] == 2

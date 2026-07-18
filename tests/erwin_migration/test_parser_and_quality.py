@@ -100,6 +100,7 @@ FIXTURE = textwrap.dedent(f"""\
   </View_Groups>
   <Relationship_Groups>
    <Relationship id="R1" name="R/1"><RelationshipProps><Type>7</Type><Cardinality>-3</Cardinality>
+    <Null_Option_Type>100</Null_Option_Type>
     <Parent_Entity_Ref>E1</Parent_Entity_Ref><Child_Entity_Ref>E2</Child_Entity_Ref></RelationshipProps></Relationship>
    <Relationship id="R2" name="R/2"><RelationshipProps><Type>16</Type><Cardinality>-3</Cardinality>
     <Parent_Entity_Ref>E1</Parent_Entity_Ref><Child_Entity_Ref>V1</Child_Entity_Ref></RelationshipProps></Relationship>
@@ -178,6 +179,35 @@ def test_vistas_con_columnas_y_derivacion(model):
 def test_relaciones_y_pares_fk(model):
     assert model.relationships["R1"].rel_type == ep.REL_NON_IDENTIFYING
     assert model.fk_pairs()["R1"] == [("A1", "B2")]
+    # Null_Option_Type de la relación (100 = nulls allowed → padre 0..1).
+    assert model.relationships["R1"].null_option == ep.REL_NULLS_ALLOWED
+
+
+def test_parent_cardinality_desde_null_option():
+    assert pol.map_parent_cardinality("100") == "zero-one"
+    assert pol.map_parent_cardinality("101") == "one"
+    assert pol.map_parent_cardinality("") == "one"       # sin dato → conservador
+
+
+def test_particion_correlativo_y_marks():
+    # Parseo del valor UDP (convención DDV): PART_nn; el resto NO es partición.
+    assert pol.partition_correlative("PART_01") == 1
+    assert pol.partition_correlative("part-2") == 2
+    assert pol.partition_correlative("PART10") == 10
+    assert pol.partition_correlative("No Definido") is None
+    assert pol.partition_correlative("") is None
+    assert pol.partition_correlative(None) is None
+    # Congruente: correlativo asciende en orden físico → se marca todo.
+    assert pol.partition_marks([("a", 1), ("b", 2)]) == ({"a", "b"}, None)
+    # Huecos 1..n tolerados (el orden sigue bien definido).
+    assert pol.partition_marks([("a", 1), ("b", 3)]) == ({"a", "b"}, None)
+    # Correlativo duplicado → nada se marca, con motivo.
+    ids, motivo = pol.partition_marks([("a", 1), ("b", 1)])
+    assert ids == set() and "duplicado" in motivo
+    # Orden por correlativo ≠ orden físico → nada se marca, con motivo.
+    ids, motivo = pol.partition_marks([("a", 2), ("b", 1)])
+    assert ids == set() and "orden" in motivo
+    assert pol.partition_marks([]) == (set(), None)
 
 
 def test_schema_dominios_glosario_udp(model):

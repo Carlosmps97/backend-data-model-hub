@@ -566,8 +566,9 @@ def s14_impacto_eliminacion() -> Suite:
     c3 = mod.add_column(t3, "id cliente", "BIGINT", ordinal=0)
     nrid = _uid("rel")
     r = _cs_change(mod, cs, "relationships", nrid,
-                   {"id": nrid, "sourceTableId": t3, "sourceColumnId": c3,
-                    "targetTableId": t1, "targetColumnId": c1, "cardinality": "N:1"})
+                   {"id": nrid, "parentTableId": t3, "childTableId": t1,
+                    "pairs": [{"parentColumnId": c3, "childColumnId": c1}],
+                    "parentCardinality": "one", "childCardinality": "zero-many"})
     s.eq("relación nueva en draft", r.status, 200)
     H._track("relationships", nrid)
     imp2 = mod.get(f"/api/relationships/impact?columnId={c1}&changesetId={cs}")

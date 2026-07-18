@@ -36,12 +36,15 @@ async def views_with_table() -> list[dict]:
 
 
 async def relationships_min() -> list[dict]:
-    """Relaciones activas con sólo las dos puntas (source/target tableId)."""
+    """Relaciones activas con sólo las dos puntas (parent/child tableId; los
+    campos legacy source/target cubren docs pre-backfill)."""
     db = await get_db()
     docs = await db["relationships"].find(
-        ACTIVE, {"sourceTableId": 1, "targetTableId": 1}
+        ACTIVE, {"parentTableId": 1, "childTableId": 1,
+                 "sourceTableId": 1, "targetTableId": 1}
     ).to_list(None)
     return [
-        {"sourceTableId": d.get("sourceTableId"), "targetTableId": d.get("targetTableId")}
+        {"parentTableId": d.get("parentTableId") or d.get("targetTableId"),
+         "childTableId": d.get("childTableId") or d.get("sourceTableId")}
         for d in docs
     ]

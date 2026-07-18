@@ -40,6 +40,11 @@ class ChangeDoc(BaseModel):
     op: str  # upsert | delete
     payload: dict | None = None
     at: str | None = None  # ISO-8601: baseline de conflicto vs producción
+    # Imagen PREVIA de la entidad publicada, capturada en el publish (doc 16
+    # §5d): alimenta el rollback (draft inverso). `before=None` con `beforeAt`
+    # estampado = la entidad NO existía (el inverso es un delete).
+    before: dict | None = None
+    beforeAt: str | None = None
 
 
 class ChangesetDoc(BaseModel):

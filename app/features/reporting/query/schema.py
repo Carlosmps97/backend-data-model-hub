@@ -83,11 +83,12 @@ _TABLES = [
     _s("schema", "Schema", indexed=True),
     _s("description", "Description"),
 ]
+_CARDINALITY_ENUM = ["one", "many", "one-only", "zero-one", "one-many", "zero-many"]
 _RELATIONSHIPS = [
-    _s("sourceTableId", "Source table id", indexed=True),
-    _s("targetTableId", "Target table id", indexed=True),
-    _s("sourceCardinality", "Source cardinality", type="enum", enumValues=["one", "many"]),
-    _s("targetCardinality", "Target cardinality", type="enum", enumValues=["one", "many"]),
+    _s("parentTableId", "Parent table id", indexed=True),
+    _s("childTableId", "Child table id", indexed=True),
+    _s("parentCardinality", "Parent cardinality", type="enum", enumValues=_CARDINALITY_ENUM),
+    _s("childCardinality", "Child cardinality", type="enum", enumValues=_CARDINALITY_ENUM),
     _s("identifying", "Identifying", type="boolean"),
 ]
 _VIEWS = [

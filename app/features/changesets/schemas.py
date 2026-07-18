@@ -49,3 +49,9 @@ class ReviewDecisionBody(BaseModel):
 
 class CommentBody(BaseModel):
     text: str
+
+
+class SchemaRenameBody(BaseModel):
+    """Rename versionado de un esquema (doc 18): nombre nuevo; la propagación
+    a tablas/vistas la computa el service server-side dentro del draft."""
+    newName: str

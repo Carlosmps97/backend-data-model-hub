@@ -24,6 +24,13 @@ REL_IDENTIFYING = "2"
 REL_NON_IDENTIFYING = "7"
 REL_TABLE_TO_VIEW = "16"
 
+# Null_Option_Type de la RELACIÓN (no confundir con el de atributo 0/1):
+# "100" = Nulls Allowed (la FK del hijo admite NULL → el padre es OPCIONAL,
+# cardinalidad 0..1) · "101" = No Nulls (padre obligatorio, exactamente 1).
+# Evidencia DDV: las 35 identifying (FK⊂PK, no pueden ser NULL) traen todas
+# "101"; las non-identifying se reparten 95×"100" + 4×"101".
+REL_NULLS_ALLOWED = "100"
+
 # Contenedores que sí se limpian al cerrar (el resto de tags simples se libera
 # junto con su contenedor).
 _CLEAR_TAGS = {
@@ -69,6 +76,10 @@ class ErwinEntity:
     comment: str
     attributes: list[ErwinAttribute] = field(default_factory=list)
     pk_attr_ids: set[str] = field(default_factory=set)
+    # Orden REAL de la llave (miembros del Key_Group PK, doc 19 §12b): Erwin
+    # muestra el bloque PK del diagrama en ESTE orden, que es independiente
+    # del orden físico de columnas (Physical_Order).
+    pk_attr_order: list[str] = field(default_factory=list)
     index_key_groups: int = 0  # IF* (inversion entries) — no se migran
 
 
@@ -78,6 +89,7 @@ class ErwinView:
     name: str                  # físico (las vistas Erwin no tienen lógico)
     definition: str
     comment: str
+    sql: str = ""              # CREATE VIEW original (ViewProps.SQL — doc 19 §12)
     attributes: list[ErwinAttribute] = field(default_factory=list)
 
 
@@ -89,6 +101,7 @@ class ErwinRelationship:
     cardinality: str           # códigos Erwin: -3, -1, -2, N
     parent_ref: str            # entidad padre (lado PK)
     child_ref: str             # entidad o vista hija (lado FK / derivada)
+    null_option: str = ""      # Null_Option_Type: "100" nulls allowed | "101" no nulls
 
 
 @dataclass
@@ -181,6 +194,17 @@ def _props(el: ET.Element, tag: str) -> ET.Element | None:
     return el.find(f"./{{*}}{tag}")
 
 
+def _phys_sorted(el: ET.Element, props_tag: str, attrs: list[ErwinAttribute]) -> list[ErwinAttribute]:
+    """Orden físico CANÓNICO de columnas: el array ordenado del dueño
+    (`Physical_Columns_Order_Ref_Array`) — que es lo que Erwin muestra —,
+    con fallback al `Physical_Order` numérico por atributo (que puede quedar
+    desincronizado tras reordenamientos; doc 19 §12b)."""
+    refs = [r.text or "" for r in el.findall(
+        f"./{{*}}{props_tag}/{{*}}Physical_Columns_Order_Ref_Array/{{*}}Physical_Columns_Order_Ref")]
+    pos = {rid: i for i, rid in enumerate(refs)}
+    return sorted(attrs, key=lambda a: (pos.get(a.id, 10**6), a.order))
+
+
 def _txt(p: ET.Element | None, name: str) -> str:
     return (p.findtext(f"./{{*}}{name}") or "") if p is not None else ""
 
@@ -194,6 +218,7 @@ def parse(xml_path: str) -> ErwinModel:
     # por id() del elemento — estable mientras el dueño siga en el stack.
     attrs_of: dict[int, list[ErwinAttribute]] = {}
     keys_of: dict[int, dict] = {}
+    kg_member_attr: dict[str, str] = {}  # Key_Group_Member id → Attribute_Ref
     raw_shapes: list[tuple[str, str | None, str]] = []
 
     for ev, el in ET.iterparse(xml_path, events=("start", "end")):
@@ -238,16 +263,29 @@ def parse(xml_path: str) -> ErwinModel:
                 # el registro se completa al cerrar el dueño (está en el stack)
                 attrs_of.setdefault(id(owner), []).append(attr)
 
+        elif tag == "Key_Group_Member":
+            # El miembro del key group es un objeto PROPIO: su Attribute_Ref es
+            # el id real del atributo. Los refs del array de miembros del
+            # Key_Group apuntan a ESTOS objetos, no a atributos (fix doc 19:
+            # sin esta traducción, pk_attr_ids nunca matcheaba y NINGUNA
+            # columna migrada quedaba isPrimaryKey).
+            p = _props(el, "Key_Group_MemberProps")
+            ref = _txt(p, "Attribute_Ref")
+            if ref:
+                kg_member_attr[el.get("id") or ""] = ref
+
         elif tag == "Key_Group":
             owner = stack[-2] if len(stack) >= 2 else None
             if owner is not None and _t(owner) == "Entity":
                 p = _props(el, "Key_GroupProps")
                 ktype = _txt(p, "Key_Group_Type")
-                members = [r.text or "" for r in el.findall(
+                members = [kg_member_attr.get(r.text or "", r.text or "") for r in el.findall(
                     "./{*}Key_GroupProps/{*}Key_Group_Members_Order_Ref_Array/{*}Key_Group_Members_Order_Ref")]
-                info = keys_of.setdefault(id(owner), {"pk": set(), "if": 0})
+                info = keys_of.setdefault(id(owner), {"pk": set(), "pk_order": [], "if": 0})
                 if ktype == "PK":
                     info["pk"].update(members)
+                    if not info["pk_order"]:  # una PK por entidad; el array YA viene ordenado
+                        info["pk_order"] = list(members)
                 elif ktype.startswith("IF"):
                     info["if"] += 1
 
@@ -256,7 +294,7 @@ def parse(xml_path: str) -> ErwinModel:
             raw = _txt(p, "Physical_Name")
             ufpn = _txt(p, "User_Formatted_Physical_Name")
             was_macro = "%" in raw
-            keys = keys_of.pop(id(el), {"pk": set(), "if": 0})
+            keys = keys_of.pop(id(el), {"pk": set(), "pk_order": [], "if": 0})
             ent = ErwinEntity(
                 id=el.get("id") or "",
                 name=el.get("name") or _txt(p, "Name"),
@@ -264,8 +302,9 @@ def parse(xml_path: str) -> ErwinModel:
                 physical_was_macro=was_macro,
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
-                attributes=sorted(attrs_of.pop(id(el), []), key=lambda a: a.order),
+                attributes=_phys_sorted(el, "EntityProps", attrs_of.pop(id(el), [])),
                 pk_attr_ids=set(keys["pk"]),
+                pk_attr_order=list(keys.get("pk_order") or []),
                 index_key_groups=keys["if"],
             )
             m.entities[ent.id] = ent
@@ -277,7 +316,8 @@ def parse(xml_path: str) -> ErwinModel:
                 name=el.get("name") or _txt(p, "Name"),
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
-                attributes=sorted(attrs_of.pop(id(el), []), key=lambda a: a.order),
+                sql=_txt(p, "SQL").strip(),
+                attributes=_phys_sorted(el, "ViewProps", attrs_of.pop(id(el), [])),
             )
             m.views[v.id] = v
 
@@ -290,6 +330,7 @@ def parse(xml_path: str) -> ErwinModel:
                 cardinality=_txt(p, "Cardinality").strip(),
                 parent_ref=_txt(p, "Parent_Entity_Ref"),
                 child_ref=_txt(p, "Child_Entity_Ref"),
+                null_option=_txt(p, "Null_Option_Type").strip(),
             )
             m.relationships[r.id] = r
 

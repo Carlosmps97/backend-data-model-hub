@@ -40,5 +40,5 @@ async def rollback(body: RollbackBody, user: dict = Depends(require_permission("
     version = await service.rollback(user["username"], body.targetSeq)
     if version is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="La versión de estándares no existe.")
+                            detail="That standards version doesn't exist.")
     return ok(version)

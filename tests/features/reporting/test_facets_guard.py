@@ -28,7 +28,7 @@ def test_facets_de_campo_enum_sigue_funcionando(client, monkeypatch):
     monkeypatch.setattr(ex, "_udp_defs", AsyncMock(return_value=[]))
     monkeypatch.setattr(qrouter, "get_db", AsyncMock(return_value=None))
     resp = client.get("/api/reporting/facets",
-                      params={"field": "sourceCardinality", "from": "relationships"})
+                      params={"field": "parentCardinality", "from": "relationships"})
     assert resp.status_code == 200
-    assert resp.json()["data"] == [{"value": "one", "label": "one"},
-                                   {"value": "many", "label": "many"}]
+    assert [v["value"] for v in resp.json()["data"]] == [
+        "one", "many", "one-only", "zero-one", "one-many", "zero-many"]

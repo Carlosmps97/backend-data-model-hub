@@ -16,7 +16,7 @@ def test_tabla_duplicada_contra_publicado_case_insensitive():
     err = duplicate_error("canonical_tables", "t9",
                           {"physicalName": "cliente", "logicalName": "x", "schema": "CORE"},
                           PUB_T, {})
-    assert err == "Ya existe la tabla CORE.cliente"
+    assert err == "Table CORE.cliente already exists"
 
 
 def test_tabla_misma_entidad_no_conflicta():
@@ -52,14 +52,14 @@ def test_tabla_sin_schema_matchea_sin_schema():
     pub = [{"id": "t1", "physicalName": "CLIENTE", "logicalName": "cliente"}]
     err = duplicate_error("canonical_tables", "t9",
                           {"physicalName": "cliente", "logicalName": "x"}, pub, {})
-    assert err == "Ya existe la tabla cliente"
+    assert err == "Table cliente already exists"
 
 
 def test_columna_duplicada_en_misma_tabla():
     err = duplicate_error("canonical_columns", "c9",
                           {"tableId": "t1", "physicalName": "id_cta", "logicalName": "x", "dataType": "STRING"},
                           PUB_C, {})
-    assert err == "Ya existe la columna id_cta en esta tabla"
+    assert err == "Column id_cta already exists in this table"
 
 
 def test_columna_misma_entidad_no_conflicta():

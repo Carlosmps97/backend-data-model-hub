@@ -602,8 +602,8 @@ def build_columns() -> list[dict]:
 
 
 # ── Relationships (crow's-foot) ──────────────────────────────────────────────
-# (id, sourceTable, sourceCol, targetTable, targetCol, srcCard, tgtCard, identifying)
-# Convención: source = lado "muchos" (FK), target = lado "uno" (PK del padre).
+# (id, childTable, childCol, parentTable, parentCol, childCard, parentCard, identifying)
+# Convención v2 (doc 19): child = lado "muchos" (FK), parent = lado "uno" (PK).
 _RELATIONSHIPS: list[tuple[str, str, str, str, str, str, str, bool]] = [
     ("rel-cuenta-cliente", "ct-cuenta", "id_cliente", "ct-cliente", "id_cliente",
      "many", "one", True),
@@ -651,17 +651,17 @@ _RELATIONSHIPS: list[tuple[str, str, str, str, str, str, str, bool]] = [
 
 
 def build_relationships() -> list[dict]:
-    """`relationships`: PK/FK con cardinalidades crow's-foot."""
+    """`relationships` v2 (doc 19): parent/child + pares de columnas."""
     out: list[dict] = []
-    for rid, st, sc, tt, tc, src_card, tgt_card, ident in _RELATIONSHIPS:
+    for rid, ct, cc, pt, pc, child_card, parent_card, ident in _RELATIONSHIPS:
         out.append({
             "_id": rid,
-            "sourceTableId": st,
-            "sourceColumnId": _column_id(st, sc),
-            "targetTableId": tt,
-            "targetColumnId": _column_id(tt, tc),
-            "sourceCardinality": src_card,
-            "targetCardinality": tgt_card,
+            "parentTableId": pt,
+            "childTableId": ct,
+            "pairs": [{"parentColumnId": _column_id(pt, pc),
+                       "childColumnId": _column_id(ct, cc), "roleName": None}],
+            "parentCardinality": parent_card,
+            "childCardinality": child_card,
             "identifying": ident,
             "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
         })

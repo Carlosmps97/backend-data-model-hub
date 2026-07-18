@@ -469,9 +469,9 @@ erDiagram
     }
     RELATIONSHIPS {
         string id PK
-        string sourceTableId FK
-        string targetTableId FK
-        string sourceCardinality
+        string parentTableId FK
+        string childTableId FK
+        string parentCardinality
         bool identifying
     }
     CHANGESETS {
@@ -530,7 +530,7 @@ erDiagram
 | `changesets` | `updatedAt` (desc), `status` | Listas y transiciones |
 | `changeset_changes` | `csId + collection` (compuesto) | overlay/diff/apply por changeset |
 | `subject_areas`, `folders` | `projectId` | Canvases y carpetas por proyecto |
-| `relationships` | `flgactive`, `sourceTableId`, `targetTableId` | Resolución del canvas por extremos |
+| `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.*ColumnId` | Resolución del canvas por extremos (v2 doc 19) |
 | `views` | `flgactive`, `tableId` | Vistas por tabla |
 | `naming_config` | `scope` | 1 doc por scope |
 | `users` | `email` | Lookup de login |

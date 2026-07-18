@@ -166,25 +166,51 @@ async def glossary_usage(limit: int = 200) -> list[dict]:
 
 
 # ── Relationships resueltas ──────────────────────────────────────────────────
+# Cardinalidad de plataforma → etiqueta legible por lado. El mapeo viejo
+# ('N' si == 'many', si no '1') aplanaba zero-many/one-many/zero-one a "1".
+_CARD_LABEL = {"one": "1", "zero-one": "0..1", "one-many": "1..N",
+               "zero-many": "0..N", "many": "N"}
+
+
 async def relationships_report(limit: int = 2000) -> list[dict]:
+    """Relaciones resueltas, UNA FILA POR PAR de columnas (v2, doc 19): una FK
+    compuesta de 3 columnas emite 3 filas con el mismo `id` y `pairIndex`
+    incremental — conserva el espíritu "1 fila por columna FK" del export."""
+    from app.features.relationships.models import RelationshipDoc
+
     db = await get_db()
-    rels = await db["relationships"].find(ACTIVE).limit(limit).to_list(limit)
-    tids = {t for r in rels for t in (r.get("sourceTableId"), r.get("targetTableId")) if t}
-    cids = {c for r in rels for c in (r.get("sourceColumnId"), r.get("targetColumnId")) if c}
+    raw = await db["relationships"].find(ACTIVE).limit(limit).to_list(limit)
+    rels = [RelationshipDoc.model_validate(
+        {**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])}).model_dump()
+        for r in raw]
+    tids = {t for r in rels for t in (r["parentTableId"], r["childTableId"]) if t}
+    cids = {c for r in rels for p in r["pairs"]
+            for c in (p.get("parentColumnId"), p.get("childColumnId")) if c}
     tmap = {str(t["_id"]): t async for t in db["canonical_tables"].find({"_id": {"$in": list(tids)}}, {"physicalName": 1, "schema": 1})}
     cmap = {str(c["_id"]): c.get("physicalName") async for c in db["canonical_columns"].find({"_id": {"$in": list(cids)}}, {"physicalName": 1})}
     rows = []
     for r in rels:
-        st, tt = tmap.get(r.get("sourceTableId"), {}), tmap.get(r.get("targetTableId"), {})
-        sc, tc = cmap.get(r.get("sourceColumnId"), "?"), cmap.get(r.get("targetColumnId"), "?")
-        card = f"{'N' if r.get('sourceCardinality') == 'many' else '1'}:{'N' if r.get('targetCardinality') == 'many' else '1'}"
-        rows.append({
-            "id": str(r["_id"]),
-            "source": f"{st.get('physicalName', '?')}.{sc}", "sourceSchema": st.get("schema"),
-            "target": f"{tt.get('physicalName', '?')}.{tc}", "targetSchema": tt.get("schema"),
-            "cardinality": card, "identifying": bool(r.get("identifying")),
-            "isSelfReferencing": r.get("sourceTableId") == r.get("targetTableId"),
-            "crossSchema": st.get("schema") != tt.get("schema"),
-            "label": f"{st.get('physicalName', '?')}.{sc} → {tt.get('physicalName', '?')}.{tc} ({card})",
-        })
+        pt, ct = tmap.get(r["parentTableId"], {}), tmap.get(r["childTableId"], {})
+        p_card = r.get("parentCardinality") or "one"
+        c_card = r.get("childCardinality") or "zero-many"
+        card = f"{_CARD_LABEL.get(p_card, p_card)} → {_CARD_LABEL.get(c_card, c_card)}"
+        pt_name, ct_name = pt.get("physicalName", "?"), ct.get("physicalName", "?")
+        for i, p in enumerate(r["pairs"]):
+            pc = cmap.get(p.get("parentColumnId"), "?")
+            cc = cmap.get(p.get("childColumnId"), "?")
+            rows.append({
+                "id": r["id"], "pairIndex": i, "pairCount": len(r["pairs"]),
+                # Extremos SEPARADOS (ids + tabla + columna) para el export por
+                # niveles del Reporting; `parent`/`child` combinados se mantienen.
+                "parentTableId": r["parentTableId"], "childTableId": r["childTableId"],
+                "parentTable": pt_name, "parentColumn": pc,
+                "childTable": ct_name, "childColumn": cc,
+                "parent": f"{pt_name}.{pc}", "parentSchema": pt.get("schema"),
+                "child": f"{ct_name}.{cc}", "childSchema": ct.get("schema"),
+                "roleName": p.get("roleName"),
+                "cardinality": card, "identifying": bool(r.get("identifying")),
+                "isSelfReferencing": r["parentTableId"] == r["childTableId"],
+                "crossSchema": pt.get("schema") != ct.get("schema"),
+                "label": f"{pt_name}.{pc} → {ct_name}.{cc} ({card})",
+            })
     return rows

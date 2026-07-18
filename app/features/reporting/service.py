@@ -11,6 +11,8 @@ Semántica de una fila de tabla (`GET /api/reporting/tables`):
   - projects           : nombres de los proyectos que contienen alguno de esos
     canvases (un proyecto referencia la tabla si cualquiera de sus canvases la
     referencia). Ordenados, sin duplicados.
+  - udpValues          : UDPs de la tabla como {NOMBRE de la def: valor}
+    (traducidos desde {defId: valor} vía `udp_definitions` — export legible).
 
 Filtros opcionales (predicado puro `_matches`), pensados para crecer:
   - schema    : igualdad exacta sobre el schema de la tabla.
@@ -50,6 +52,12 @@ def _names_for_table(
     return sa_names, proj_names, project_ids
 
 
+def _udp_named(raw: dict | None, name_by_id: dict[str, str]) -> dict:
+    """udpValues {defId: valor} → {nombre de la def: valor}. Ids sin def
+    conocida se conservan tal cual (no se pierde el valor). Puro."""
+    return {name_by_id.get(k, k): v for k, v in (raw or {}).items()}
+
+
 def _matches(row: dict, project_ids: set[str], filters: dict) -> bool:
     """Predicado de filtro de una fila de tabla. Puro y extensible."""
     schema = filters.get("schema")
@@ -69,6 +77,7 @@ def table_rows(
     projects: list[dict],
     filters: dict | None = None,
     limit: int | None = None,
+    udp_defs: list[dict] | None = None,
 ) -> list[dict]:
     """Construye las filas del reporte por tabla. Puro. Ver docstring del módulo.
 
@@ -80,14 +89,15 @@ def table_rows(
     filters = filters or {}
     tables_to_canvases = _index_tables_to_canvases(subject_areas)
     projects_by_id = {p["id"]: (p.get("name") or "") for p in projects}
+    udp_name_by_id = {d["id"]: (d.get("name") or d["id"]) for d in (udp_defs or [])}
 
     col_count: dict[str, int] = column_counts or {}
 
     rel_count: dict[str, int] = {}
     for r in relationships:
-        # set(): una relación auto-referencial (source == target, p.ej.
+        # set(): una relación auto-referencial (parent == child, p.ej.
         # empleado.jefe_id → empleado.id) cuenta UNA vez para esa tabla, no dos.
-        for tid in {r.get("sourceTableId"), r.get("targetTableId")} - {None}:
+        for tid in {r.get("parentTableId"), r.get("childTableId")} - {None}:
             rel_count[tid] = rel_count.get(tid, 0) + 1
 
     rows: list[dict] = []
@@ -105,6 +115,7 @@ def table_rows(
             "columnCount": col_count.get(tid, 0),
             "relationshipCount": rel_count.get(tid, 0),
             "projects": proj_names,
+            "udpValues": _udp_named(t.get("udpValues"), udp_name_by_id),
             "description": t.get("description"),
         }
         if _matches(row, project_ids, filters):
@@ -116,13 +127,16 @@ def table_rows(
     return rows
 
 
-def column_rows(columns: list[dict], parent_domains: list[dict]) -> list[dict]:
+def column_rows(columns: list[dict], parent_domains: list[dict],
+                udp_defs: list[dict] | None = None) -> list[dict]:
     """Filas a nivel columna para el export por niveles. Puro.
 
     `parentDomain` = nombre del Parent Domain (vía `parentDomainId`), no el id,
-    para que el export sea legible. Ordenadas por (tableId, ordinal).
+    y `udpValues` = {nombre de la def: valor}, para que el export sea legible.
+    Ordenadas por (tableId, ordinal).
     """
     domain_name_by_id = {d["id"]: (d.get("name") or "") for d in parent_domains}
+    udp_name_by_id = {d["id"]: (d.get("name") or d["id"]) for d in (udp_defs or [])}
     rows: list[dict] = []
     for c in columns:
         did = c.get("parentDomainId")
@@ -137,6 +151,7 @@ def column_rows(columns: list[dict], parent_domains: list[dict]) -> list[dict]:
                 "isForeignKey": bool(c.get("isForeignKey")),
                 "isNullable": c.get("isNullable", True),
                 "isPartition": bool(c.get("isPartition")),
+                "udpValues": _udp_named(c.get("udpValues"), udp_name_by_id),
                 "description": c.get("description"),
                 "ordinal": c.get("ordinal", 0),
             }
@@ -151,11 +166,12 @@ async def list_table_rows(filters: dict | None = None, limit: int | None = None)
     Fast-path de la carga inicial: con `limit` y SIN filtros se traen sólo las
     primeras `limit` tablas (orden físico) + sus conteos, en vez de barrer las
     10k/400k (`report_inputs_page`)."""
+    udp_defs = await repository.udp_definitions()
     if limit is not None and limit >= 0 and not (filters or {}):
         data = await repository.report_inputs_page(limit)
         return table_rows(
             data["tables"], data["columnCounts"], data["relationships"],
-            data["subjectAreas"], data["projects"], filters, limit,
+            data["subjectAreas"], data["projects"], filters, limit, udp_defs,
         )
     data = await repository.report_inputs()
     return table_rows(
@@ -166,11 +182,55 @@ async def list_table_rows(filters: dict | None = None, limit: int | None = None)
         data["projects"],
         filters,
         limit,
+        udp_defs,
     )
+
+
+def view_rows(views: list[dict], table_name_by_id: dict[str, str]) -> list[dict]:
+    """Filas por vista para el export por niveles. Puro.
+
+    Fuentes resueltas a `schema.tabla` legible y `columns` = detalle columna a
+    columna del editor de vistas: alias de salida, tabla/columna de origen,
+    casteo (`castType`) y transformación (`expression`). Se incluyen además
+    `filter` (WHERE de la vista), `joinOverride` y el `sql` completo.
+    """
+    rows: list[dict] = []
+    for v in views:
+        src_ids = v.get("sourceTableIds") or ([v["tableId"]] if v.get("tableId") else [])
+        cols = []
+        for s in (v.get("sources") or []):
+            if not (s.get("column") or s.get("expression")):
+                continue
+            src_tid = s.get("tableId") or (src_ids[0] if src_ids else None)
+            cols.append({
+                "outputAlias": s.get("outputAlias") or s.get("column"),
+                "sourceTable": table_name_by_id.get(src_tid, src_tid) if src_tid else None,
+                "sourceColumn": s.get("column"),
+                "castType": s.get("castType"),
+                "expression": s.get("expression"),
+            })
+        rows.append({
+            "id": v["id"],
+            "schema": v.get("schema"),
+            "name": v.get("name"),
+            "sourceTableIds": src_ids,
+            "sourceTables": sorted({table_name_by_id.get(t, t) for t in src_ids}),
+            "filter": v.get("filter"),
+            "joinOverride": v.get("joinOverride"),
+            "showOnCanvas": bool(v.get("showOnCanvas")),
+            "description": v.get("description"),
+            "sql": v.get("sql") or None,
+            "columns": cols,
+        })
+    rows.sort(key=lambda r: ((r.get("schema") or ""), (r.get("name") or "").lower()))
+    return rows
 
 
 # Tope de seguridad del export de columnas SIN filtro (evita volcar 400k ~91MB).
 UNFILTERED_COLUMNS_CAP = 20000
+
+# Tope de seguridad del export de vistas SIN filtro (los docs llevan `sources`).
+UNFILTERED_VIEWS_CAP = 10000
 
 
 async def list_column_rows(table_id: str | None = None, table_ids: list[str] | None = None,
@@ -181,4 +241,23 @@ async def list_column_rows(table_id: str | None = None, table_ids: list[str] | N
         limit = limit or UNFILTERED_COLUMNS_CAP
     columns = await repository.columns(table_id, table_ids, limit)
     parent_domains = await repository.parent_domains()
-    return column_rows(columns, parent_domains)
+    udp_defs = await repository.udp_definitions()
+    return column_rows(columns, parent_domains, udp_defs)
+
+
+async def list_view_rows(table_ids: list[str] | None = None,
+                         schema: str | None = None) -> list[dict]:
+    """Vistas para el export por niveles; con `table_ids`, las derivadas de
+    esas tablas; con `schema`, las de ese esquema (Database Explorer, doc 18).
+    Resuelve los nombres `schema.tabla` de TODAS las fuentes."""
+    limit = None if (table_ids or schema) else UNFILTERED_VIEWS_CAP
+    views = await repository.views_for_tables(table_ids, limit, schema=schema)
+    src_ids = sorted({t for v in views for t in (v.get("sourceTableIds") or [])}
+                     | {v["tableId"] for v in views if v.get("tableId")})
+    names = await repository.table_names(src_ids)
+    name_by_id = {
+        tid: (f"{d.get('schema')}.{d.get('physicalName')}" if d.get("schema")
+              else (d.get("physicalName") or tid))
+        for tid, d in names.items()
+    }
+    return view_rows(views, name_by_id)

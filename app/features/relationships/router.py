@@ -28,6 +28,14 @@ async def impact(columnId: str = Query(...), changesetId: str | None = Query(def
     return ok(await service.column_impact(columnId, changesetId))
 
 
+@router.get("/links")
+async def links(tableId: str = Query(...), changesetId: str | None = Query(default=None)):
+    """Relaciones de una tabla en TODOS los canvases (la tabla es canónica),
+    con nombres resueltos y los canvases donde cada relación es visible —
+    alimenta Properties · Links (bloques del canvas actual + de otros)."""
+    return ok(await service.table_links(tableId, changesetId))
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create(body: RelationshipBody):
     return ok(await service.create(body))
@@ -37,12 +45,12 @@ async def create(body: RelationshipBody):
 async def update(rid: str, body: RelationshipBody):
     res = await service.update(rid, body)
     if res is None:
-        raise HTTPException(status_code=404, detail="Relación no encontrada.")
+        raise HTTPException(status_code=404, detail="Relationship not found.")
     return ok(res)
 
 
 @router.delete("/{rid}")
 async def delete(rid: str):
     if not await service.delete(rid):
-        raise HTTPException(status_code=404, detail="Relación no encontrada.")
+        raise HTTPException(status_code=404, detail="Relationship not found.")
     return ok({"id": rid})

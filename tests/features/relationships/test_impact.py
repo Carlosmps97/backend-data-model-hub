@@ -3,28 +3,28 @@ from __future__ import annotations
 
 from app.features.relationships.service import impact_rows
 
-REL = {"id": "r1", "sourceTableId": "tA", "sourceColumnId": "cA",
-       "targetTableId": "tB", "targetColumnId": "cB",
-       "sourceCardinality": "one", "targetCardinality": "many", "identifying": False}
+REL = {"id": "r1", "parentTableId": "tA", "childTableId": "tB",
+       "pairs": [{"parentColumnId": "cA", "childColumnId": "cB", "roleName": None}],
+       "parentCardinality": "one", "childCardinality": "many", "identifying": False}
 CANVASES = [
     {"id": "sa1", "name": "Ventas", "tableIds": ["tA", "tB"]},
     {"id": "sa2", "name": "Riesgos", "tableIds": ["tA"]},  # NO tiene la otra tabla
 ]
 
 
-def test_lado_source_apunta_al_extremo_target():
+def test_lado_parent_apunta_al_extremo_child():
     rows = impact_rows("cA", [REL], {"tB": "CUENTA"}, {"cB": "ID_CTA"}, CANVASES)
     assert rows == [{
         "relId": "r1", "otherTableId": "tB", "otherTableName": "CUENTA",
-        "otherColumnId": "cB", "otherColumnName": "ID_CTA", "thisSide": "source",
-        "sourceCardinality": "one", "targetCardinality": "many",
+        "otherColumnId": "cB", "otherColumnName": "ID_CTA", "thisSide": "parent",
+        "parentCardinality": "one", "childCardinality": "many", "identifying": False,
         "canvases": [{"id": "sa1", "name": "Ventas"}],  # sa2 no contiene AMBAS tablas
     }]
 
 
-def test_lado_target_apunta_al_extremo_source():
+def test_lado_child_apunta_al_extremo_parent():
     rows = impact_rows("cB", [REL], {"tA": "CLIENTE"}, {"cA": "ID_CLI"}, [])
-    assert rows[0]["thisSide"] == "target"
+    assert rows[0]["thisSide"] == "child"
     assert rows[0]["otherTableName"] == "CLIENTE"
     assert rows[0]["otherColumnName"] == "ID_CLI"
     assert rows[0]["canvases"] == []
@@ -34,6 +34,16 @@ def test_nombre_desconocido_cae_al_id():
     rows = impact_rows("cA", [REL], {}, {}, [])
     assert rows[0]["otherTableName"] == "tB"
     assert rows[0]["otherColumnName"] == "cB"
+
+
+def test_par_compuesto_junta_columnas_del_otro_extremo():
+    rel = {**REL, "pairs": [
+        {"parentColumnId": "cA", "childColumnId": "cB"},
+        {"parentColumnId": "cA", "childColumnId": "cB2"},
+    ]}
+    rows = impact_rows("cA", [rel], {}, {"cB": "ID_CTA", "cB2": "ID_MON"}, [])
+    assert len(rows) == 1  # una fila POR RELACIÓN, no por par
+    assert rows[0]["otherColumnName"] == "ID_CTA, ID_MON"
 
 
 # ── column_impact (async): publicado + overlay del changeset ───────────────

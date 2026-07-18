@@ -300,11 +300,13 @@ async def main() -> None:
             if a != b:
                 links.add((a, b))
         for (a, b) in links:
-            src, tgt = ids[a], ids[b]
-            await rb.add({"_id": f"str-{ci}-{a}-{b}", "sourceTableId": src,
-                          "sourceColumnId": f"{src}.c1", "targetTableId": tgt,
-                          "targetColumnId": f"{tgt}.c0", "sourceCardinality": "many",
-                          "targetCardinality": "one", "identifying": False,
+            child, parent = ids[a], ids[b]
+            await rb.add({"_id": f"str-{ci}-{a}-{b}", "parentTableId": parent,
+                          "childTableId": child,
+                          "pairs": [{"parentColumnId": f"{parent}.c0",
+                                     "childColumnId": f"{child}.c1", "roleName": None}],
+                          "parentCardinality": "one", "childCardinality": "many",
+                          "identifying": False,
                           "flgactive": True, "createdAt": _NOW, "updatedAt": _NOW})
     await ca.close()
     await rb.close()

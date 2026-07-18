@@ -54,7 +54,7 @@ def count_for_project(
     rel_count = sum(
         1
         for r in relationships
-        if r.get("sourceTableId") in table_ids and r.get("targetTableId") in table_ids
+        if r.get("parentTableId") in table_ids and r.get("childTableId") in table_ids
     )
     return {
         "tables": len(table_ids),

@@ -14,12 +14,12 @@ from .schemas import NamingConfigBody
 
 def _validate_scope(scope: str) -> None:
     if scope not in SCOPES:
-        raise ValueError(f"scope debe ser uno de {SCOPES}, no {scope!r}")
+        raise ValueError(f"scope must be one of {SCOPES}, not {scope!r}")
 
 
 def _validate_case(case: str) -> None:
     if case not in _VALID_CASES:
-        raise ValueError(f"case debe ser uno de {_VALID_CASES}, no {case!r}")
+        raise ValueError(f"case must be one of {_VALID_CASES}, not {case!r}")
 
 
 async def get_naming() -> dict[str, dict]:

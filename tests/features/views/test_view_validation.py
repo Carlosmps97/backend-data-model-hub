@@ -33,7 +33,7 @@ def test_create_sin_fuentes_409(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(views_router.create(ViewBody.model_validate({"name": "v"})))
     assert exc.value.status_code == 409
-    assert "fuente" in exc.value.detail
+    assert "source table" in exc.value.detail
     guard.assert_not_awaited()
 
 

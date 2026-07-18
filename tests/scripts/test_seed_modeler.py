@@ -106,15 +106,21 @@ def test_relationship_endpoints_exist(data):
     columns = _column_ids(data)
     assert data["relationships"], "sin relaciones"
     for r in data["relationships"]:
-        assert r["sourceTableId"] in tables
-        assert r["targetTableId"] in tables
-        assert r["sourceColumnId"] in columns, f"{r['_id']} sourceColumn inexistente"
-        assert r["targetColumnId"] in columns, f"{r['_id']} targetColumn inexistente"
-        # la columna source pertenece a la tabla source
-        assert any(
-            c["_id"] == r["sourceColumnId"] and c["tableId"] == r["sourceTableId"]
-            for c in data["canonical_columns"]
-        )
+        assert r["parentTableId"] in tables
+        assert r["childTableId"] in tables
+        assert r["pairs"], f"{r['_id']} sin pares"
+        for p in r["pairs"]:
+            assert p["parentColumnId"] in columns, f"{r['_id']} parentColumn inexistente"
+            assert p["childColumnId"] in columns, f"{r['_id']} childColumn inexistente"
+            # cada columna del par pertenece a su tabla
+            assert any(
+                c["_id"] == p["parentColumnId"] and c["tableId"] == r["parentTableId"]
+                for c in data["canonical_columns"]
+            )
+            assert any(
+                c["_id"] == p["childColumnId"] and c["tableId"] == r["childTableId"]
+                for c in data["canonical_columns"]
+            )
 
 
 def test_canvas_tableids_and_layout_exist(data):

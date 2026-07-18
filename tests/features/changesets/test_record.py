@@ -27,8 +27,10 @@ def test_delete_no_valida_payload():
 
 
 def test_relationship_requiere_extremos():
+    # Payload legacy incompleto: el validator lo normaliza a v2 y falla por los
+    # campos que siguen faltando (parentTableId/pares) — nombra el campo v2.
     err = payload_error("relationships", "r1", "upsert", {"sourceTableId": "a"})
-    assert err is not None and "targetTableId" in err
+    assert err is not None and "parentTableId" in err
 
 
 def test_tabla_acepta_alias_schema():

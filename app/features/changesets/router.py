@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.api.envelope import ok
 from app.core.audit import audit
 from app.core.identity import Principal, current_principal
+from app.features.auth import repository as auth_repo
 from app.features.auth.deps import require_permission
 
 from . import service
@@ -23,13 +24,14 @@ from . import service
 _can_edit = require_permission("model.edit")
 _can_decide = require_permission("review.decide")
 from .repository import VERSIONED
-from .validation import DuplicateEntityError, InvalidPayloadError
+from .validation import DuplicateEntityError, InvalidPayloadError, SchemaInUseError
 from .schemas import (
     ChangeBody,
     ChangesetCreate,
     CommentBody,
     ReviewBody,
     ReviewDecisionBody,
+    SchemaRenameBody,
     SnapshotBody,
     SubmitBody,
 )
@@ -67,7 +69,7 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
     if body.collection not in VERSIONED:
         # Una colección arbitraria acabaría APLICADA a Mongo en el publish
         # (apply_changes escribe en db[collection] literal): whitelist dura.
-        raise HTTPException(status_code=422, detail=f"Colección no versionada: {body.collection!r}.")
+        raise HTTPException(status_code=422, detail=f"Collection not under versioning: {body.collection!r}.")
     try:
         res = await service.add_change(cs_id, user["username"], body.collection, body.entityId, body.op, body.payload)
     except DuplicateEntityError as exc:
@@ -77,15 +79,15 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
     except InvalidPayloadError as exc:
         # El upsert terminaría aplicado tal cual a la colección publicada:
         # payload que no valida contra el modelo NO entra al changeset.
-        raise HTTPException(status_code=422, detail=f"Cambio inválido — {exc}") from exc
+        raise HTTPException(status_code=422, detail=f"Invalid change — {exc}") from exc
     if res == "forbidden":
-        raise HTTPException(status_code=403, detail="Sólo el dueño de la versión puede editar su working copy.")
+        raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
     if res == "locked":
         # Editar una versión que ya salió de draft NO es silencioso: 409 explícito.
         raise HTTPException(
             status_code=409,
-            detail="La versión ya no está en borrador (fue enviada a revisión o cerrada): "
-                   "no admite más cambios. Abrí una nueva versión para editar.",
+            detail="The version is no longer in draft (it was sent to review or closed): "
+                   "it doesn't accept more changes. Open a new version to edit.",
         )
     return ok(res)
 
@@ -103,7 +105,7 @@ async def effective(
     un slice — obligatorio en colecciones grandes (canonical_columns).
     `q`+`limit`: búsqueda server-side por nombre (modales de catálogo)."""
     if collection not in VERSIONED:
-        raise HTTPException(status_code=422, detail=f"Colección no versionada: {collection!r}.")
+        raise HTTPException(status_code=422, detail=f"Collection not under versioning: {collection!r}.")
     id_list = [s for s in (ids.split(",") if ids else []) if s] or None
     return ok(await service.effective(cs_id, collection, table_id=tableId, ids=id_list, q=q, limit=limit))
 
@@ -125,16 +127,30 @@ async def submit(cs_id: str, body: SubmitBody | None = None,
     if not body.reviewers:
         # Sin revisores el request queda 'submitted' pero inactivable (la
         # unanimidad de [] nunca se cumple): exigir al menos uno.
-        raise HTTPException(status_code=400, detail="Asigná al menos un revisor para enviar a revisión.")
+        raise HTTPException(status_code=400, detail="Assign at least one reviewer to send to review.")
+    # Gate de asignación: un revisor cuyo rol NO tiene `review.decide` jamás
+    # podría votar → el request quedaría trabado (unanimidad imposible) y ese
+    # revisor vería un 403 confuso al intentar aprobar. Se corta acá con 400.
+    users_by_id = {u["id"]: u for u in await auth_repo.list_users()}
+    perms_by_role = {r["id"]: (r.get("permissions") or {}) for r in await auth_repo.list_roles()}
+    bad = [r for r in body.reviewers
+           if not perms_by_role.get((users_by_id.get(r) or {}).get("role") or "", {}).get("review.decide")]
+    if bad:
+        names = ", ".join((users_by_id.get(b) or {}).get("name") or b for b in bad)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reviewer(s) without approval permission (review.decide): {names}. "
+                   "Assign users with the reviewer or administrator role.",
+        )
     res = await service.submit(cs_id, user["username"], body.title, body.description,
                                body.reviewers, body.projectIds)
     if res == "forbidden":
-        raise HTTPException(status_code=403, detail="Sólo el dueño de la versión puede enviarla a revisión.")
+        raise HTTPException(status_code=403, detail="Only the version owner can send it to review.")
     if res is None:
         raise HTTPException(
             status_code=409,
-            detail="La versión no está en borrador: no se puede enviar a revisión "
-                   "(si ya está en revisión, retirala primero con Withdraw).",
+            detail="The version is not in draft: it can't be sent to review "
+                   "(if it's already in review, withdraw it first).",
         )
     await audit(user["username"], "changeset.submit", target=cs_id, target_type="changeset",
                 meta={"reviewers": body.reviewers})
@@ -152,22 +168,29 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
         # El claim ya se revirtió (producción intacta); el request sigue en revisión.
         raise HTTPException(
             status_code=409,
-            detail=f"No se pudo publicar: {exc}. El owner debe retirar la versión (Withdraw), corregir y re-enviar.",
+            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
+        ) from exc
+    except SchemaInUseError as exc:
+        # Delete de esquema con tablas/vistas efectivas (doc 18): el claim ya
+        # se revirtió, producción intacta; el request sigue en revisión.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
         ) from exc
     except InvalidPayloadError as exc:
         # Gate autoritativo del apply: el claim se revirtió, producción intacta.
         raise HTTPException(
             status_code=422,
-            detail=f"No se pudo publicar: {exc}. El owner debe retirar la versión (Withdraw), corregir y re-enviar.",
+            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
         ) from exc
     if res == "forbidden":
-        raise HTTPException(status_code=403, detail="No estás asignado como revisor de este request.")
+        raise HTTPException(status_code=403, detail="You are not assigned as a reviewer of this request.")
     if res is None:
         # ok(None) con 200 era un éxito FALSO (toast "approved" sobre un request
         # retirado). La carrera con withdraw ahora es un flujo de primera clase.
         raise HTTPException(
             status_code=409,
-            detail="El request ya no está en revisión (fue retirado o ya decidido): recargá la lista.",
+            detail="The request is no longer in review (it was withdrawn or already decided): reload the list.",
         )
     await audit(actor, "changeset.decide", target=cs_id, target_type="changeset",
                 meta={"decision": decision, "result": res.get("status") if isinstance(res, dict) else None})
@@ -187,9 +210,9 @@ async def withdraw(cs_id: str, user: dict = Depends(_can_edit)):
     Sólo el owner; las decisiones registradas se invalidan."""
     res = await service.withdraw(cs_id, user["username"])
     if res == "forbidden":
-        raise HTTPException(status_code=403, detail="Sólo quien envió el request puede retirarlo.")
+        raise HTTPException(status_code=403, detail="Only whoever submitted the request can withdraw it.")
     if res is None:
-        raise HTTPException(status_code=409, detail="El request ya no está en revisión (quizá ya fue decidido).")
+        raise HTTPException(status_code=409, detail="The request is no longer in review (it may have already been decided).")
     await audit(user["username"], "changeset.withdraw", target=cs_id, target_type="changeset")
     return ok(res)
 
@@ -200,11 +223,101 @@ async def reopen(cs_id: str, user: dict = Depends(_can_edit)):
     Sólo el owner; el reject nunca elimina la versión."""
     res = await service.reopen(cs_id, user["username"])
     if res == "forbidden":
-        raise HTTPException(status_code=403, detail="Sólo el dueño de la versión puede reabrirla.")
+        raise HTTPException(status_code=403, detail="Only the version owner can reopen it.")
     if res is None:
-        raise HTTPException(status_code=409, detail="La versión no está rechazada: no hay nada que reabrir.")
+        raise HTTPException(status_code=409, detail="The version is not rejected: there is nothing to reopen.")
     await audit(user["username"], "changeset.reopen", target=cs_id, target_type="changeset")
     return ok(res)
+
+
+@router.post("/{cs_id}/rollback")
+async def rollback(cs_id: str, user: dict = Depends(_can_edit)):
+    """Rollback de la ÚLTIMA versión publicada: crea un DRAFT con los cambios
+    inversos (restaura las imágenes previas capturadas en su publish). El
+    draft pasa por el flujo normal — submit → review → approve — así el
+    rollback también se revisa, se audita y se re-valida antes de tocar
+    producción (mismo estándar que Data Standards, pero con governance)."""
+    res = await service.rollback(cs_id, user["username"])
+    if res is None:
+        raise HTTPException(status_code=404, detail="Version not found.")
+    if res == "not-applied":
+        raise HTTPException(status_code=409, detail="Only a PUBLISHED version can be rolled back.")
+    if res == "not-latest":
+        raise HTTPException(status_code=409,
+                            detail="Only the LATEST published version can be rolled back (undo in order).")
+    if res == "no-before":
+        raise HTTPException(status_code=409,
+                            detail="This version was published before rollback existed "
+                                   "(its before-images were not captured).")
+    if res == "empty":
+        raise HTTPException(status_code=409, detail="The version has no changes to roll back.")
+    await audit(user["username"], "changeset.rollback_draft", target=cs_id, target_type="changeset",
+                meta={"draft": res["id"]})
+    return ok(res)
+
+
+# ── Entidad `schemas` dentro del draft (doc 18): rename con propagación y
+#    delete con guard de uso — server-side (el effective de tablas es enorme
+#    para el cliente y ambos deben ser atómicos respecto del draft). ──
+
+
+def _schema_change_result(res, cs_id: str):
+    """Mapea la semántica de add_change de los endpoints de esquema a HTTP."""
+    if res == "forbidden":
+        raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
+    if res == "locked":
+        raise HTTPException(
+            status_code=409,
+            detail="The version is no longer in draft (it was sent to review or closed): "
+                   "it doesn't accept more changes.",
+        )
+    if res is None:
+        raise HTTPException(status_code=404, detail="Version or schema not found.")
+    return res
+
+
+@router.get("/{cs_id}/schemas/{schema_id}/impact")
+async def schema_impact(cs_id: str, schema_id: str):
+    """Impacto EFECTIVO de tocar el esquema: {name, tables, views, canvases}.
+    Lo consume el gestor de esquemas ANTES de guardar un rename/delete."""
+    res = await service.schema_impact(cs_id, schema_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Version or schema not found.")
+    return ok(res)
+
+
+@router.post("/{cs_id}/schemas/{schema_id}/rename")
+async def rename_schema(cs_id: str, schema_id: str, body: SchemaRenameBody,
+                        user: dict = Depends(_can_edit)):
+    """Renombra un esquema DENTRO del draft: registra el schema + un upsert por
+    cada tabla/vista efectiva que lo usa (docs completos, invariante overlay).
+    Devuelve {tables, views} con lo propagado."""
+    try:
+        res = await service.rename_schema(cs_id, user["username"], schema_id, body.newName)
+    except InvalidPayloadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateEntityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    counts = _schema_change_result(res, cs_id)
+    await audit(user["username"], "changeset.schema_rename", target=cs_id, target_type="changeset",
+                meta={"schemaId": schema_id, "newName": body.newName, **counts})
+    return ok(counts)
+
+
+@router.post("/{cs_id}/schemas/{schema_id}/delete")
+async def delete_schema_in_cs(cs_id: str, schema_id: str, user: dict = Depends(_can_edit)):
+    """Registra el delete del esquema en el draft, sólo si su estado efectivo
+    (publicado + este draft) no tiene tablas ni vistas."""
+    res = await service.delete_schema_in_changeset(cs_id, user["username"], schema_id)
+    if isinstance(res, tuple) and res[0] == "in-use":
+        raise HTTPException(
+            status_code=409,
+            detail=f"The schema still has {res[1]} table(s)/view(s): it can't be deleted.",
+        )
+    _schema_change_result(res, cs_id)
+    await audit(user["username"], "changeset.schema_delete", target=cs_id, target_type="changeset",
+                meta={"schemaId": schema_id})
+    return ok({"deleted": True})
 
 
 @router.post("/{cs_id}/comments")

@@ -36,9 +36,12 @@ async def list_for_tables(table_ids: list[str]) -> list[dict]:
     if not table_ids:
         return []
     db = await get_db()
+    # Campos legacy (source/target) en el $or: cubre docs pre-backfill; el
+    # model_validate de abajo los devuelve ya normalizados a v2.
     docs = await db[COLL].find({
         "flgactive": {"$ne": False},
-        "$or": [{"sourceTableId": {"$in": table_ids}}, {"targetTableId": {"$in": table_ids}}],
+        "$or": [{"parentTableId": {"$in": table_ids}}, {"childTableId": {"$in": table_ids}},
+                {"sourceTableId": {"$in": table_ids}}, {"targetTableId": {"$in": table_ids}}],
     }).to_list(None)
     return [RelationshipDoc.model_validate(_to(d)).model_dump() for d in docs]
 
@@ -68,14 +71,16 @@ async def delete(rid: str) -> bool:
 
 
 async def list_for_column(column_id: str) -> list[dict]:
-    """Relaciones ACTIVAS donde la columna es extremo (origen o destino) —
-    spec 10 §8. Usa los índices sourceColumnId/targetColumnId."""
+    """Relaciones ACTIVAS donde la columna participa en algún PAR (padre o
+    hijo) — spec 10 §8. Usa los índices pairs.parentColumnId/pairs.childColumnId
+    (multikey); los campos legacy cubren docs pre-backfill."""
     if not column_id:
         return []
     db = await get_db()
     docs = await db[COLL].find({
         "flgactive": {"$ne": False},
-        "$or": [{"sourceColumnId": column_id}, {"targetColumnId": column_id}],
+        "$or": [{"pairs.parentColumnId": column_id}, {"pairs.childColumnId": column_id},
+                {"sourceColumnId": column_id}, {"targetColumnId": column_id}],
     }).to_list(None)
     return [RelationshipDoc.model_validate(_to(d)).model_dump() for d in docs]
 

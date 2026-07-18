@@ -65,11 +65,11 @@ def current_principal(request: Request) -> Principal:
             return _principal_from_claims(claims)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sesión inválida o expirada. Iniciá sesión de nuevo.",
+            detail="Invalid or expired session. Sign in again.",
         )
     if settings.REQUIRE_AUTH:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Autenticación requerida. Iniciá sesión.",
+            detail="Authentication required. Sign in.",
         )
     return get_identity_provider().principal_from_request(request)

@@ -47,7 +47,7 @@ async def update_user(username: str, body: UserUpdate, user: dict = Depends(_adm
     except AdminGuardError as exc:
         raise _guard(exc) from exc
     if res is None:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+        raise HTTPException(status_code=404, detail="User not found.")
     return ok(res)
 
 
@@ -58,7 +58,7 @@ async def delete_user(username: str, user: dict = Depends(_admin)):
     except AdminGuardError as exc:
         raise _guard(exc) from exc
     if not deleted:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+        raise HTTPException(status_code=404, detail="User not found.")
     return ok({"id": username})
 
 
@@ -85,7 +85,7 @@ async def delete_role(key: str, user: dict = Depends(_admin)):
     except AdminGuardError as exc:
         raise _guard(exc) from exc
     if not deleted:
-        raise HTTPException(status_code=404, detail="Rol no encontrado.")
+        raise HTTPException(status_code=404, detail="Role not found.")
     return ok({"id": key})
 
 

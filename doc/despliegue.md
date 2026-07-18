@@ -315,8 +315,8 @@ Tabla completa de índices por colección (tal como están en el código):
 | `projects` | `flgactive` | Filtrado de activos. |
 | `subject_areas` | `projectId` | Áreas por proyecto. |
 | `relationships` | `flgactive` | Filtrado de activos. |
-| `relationships` | `sourceTableId` | El canvas resuelve relaciones por extremo origen. |
-| `relationships` | `targetTableId` | El canvas resuelve relaciones por extremo destino. |
+| `relationships` | `parentTableId` | El canvas resuelve relaciones por extremo padre (v2, doc 19). |
+| `relationships` | `childTableId` | El canvas resuelve relaciones por extremo hijo. |
 | `views` | `flgactive` | Filtrado de activos. |
 | `views` | `tableId` | Listar vistas de una tabla. |
 | `folders` | `projectId` | Jerarquía del Model Explorer. |

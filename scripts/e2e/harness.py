@@ -105,9 +105,9 @@ class Client:
                        "isPrimaryKey": pk, "ordinal": ordinal})
         return _track("canonical_columns", r.data["id"]) if r.status in (200, 201) else _fail("add_column", r)
 
-    def create_relationship(self, s_tid, s_cid, t_tid, t_cid):
-        r = self.post("/api/relationships", {"sourceTableId": s_tid, "sourceColumnId": s_cid,
-                                             "targetTableId": t_tid, "targetColumnId": t_cid})
+    def create_relationship(self, p_tid, p_cid, c_tid, c_cid):
+        r = self.post("/api/relationships", {"parentTableId": p_tid, "childTableId": c_tid,
+                                             "pairs": [{"parentColumnId": p_cid, "childColumnId": c_cid}]})
         return _track("relationships", r.data["id"]) if r.status in (200, 201) else _fail("create_relationship", r)
 
     def create_view(self, name, sql, table_id=None):
