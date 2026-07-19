@@ -38,10 +38,10 @@ def main() -> int:
     args = ap.parse_args()
 
     from dotenv import load_dotenv
-    from pymongo import MongoClient
+
+    from app.core.db.sync import get_sync_db
     load_dotenv()
-    db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-        os.environ.get("COSMOS_DATABASE", "db_modeler")]
+    db = get_sync_db()
 
     existing = set(db.list_collection_names())
     assert "column_catalog" not in WIPE, "column_catalog NUNCA se borra"

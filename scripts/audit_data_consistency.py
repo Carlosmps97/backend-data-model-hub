@@ -41,12 +41,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateOne
+from pymongo import UpdateOne
+
+from app.core.db.sync import get_sync_db
 
 load_dotenv()
 FIX = "--fix" in sys.argv
-db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-    os.environ.get("COSMOS_DATABASE", "db_modeler")]
+db = get_sync_db()
 
 ACTIVE = {"flgactive": {"$ne": False}}
 now = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731

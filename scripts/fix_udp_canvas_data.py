@@ -26,12 +26,13 @@ import sys
 
 import httpx
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateOne
+from pymongo import UpdateOne
+
+from app.core.db.sync import get_sync_db
 
 load_dotenv()
 BASE = os.getenv("E2E_BASE", "http://localhost:8000")
-db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-    os.environ.get("COSMOS_DATABASE", "db_modeler")]
+db = get_sync_db()
 ACTIVE = {"flgactive": {"$ne": False}}
 # El tag puede ir en medio ("UDP E2E_xxx Criticidad") — search, no match.
 E2E_RX = re.compile(r"E2E_[0-9a-f]{8}")

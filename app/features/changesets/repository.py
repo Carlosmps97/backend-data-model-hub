@@ -248,14 +248,26 @@ async def store_before_images(cs_id: str, befores: dict[tuple[str, str], dict | 
 
 
 async def latest_applied_id() -> str | None:
-    """Id del changeset APLICADO más reciente (máximo `appliedAt`) — la única
-    versión directamente reversible (deshacer en orden)."""
+    """Id del changeset APLICADO más reciente (máximo `appliedAt`)."""
     db = await get_db()
     docs = await db[COLL].find({"status": "approved", "appliedAt": {"$ne": None}},
                                {"appliedAt": 1}).to_list(None)
     if not docs:
         return None
     return str(max(docs, key=lambda d: d.get("appliedAt") or "")["_id"])
+
+
+async def applied_after(applied_at: str) -> list[dict]:
+    """Changesets publicados DESPUÉS de `applied_at` — los que un rollback A esa
+    versión debe deshacer — del MÁS RECIENTE al más viejo. Cosmos RU no ordena
+    sin índice ⇒ se ordena en Python (son pocas versiones)."""
+    db = await get_db()
+    docs = await db[COLL].find(
+        {"status": "approved", "appliedAt": {"$gt": applied_at}},
+        {"appliedAt": 1, "versionLabel": 1}).to_list(None)
+    docs.sort(key=lambda d: d.get("appliedAt") or "", reverse=True)
+    return [{"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
+             "versionLabel": d.get("versionLabel")} for d in docs]
 
 
 async def published(collection: str, flt: dict | None = None, limit: int | None = None,

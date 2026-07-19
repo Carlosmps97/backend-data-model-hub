@@ -36,6 +36,8 @@ def rec(cs, headers, collection, eid, payload=None, op="upsert"):
 
 
 admin, rev = login("admin", "admin"), login("T1238", "T1238")
+# Doc 27: para deshacer lo publicado se rollbackea la versión PREVIA.
+prev_ver = C.get(f"{B}/api/versions/published", headers=admin).json()["data"]["id"]
 tag = uuid.uuid4().hex[:6]
 
 # 1. Draft + 2 tablas con 2 columnas cada una (padre con PK compuesta)
@@ -113,7 +115,7 @@ check("impact por columna del par: thisSide=parent y otherColumn=hija",
       str(row)[:200])
 
 # 7. Rollback → desaparece de producción
-r = C.post(f"{B}/api/changesets/{cs}/rollback", headers=admin)
+r = C.post(f"{B}/api/changesets/{prev_ver}/rollback", headers=admin)
 check("rollback crea draft inverso", r.status_code == 200, r.text[:200])
 if r.status_code == 200:
     inv = r.json()["data"]["id"]

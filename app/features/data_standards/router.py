@@ -36,7 +36,9 @@ async def apply(body: ApplyBody, user: dict = Depends(require_permission("standa
 
 
 @router.post("/rollback")
-async def rollback(body: RollbackBody, user: dict = Depends(require_permission("standards.edit"))):
+async def rollback(body: RollbackBody, user: dict = Depends(require_permission("rollback"))):
+    """Rollback de Data Standards a cualquier versión (por `targetSeq`). Requiere
+    el permiso `rollback` (antes `standards.edit`)."""
     version = await service.rollback(user["username"], body.targetSeq)
     if version is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,

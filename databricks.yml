@@ -10,8 +10,13 @@ resources:
     backend:                      # resource key (lo usa `databricks bundle run backend`)
       name: bknd-data-model-hub   # nombre real de la app en el workspace
       source_code_path: .         # el código de la app está en la raíz del repo
-      description: "Data Model Hub — backend de plataforma (FastAPI · Cosmos DB)."
+      description: "Data Model Hub — backend de plataforma (FastAPI · Lakebase Postgres, fallback Cosmos)."
       resources:
+        # NOTA Lakebase (doc 28): la BD principal NO necesita recurso aquí —
+        # la app se autentica con su propio service principal (OAuth M2M
+        # ambiente) y el rol PG del SP se crea one-time en el proyecto
+        # `dmh-proj` (doc 28 §11). Los recursos de abajo quedan para el
+        # fallback Cosmos y la firma de sesión.
         # Secreto con la connection string de Cosmos. Scope respaldado por Key
         # Vault (kv-scope-datacraft); el secreto vive en KV como `conn-str-cosmos`.
         # Da READ al service principal de la app y se referencia con valueFrom.

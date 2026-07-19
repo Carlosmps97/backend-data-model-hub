@@ -18,6 +18,7 @@ PERMISSIONS: tuple[str, ...] = (
     "model.edit",       # Crear / editar tablas (working copy)
     "review.decide",    # Aprobar / rechazar solicitudes
     "publish",          # Publicar a producción
+    "rollback",         # Revertir a una versión publicada (Model + Data Standards)
     "export",           # Exportar DDL / metadata
     "standards.edit",   # Editar Data Standards (UDP / Parent Domains)
     "admin.manage",     # Administrar usuarios y permisos

@@ -13,8 +13,13 @@ jobs:
   deploy:
     name: Deploy backend
     runs-on: ubuntu-latest
-    # Auth por PAT: define DATABRICKS_HOST y DATABRICKS_TOKEN como
-    # GitHub Actions secrets (Settings → Secrets and variables → Actions).
+    # Auth del CLI por PAT — en GitHub (Settings → Secrets and variables →
+    # Actions) deben existir:
+    #   · variable DATABRICKS_HOST  = https://adb-3871428306507680.0.azuredatabricks.net
+    #   · secret   DATABRICKS_TOKEN = PAT del workspace
+    # La migración a Lakebase (doc 28) NO agrega secrets aquí: en runtime la
+    # app se autentica a la BD con su propio service principal (ver app.yaml);
+    # el PAT solo lo usa este workflow para `databricks bundle ...`.
     env:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}

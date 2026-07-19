@@ -40,9 +40,12 @@ Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo
 entornos de prueba).
 
 **Requisitos:** el `.venv` del backend (el parseo usa solo stdlib; `migrate
---apply` y `arrange_all` usan la conexión del `.env`: `COSMOS_CONNECTION_STRING`
-/ `COSMOS_DATABASE`). `arrange_all` necesita además **node** y el elkjs del
-front (o `ELKJS_PATH`). Todos se ejecutan **desde la raíz del backend**.
+--apply`, `arrange_all` y los backfills usan la conexión del `.env` según
+`DB_BACKEND` — hoy `lakebase` = Databricks Lakebase Postgres vía
+`app/core/db/sync.get_sync_db()`; con `cosmos` vuelven a Cosmos, doc 28).
+`arrange_all` necesita además **node** y el elkjs del front (o `ELKJS_PATH`).
+Todos se ejecutan **desde la raíz del backend**. Los comandos y flags de esta
+guía NO cambiaron con la migración de BD.
 
 ---
 

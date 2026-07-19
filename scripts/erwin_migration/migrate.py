@@ -468,10 +468,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         from dotenv import load_dotenv
-        from pymongo import MongoClient
+
+        from app.core.db.sync import get_sync_db
         load_dotenv()
-        db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-            os.environ.get("COSMOS_DATABASE", "db_modeler")]
+        db = get_sync_db()
         mig = Migrator(db, m, args.project, args.only_sa)
         mig.run()
         print("\nRESULTADO:")

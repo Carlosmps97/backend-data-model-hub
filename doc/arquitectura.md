@@ -2,6 +2,18 @@
 
 Documento de arquitectura del servicio de plataforma del Data Model Hub. Describe la visión, las capas, el stack, el árbol de carpetas, el ciclo de vida de un request, los flujos de negocio clave, las consideraciones de base de datos y el despliegue. Está escrito a partir del código real de `app/main.py`, `app/core/` y `app/features/`.
 
+> **ACTUALIZACIÓN 2026-07-19 (doc 28 de `plan-implementacion/`):** la base de
+> datos productiva es **Databricks Lakebase Postgres** (proyecto `dmh-proj`,
+> branch `production`, base `databricks_postgres`, schema PG `dmh`). Donde este
+> documento dice "Cosmos/Motor", el acceso pasa hoy por el seam
+> `app/core/db/client.py` con `DB_BACKEND=lakebase|cosmos`: el adaptador
+> `app/core/db/lakebase/` emula la superficie Motor sobre tablas
+> `(id text PK, doc jsonb)` — una por colección — con credenciales OAuth
+> rotativas del SDK de Databricks. Los repositorios NO cambiaron: el contrato
+> de documentos, filtros y pipelines descrito acá sigue siendo el vigente.
+> Cosmos queda como legacy/rollback (`DB_BACKEND=cosmos`). Detalle completo:
+> `plan-implementacion/28-MIGRACION-LAKEBASE.md`.
+
 ---
 
 ## 1. Visión y responsabilidades

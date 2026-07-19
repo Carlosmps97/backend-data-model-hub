@@ -116,9 +116,8 @@ def main() -> int:
     args = ap.parse_args()
 
     load_dotenv()
-    from pymongo import MongoClient
-    db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-        os.environ.get("COSMOS_DATABASE", "db_modeler")]
+    from app.core.db.sync import get_sync_db
+    db = get_sync_db()
 
     tag = "APPLY" if args.apply else "DRY-RUN"
     tot = {"rel_upd": 0, "rel_missing": 0, "col_upd": 0, "col_missing": 0,

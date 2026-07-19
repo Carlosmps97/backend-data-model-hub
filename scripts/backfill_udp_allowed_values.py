@@ -50,11 +50,10 @@ def main() -> int:
     xmls = args.xml or [DEFAULT_XML]
 
     load_dotenv()
-    from pymongo import MongoClient
+    from app.core.db.sync import get_sync_db
     from scripts.erwin_migration import policies as pol
     from scripts.erwin_migration.erwin_parser import parse
-    db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-        os.environ.get("COSMOS_DATABASE", "db_modeler")]
+    db = get_sync_db()
 
     tag = "APPLY" if args.apply else "DRY-RUN"
     print(f"[{tag}] backfill de valores permitidos de UDP (estándares completos)")

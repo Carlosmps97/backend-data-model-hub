@@ -11,6 +11,24 @@ env:
   # Orígenes CORS = URL de la app frontend.
   - name: CORS_ORIGINS
     value: 'https://frnt-data-model-hub-3871428306507680.0.azure.databricksapps.com'
+  # ── BD: Databricks Lakebase Postgres (doc 28) ───────────────────────────
+  # Auth SIN secretos: Apps inyecta DATABRICKS_HOST + DATABRICKS_CLIENT_ID/
+  # SECRET del service principal de la app; con eso el backend acuña tokens
+  # OAuth de BD (~1 h) por conexión nueva del pool. PGUSER tampoco se setea:
+  # su default es DATABRICKS_CLIENT_ID (= nombre del rol PG del SP).
+  # Requisito ONE-TIME antes del primer deploy: crear el rol PG del SP en el
+  # proyecto Lakebase y sus GRANTs sobre el schema `dmh` (doc 28 §11).
+  - name: DB_BACKEND
+    value: 'lakebase'
+  - name: LAKEBASE_ENDPOINT
+    value: 'projects/dmh-proj/branches/production/endpoints/primary'
+  - name: PGHOST
+    value: 'ep-orange-sunset-e1gjz1qx.database.eastus2.azuredatabricks.net'
+  - name: PGDATABASE
+    value: 'databricks_postgres'
+  - name: LAKEBASE_PGSCHEMA
+    value: 'dmh'
+  # ── Cosmos (fallback limpio): rollback = DB_BACKEND 'cosmos' + redeploy ──
   - name: COSMOS_DATABASE
     value: 'db_modeler'
   # Connection string de Cosmos desde el recurso `cosmos_secret` (declarado en

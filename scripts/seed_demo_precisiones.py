@@ -19,13 +19,13 @@ import sys
 
 import httpx
 from dotenv import load_dotenv
-from pymongo import MongoClient
+
+from app.core.db.sync import get_sync_db
 
 load_dotenv()
 BASE = os.getenv("E2E_BASE", "http://localhost:8000")
 
-_db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-    os.environ.get("COSMOS_DATABASE", "db_modeler")]
+_db = get_sync_db()
 
 
 def _login(user="admin", pwd="admin") -> httpx.Client:

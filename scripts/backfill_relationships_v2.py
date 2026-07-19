@@ -82,10 +82,10 @@ def main() -> int:
     args = ap.parse_args()
 
     from dotenv import load_dotenv
-    from pymongo import MongoClient
+
+    from app.core.db.sync import get_sync_db
     load_dotenv()
-    db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-        os.environ.get("COSMOS_DATABASE", "db_modeler")]
+    db = get_sync_db()
 
     key_flags = {c["_id"]: c for c in db.canonical_columns.find(
         ACTIVE, {"isPrimaryKey": 1, "isForeignKey": 1})}

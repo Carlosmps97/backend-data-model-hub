@@ -27,13 +27,50 @@ INSECURE_DEFAULT_SECRET_KEY = "dev-only-insecure-change-me-in-prod"
 class Settings:
     """Configuración global del backend de plataforma."""
 
-    # ─── Azure Cosmos DB for MongoDB ───────────────────────────
+    # ─── Backend de base de datos ──────────────────────────────
+    # "lakebase" (Databricks Lakebase Postgres, doc 28) o "cosmos" (legacy /
+    # rollback). El seam es app/core/db/client.py: los repositorios no saben
+    # cuál hay debajo.
+    DB_BACKEND: str = os.getenv("DB_BACKEND", "cosmos").strip().lower()
+
+    # ─── Azure Cosmos DB for MongoDB (legacy / rollback) ───────
     # Misma cuenta que el servicio de agentes. Cada uno toca colecciones
     # distintas: el backend administra `users` / `projects` / `project_tables`
     # / `project_relationships` / `semantic_types` / `udps`; el agente
     # administra `column_catalog`.
     COSMOS_CONNECTION_STRING: str = os.getenv("COSMOS_CONNECTION_STRING", "")
     COSMOS_DATABASE: str = os.getenv("COSMOS_DATABASE", "db_modeler")
+
+    # ─── Databricks Lakebase Postgres (doc 28) ─────────────────
+    # El PAT autentica el SDK ante el workspace; el password real de Postgres
+    # es un token OAuth de ~1h que se acuña por conexión nueva del pool
+    # (lakebase/credentials.py). `PAT_DATABRICKS` se acepta como alias porque
+    # así está hoy en el .env del owner.
+    DATABRICKS_HOST: str = os.getenv(
+        "DATABRICKS_HOST", "https://adb-3871428306507680.0.azuredatabricks.net"
+    )
+    DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "") or os.getenv(
+        "PAT_DATABRICKS", ""
+    )
+    LAKEBASE_ENDPOINT: str = os.getenv(
+        "LAKEBASE_ENDPOINT", "projects/dmh-proj/branches/production/endpoints/primary"
+    )
+    PGHOST: str = os.getenv(
+        "PGHOST", "ep-orange-sunset-e1gjz1qx.database.eastus2.azuredatabricks.net"
+    )
+    PGPORT: int = int(os.getenv("PGPORT", "5432"))
+    # Rol de Postgres = identidad Databricks que acuña el token. En Databricks
+    # Apps NO se setea PGUSER: cae al DATABRICKS_CLIENT_ID inyectado (rol PG
+    # del service principal de la app — requiere el alta one-time de doc 28 §11).
+    PGUSER: str = (
+        os.getenv("PGUSER", "")
+        or os.getenv("DATABRICKS_CLIENT_ID", "")
+        or "carlosmps97@hotmail.com"
+    )
+    PGDATABASE: str = os.getenv("PGDATABASE", "databricks_postgres")
+    PGSSLMODE: str = os.getenv("PGSSLMODE", "require")
+    # Schema de Postgres donde viven las "colecciones" (tablas id+doc jsonb).
+    LAKEBASE_PGSCHEMA: str = os.getenv("LAKEBASE_PGSCHEMA", "dmh")
 
     # ─── Identidad / Auth seam ─────────────────────────────────
     # Auth PROPIA (decisión 2026-07-04): login usuario/contraseña en TODOS los

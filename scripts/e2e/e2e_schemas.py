@@ -28,6 +28,8 @@ def login(u, p):
 
 
 admin, rev = login("admin", "admin"), login("T1238", "T1238")
+# Doc 27: para deshacer lo publicado se rollbackea la versión PREVIA.
+prev_ver = C.get(f"{B}/api/versions/published", headers=admin).json()["data"]["id"]
 name = f"e2e_sch_{uuid.uuid4().hex[:6]}"
 renamed = f"{name}_v2"
 sid = str(uuid.uuid4())
@@ -75,15 +77,16 @@ check("publicado: producción muestra el esquema renombrado",
       any(s["name"] == renamed for s in pub) and not any(s["name"] == name for s in pub))
 
 # 6. Rollback de la versión → el esquema desaparece de producción
-r = C.post(f"{B}/api/changesets/{cs}/rollback", headers=admin)
+r = C.post(f"{B}/api/changesets/{prev_ver}/rollback", headers=admin)
 check("rollback crea draft inverso", r.status_code == 200, r.text[:200])
-draft = r.json()["data"]
-assert C.post(f"{B}/api/changesets/{draft['id']}/submit",
+if r.status_code == 200:
+    draft = r.json()["data"]
+    assert C.post(f"{B}/api/changesets/{draft['id']}/submit",
                   json={"reviewers": ["T1238"]}, headers=admin).status_code == 200
-assert C.post(f"{B}/api/changesets/{draft['id']}/approve", json={}, headers=rev).status_code == 200
-pub = C.get(f"{B}/api/schemas", headers=admin).json()["data"]
-check("rollback publicado: el esquema ya no está en producción",
-      not any(s["name"] in (name, renamed) for s in pub))
+    assert C.post(f"{B}/api/changesets/{draft['id']}/approve", json={}, headers=rev).status_code == 200
+    pub = C.get(f"{B}/api/schemas", headers=admin).json()["data"]
+    check("rollback publicado: el esquema ya no está en producción",
+          not any(s["name"] in (name, renamed) for s in pub))
 
 print(f"\nRESULTADO: {'TODO OK' if not FAILS else f'FALLARON: {FAILS}'}")
 sys.exit(1 if FAILS else 0)

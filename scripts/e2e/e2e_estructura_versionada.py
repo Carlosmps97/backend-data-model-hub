@@ -7,6 +7,23 @@ submit con revisor → revisor aprueba → producción los ve.
 import sys, uuid
 import httpx
 
+# WAN (Lakebase/Cosmos remotos): publish/approve pueden superar el default de
+# 5 s de httpx — todas las llamadas van con timeout explícito.
+def _get(url, **k):
+    k.setdefault("timeout", 60)
+    return httpx.request("GET", url, **k)
+
+
+def _post(url, **k):
+    k.setdefault("timeout", 60)
+    return httpx.request("POST", url, **k)
+
+
+def _put(url, **k):
+    k.setdefault("timeout", 60)
+    return httpx.request("PUT", url, **k)
+
+
 B = "http://localhost:8000"
 FAILS = []
 
@@ -18,20 +35,23 @@ def check(name, ok, detail=""):
 
 
 def login(user, pwd):
-    r = httpx.post(f"{B}/api/auth/login", json={"username": user, "password": pwd})
+    r = _post(f"{B}/api/auth/login", json={"username": user, "password": pwd})
     r.raise_for_status()
     return {"Authorization": f"Bearer {r.json()['data']['token']}"}
 
 
 def get(h, path):
-    r = httpx.get(f"{B}{path}", headers=h)
+    r = _get(f"{B}{path}", headers=h)
     return r.status_code, (r.json().get("data") if r.headers.get("content-type", "").startswith("application/json") else None)
 
 
 admin = login("admin", "admin")
+# Doc 27: para deshacer la versión de este e2e al final se restaura A la
+# versión vigente ANTES de la corrida.
+prev_ver = _get(f"{B}/api/versions/published", headers=admin).json()["data"]["id"]
 
 # 1. Nueva versión desde producción
-r = httpx.post(f"{B}/api/changesets/snapshot", json={}, headers=admin)
+r = _post(f"{B}/api/changesets/snapshot", json={}, headers=admin)
 r.raise_for_status()
 cs = r.json()["data"]["id"]
 print(f"changeset draft: {cs}")
@@ -50,7 +70,7 @@ changes = [
                              "tableIds": [tid], "layout": {tid: {"x": 80, "y": 80}}, "drawings": [], "udpValues": {}}),
 ]
 for coll, eid, payload in changes:
-    r = httpx.put(f"{B}/api/changesets/{cs}/changes",
+    r = _put(f"{B}/api/changesets/{cs}/changes",
                   json={"collection": coll, "entityId": eid, "op": "upsert", "payload": payload}, headers=admin)
     check(f"registrar {coll}", r.status_code == 200, f"{r.status_code}: {r.text[:200]}")
 
@@ -72,11 +92,11 @@ check("efectivo: diagrama draft renderiza", sc == 200 and dia and len(dia["table
       f"sc={sc}")
 
 # 5. Submit con revisor y aprobación
-r = httpx.post(f"{B}/api/changesets/{cs}/submit",
+r = _post(f"{B}/api/changesets/{cs}/submit",
                json={"reviewers": ["T1238"], "title": "E2E estructura versionada"}, headers=admin)
 check("submit", r.status_code == 200, r.text[:200])
 rev = login("T1238", "T1238")
-r = httpx.post(f"{B}/api/changesets/{cs}/approve", json={}, headers=rev)
+r = _post(f"{B}/api/changesets/{cs}/approve", json={}, headers=rev)
 check("approve (revisor)", r.status_code == 200, r.text[:200])
 
 # 6. PRODUCCIÓN ahora sí
@@ -89,14 +109,14 @@ check("publicado: folder visible", any(f["id"] == fid for f in (folders or [])))
 
 # 7. AUTO-LIMPIEZA: rollback de la versión publicada por este e2e — la BD real
 # no debe acumular proyectos/tablas de prueba tras cada corrida (doc 20).
-r = httpx.post(f"{B}/api/changesets/{cs}/rollback", headers=admin)
+r = _post(f"{B}/api/changesets/{prev_ver}/rollback", headers=admin)
 check("cleanup: rollback del e2e", r.status_code == 200, r.text[:160])
 if r.status_code == 200:
     inv = r.json()["data"]["id"]
-    ok1 = httpx.post(f"{B}/api/changesets/{inv}/submit",
+    ok1 = _post(f"{B}/api/changesets/{inv}/submit",
                      json={"reviewers": ["T1238"], "title": "E2E estructura rollback"},
                      headers=admin).status_code == 200
-    ok2 = httpx.post(f"{B}/api/changesets/{inv}/approve", json={}, headers=rev).status_code == 200
+    ok2 = _post(f"{B}/api/changesets/{inv}/approve", json={}, headers=rev).status_code == 200
     sc, projs = get(admin, "/api/projects")
     check("cleanup: proyecto e2e fuera de producción",
           ok1 and ok2 and all(p["id"] != pid for p in projs))

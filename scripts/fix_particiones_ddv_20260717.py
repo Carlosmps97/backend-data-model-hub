@@ -70,9 +70,8 @@ def main() -> int:
     args = ap.parse_args()
 
     load_dotenv()
-    from pymongo import MongoClient
-    db = MongoClient(os.environ["COSMOS_CONNECTION_STRING"])[
-        os.environ.get("COSMOS_DATABASE", "db_modeler")]
+    from app.core.db.sync import get_sync_db
+    db = get_sync_db()
 
     udp = db.udp_definitions.find_one({"name": "Particion", "level": "column", **ACTIVE}, {"_id": 1})
     if not udp:

@@ -2,7 +2,16 @@
 
 **Actualizado:** 2026-07-19 · Fuente: los modelos Pydantic `*Doc` reales de `app/features/*/models.py` + `app/core/models.py`, los `repository.py` (nombres de colección) y `app/core/db/indexes.py` (índices).
 
-Referencia **campo por campo** de todas las colecciones que administra este backend en Azure Cosmos DB (API de Mongo, base `db_modeler`). Pensada como insumo para diseñar/migrar el esquema (p. ej. a un modelo relacional). Describe el **estado actual**, no cómo migrar. Complementa `arquitectura.md` (§7, visión) y `migracion-erwin.md` (carga desde XML de Erwin).
+Referencia **campo por campo** de todas las colecciones que administra este backend. Describe el **estado actual**, no cómo migrar. Complementa `arquitectura.md` (§7, visión) y `migracion-erwin.md` (carga desde XML de Erwin).
+
+> **Residencia física (doc 28, 2026-07-19):** la BD productiva es **Databricks
+> Lakebase Postgres** (`databricks_postgres`, schema PG `dmh`): cada colección
+> de este documento vive como una tabla `(id text PRIMARY KEY, doc jsonb)` con
+> el documento COMPLETO (con `_id`) en `doc` + índice GIN `jsonb_path_ops` +
+> btrees por expresión para los sorts. La forma lógica de los documentos — TODO
+> lo que sigue — no cambió. Azure Cosmos DB (Mongo, base `db_modeler`) queda
+> como legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc
+> con `scripts/lakebase/verify_migration.py`.
 
 ---
 

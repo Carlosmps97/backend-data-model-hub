@@ -23,6 +23,8 @@ from . import service
 # sesión válida (incluso rol lector) podía crear/editar o publicar a producción.
 _can_edit = require_permission("model.edit")
 _can_decide = require_permission("review.decide")
+# Rollback a una versión publicada = permiso propio (afecta producción, como publish).
+_can_rollback = require_permission("rollback")
 from .repository import VERSIONED
 from .validation import DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError
 from .schemas import (
@@ -238,26 +240,25 @@ async def reopen(cs_id: str, user: dict = Depends(_can_edit)):
 
 
 @router.post("/{cs_id}/rollback")
-async def rollback(cs_id: str, user: dict = Depends(_can_edit)):
-    """Rollback de la ÚLTIMA versión publicada: crea un DRAFT con los cambios
-    inversos (restaura las imágenes previas capturadas en su publish). El
+async def rollback(cs_id: str, user: dict = Depends(_can_rollback)):
+    """Rollback a CUALQUIER versión publicada: crea un DRAFT que restaura el
+    modelo al estado de esa versión (deshace las versiones posteriores). El
     draft pasa por el flujo normal — submit → review → approve — así el
     rollback también se revisa, se audita y se re-valida antes de tocar
-    producción (mismo estándar que Data Standards, pero con governance)."""
+    producción (mismo estándar que Data Standards, pero con governance).
+    Requiere el permiso `rollback`."""
     res = await service.rollback(cs_id, user["username"])
     if res is None:
         raise HTTPException(status_code=404, detail="Version not found.")
     if res == "not-applied":
         raise HTTPException(status_code=409, detail="Only a PUBLISHED version can be rolled back.")
-    if res == "not-latest":
-        raise HTTPException(status_code=409,
-                            detail="Only the LATEST published version can be rolled back (undo in order).")
     if res == "no-before":
         raise HTTPException(status_code=409,
-                            detail="This version was published before rollback existed "
-                                   "(its before-images were not captured).")
+                            detail="A version published after this one predates rollback support "
+                                   "(its before-images were not captured), so this rollback can't be reconstructed.")
     if res == "empty":
-        raise HTTPException(status_code=409, detail="The version has no changes to roll back.")
+        raise HTTPException(status_code=409,
+                            detail="This is already the current production version — nothing after it to undo.")
     await audit(user["username"], "changeset.rollback_draft", target=cs_id, target_type="changeset",
                 meta={"draft": res["id"]})
     return ok(res)

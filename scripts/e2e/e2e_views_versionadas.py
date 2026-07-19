@@ -27,6 +27,9 @@ def login(u, p):
 
 
 admin, rev = login("admin", "admin"), login("T1238", "T1238")
+# Doc 27: rollback restaura A una versión (deshace las posteriores). Para
+# deshacer lo publicado por este e2e se rollbackea la versión PREVIA.
+prev_ver = C.get(f"{B}/api/versions/published", headers=admin).json()["data"]["id"]
 tag = uuid.uuid4().hex[:6]
 
 # 0. Una tabla REAL publicada como fuente
@@ -73,7 +76,7 @@ check("publicado: producción la muestra (con la edición)",
       bool(mine) and mine.get("description") == "e2e v2", str(mine)[:160])
 
 # 4. Rollback → desaparece de producción
-r = C.post(f"{B}/api/changesets/{cs}/rollback", headers=admin)
+r = C.post(f"{B}/api/changesets/{prev_ver}/rollback", headers=admin)
 check("rollback crea draft inverso", r.status_code == 200, r.text[:200])
 if r.status_code == 200:
     inv = r.json()["data"]["id"]

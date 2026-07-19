@@ -967,7 +967,7 @@ _ROLE_GRANTS: dict[str, tuple[str, str, set[str]]] = {
     "modelador": ("Modelador", "Crea y edita tablas · envía a revisión",
                   {"model.view", "model.edit", "export"}),
     "revisor": ("Revisor", "Aprueba o rechaza solicitudes",
-                {"model.view", "review.decide", "publish", "export"}),
+                {"model.view", "review.decide", "publish", "rollback", "export"}),
     "lector": ("Lector", "Solo lectura · exporta metadata", {"model.view", "export"}),
 }
 

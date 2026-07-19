@@ -870,33 +870,51 @@ def rollback_plan(changes: dict) -> tuple[list[dict], list[str]]:
 
 
 async def rollback(cs_id: str, actor: str) -> dict | str | None:
-    """Crea un DRAFT con los cambios inversos de la ÚLTIMA versión publicada
-    (restaura la imagen previa de cada entidad que tocó). El draft pasa por el
-    flujo normal (submit → review → approve): el rollback también se revisa,
-    se audita y re-valida (unicidad/payloads) — igual que cualquier publish.
+    """Crea un DRAFT que RESTAURA el modelo al estado de la versión `cs_id`
+    (cualquier versión publicada, no sólo la última): deshace TODAS las versiones
+    publicadas DESPUÉS de la objetivo, componiendo sus cambios inversos. El draft
+    pasa por el flujo normal (submit → review → approve): el rollback también se
+    revisa, se audita y re-valida (unicidad/payloads) — igual que cualquier publish.
+
+    Composición: se recorren las versiones a deshacer del MÁS RECIENTE al más
+    VIEJO y por entidad gana el inverso de la versión MÁS CERCANA a la objetivo
+    (su imagen previa = el estado tal como quedó en la objetivo). Publicar el
+    draft deja el modelo idéntico a como estaba al aplicar `cs_id`.
 
     Devuelve el draft creado, o: None (no existe) · "not-applied" (no es una
-    versión publicada) · "not-latest" (solo la última publicada es reversible:
-    deshacer en orden) · "no-before" (publicada antes de la captura de
-    imágenes previas) · "empty" (sin cambios que revertir)."""
+    versión publicada) · "no-before" (alguna versión posterior se publicó antes
+    de la captura de imágenes previas ⇒ no reconstruible) · "empty" (la objetivo
+    ya es la producción actual: no hay nada posterior que deshacer)."""
     cs = await repository.get(cs_id)
     if not cs:
         return None
     if cs.get("status") != "approved" or not cs.get("appliedAt"):
         return "not-applied"
-    if await repository.latest_applied_id() != cs_id:
-        return "not-latest"
-    changes = await repository.changes_map(cs_id)
-    inverse, missing = rollback_plan(changes)
+    # Versiones publicadas DESPUÉS de la objetivo (latest→oldest). Ninguna ⇒ la
+    # objetivo ES la producción actual: no hay rollback que hacer.
+    after = await repository.applied_after(cs["appliedAt"])
+    if not after:
+        return "empty"
+    # Inversos deduplicados por entidad; al iterar latest→oldest, el inverso de
+    # la versión MÁS VIEJA (más cercana a la objetivo) queda de ÚLTIMO y gana.
+    inverse_by_key: dict[tuple[str, str], dict] = {}
+    missing: list[str] = []
+    for ver in after:
+        inv, miss = rollback_plan(await repository.changes_map(ver["id"]))
+        missing.extend(miss)
+        for ch in inv:
+            inverse_by_key[(ch["collection"], ch["entityId"])] = ch
     if missing:
         return "no-before"
+    inverse = list(inverse_by_key.values())
     if not inverse:
         return "empty"
     label = cs.get("versionLabel") or cs.get("title") or cs_id[:8]
+    n_ver = len(after)
     draft = await repository.create(
-        f"Rollback de {label}", actor,
-        extra={"description": f"Deshace la publicación {label}: restaura la "
-                              f"imagen previa de {len(inverse)} entidades."})
+        f"Rollback a {label}", actor,
+        extra={"description": f"Restaura el modelo al estado de {label}: deshace "
+                              f"{n_ver} versión(es) posterior(es) sobre {len(inverse)} entidades."})
     for ch in inverse:
         await repository.set_change(draft["id"], ch["collection"], ch["entityId"],
                                     ch["op"], ch["payload"])
@@ -985,6 +1003,134 @@ async def add_comment(cs_id: str, actor: str, text: str) -> dict | None:
     return await repository.push_comment(cs_id, {"author": actor, "text": text, "at": _now()})
 
 
+def build_diff_tree(collections: dict, changes: dict, published: dict,
+                    sas: list[dict], projects: list[dict], folders: list[dict]) -> dict:
+    """Jerarquía Proyecto→Folder→Canvas→Esquema→Tabla→Columnas (+Vistas) de los
+    cambios de tablas/columnas/vistas, para el vistazo de la revisión (p5).
+
+    Devuelve `{tree, orphans, structure, projectsAffected}`:
+    - `tree`: nodos anidados por la jerarquía (una tabla en N canvases aparece
+      en cada uno; las vistas cuelgan del/los canvas de sus fuentes).
+    - `orphans`: tablas/vistas cambiadas sin canvas (no importadas a ningún ER).
+    - `structure`: cambios de ESTRUCTURA (projects/folders/subject_areas/schemas
+      como entidades) — su propio bloque, no encajan en el árbol de datos.
+    - `projectsAffected`: nº de proyectos distintos tocados (canvas membership).
+    Puro."""
+    proj_name = {p["id"]: (p.get("name") or p["id"]) for p in projects}
+    folder_by = {f["id"]: f for f in folders}
+    sa_by_id = {sa["id"]: sa for sa in sas}
+
+    def _kinds(coll: str) -> dict:
+        b = collections.get(coll) or {}
+        return {e["id"]: verb for verb in ("added", "edited", "deleted") for e in b.get(verb, [])}
+
+    tbl_kind, col_kind, view_kind = _kinds("canonical_tables"), _kinds("canonical_columns"), _kinds("views")
+
+    # Meta efectiva de tablas (nombre/esquema aun si sólo cambiaron columnas).
+    tmeta = {d["id"]: d for d in published.get("canonical_tables", [])}
+    for eid, ch in (changes.get("canonical_tables") or {}).items():
+        if ch.get("payload"):
+            tmeta[eid] = {**ch["payload"], "id": eid}
+
+    # Columnas cambiadas agrupadas por tableId.
+    cmeta = {d["id"]: d for d in published.get("canonical_columns", [])}
+    cols_by_table: dict[str, list] = {}
+    for eid, verb in col_kind.items():
+        p = ((changes.get("canonical_columns") or {}).get(eid) or {}).get("payload") or {}
+        tid = p.get("tableId") or (cmeta.get(eid) or {}).get("tableId") or "__none__"
+        nm = p.get("physicalName") or p.get("logicalName") or (cmeta.get(eid) or {}).get("physicalName") or eid
+        cols_by_table.setdefault(tid, []).append({"type": "column", "id": eid, "name": nm, "change": verb})
+
+    # Vistas cambiadas.
+    vmeta = {d["id"]: d for d in published.get("views", [])}
+    view_entries = []
+    for eid, verb in view_kind.items():
+        p = ((changes.get("views") or {}).get(eid) or {}).get("payload") or vmeta.get(eid) or {}
+        srcs = p.get("sourceTableIds") or ([p.get("tableId")] if p.get("tableId") else [])
+        view_entries.append({"id": eid, "name": p.get("name") or eid, "change": verb,
+                             "schema": p.get("schema") or "—", "sources": srcs})
+
+    # Canvas por tabla (membership efectiva).
+    sa_of: dict[str, list] = {}
+    for sa in sas:
+        for tid in sa.get("tableIds") or []:
+            sa_of.setdefault(tid, []).append(sa)
+
+    nested: dict = {}
+    projects_affected: set[str] = set()
+
+    def slot(proj_id, folder_id, sa_id, schema) -> dict:
+        p = nested.setdefault(proj_id, {})
+        f = p.setdefault(folder_id or "__root__", {})
+        s = f.setdefault(sa_id, {})
+        return s.setdefault(schema or "—", {"tables": {}, "views": {}})
+
+    # Tablas cambiadas + tablas con columnas cambiadas.
+    orphan_tables, orphan_views = [], []
+    all_table_ids = set(tbl_kind) | {tid for tid in cols_by_table if tid != "__none__"}
+    for tid in all_table_ids:
+        tname = (tmeta.get(tid) or {}).get("physicalName") or (tmeta.get(tid) or {}).get("logicalName") or tid
+        node = {"type": "table", "id": tid, "name": tname, "change": tbl_kind.get(tid),
+                "children": list(cols_by_table.get(tid, []))}
+        canvases = sa_of.get(tid)
+        if not canvases:
+            orphan_tables.append(node)
+            continue
+        for sa in canvases:
+            projects_affected.add(sa.get("projectId"))
+            schema = (tmeta.get(tid) or {}).get("schema") or "—"
+            slot(sa.get("projectId"), sa.get("folderId"), sa["id"], schema)["tables"].setdefault(tid, dict(node))
+
+    # Vistas: bajo el/los canvas de sus fuentes; sin fuentes en canvas → orphan.
+    for v in view_entries:
+        seen_sa: set[str] = set()
+        for src in v["sources"]:
+            for sa in sa_of.get(src, []):
+                if sa["id"] in seen_sa:
+                    continue
+                seen_sa.add(sa["id"])
+                projects_affected.add(sa.get("projectId"))
+                slot(sa.get("projectId"), sa.get("folderId"), sa["id"], v["schema"])["views"][v["id"]] = \
+                    {"type": "view", "id": v["id"], "name": v["name"], "change": v["change"]}
+        if not seen_sa:
+            orphan_views.append({"type": "view", "id": v["id"], "name": v["name"], "change": v["change"]})
+
+    # Serializar a lista de nodos (ordenados por nombre; tablas antes que vistas).
+    tree = []
+    for proj_id, folders_map in nested.items():
+        f_children = []
+        for folder_id, sas_map in folders_map.items():
+            c_children = []
+            for sa_id, schemas_map in sas_map.items():
+                s_children = []
+                for schema, groups in schemas_map.items():
+                    kids = list(groups["tables"].values()) + list(groups["views"].values())
+                    kids.sort(key=lambda n: (n["type"] != "table", (n.get("name") or "").lower()))
+                    s_children.append({"type": "schema", "id": schema, "name": schema, "children": kids})
+                s_children.sort(key=lambda n: (n["name"] or "").lower())
+                c_children.append({"type": "canvas", "id": sa_id,
+                                   "name": (sa_by_id.get(sa_id) or {}).get("name") or sa_id, "children": s_children})
+            c_children.sort(key=lambda n: (n["name"] or "").lower())
+            fname = "— (project root)" if folder_id == "__root__" else ((folder_by.get(folder_id) or {}).get("name") or folder_id)
+            f_children.append({"type": "folder", "id": folder_id, "name": fname, "children": c_children})
+        f_children.sort(key=lambda n: (n["name"] or "").lower())
+        tree.append({"type": "project", "id": proj_id or "—", "name": proj_name.get(proj_id) or proj_id or "—",
+                     "children": f_children})
+    tree.sort(key=lambda n: (n["name"] or "").lower())
+
+    STRUCT = {"projects": "Project", "folders": "Folder", "subject_areas": "Canvas", "schemas": "Schema"}
+    structure = []
+    for coll, label in STRUCT.items():
+        b = collections.get(coll) or {}
+        for verb in ("added", "edited", "deleted"):
+            for e in b.get(verb, []):
+                structure.append({"type": coll, "id": e["id"], "name": e.get("name") or e["id"],
+                                  "kind": label, "change": verb})
+
+    return {"tree": tree, "orphans": orphan_tables + orphan_views, "structure": structure,
+            "projectsAffected": len([p for p in projects_affected if p])}
+
+
 async def diff(cs_id: str) -> dict | None:
     """Diff estructurado por colección (added/edited/deleted con nombres +
     flag de conflicto vs producción) + impacto.
@@ -1030,7 +1176,27 @@ async def diff(cs_id: str) -> dict | None:
             "canonical_tables", {"_id": {"$in": missing}}
         )
 
-    return structured_diff(changes, published, relationships, baseline=cs.get("createdAt"))
+    # Meta de TODAS las tablas tocadas (incl. las que sólo tienen cambios de
+    # columna) para poder ubicarlas en la jerarquía de la revisión.
+    known2 = {d["id"] for d in published["canonical_tables"]}
+    need = [tid for tid in touched if tid not in known2]
+    if need:
+        published["canonical_tables"] = published["canonical_tables"] + await repository.published(
+            "canonical_tables", {"_id": {"$in": need}})
+
+    result = structured_diff(changes, published, relationships, baseline=cs.get("createdAt"))
+    # Jerarquía Proyecto→Folder→Canvas→Esquema→Tabla→Columnas (+Vistas) +
+    # projectsAffected REAL (antes 0: leía el hint estático del changeset). La
+    # estructura es chica (proyectos/folders/canvases) → overlay completo.
+    sas = overlay(await repository.published("subject_areas"), changes.get("subject_areas") or {})
+    projs = overlay(await repository.published("projects"), changes.get("projects") or {})
+    flds = overlay(await repository.published("folders"), changes.get("folders") or {})
+    tree = build_diff_tree(result["collections"], changes, published, sas, projs, flds)
+    result["tree"] = tree["tree"]
+    result["orphans"] = tree["orphans"]
+    result["structure"] = tree["structure"]
+    result["impact"]["projectsAffected"] = tree["projectsAffected"]
+    return result
 
 
 # Los compat M-series /approve y /reject ya NO tienen funciones propias: el

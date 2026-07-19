@@ -6,9 +6,13 @@ python-dotenv
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 
-# Cosmos DB (Motor async + pymongo for type compat)
+# Cosmos DB (Motor async + pymongo for type compat) — legacy/rollback (doc 28)
 pymongo>=4.0
 motor>=3.3.0
+
+# Databricks Lakebase Postgres (backend actual, doc 28)
+asyncpg>=0.29
+databricks-sdk>=0.89.0
 
 # Auth propia (login usuario/contraseña + token de sesión)
 bcrypt>=4.0        # hash de contraseñas
