@@ -95,6 +95,22 @@ _VIEWS = [
     _s("name", "Name", sortable=False),
     _s("schema", "Schema", indexed=True),
     _s("tableId", "Base table id", indexed=True),
+    _s("description", "Definition"),          # F5: definición funcional de la vista
+]
+# F5 — entidad virtual `view_columns`: 1 fila por COLUMNA de cada vista (unwind
+# de `views.sources`). Expone la definición a nivel de columna-de-vista (override
+# del origen) con FALLBACK a la def de la columna física. Se ejecuta por un
+# camino DEDICADO (aggregate+unwind) en el executor — NO por el keyset genérico:
+# por eso los campos van groupable=False (el builder no ofrece agrupar).
+_VIEW_COLUMNS = [
+    _s("viewName", "View", path="name", sortable=True, groupable=False),
+    _s("schema", "Schema", path="schema", sortable=True, groupable=False),
+    _s("outputName", "Column", path="sources.outputAlias", sortable=True, groupable=False),
+    _s("sourceColumn", "Source column", path="sources.column", groupable=False),
+    _s("sourceTableId", "Source table id", path="sources.tableId", groupable=False),
+    _s("castType", "Cast", path="sources.castType", groupable=False),
+    _s("expression", "Expression", path="sources.expression", groupable=False),
+    _s("description", "Definition", path="sources.description", groupable=False),
 ]
 # F5 — entidad `models` (Modelo de Datos = subject_areas). `tableCount` es
 # CALCULADO post-fetch (len(tableIds) en el executor): path = la FUENTE
@@ -108,7 +124,7 @@ _MODELS = [
              groupable=False, hydrate="derived"),
 ]
 _STATIC = {"columns": _COLUMNS, "tables": _TABLES, "relationships": _RELATIONSHIPS,
-           "views": _VIEWS, "models": _MODELS}
+           "views": _VIEWS, "view_columns": _VIEW_COLUMNS, "models": _MODELS}
 
 # En qué vista aparece cada nivel de UDP.
 _UDP_VIEW_BY_LEVEL = {"column": "columns", "table": "tables", "canvas": "models"}

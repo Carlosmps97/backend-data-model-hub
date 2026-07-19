@@ -41,9 +41,12 @@ class ViewDoc(BaseModel):
     sql_schema: str | None = Field(default=None, alias="schema")
     tags: list[str] = []
     filter: str | None = None
-    # Cada source: {column?, tableId?, outputAlias?, expression?, castType?}.
-    # `tableId` = de qué fuente viene la columna (F3 multi-fuente);
-    # `castType` = override de tipo (el DDL del front emite CAST(...) AS).
+    # Cada source: {column?, tableId?, outputAlias?, expression?, castType?,
+    # description?}. `tableId` = de qué fuente viene la columna (F3 multi-fuente);
+    # `castType` = override de tipo (el DDL del front emite CAST(...) AS);
+    # `description` = definición funcional propia de la columna en la vista (F5,
+    # override del origen físico). `sources` es list[dict] → las claves nuevas
+    # PERSISTEN sin tocar el modelo (no hay sub-schema estricto).
     sources: list[dict] = []
     outputAlias: str | None = None
     expression: str | None = None

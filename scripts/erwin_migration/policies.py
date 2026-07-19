@@ -121,8 +121,8 @@ def udp_datatype(code: str) -> str:
 def collapse_udp_defs(defs: dict) -> dict[str, dict]:
     """Colapsa defs Logical/Physical homónimas por (nivel plataforma, nombre).
 
-    Devuelve {clave: {"name", "level", "dataType", "default", "erwin_ids",
-    "physical_ids"}} solo para niveles soportados. `erwin_ids` = todas las
+    Devuelve {clave: {"name", "level", "dataType", "default", "allowed_values",
+    "erwin_ids", "physical_ids"}} solo para niveles soportados. `erwin_ids` = todas las
     defs Erwin que caen en esta def de plataforma; `physical_ids` = las de
     vista Physical (sus valores ganan en conflicto).
     """
@@ -136,6 +136,7 @@ def collapse_udp_defs(defs: dict) -> dict[str, dict]:
             "name": d.short_name, "level": level,
             "dataType": udp_datatype(d.data_type_code),
             "default": d.default or None,
+            "allowed_values": [],          # lista explícita (unión, orden Erwin)
             "erwin_ids": set(), "physical_ids": set(),
         })
         entry["erwin_ids"].add(d.id)
@@ -145,6 +146,9 @@ def collapse_udp_defs(defs: dict) -> dict[str, dict]:
             entry["dataType"] = "list"
         if not entry["default"] and d.default:
             entry["default"] = d.default
+        for v in d.allowed_values:          # unión de las listas Logical+Physical
+            if v not in entry["allowed_values"]:
+                entry["allowed_values"].append(v)
     return out
 
 

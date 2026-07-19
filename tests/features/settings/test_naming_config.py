@@ -35,7 +35,12 @@ def test_to_doc_siembra_default_table_si_no_existe():
 def test_to_doc_respeta_doc_existente():
     doc = {"_id": "column", "separator": "-", "case": "lower"}
     out = repository._to_doc("column", doc)
-    assert out == {"scope": "column", "separator": "-", "case": "lower"}
+    assert out == {"scope": "column", "separator": "-", "case": "lower", "maxLength": 150}
+
+
+def test_to_doc_respeta_maxlength_del_doc():
+    out = repository._to_doc("table", {"_id": "table", "maxLength": 64})
+    assert out["maxLength"] == 64 and out["scope"] == "table"
 
 
 # ── Validación en el service (agnóstica al store) ────────────────────────

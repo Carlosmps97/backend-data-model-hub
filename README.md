@@ -393,9 +393,11 @@ Checklist mínimo de producción, independientemente del destino:
 | Documento | Contenido |
 |---|---|
 | [`doc/arquitectura.md`](doc/arquitectura.md) | Arquitectura del backend, monolito modular y capas. |
+| [`doc/esquema-datos.md`](doc/esquema-datos.md) | **Referencia completa de las colecciones** (campos, tipos, embebidos, índices, referencias) — insumo para migrar el esquema. |
 | [`doc/api-contract.md`](doc/api-contract.md) | Contrato de la API: sobre estándar, endpoints y ejemplos. |
 | [`doc/seguridad.md`](doc/seguridad.md) | Autenticación, RBAC, hardening y postura de producción. |
 | [`doc/testing.md`](doc/testing.md) | Estrategia de tests y cómo correrlos. |
 | [`doc/consideraciones-y-limites.md`](doc/consideraciones-y-limites.md) | Límites, escalabilidad y decisiones de diseño. |
 | [`doc/despliegue.md`](doc/despliegue.md) | Dónde corre, variables de entorno y consideraciones de Cosmos. |
+| [`doc/migracion-erwin.md`](doc/migracion-erwin.md) | Carga del modelo desde un XML de Erwin (scripts, mapeo, censo de lo no migrado). |
 | [`doc/feature-architecture.md`](doc/feature-architecture.md) | Guía para agregar features sin romper los guardrails. |

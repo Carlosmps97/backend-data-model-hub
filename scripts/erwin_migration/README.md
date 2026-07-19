@@ -41,14 +41,20 @@ clave natural**, así que la config duplicada entre archivos converge sola.
 ## Mapeo
 
 Modelo→`projects` · Subject Area→`folders` · ER_Diagram→`subject_areas`
-(canvas, layout inicial en grilla) · Entity→`canonical_tables` ·
-Attribute→`canonical_columns` (isPk del Key_Group PK, parentDomainId del
-Parent_Domain_Ref, typeOverridden si difiere del default del dominio) ·
-Relationship 2/7→`relationships` (un doc por par FK; identifying=tipo 2) ·
-View→`views` (fuente por relación tipo 16, columnas passthrough con
-castType si el tipo difiere) · Domain custom→`parent_domains` ·
-Glossary→`glossary_terms` · Property_Type→`udp_definitions` (allowedValues
-derivados de los valores usados; defs sin valores no se crean).
+(canvas, layout inicial en grilla) · Hive_Database→`schemas` (entidad,
+`sch-<name>`) · Entity→`canonical_tables` · Attribute→`canonical_columns`
+(isPk + `pkPosition` del Key_Group PK, `ordinal` físico, parentDomainId del
+Parent_Domain_Ref, typeOverridden si difiere del default del dominio,
+`isNullable`, `isPartition` del UDP Particion) · Relationship 2/7→
+`relationships` (**v2, doc 19: UN doc por relación con TODOS sus pares** en
+`pairs[]`, no uno por par; identifying=tipo 2; cardinalidad del padre desde
+`Null_Option_Type`) · View→`views` (fuente por relación tipo 16, columnas
+passthrough con castType si el tipo difiere; **+ `description` de vista y de
+columna-de-vista (F5)** cuando difiere del origen físico) · Domain custom→
+`parent_domains` · Glossary→`glossary_terms` · Property_Type→
+`udp_definitions` (**allowedValues = lista EXPLÍCITA `tag_Udp_Values_List`**,
+catálogo completo aunque un valor no se use; niveles no-Entity/Attribute/Model
+—incl. Domain— se omiten).
 
 ## Garantías
 

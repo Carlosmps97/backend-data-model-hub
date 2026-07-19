@@ -124,24 +124,46 @@ class Migrator:
                 "wordType": None, "locked": False})
             self.stats["glosario creado"] += 1
 
-        # defs UDP (lookup SIEMPRE por nombre + NIVEL — lección C8, doc 11 §4b)
+        # defs UDP (lookup SIEMPRE por nombre + NIVEL — lección C8, doc 11 §4b).
+        # Se cargan COMPLETAS: TODAS las defs y sus valores permitidos de la
+        # LISTA EXPLÍCITA del XML (tag_Udp_Values_List), AUNQUE no se usen en
+        # ninguna tabla de este modelo — son estándares compartidos que se
+        # repiten entre XML y pueden usarse en otras tablas (pedido owner
+        # 2026-07-18). El uso observado y el default se agregan por si algún
+        # valor no estuviera en la lista explícita.
         values_by_key: dict[str, set] = defaultdict(set)
         for (oid, key), val in self.udp_vals.items():
             values_by_key[key].add(val)
         for key, entry in self.collapsed.items():
-            if not values_by_key.get(key):
-                self.stats["defs UDP sin valores (omitidas)"] += 1
+            # texto SIN uso: nada que cargar (no tiene enum). Las LISTAS se
+            # cargan SIEMPRE — traen su enum explícito aunque no se use acá.
+            if entry["dataType"] != "list" and not values_by_key.get(key):
+                self.stats["defs UDP de texto sin uso (omitidas)"] += 1
                 continue
+            allowed: list[str] = []
+            if entry["dataType"] == "list":
+                allowed = list(entry.get("allowed_values") or [])
+                extra = values_by_key.get(key, set()) | (
+                    {entry["default"]} if entry["default"] else set())
+                for v in sorted(extra):
+                    if v and v not in allowed:
+                        allowed.append(v)
             existing = self.db.udp_definitions.find_one(
                 {"name": re.compile(f"^{re.escape(entry['name'])}$", re.I),
-                 "level": entry["level"], "flgactive": {"$ne": False}}, {"_id": 1})
+                 "level": entry["level"], "flgactive": {"$ne": False}},
+                {"_id": 1, "allowedValues": 1})
             pid = existing["_id"] if existing else pol.platform_id(f"udp|{key}")
             self.udp_pid[key] = pid
             if existing:
+                # converge la lista entre XML: agrega los valores que falten
+                missing = [v for v in allowed
+                           if v not in (existing.get("allowedValues") or [])]
+                if missing:
+                    self._upsert("udp_definitions", pid, {
+                        "allowedValues": (existing.get("allowedValues") or []) + missing})
+                    self.stats["defs UDP con valores agregados"] += 1
                 self.stats["defs UDP reusadas"] += 1
                 continue
-            allowed = (sorted(values_by_key[key] | ({entry["default"]} if entry["default"] else set()))
-                       if entry["dataType"] == "list" else [])
             self._upsert("udp_definitions", pid, {
                 "name": entry["name"], "level": entry["level"],
                 "dataType": entry["dataType"], "defaultValue": entry["default"],
@@ -291,12 +313,24 @@ class Migrator:
                 cast = (a.data_type if origin
                         and _norm_type(origin.data_type) != _norm_type(a.data_type)
                         else None)
-                sources.append({
+                src = {
                     "tableId": origin_tid or source_pids[0],
                     "column": origin.physical if origin else a.physical,
                     "outputAlias": a.physical,
-                    **({"castType": cast} if cast else {}),
-                })
+                }
+                if cast:
+                    src["castType"] = cast
+                # F5: definición PROPIA de la columna-de-vista (Erwin la trae a
+                # nivel de columna-de-vista). Se guarda SOLO si APORTA: difiere de
+                # la del origen físico, o el origen no tiene. Las passthrough
+                # idénticas NO se duplican (heredan de la física en el front).
+                vdef = (a.definition or a.comment or "").strip()
+                odef = ((origin.definition or origin.comment or "").strip()
+                        if origin else "")
+                if vdef and vdef != odef:
+                    src["description"] = vdef
+                    self.stats["columnas de vista con definición propia"] += 1
+                sources.append(src)
             self._upsert("views", pid, {
                 # `sql` = el CREATE VIEW ORIGINAL de Erwin (ViewProps.SQL, doc 19
                 # §12). El export DDL sigue generando desde `sources` (estructura);

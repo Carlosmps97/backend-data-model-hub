@@ -264,7 +264,7 @@ Estrategia **token-first** (`app/core/identity/dependencies.py`):
 
 El **changeset** es la unidad de versionado del modelo. Es cross-project (`projectIds[]`). Los cambios **no** viven embebidos en el documento del changeset: cada cambio es un documento propio en `changeset_changes` con `_id` determinista `{csId}::{collection}::{entityId}` (el dict embebido topaba el límite de 2MB/doc de Cosmos RU con ~2-4k entidades tocadas).
 
-Colecciones versionadas (whitelist dura `VERSIONED`): `canonical_tables`, `canonical_columns`, `relationships`, `views`. Los estándares (glosario/dominios/UDP) **salieron** del changeset: se editan por el módulo Data Standards con escritura global directa.
+Colecciones versionadas (whitelist dura `VERSIONED`, `changesets/repository.py`): **8 colecciones** — `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`. La estructura del Model Explorer (`projects`/`folders`/`subject_areas`) y la entidad `schemas` (esquema físico de BD) entraron a versionado en 2026-07-16 (antes un draft escribía estructura y esquemas directo a producción). El orden de la tupla es el orden de dependencia del apply (schemas antes que tablas, tablas antes que columnas/relaciones/vistas). Los estándares (glosario/dominios/UDP/naming) **salieron** del changeset: se editan por el módulo Data Standards con escritura global directa y su propio versionado (`standards_versions`).
 
 Máquina de estados:
 
@@ -408,6 +408,7 @@ Además, hay vistas curadas de insights (`/api/reporting/insights/scorecard`, `/
 | `projects` | Proyectos (contenedor padre) | projects |
 | `folders` | Carpetas del Model Explorer (jerarquía) | folders |
 | `subject_areas` | Canvases: `tableIds[]` + `layout` + `drawings` | projects |
+| `schemas` | Esquema físico de BD como entidad (`name` único; tablas/vistas lo referencian por string, sin FK) | schemas |
 | `canonical_tables` | Tablas canónicas (pool universal, `udpValues` embebido) | catalog |
 | `canonical_columns` | Columnas canónicas (`tableId`, `parentDomainId`, `udpValues`) | catalog |
 | `relationships` | PK/FK entre tablas (source/target + cardinalidad) | relationships |
@@ -424,12 +425,16 @@ Además, hay vistas curadas de insights (`/api/reporting/insights/scorecard`, `/
 
 ### 7.2 Modelo de datos principal (erDiagram)
 
+> **Referencia completa campo por campo:** `esquema-datos.md` (todas las colecciones, tipos, defaults, embebidos, enums y referencias). El erDiagram de abajo es la vista de alto nivel; los campos que muestra son un subconjunto.
+
 ```mermaid
 erDiagram
     PROJECTS ||--o{ FOLDERS : contiene
     PROJECTS ||--o{ SUBJECT_AREAS : contiene
     FOLDERS ||--o{ SUBJECT_AREAS : agrupa
     SUBJECT_AREAS }o--o{ CANONICAL_TABLES : referencia
+    SCHEMAS ||--o{ CANONICAL_TABLES : "agrupa (por nombre)"
+    SCHEMAS ||--o{ VIEWS : "agrupa (por nombre)"
     CANONICAL_TABLES ||--o{ CANONICAL_COLUMNS : tiene
     CANONICAL_TABLES ||--o{ RELATIONSHIPS : origen
     CANONICAL_TABLES ||--o{ VIEWS : base
@@ -450,29 +455,54 @@ erDiagram
         string name
         list tableIds
         dict layout
+        list drawings
+        dict udpValues
+    }
+    SCHEMAS {
+        string id PK
+        string name
+        string description
     }
     CANONICAL_TABLES {
         string id PK
         string physicalName
         string logicalName
-        string schema
+        string schema "por nombre"
+        string description
         dict udpValues
     }
     CANONICAL_COLUMNS {
         string id PK
         string tableId FK
         string physicalName
+        string logicalName
         string parentDomainId FK
         string dataType
         bool typeOverridden
+        bool isPrimaryKey
+        int pkPosition
+        bool isForeignKey
+        bool isNullable
+        bool isPartition
+        int ordinal
         dict udpValues
     }
     RELATIONSHIPS {
         string id PK
         string parentTableId FK
         string childTableId FK
+        list pairs "parentColumnId+childColumnId+roleName"
         string parentCardinality
+        string childCardinality
         bool identifying
+    }
+    VIEWS {
+        string id PK
+        string name
+        string schema "por nombre"
+        list sourceTableIds FK
+        list sources "col a col + description"
+        bool showOnCanvas
     }
     CHANGESETS {
         string id PK
@@ -523,15 +553,17 @@ erDiagram
 
 | Colección | Índice | Por qué |
 |-----------|--------|---------|
-| `parent_domains`, `glossary_terms`, `udp_definitions`, `canonical_tables` | `flgactive` | Filtro de activos |
-| `canonical_tables` | `physicalName` | Sort del top-N en la búsqueda server-side del catálogo |
+| `parent_domains`, `glossary_terms`, `udp_definitions`, `canonical_tables`, `projects`, `relationships`, `views`, `schemas` | `flgactive` | Filtro de activos (soft-delete) |
+| `canonical_tables` | `physicalName`; **compuesto** `(schema, physicalName)` | Sort del top-N de la búsqueda de catálogo; listado por esquema (Database Explorer) |
 | `canonical_columns` | `tableId`, `parentDomainId`, `physicalName`, `dataType` | Slices por tabla, cascada de dominio, keyset y filtro del reporting |
-| `canonical_columns`, `canonical_tables` | `udpValues.$**` (wildcard) | Filtrar por **cualquier** UDP (presente o futuro) hace seek, sin DDL por-key |
+| `canonical_columns`, `canonical_tables`, `subject_areas` | `udpValues.$**` (wildcard) | Filtrar por **cualquier** UDP (presente o futuro) hace seek, sin DDL por-key |
 | `changesets` | `updatedAt` (desc), `status` | Listas y transiciones |
 | `changeset_changes` | `csId + collection` (compuesto) | overlay/diff/apply por changeset |
-| `subject_areas`, `folders` | `projectId` | Canvases y carpetas por proyecto |
-| `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.*ColumnId` | Resolución del canvas por extremos (v2 doc 19) |
-| `views` | `flgactive`, `tableId` | Vistas por tabla |
+| `subject_areas` | `projectId`, `name` | Canvases por proyecto y por nombre |
+| `folders` | `projectId` | Carpetas por proyecto |
+| `schemas` | `flgactive`, `name` | Activos y lookup/unicidad por nombre |
+| `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.parentColumnId`, `pairs.childColumnId` | Resolución del canvas por extremos (v2 doc 19) |
+| `views` | `flgactive`, `tableId`, `sourceTableIds` | Vistas por tabla base y por tablas fuente (multi-fuente F3) |
 | `naming_config` | `scope` | 1 doc por scope |
 | `users` | `email` | Lookup de login |
 | `audit_log` | `at` (desc), `actor` | Lectura del log |

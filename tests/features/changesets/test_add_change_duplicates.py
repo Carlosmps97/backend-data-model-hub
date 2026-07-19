@@ -8,17 +8,42 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.features.changesets import service
-from app.features.changesets.validation import DuplicateEntityError
+from app.features.changesets.validation import DuplicateEntityError, NameTooLongError
 
 
-def _mock_repo(monkeypatch, published, changes_map):
+def _mock_repo(monkeypatch, published, changes_map, max_length=150):
     monkeypatch.setattr(service.repository, "get",
                         AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=published))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes_map))
     set_change = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "set_change", set_change)
+    # add_change ahora consulta el naming_config (límite de caracteres del físico)
+    # → se mockea para no tocar la BD.
+    monkeypatch.setattr(service.settings_service, "get_naming_for",
+                        AsyncMock(return_value={"maxLength": max_length}))
     return set_change
+
+
+def test_upsert_nombre_muy_largo_bloquea(monkeypatch):
+    set_change = _mock_repo(monkeypatch, published=[], changes_map={}, max_length=10)
+    with pytest.raises(NameTooLongError, match="10-character"):
+        asyncio.run(service.add_change(
+            "c1", "ana", "canonical_tables", "t9", "upsert",
+            {"physicalName": "NOMBREDEMASIADOLARGO", "logicalName": "x", "schema": "core"}))
+    set_change.assert_not_called()
+
+
+def test_upsert_nombre_largo_heredado_sin_cambio_pasa(monkeypatch):
+    # el mismo nombre largo ya existe publicado con ESE id → grandfather (no bloquea).
+    set_change = _mock_repo(
+        monkeypatch,
+        published=[{"id": "t9", "physicalName": "NOMBREDEMASIADOLARGO", "logicalName": "x", "schema": "core"}],
+        changes_map={}, max_length=10)
+    asyncio.run(service.add_change(
+        "c1", "ana", "canonical_tables", "t9", "upsert",
+        {"physicalName": "NOMBREDEMASIADOLARGO", "logicalName": "x", "schema": "core"}))
+    set_change.assert_called_once()
 
 
 def test_upsert_tabla_duplicada_levanta_duplicate(monkeypatch):

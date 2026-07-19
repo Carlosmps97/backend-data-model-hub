@@ -10,9 +10,11 @@ from app.core.models import DOC_CONFIG
 # derivan los físicos reales del catálogo (CODCLAVESUJETOCLI). La UI muestra
 # las otras opciones pero deshabilitadas.
 SCOPES = ("column", "table")
-DEFAULTS: dict[str, dict[str, str]] = {
-    "column": {"separator": "", "case": "upper"},
-    "table": {"separator": "", "case": "upper"},
+# `maxLength` = límite de caracteres del nombre FÍSICO (tabla/columna). Default
+# 150 en ambos scopes (pedido owner). Se versiona en Data Standards.
+DEFAULTS: dict[str, dict] = {
+    "column": {"separator": "", "case": "upper", "maxLength": 150},
+    "table": {"separator": "", "case": "upper", "maxLength": 150},
 }
 
 
@@ -24,3 +26,4 @@ class NamingConfigDoc(BaseModel):
     scope: str  # 'column' | 'table'
     separator: str = ""
     case: str = "upper"  # 'upper' | 'lower' | 'camel'
+    maxLength: int = 150  # límite de caracteres del nombre físico

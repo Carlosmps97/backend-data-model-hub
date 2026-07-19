@@ -48,7 +48,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
         ],
         "namingConfig": {
             scope: {"separator": (naming.get(scope) or {}).get("separator"),
-                    "case": (naming.get(scope) or {}).get("case")}
+                    "case": (naming.get(scope) or {}).get("case"),
+                    "maxLength": (naming.get(scope) or {}).get("maxLength")}
             for scope in ("column", "table")
         },
         "udp": [
@@ -88,7 +89,7 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
         removed.append(f"Term {prev['term']}" if prev else f"Term {tid}")
 
     for scope, rule in (body.namingConfig or {}).items():
-        edited.append(f"{scope.capitalize()} naming · sep '{rule.separator}' · {rule.case}")
+        edited.append(f"{scope.capitalize()} naming · sep '{rule.separator}' · {rule.case} · max {rule.maxLength}")
 
     for d in body.domainsUpsert:
         if d.id and d.id in before_domains:

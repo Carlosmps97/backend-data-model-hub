@@ -23,6 +23,7 @@ class DomainEdit(BaseModel):
 class NamingEdit(BaseModel):
     separator: str
     case: str
+    maxLength: int = 150  # límite de caracteres del físico (tabla/columna)
 
 
 class UdpEdit(BaseModel):

@@ -24,7 +24,7 @@ from . import service
 _can_edit = require_permission("model.edit")
 _can_decide = require_permission("review.decide")
 from .repository import VERSIONED
-from .validation import DuplicateEntityError, InvalidPayloadError, SchemaInUseError
+from .validation import DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError
 from .schemas import (
     ChangeBody,
     ChangesetCreate,
@@ -76,6 +76,10 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         # Unicidad de nombres (spec 10 §9): el Save queda bloqueado ACÁ, en el
         # router — el publish queda protegido transitivamente (y re-chequeado).
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except NameTooLongError as exc:
+        # Nombre físico sobre el límite del naming config (Data Standards): 400
+        # con el mensaje legible; el create popup lo muestra inline.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except InvalidPayloadError as exc:
         # El upsert terminaría aplicado tal cual a la colección publicada:
         # payload que no valida contra el modelo NO entra al changeset.
@@ -100,14 +104,17 @@ async def effective(
     ids: str | None = Query(default=None, description="ids separados por coma"),
     q: str | None = Query(default=None, description="búsqueda por nombre (contains, case-insensitive)"),
     limit: int | None = Query(default=None, ge=1, le=500),
+    schema: str | None = Query(default=None, description="tablas/vistas de un esquema (Database Explorer)"),
 ):
     """Estado efectivo de una colección. `tableId`/`ids` acotan la respuesta a
     un slice — obligatorio en colecciones grandes (canonical_columns).
-    `q`+`limit`: búsqueda server-side por nombre (modales de catálogo)."""
+    `q`+`limit`: búsqueda server-side por nombre (modales de catálogo).
+    `schema`: tablas/vistas de UN esquema, draft-aware (Database Explorer)."""
     if collection not in VERSIONED:
         raise HTTPException(status_code=422, detail=f"Collection not under versioning: {collection!r}.")
     id_list = [s for s in (ids.split(",") if ids else []) if s] or None
-    return ok(await service.effective(cs_id, collection, table_id=tableId, ids=id_list, q=q, limit=limit))
+    return ok(await service.effective(cs_id, collection, table_id=tableId, ids=id_list,
+                                      q=q, limit=limit, schema=schema))
 
 
 @router.get("/{cs_id}/diff")

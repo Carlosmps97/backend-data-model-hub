@@ -18,7 +18,7 @@ from .spec import Condition, QuerySpec, WhereGroup
 
 COLL_OF = {"columns": "canonical_columns", "tables": "canonical_tables",
            "relationships": "relationships", "views": "views",
-           "models": "subject_areas"}
+           "view_columns": "views", "models": "subject_areas"}
 # Campo de orden por defecto del row-query (keyset). `subject_areas` no tiene
 # physicalName: la entidad `models` ordena por `name` (indexado en indexes.py).
 DEFAULT_SORT_FIELD = {"models": "name"}
@@ -108,6 +108,10 @@ def _row(doc: dict, select: list[FieldDef], maps: dict) -> dict:
 
 async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
     catalog = await get_catalog(spec.from_)
+    if spec.from_ == "view_columns":
+        # Entidad virtual (F5): camino DEDICADO aggregate+unwind — no toca el
+        # keyset genérico ni sus defensas de escala (ver _run_view_columns).
+        return await _run_view_columns(spec, catalog, cursor)
     where = await _rewrite_cross_entity(spec.where, catalog)
     spec2 = spec.model_copy(update={"where": where})
     compiled = compile_spec(spec2, catalog)
@@ -157,3 +161,87 @@ async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
     return {"rows": rows, "columns": columns, "nextCursor": next_cursor, "hasMore": has_more,
             "meta": {"grouped": False, "warnings": compiled.warnings,
                      "scan": "index" if compiled.sort else "default"}}
+
+
+# ── Entidad virtual `view_columns` (F5) ──────────────────────────────────────
+_VC_GETTERS = {
+    "viewName": lambda d, s: d.get("name"),
+    "schema": lambda d, s: d.get("schema"),
+    "outputName": lambda d, s: s.get("outputAlias") or s.get("column"),
+    "sourceColumn": lambda d, s: s.get("column"),
+    "sourceTableId": lambda d, s: s.get("tableId"),
+    "castType": lambda d, s: s.get("castType"),
+    "expression": lambda d, s: s.get("expression"),
+}
+
+
+async def _run_view_columns(spec: QuerySpec, catalog: dict[str, FieldDef],
+                            cursor: str | None) -> dict:
+    """1 fila por COLUMNA de cada vista (unwind de `views.sources`, F5).
+
+    Camino DEDICADO: dataset acotado (columnas de vista, ~miles) → aggregate +
+    unwind, sort en memoria y skip-paging (el keyset por _id no aplica a filas
+    derivadas del $unwind). La `description` cae a la de la columna FÍSICA origen
+    cuando la vista no la override (mismo fallback que el editor)."""
+    if spec.is_grouped:
+        raise QueryError("El agrupado no está soportado para view_columns.", code=422)
+    db = await get_db()
+    coll = db["views"]
+    match = build_match(spec.where, catalog)
+    select_keys = spec.select or list(catalog.keys())
+    select = [catalog[k] for k in select_keys if k in catalog]
+    if spec.orderBy:
+        fd0 = catalog.get(spec.orderBy[0].field)
+        sort_path = fd0.path if fd0 else "name"
+        sort_dir = 1 if spec.orderBy[0].dir == "asc" else -1
+    else:
+        sort_path, sort_dir = "name", 1
+    offset = 0
+    if cursor:
+        try:
+            offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+        except Exception:
+            raise QueryError("Cursor inválido", code=400)
+        if offset < 0:
+            raise QueryError("Cursor inválido", code=400)
+    pipe: list[dict] = [{"$match": {**ACTIVE}}, {"$unwind": "$sources"}]
+    if match:
+        pipe.append({"$match": match})
+    pipe += [
+        {"$project": {"name": 1, "schema": 1, "sources.outputAlias": 1,
+                      "sources.column": 1, "sources.tableId": 1,
+                      "sources.castType": 1, "sources.expression": 1,
+                      "sources.description": 1}},
+        {"$sort": {sort_path: sort_dir, "_id": 1}},
+        {"$skip": offset},
+        {"$limit": spec.limit + 1},
+    ]
+    docs = await coll.aggregate(pipe, maxTimeMS=MAX_TIME_MS).to_list(spec.limit + 1)
+    has_more = len(docs) > spec.limit
+    docs = docs[:spec.limit]
+    # Fallback de `description`: def de la columna física origen (una lectura,
+    # acotada a las tablas presentes en la página).
+    phys: dict = {}
+    if any(fd.key == "description" for fd in select):
+        tids = {(d.get("sources") or {}).get("tableId") for d in docs}
+        tids.discard(None)
+        if tids:
+            async for c in db["canonical_columns"].find(
+                    {"tableId": {"$in": list(tids)}, **ACTIVE},
+                    {"tableId": 1, "physicalName": 1, "description": 1}):
+                phys[(c.get("tableId"), c.get("physicalName"))] = c.get("description")
+    rows = []
+    for d in docs:
+        s = d.get("sources") or {}
+        row = {"_id": f"{d.get('_id')}#{s.get('outputAlias') or s.get('column')}"}
+        for fd in select:
+            if fd.key == "description":
+                row[fd.key] = s.get("description") or phys.get((s.get("tableId"), s.get("column")))
+            else:
+                row[fd.key] = _VC_GETTERS.get(fd.key, lambda d, s: None)(d, s)
+        rows.append(row)
+    next_cursor = (base64.urlsafe_b64encode(str(offset + spec.limit).encode()).decode()
+                   if has_more else None)
+    columns = [{"key": fd.key, "label": fd.label, "type": fd.type, "udp": False} for fd in select]
+    return {"rows": rows, "columns": columns, "nextCursor": next_cursor, "hasMore": has_more,
+            "meta": {"grouped": False, "warnings": [], "scan": "unwind"}}

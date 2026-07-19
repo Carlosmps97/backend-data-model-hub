@@ -123,6 +123,10 @@ class ErwinUdpDef:
     short_name: str
     data_type_code: str        # "6" = lista, resto = texto
     default: str
+    # Valores permitidos EXPLÍCITOS (tag_Udp_Values_List): la lista COMPLETA
+    # de la def, aunque no se use en ninguna tabla. Coma-separada; los valores
+    # pueden llevar espacios internos ("CUSTOM_90 days").
+    allowed_values: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -353,6 +357,7 @@ def parse(xml_path: str) -> ErwinModel:
                 m.subtype_udp_defs += 1
             elif len(parts) >= 3:
                 p = _props(el, "Property_TypeProps")
+                raw_vals = _txt(p, "tag_Udp_Values_List")
                 m.udp_defs[el.get("id") or ""] = ErwinUdpDef(
                     id=el.get("id") or "",
                     full_name=full,
@@ -362,6 +367,9 @@ def parse(xml_path: str) -> ErwinModel:
                     data_type_code=_txt(p, "tag_Udp_Data_Type").strip()
                                    or _txt(p, "Data_Type").strip(),
                     default=(_txt(p, "tag_Udp_Default_Value") or "").strip(),
+                    # lista explícita coma-separada (valores con espacios internos)
+                    allowed_values=[v.strip() for v in raw_vals.split(",") if v.strip()]
+                                   if raw_vals else [],
                 )
 
         elif tag == "Glossary_Word_List":

@@ -46,6 +46,13 @@ class InvalidPayloadError(ValueError):
     El router la convierte en 422 (el mensaje ya es legible)."""
 
 
+class NameTooLongError(ValueError):
+    """Nombre FÍSICO (tabla/columna) que excede el límite de caracteres del
+    naming config (Data Standards · Glosario). El router la convierte en 400
+    (el mensaje ya es legible). Solo se dispara al CREAR o al RENOMBRAR — nunca
+    penaliza nombres largos HEREDADOS que no se están tocando."""
+
+
 def payload_error(collection: str, entity_id: str, op: str | None, payload: dict | None) -> str | None:
     """Error legible si el payload no valida contra el modelo de la colección;
     None si es válido (o es un delete, que no lleva payload). Puro."""

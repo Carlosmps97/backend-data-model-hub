@@ -206,6 +206,15 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
             query["name"] = {"$regex": re.escape(q), "$options": "i"}  # escapado: sin ReDoS/inyección
         doms = await db["parent_domains"].find(query, {"name": 1}).limit(limit).to_list(limit)
         return ok([{"value": str(d["_id"]), "label": d.get("name")} for d in doms])
+    if from_ == "view_columns" and fd.path.startswith("sources."):
+        # Entidad virtual (F5): las columnas viven en el array `sources` → unwind
+        # antes de facetar (el distinct genérico agruparía por el array entero).
+        pipe = [{"$match": {"flgactive": {"$ne": False}}}, {"$unwind": "$sources"}]
+        if q:
+            pipe.append({"$match": {fd.path: {"$regex": re.escape(q), "$options": "i"}}})  # escapado
+        pipe += [{"$group": {"_id": f"${fd.path}"}}, {"$sort": {"_id": 1}}, {"$limit": limit}]
+        vals = await db["views"].aggregate(pipe, maxTimeMS=ex.MAX_TIME_MS).to_list(limit)
+        return ok([{"value": v["_id"], "label": str(v["_id"])} for v in vals if v["_id"] is not None])
     # distinct acotado sobre el path (barato si el campo está indexado). Campos
     # cross-entity (schema en columns vive en la tabla) se facetan en la tabla.
     coll = db["canonical_tables"] if fd.entity == "table" else db[ex.COLL_OF[from_]]

@@ -269,14 +269,15 @@ AsyncIOMotorClient(
 
 | Colección | Índices |
 |---|---|
-| `canonical_tables` | `flgactive`, `physicalName`, `udpValues.$**` |
+| `canonical_tables` | `flgactive`, `physicalName`, compuesto `(schema, physicalName)`, `udpValues.$**` |
 | `canonical_columns` | `tableId`, `parentDomainId`, `physicalName`, `dataType`, `udpValues.$**` |
 | `changesets` | `updatedAt` (desc), `status` |
 | `changeset_changes` | compuesto `(csId, collection)` |
 | `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.parentColumnId`, `pairs.childColumnId` |
-| `views` | `flgactive`, `tableId` |
-| `subject_areas` | `projectId` |
+| `views` | `flgactive`, `tableId`, `sourceTableIds` |
+| `subject_areas` | `projectId`, `name`, `udpValues.$**` |
 | `folders` | `projectId` |
+| `schemas` | `flgactive`, `name` |
 | `naming_config` | `scope` |
 | `users` | `email` |
 | `audit_log` | `at` (desc), `actor` |
@@ -405,7 +406,7 @@ flowchart TD
 
 ### 6.2 Alcance versionado
 
-Solo pasan por el changeset/aprobación del canvas: `canonical_tables`, `canonical_columns`, `relationships`, `views`. Los estándares (Parent Domains, Glossary, UDP definitions) se editan y versionan aparte, en el módulo Data Standards, con escritura global directa fuera del publish.
+Pasan por el changeset/aprobación del canvas **8 colecciones** (`VERSIONED`, en orden de dependencia del apply): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`. La estructura del Model Explorer y la entidad `schemas` entraron a versionado el 2026-07-16 (antes se escribían directo a producción). Los estándares (Parent Domains, Glossary, UDP definitions, naming) se editan y versionan aparte, en el módulo Data Standards, con escritura global directa fuera del publish (`standards_versions`).
 
 ---
 
@@ -477,7 +478,7 @@ Checklist mínimo de producción: `COSMOS_CONNECTION_STRING` + `SECRET_KEY` fuer
 
 ### 8.3 Consideraciones de base de datos (Azure Cosmos DB con API de Mongo)
 
-- Un único cluster Cosmos y una única database (`db_modeler`), compartidos con el servicio de agentes (`app-agents-modeler`), sobre **colecciones disjuntas**: este backend administra `canonical_tables`, `canonical_columns`, `relationships`, `views`, `subject_areas`, `folders`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports`, `naming_config`; el agente administra `column_catalog`. El seed de estrés **nunca toca** `column_catalog`.
+- Un único cluster Cosmos y una única database (`db_modeler`), compartidos con el servicio de agentes (`app-agents-modeler`), sobre **colecciones disjuntas**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports` (**19 colecciones** — referencia campo por campo en `esquema-datos.md`); el agente administra `column_catalog`. El seed de estrés **nunca toca** `column_catalog`.
 - **Dimensionar el RU** (o habilitar autoscale) según la carga del reporting y del canvas. Los `POST /query` sobre `canonical_columns` (400k documentos) son las operaciones más caras; sin RU suficiente aparecen 429 (`code 16500`).
 - Los **índices se aseguran al arrancar** (`ensure_indexes`, idempotente). El índice wildcard `udpValues.$**` es crítico para filtrar por UDP creados en runtime y debe existir después del bulk load inicial (por ejemplo el import one-shot de Erwin).
 - La app tolera `NamespaceExists` (48) y duplicate-key (11000) al crear índices; cualquier otro error de índice sí propaga.

@@ -14,11 +14,13 @@ from app.core.logging import get_logger
 from app.core.versioning import overlay, summarize_diff
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas import service as schemas_service
+from app.features.settings import service as settings_service
 from app.features.views.models import normalize_source_tables
 
 from . import repository, validation
 from .repository import VERSIONED
-from .validation import DuplicateEntityError, InvalidPayloadError, SchemaInUseError
+from .validation import (
+    DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError)
 
 log = get_logger("app.changesets")
 
@@ -342,6 +344,39 @@ async def _duplicate_error(cs_id: str, collection: str, entity_id: str,
     return validation.duplicate_error(collection, entity_id, p, pub, pending)
 
 
+async def _name_length_error(cs_id: str, collection: str, entity_id: str,
+                             op: str, payload: dict | None) -> str | None:
+    """Límite de caracteres del nombre FÍSICO (naming config / Data Standards ·
+    Glosario). Solo tablas/columnas en upsert. Se dispara al CREAR o RENOMBRAR;
+    un nombre largo HEREDADO que NO cambia no se penaliza (grandfather). None si
+    pasa o no aplica. El chequeo de longitud corta ANTES de tocar la BD (caso
+    común); solo si excede busca el nombre actual."""
+    if op == "delete" or collection not in ("canonical_tables", "canonical_columns"):
+        return None
+    name = str((payload or {}).get("physicalName") or "").strip()
+    if not name:
+        return None
+    scope = "table" if collection == "canonical_tables" else "column"
+    max_len = int((await settings_service.get_naming_for(scope)).get("maxLength") or 0)
+    if not max_len or len(name) <= max_len:
+        return None  # dentro del límite (o límite en 0 = desactivado)
+    # Excede: bloquear SOLO si es nuevo o el físico CAMBIÓ respecto del estado
+    # efectivo (pendiente del changeset o publicado).
+    pend = (await repository.changes_map(cs_id, [collection])).get(collection, {})
+    current: str | None = None
+    if entity_id in pend:
+        current = str((pend[entity_id].get("payload") or {}).get("physicalName") or "").strip() or None
+    if current is None:
+        pub = await repository.published(collection, {"_id": entity_id})
+        if pub:
+            current = str(pub[0].get("physicalName") or "").strip() or None
+    if current == name:
+        return None  # heredado sin cambios
+    return (f"Can't save this {scope}: the physical name «{name}» has {len(name)} "
+            f"characters, over the {max_len}-character limit. Shorten the logical "
+            f"name, or raise the limit in Data Standards · Glossary.")
+
+
 async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op: str, payload: dict | None) -> dict | str | None:
     """Graba un cambio como documento propio (`changeset_changes`), sólo si el
     changeset sigue en `draft` (protocolo con compensación en el repository).
@@ -374,6 +409,9 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     dup = await _duplicate_error(cs_id, collection, entity_id, op, payload)
     if dup:
         raise DuplicateEntityError(dup)
+    too_long = await _name_length_error(cs_id, collection, entity_id, op, payload)
+    if too_long:
+        raise NameTooLongError(too_long)
     updated = await repository.set_change(cs_id, collection, entity_id, op, payload)
     if updated is not None:
         return updated
@@ -398,7 +436,8 @@ def _q_filter(q: str) -> dict:
 
 async def effective(cs_id: str, collection: str,
                     table_id: str | None = None, ids: list[str] | None = None,
-                    q: str | None = None, limit: int | None = None) -> list[dict] | None:
+                    q: str | None = None, limit: int | None = None,
+                    schema: str | None = None) -> list[dict] | None:
     """Estado efectivo (publicado + overlay del changeset) de una colección.
 
     `table_id`/`ids` acotan la lectura a un SLICE: sin filtro, un GET de
@@ -409,11 +448,31 @@ async def effective(cs_id: str, collection: str,
     `q`/`limit` (excluyentes con los slices): búsqueda server-side por nombre
     para los modales de catálogo — publicado filtrado+capado en Mongo, cambios
     del changeset filtrados por el MISMO criterio, y re-filtro post-overlay
-    (un upsert puede renombrar la entidad y sacarla del match)."""
+    (un upsert puede renombrar la entidad y sacarla del match).
+
+    `schema` (Database Explorer draft-aware, doc 25): tablas/vistas de UN
+    esquema — mismo patrón que `q` pero filtrando por `schema` en vez de por
+    nombre. Precede a `q`/`limit` (el Explorer pasa `schema`+`limit` juntos)."""
     cs = await repository.get(cs_id)
     if not cs:
         return None
     changes = (await repository.changes_map(cs_id, [collection])).get(collection, {})
+
+    if schema is not None:
+        # Bounded por esquema (como el reporting per-schema) + overlay del draft.
+        # `in_slice` = publicado en el esquema; a los `changes` sólo dejamos los
+        # que YA están en el slice o cuyo payload cae en este esquema (una tabla
+        # nueva/movida al esquema). El POST-filtro por `schema` sobre el overlay
+        # descarta lo que el draft SACÓ del esquema (rename de `schema`).
+        pub = await repository.published(collection, {"schema": schema}, limit=limit)
+        in_slice = {d["id"] for d in pub}
+        changes = {
+            eid: ch for eid, ch in changes.items()
+            if eid in in_slice or (ch.get("payload") or {}).get("schema") == schema
+        }
+        out = [d for d in overlay(pub, changes) if d.get("schema") == schema]
+        out.sort(key=lambda d: str(d.get("physicalName") or d.get("name") or "").lower())
+        return out[:limit] if limit else out
 
     if q is not None or limit is not None:
         # `limit` sin `q` = página inicial del modal (primeras N por nombre).

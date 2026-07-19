@@ -1,6 +1,6 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-07-15 · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-07-19 · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
 ~50 MB).
 
@@ -74,8 +74,13 @@ Extrae **glosario (NSM), parent domains y definiciones UDP** del XML a JSON
   (`term/abbrev/alts`), `parent_domains.json` (`name/dataType/definition`),
   `udp_definitions.json` (`name/level/dataType/default/allowedValues/usedBy`)
   y `summary.json`. Con `--csv`, equivalentes abribles en Excel.
-- **Nota:** los `allowedValues` de UDP tipo lista = default de la definición
-  ∪ **valores observados** en el modelo (la def de Erwin no trae el catálogo).
+- **Nota (actualizado doc 22 §7):** los `allowedValues` de UDP tipo lista se
+  leen de la **lista EXPLÍCITA** del XML (`tag_Udp_Values_List`) — el catálogo
+  completo de la definición, aunque un valor no se use en ninguna tabla —
+  unido a los valores observados. (Antes solo se tomaban los USADOS, lo que
+  truncaba enums como "Clasificación del Dato" a las categorías presentes;
+  corregido en el parser. Backfill para BDs ya migradas:
+  `scripts/backfill_udp_allowed_values.py` dry-run + `--apply`.)
 
 ## 3. `extract_model` — modelo de datos limpio a archivos
 
@@ -127,6 +132,12 @@ muestra el plan sin abrir conexión a la BD.
   `scripts/backfill_cardinalidad_particion.py` (dry-run + `--apply`).
 - **Entidad `schemas` (doc 18):** también upserta un doc por schema usado
   (ids `sch-<name>`, reusa por nombre case-insensitive).
+- **Definiciones de vista (F5, doc 22):** además del físico, migra la
+  definición funcional a nivel VISTA (`views.description`) y a nivel COLUMNA
+  DE VISTA (`sources[].description`) — esta última **solo** cuando difiere de
+  la definición de la columna física origen (si coincide, la columna de vista
+  HEREDA y no se guarda override). Backfill para BDs ya migradas:
+  `scripts/backfill_view_col_defs.py` (dry-run + `--apply`).
 - **PKs correctas:** los miembros del Key_Group PK se traducen vía
   `Key_Group_Member.Attribute_Ref` (fix 2026-07-16 — antes NINGUNA columna
   migrada quedaba `isPrimaryKey`).
@@ -213,3 +224,28 @@ previstas (avisadas por el gate, nunca rompen):
 - **Macros `%...%` en nombres físicos**: se resuelven vía
   `User_Formatted_Physical_Name`.
 - Vistas: Erwin no les da nombre lógico; se migran con el físico.
+
+## 10. Censo: qué del XML NO se incorpora hoy (doc 22 §7)
+
+Inventario de datos presentes en el XML de Erwin que la plataforma **aún no
+modela**. No son bugs: son alcance de producto. Útil como contexto para una
+migración o para futuras features.
+
+| Dato del XML | Estado | Detalle |
+|---|---|---|
+| Enum de `allowedValues` de UDP tipo lista | **RESUELTO** | El parser lee la lista completa `tag_Udp_Values_List` (antes solo los usados). Ver §2. |
+| Definiciones de vista/columna-de-vista | **RESUELTO** (F5) | `views.description` + `sources[].description`. Ver §4. |
+| Valores UDP de nivel **Domain** (~59 en el DDV) | **Abierto** | Los `Property_Type` con owner de dominio no se migran (solo Entity/Attribute/Model → table/column/canvas). |
+| **RI actions** de las relaciones (~134 rels) | **Abierto** | ON DELETE/UPDATE (Cascade/Restrict/…) del `Referential_Integrity` no se modela; solo se migra cardinalidad + identifying. |
+| **Índices** (`Key_Group` IF*) + `Is_Unique` | **Abierto** | Los índices no-PK y el flag de unicidad no se migran (no hay feature de índices en la web). |
+| **Comment ≠ Definition** (~125 columnas) | **Abierto** | Erwin distingue `Comment` y `Definition`; la plataforma guarda **uno** (`definition or comment`). Cuando difieren, se pierde el que no se elige. |
+
+> Las decisiones sobre los ítems **Abiertos** las toma el owner; a la fecha
+> (2026-07-18) quedaron descartados hasta nuevo aviso.
+
+---
+
+## Ver también
+- `esquema-datos.md` — referencia completa de las colecciones destino (campos,
+  tipos, embebidos, referencias) que estos scripts pueblan.
+- `arquitectura.md` §6.1 — el alcance `VERSIONED` y el flujo de publicación.

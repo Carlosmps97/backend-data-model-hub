@@ -19,7 +19,7 @@ def test_snapshot_of_limpia_campos():
     assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
                                    "namingTerm": None, "description": None}
     assert "junk" not in snap["dict"][0]
-    assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper"}
+    assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
 
 
 def test_build_diff_clasifica_add_edit_remove():

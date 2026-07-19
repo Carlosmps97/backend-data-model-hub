@@ -9,3 +9,4 @@ class NamingConfigBody(BaseModel):
 
     separator: str = ""  # regla corporativa: join (sin separador)
     case: str = "upper"  # 'upper' | 'lower' | 'camel'
+    maxLength: int = 150  # límite de caracteres del nombre físico (tabla/columna)

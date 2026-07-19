@@ -25,7 +25,7 @@ def _to_doc(scope: str, doc: dict | None) -> dict:
     """Normaliza un doc Cosmos (o None) a la forma pública, sembrando defaults."""
     base = {"scope": scope, **DEFAULTS.get(scope, {})}
     if doc:
-        for k in ("separator", "case"):
+        for k in ("separator", "case", "maxLength"):
             if doc.get(k) is not None:
                 base[k] = doc[k]
     return NamingConfigDoc.model_validate(base).model_dump()
@@ -49,7 +49,7 @@ async def get_one(scope: str) -> dict:
 async def upsert(scope: str, data: dict) -> dict:
     """Upsert de {separator, case} para `scope`. Crea el doc si no existía."""
     db = await get_db()
-    fields = {k: v for k, v in data.items() if k in ("separator", "case")}
+    fields = {k: v for k, v in data.items() if k in ("separator", "case", "maxLength")}
     res = await db[COLL].find_one_and_update(
         {"_id": scope},
         {

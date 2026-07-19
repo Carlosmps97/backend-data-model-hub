@@ -14,7 +14,9 @@ class ViewBody(BaseModel):
     sql_schema: str | None = Field(default=None, alias="schema")
     tags: list[str] = []
     filter: str | None = None
-    # Cada source: {column?, tableId?, outputAlias?, expression?, castType?}.
+    # Cada source: {column?, tableId?, outputAlias?, expression?, castType?,
+    # description?}. `description` = definición funcional propia de la columna en
+    # la vista (F5). list[dict] ⇒ las claves nuevas viajan sin sub-schema.
     sources: list[dict] = []
     outputAlias: str | None = None
     expression: str | None = None
