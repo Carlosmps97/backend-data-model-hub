@@ -1,10 +1,15 @@
 # Pydantic + env
-pydantic>=2.0
+# Stack web PINEADO (== del venv local validado con pytest 430 + suite viva):
+# la imagen base de Databricks Apps trae pre-instalados fastapi/starlette/
+# uvicorn viejos (0.115.0/0.38.6/0.30.6) que con rangos abiertos (>=) pip da
+# por satisfechos → en Apps corría una combinación JAMÁS testeada localmente.
+pydantic==2.13.4
 python-dotenv
 
 # API Server
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+fastapi==0.136.1
+starlette==1.0.0
+uvicorn[standard]==0.47.0
 
 # Cosmos DB (Motor async + pymongo for type compat) — legacy/rollback (doc 28)
 pymongo>=4.0
