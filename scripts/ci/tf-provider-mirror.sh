@@ -52,7 +52,19 @@ $VLINE
 TF
 ( cd "$SRC" && tofu providers mirror -platform=linux_amd64 "$MIRROR" )
 
-# 3. Config: instalar TODOS los providers desde el mirror local (sin firma).
+# 3. El init puede buscar el provider por CUALQUIERA de sus dos direcciones
+#    canónicas — registry.opentofu.org o registry.terraform.io (visto en CI:
+#    "provider registry.terraform.io/databricks/databricks was not found in
+#    any of the search locations"). Publicarlo bajo AMBOS hosts: los archivos
+#    del mirror no dependen del hostname (es solo el directorio raíz).
+if [ -d "$MIRROR/registry.opentofu.org" ] && [ ! -d "$MIRROR/registry.terraform.io" ]; then
+  cp -R "$MIRROR/registry.opentofu.org" "$MIRROR/registry.terraform.io"
+fi
+if [ -d "$MIRROR/registry.terraform.io" ] && [ ! -d "$MIRROR/registry.opentofu.org" ]; then
+  cp -R "$MIRROR/registry.terraform.io" "$MIRROR/registry.opentofu.org"
+fi
+
+# 4. Config: instalar TODOS los providers desde el mirror local (sin firma).
 cat > "$RC" <<RC
 provider_installation {
   filesystem_mirror {
@@ -65,7 +77,7 @@ provider_installation {
 }
 RC
 
-# 4. Exportar la config para los pasos siguientes (validate/deploy del workflow).
+# 5. Exportar la config para los pasos siguientes (validate/deploy del workflow).
 {
   echo "DATABRICKS_TF_CLI_CONFIG_FILE=$RC"
   echo "TF_CLI_CONFIG_FILE=$RC"
