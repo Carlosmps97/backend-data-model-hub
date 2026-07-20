@@ -39,8 +39,14 @@ async def connect() -> None:
 
         pool = await create_pool()
         db = LakebaseDatabase(pool, settings.LAKEBASE_PGSCHEMA)
-        await db.ensure_base()
-        await ensure_indexes(db)
+        try:
+            await db.ensure_base()
+            await ensure_indexes(db)
+        except Exception:
+            # Sin esto, cada reintento del lifespan filtraba un pool a medio
+            # abrir cuando el DDL de arranque fallaba (visto en Apps).
+            await pool.close()
+            raise
         _pg_db = db
         log.info(
             "lakebase connected",

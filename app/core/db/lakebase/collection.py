@@ -579,26 +579,58 @@ class LakebaseDatabase:
         return [r["tablename"] for r in rows]
 
     async def ensure_base(self) -> None:
-        """DDL de arranque en UN solo round-trip (multi-statement, sin params):
-        ~110 statements secuenciales sobre WAN costaban ~30 s por reload."""
-        stmts = [f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"']
-        for name in KNOWN_COLLECTIONS:
-            stmts.append(
-                f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
-                f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
-            )
-            stmts.append(
-                f'CREATE INDEX IF NOT EXISTS "gin_{name}" ON "{self.schema}"."{name}" '
-                f"USING gin (doc jsonb_path_ops)"
-            )
+        """Censa el schema y emite SOLO el DDL faltante, en UN round-trip
+        (multi-statement, sin params): ~110 statements secuenciales sobre WAN
+        costaban ~30 s por reload.
+
+        Censar primero es CLAVE en Databricks Apps: el service principal de la
+        app no es owner de las tablas que creó la migración, y en Postgres
+        hasta un `CREATE INDEX IF NOT EXISTS` de un índice YA existente falla
+        con "must be owner of table ..." (el chequeo de ownership corre antes
+        del IF NOT EXISTS; visto en el primer arranque en Apps 2026-07-20).
+        En operación normal (todo migrado) aquí no se ejecuta ningún DDL."""
         async with self._ddl_lock:
             async with self.pool.acquire() as conn:
-                await conn.execute(";\n".join(stmts))
-                rows = await conn.fetch(
-                    "SELECT indexname FROM pg_indexes WHERE schemaname = $1", self.schema
+                has_schema = await conn.fetchrow(
+                    "SELECT 1 FROM pg_namespace WHERE nspname = $1", self.schema
                 )
+                tables = {
+                    r["tablename"]
+                    for r in await conn.fetch(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = $1", self.schema
+                    )
+                }
+                indexes = {
+                    r["indexname"]
+                    for r in await conn.fetch(
+                        "SELECT indexname FROM pg_indexes WHERE schemaname = $1", self.schema
+                    )
+                }
+                stmts: list[str] = []
+                if has_schema is None:
+                    stmts.append(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+                for name in KNOWN_COLLECTIONS:
+                    if name not in tables:
+                        stmts.append(
+                            f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
+                            f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
+                        )
+                    if f"gin_{name}" not in indexes:
+                        stmts.append(
+                            f'CREATE INDEX IF NOT EXISTS "gin_{name}" ON "{self.schema}"."{name}" '
+                            f"USING gin (doc jsonb_path_ops)"
+                        )
+                if stmts:
+                    await conn.execute(";\n".join(stmts))
+                    indexes = {
+                        r["indexname"]
+                        for r in await conn.fetch(
+                            "SELECT indexname FROM pg_indexes WHERE schemaname = $1",
+                            self.schema,
+                        )
+                    }
             self._ensured.update(KNOWN_COLLECTIONS)
-            self._known_indexes = {r["indexname"] for r in rows}
+            self._known_indexes = indexes
 
     async def ensure_table(self, name: str) -> None:
         if name in self._ensured:
@@ -608,15 +640,29 @@ class LakebaseDatabase:
             if name in self._ensured:
                 return
             async with self.pool.acquire() as conn:
-                await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
-                await conn.execute(
-                    f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
-                    f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
+                # Igual que ensure_base: DDL solo si FALTA (en Apps el SP no es
+                # owner de tablas pre-existentes y el CREATE fallaría).
+                exists = await conn.fetchrow(
+                    "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2",
+                    self.schema,
+                    name,
                 )
-                await conn.execute(
-                    f'CREATE INDEX IF NOT EXISTS "gin_{name}" ON "{self.schema}"."{name}" '
-                    f"USING gin (doc jsonb_path_ops)"
+                has_gin = await conn.fetchrow(
+                    "SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+                    self.schema,
+                    f"gin_{name}",
                 )
+                if exists is None:
+                    await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+                    await conn.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
+                        f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
+                    )
+                if has_gin is None:
+                    await conn.execute(
+                        f'CREATE INDEX IF NOT EXISTS "gin_{name}" ON "{self.schema}"."{name}" '
+                        f"USING gin (doc jsonb_path_ops)"
+                    )
             self._ensured.add(name)
 
     async def create_field_index(
