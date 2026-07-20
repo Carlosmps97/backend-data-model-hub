@@ -67,6 +67,21 @@ def test_login_ok_devuelve_token_y_usuario(monkeypatch):
     assert "passwordHash" not in res["user"]
 
 
+def test_current_principal_acepta_x_session_token():
+    """Regresión Apps 2026-07-20: el proxy SSO de Databricks Apps CONSUME el
+    header `Authorization` (su propio carril de auth) y el backend nunca lo
+    recibe — el front quedaba 401 con un token válido en vuelo. El token de
+    sesión viaja entonces en `X-Session-Token`; `bearer_token` lee ambos."""
+    from app.core.security import create_access_token
+
+    token = create_access_token(
+        "maria.rojas", extra={"email": "m@e.com", "name": "Maria", "role": "administrador"}
+    )
+    p = current_principal(_req({"X-Session-Token": token}))
+    assert p.username == "maria.rojas"
+    assert p.source == "session"
+
+
 def test_login_http_con_rate_limiter_activo(monkeypatch):
     """Regresión Apps 2026-07-20: con el limiter HABILITADO (postura de
     producción; en dev está OFF y por eso nunca se vio) slowapi intenta

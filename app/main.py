@@ -169,7 +169,15 @@ def create_app() -> FastAPI:
         # token; el header se ignora), pero evita que un front que lo mande
         # (build viejo, dev apuntando a este backend) muera en el preflight
         # con 400 "Disallowed CORS headers" → "Failed to fetch".
-        allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-Dev-User"],
+        # X-Session-Token: el token de sesión propio viaja ahí en Databricks
+        # Apps (el proxy SSO de la plataforma consume `Authorization`).
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Requested-With",
+            "X-Dev-User",
+            "X-Session-Token",
+        ],
         max_age=600,
     )
 
