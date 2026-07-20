@@ -19,6 +19,7 @@ agente de modelado conversacional vive en `app-agents-modeler` (fuera de este MV
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -69,19 +70,42 @@ log = get_logger("app.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicializa los singletons del proceso al arrancar."""
+    retry_task: asyncio.Task | None = None
     try:
         await db_client.connect()
         app.state.db_connected = True
-        log.info("motor db connected")
+        log.info("db connected")
     except Exception as e:  # noqa: BLE001
         app.state.db_connected = False
-        log.error("motor db connection failed", extra={"error": str(e)})
+        log.error("db connection failed", extra={"error": str(e)})
+
+        # Auto-sanación: si la BD no estaba disponible AL ARRANCAR (p. ej. el
+        # compute Lakebase dormido por scale-to-zero, o red transitoria), la
+        # app quedaba `degraded` hasta un restart manual aunque la BD volviera
+        # (visto en Apps 2026-07-20). Reintenta en background con backoff;
+        # /api/health se recupera solo cuando conecta.
+        async def _retry_connect() -> None:
+            delay = 15.0
+            while True:
+                await asyncio.sleep(delay)
+                try:
+                    await db_client.connect()
+                    app.state.db_connected = True
+                    log.info("db connected after retry")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("db reconnect failed", extra={"error": str(exc)})
+                    delay = min(delay * 2, 120.0)
+
+        retry_task = asyncio.create_task(_retry_connect())
 
     log.info("api started")
     try:
         yield
     finally:
         log.info("api stopping")
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
         await db_client.disconnect()
 
 
@@ -124,13 +148,20 @@ def create_app() -> FastAPI:
     # Allowlist explícita (settings.CORS_ORIGINS; default = front de dev) y/o
     # regex (settings.CORS_ORIGIN_REGEX) para que el mismo bundle sirva en
     # cualquier workspace de Databricks Apps sin editar orígenes por entorno.
-    # Auth token-first (Bearer, sin cookies) → allow_credentials=False; métodos y
-    # headers acotados en vez de wildcard (superficie mínima).
+    # allow_credentials=True: NUESTRA auth sigue siendo token-first (Bearer,
+    # sin cookies propias), pero en Databricks Apps el fetch del front lleva la
+    # cookie de sesión del PROXY SSO de la app backend (`credentials:
+    # 'include'` en http.ts). Con credenciales, el navegador EXIGE
+    # `Access-Control-Allow-Credentials: true` en el preflight — con False el
+    # POST de login ni se enviaba ("CORS error" con headers provisionales,
+    # visto 2026-07-20 en Apps). Seguro porque los orígenes están acotados
+    # (lista/regex, nunca wildcard) y la identidad sale SOLO del token.
+    # Métodos y headers acotados en vez de wildcard (superficie mínima).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
         allow_origin_regex=settings.CORS_ORIGIN_REGEX or None,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         # X-Dev-User: header del seam de identidad de DESARROLLO. Permitirlo en
         # CORS no autentica nada (con REQUIRE_AUTH la identidad es SOLO el
