@@ -132,7 +132,12 @@ def create_app() -> FastAPI:
         allow_origin_regex=settings.CORS_ORIGIN_REGEX or None,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+        # X-Dev-User: header del seam de identidad de DESARROLLO. Permitirlo en
+        # CORS no autentica nada (con REQUIRE_AUTH la identidad es SOLO el
+        # token; el header se ignora), pero evita que un front que lo mande
+        # (build viejo, dev apuntando a este backend) muera en el preflight
+        # con 400 "Disallowed CORS headers" → "Failed to fetch".
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-Dev-User"],
         max_age=600,
     )
 
