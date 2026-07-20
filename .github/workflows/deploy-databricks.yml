@@ -32,6 +32,24 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
+      # `bundle deploy` usa Terraform por debajo para crear/actualizar la app.
+      # Por defecto el CLI baja OpenTofu y la verificación de firma del provider
+      # `databricks/databricks` falla en el runner ("authentication signature
+      # from unknown issuer"). Se fuerza HashiCorp Terraform pre-instalado
+      # (registry.terraform.io = provider firmado/verificable) y se apunta el
+      # CLI a ese binario. `terraform_wrapper: false` es obligatorio: el CLI
+      # necesita el ejecutable real, no el wrapper que captura stdout.
+      - name: Install Terraform (motor del bundle)
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+          terraform_wrapper: false
+
+      - name: Apuntar el Databricks CLI a Terraform
+        run: |
+          echo "DATABRICKS_TF_EXEC_PATH=$(which terraform)" >> "$GITHUB_ENV"
+          echo "DATABRICKS_TF_VERSION=1.5.7" >> "$GITHUB_ENV"
+
       - name: Validate bundle
         run: databricks bundle validate --target "$BUNDLE_TARGET"
 

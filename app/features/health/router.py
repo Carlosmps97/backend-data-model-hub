@@ -1,6 +1,6 @@
 """Endpoint de salud del backend de plataforma.
 
-GET /api/health → estado de la API y de la conexión a Cosmos DB.
+GET /api/health → estado de la API y de la conexión a la base de datos.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class HealthResponse(BaseModel):
 @router.get(
     "/health",
     response_model=HealthResponse,
-    summary="Estado de la API y conexión con Cosmos DB.",
+    summary="Estado de la API y conexión con la base de datos.",
 )
 async def health_check(request: Request) -> HealthResponse:
     # Ping VIVO con timeout corto: el booleano del arranque quedaba congelado

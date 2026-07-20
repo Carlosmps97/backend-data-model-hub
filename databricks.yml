@@ -23,15 +23,9 @@ variables:
   cors_origin_regex:
     description: "Regex de orígenes CORS — matchea el front (frnt-data-model-hub) en cualquier workspace."
     default: https://frnt-data-model-hub-.*\.databricksapps\.com
-  cosmos_database:
-    description: "Base Mongo del fallback Cosmos."
-    default: db_modeler
   secret_scope:
-    description: "Scope de secretos (Key Vault-backed) con la conn-str de Cosmos y la SECRET_KEY."
+    description: "Scope de secretos (Key Vault-backed) que guarda la SECRET_KEY de firma de sesión."
     default: kv-scope-datacraft
-  cosmos_secret_key:
-    description: "Key del secreto con la connection string de Cosmos."
-    default: conn-str-cosmos
   session_secret_key:
     description: "Key del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
     default: session-secret-key
@@ -41,7 +35,7 @@ resources:
     backend:                      # resource key (lo usa `databricks bundle run backend`)
       name: bknd-data-model-hub   # nombre real de la app en el workspace
       source_code_path: .         # el código de la app está en la raíz del repo
-      description: "Data Model Hub — backend de plataforma (FastAPI · Lakebase Postgres, fallback Cosmos)."
+      description: "Data Model Hub — backend de plataforma (FastAPI · Databricks Lakebase Postgres)."
       config:
         # uvicorn recibe UVICORN_HOST=0.0.0.0 y UVICORN_PORT=$DATABRICKS_APP_PORT
         # del runtime de Apps — no hace falta pasar host/puerto.
@@ -64,23 +58,12 @@ resources:
           # ── CORS por regex: el mismo bundle sirve en cualquier workspace ─
           - name: CORS_ORIGIN_REGEX
             value: ${var.cors_origin_regex}
-          # ── Cosmos (fallback): rollback = DB_BACKEND 'cosmos' + redeploy ─
-          - name: COSMOS_DATABASE
-            value: ${var.cosmos_database}
-          - name: COSMOS_CONNECTION_STRING
-            value_from: cosmos_secret
           # ── Producción: login obligatorio + clave de firma desde el KV ───
           - name: REQUIRE_AUTH
             value: 'true'
           - name: SECRET_KEY
             value_from: session_secret
       resources:
-        - name: cosmos_secret
-          description: "Cosmos connection string (scope Key Vault-backed)."
-          secret:
-            scope: ${var.secret_scope}
-            key: ${var.cosmos_secret_key}
-            permission: READ
         - name: session_secret
           description: "SECRET_KEY para firmar tokens de sesión."
           secret:

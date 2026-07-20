@@ -40,7 +40,7 @@ class Settings:
     # "lakebase" (Databricks Lakebase Postgres, doc 28) o "cosmos" (legacy /
     # rollback). El seam es app/core/db/client.py: los repositorios no saben
     # cuál hay debajo.
-    DB_BACKEND: str = os.getenv("DB_BACKEND", "cosmos").strip().lower()
+    DB_BACKEND: str = os.getenv("DB_BACKEND", "lakebase").strip().lower()
 
     # ─── Azure Cosmos DB for MongoDB (fallback / rollback) ─────
     # Solo se usa con DB_BACKEND=cosmos. La data quedó restaurada a la base

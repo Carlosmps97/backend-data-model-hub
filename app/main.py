@@ -3,7 +3,7 @@
 Construye la app FastAPI y monta los routers de cada feature. Responsabilidades
 acotadas:
 - Configurar logging.
-- Lifespan: abrir/cerrar la conexión a Cosmos DB (Motor async).
+- Lifespan: abrir/cerrar la conexión a la base de datos (seam Lakebase/Cosmos).
 - Middleware: logueo estructurado de cada request.
 - CORS para el frontend Next.js (origen distinto en desarrollo local).
 - Montar los routers de cada feature: `health`, `identity`, `domains`,
@@ -98,8 +98,8 @@ def create_app() -> FastAPI:
         title="Data Modeler Platform Backend",
         description=(
             "API REST de plataforma del Data Modeler. Maneja proyectos, modelos "
-            "y la persistencia en Cosmos DB. MVP sin auth (abierto/anónimo); el "
-            "agente conversacional vive en `app-agents-modeler`."
+            "y su persistencia en Databricks Lakebase Postgres. El agente "
+            "conversacional vive en `app-agents-modeler`."
         ),
         version="1.0.0",
         lifespan=lifespan,
