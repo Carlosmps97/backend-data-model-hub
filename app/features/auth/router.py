@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
@@ -20,7 +20,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/login")
 @limiter.limit("5/minute")  # anti fuerza bruta / credential stuffing (por IP)
-async def login(request: Request, body: LoginBody):
+async def login(request: Request, response: Response, body: LoginBody):
+    # `response` es OBLIGATORIA con el limiter ACTIVO (producción): slowapi
+    # inyecta ahí los headers X-RateLimit-* cuando el endpoint devuelve un
+    # dict; sin ella revienta con "parameter `response` must be an instance
+    # of starlette.responses.Response" → 500 en el primer login real (visto
+    # en Apps 2026-07-20; en dev el limiter está OFF y nunca se manifestó).
     result = await service.login(body.username.strip(), body.password)
     if result is None:
         raise HTTPException(

@@ -67,6 +67,31 @@ def test_login_ok_devuelve_token_y_usuario(monkeypatch):
     assert "passwordHash" not in res["user"]
 
 
+def test_login_http_con_rate_limiter_activo(monkeypatch):
+    """Regresión Apps 2026-07-20: con el limiter HABILITADO (postura de
+    producción; en dev está OFF y por eso nunca se vio) slowapi intenta
+    inyectar los headers X-RateLimit-* en la respuesta del endpoint, y si este
+    devuelve un dict explota con "parameter `response` must be an instance of
+    starlette.responses.Response" → 500 en el PRIMER login real. El endpoint
+    declara `response: Response` para darle a slowapi dónde inyectarlos."""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from starlette.testclient import TestClient
+
+    from app.core.ratelimit import limiter
+    from app.main import app
+
+    monkeypatch.setattr(limiter, "enabled", True)
+    monkeypatch.setattr(
+        service, "login", _AsyncMock(return_value={"token": "tkn", "user": {"id": "maria"}})
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.post("/api/auth/login", json={"username": "maria", "password": "x"})
+    assert r.status_code == 200, f"limiter activo rompió el login: {r.status_code} {r.text}"
+    body = r.json()
+    assert body["success"] is True and body["data"]["token"] == "tkn"
+
+
 def test_login_password_incorrecta_es_none_y_audita_fallo(monkeypatch):
     from app.core.security import hash_password
     monkeypatch.setattr(service.repository, "get_login_record",
