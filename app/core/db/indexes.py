@@ -1,0 +1,115 @@
+"""Índices de colecciones (idempotentes).
+
+Cosmos DB for MongoDB (tier RU) levanta NamespaceExists (code 48) si una
+colección fue creada implícitamente antes de la llamada al índice. El índice
+igual se crea correctamente; tragamos ese código puntual. Duplicate-key
+(11000) también es seguro de ignorar en índices únicos ya existentes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+log = logging.getLogger(__name__)
+
+
+async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+    """Crea los índices de las colecciones del backend de plataforma."""
+
+    # Cosmos (tier RU) tumba con TooManyLogicalSessions (261) si se crean ~30
+    # índices en paralelo sobre una BD recién vaciada (cada create_index abre su
+    # sesión lógica). Acotamos la concurrencia con un semáforo: sigue siendo
+    # concurrente/rápido, sin reventar el límite de sesiones del worker.
+    sem = asyncio.Semaphore(5)
+
+    async def _try(col_name: str, keys: list[tuple], **kwargs: object) -> None:
+        async with sem:
+            try:
+                await db[col_name].create_index(keys, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                if code not in (48, 11000):
+                    raise
+
+    await asyncio.gather(
+        # ── Modelo canónico (M1) ────────────────────────────────
+        _try("parent_domains", [("flgactive", 1)]),
+        _try("glossary_terms", [("flgactive", 1)]),
+        _try("udp_definitions", [("flgactive", 1)]),
+        _try("canonical_tables", [("flgactive", 1)]),
+        # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
+        # top-N se ordena en Mongo por physicalName, y Cosmos RU rechaza
+        # `.sort()` sobre campos sin índice (500 en todas las búsquedas).
+        _try("canonical_tables", [("physicalName", 1)]),
+        # §9 control de duplicados (F1): chequeo de (schema, physicalName) en
+        # add_change/publish por regex anclado case-insensitive. NO-unique a
+        # propósito: Cosmos no permite índices únicos sobre colecciones
+        # pobladas — la garantía vive en el router. El campo persistido es
+        # `schema` (alias del Pydantic `sql_schema`).
+        _try("canonical_tables", [("schema", 1), ("physicalName", 1)]),
+        _try("canonical_columns", [("tableId", 1)]),
+        _try("canonical_columns", [("parentDomainId", 1)]),
+        # ── Motor de consulta del reporting (07) ────────────────
+        # keyset/orden por physicalName (Cosmos rechaza .sort() sin índice) +
+        # filtro/group por dataType.
+        _try("canonical_columns", [("physicalName", 1)]),
+        _try("canonical_columns", [("dataType", 1)]),
+        # WILDCARD sobre el mapa embebido de UDP: cubre TODAS las keys UDP
+        # presentes Y futuras (el usuario crea UDP en runtime) → filtrar por
+        # cualquier UDP hace seek, sin DDL por-key. En tablas y columnas.
+        _try("canonical_columns", [("udpValues.$**", 1)]),
+        _try("canonical_tables", [("udpValues.$**", 1)]),
+        # ── Changesets (M2a) ────────────────────────────────────
+        _try("changesets", [("updatedAt", -1)]),
+        _try("changesets", [("status", 1)]),
+        # Un doc POR CAMBIO (sin límite de 2MB/doc): overlay/diff/apply leen
+        # por csId (+collection) — el prefijo del compuesto cubre ambos.
+        _try("changeset_changes", [("csId", 1), ("collection", 1)]),
+        # ── M3a: Projects + Subject Areas + Relationships + Views ──
+        _try("projects", [("flgactive", 1)]),
+        _try("subject_areas", [("projectId", 1)]),
+        # F5 — UDP del Modelo de Datos: wildcard sobre el mapa embebido (mismo
+        # patrón que canonical_columns/tables, líneas de arriba) → filtrar por
+        # cualquier UDP de canvas hace seek. `name` soporta el sort/keyset de
+        # la entidad `models` del reporting (Cosmos rechaza sort sin índice).
+        _try("subject_areas", [("udpValues.$**", 1)]),
+        _try("subject_areas", [("name", 1)]),
+        _try("relationships", [("flgactive", 1)]),
+        # El canvas resuelve relaciones por extremos ($in por tabla) — v2
+        # parent/child (doc 19). Los índices legacy source*/target* de BDs
+        # viejas quedan huérfanos (inofensivos) hasta droparse a mano.
+        _try("relationships", [("parentTableId", 1)]),
+        _try("relationships", [("childTableId", 1)]),
+        # §8 warning de eliminación (F1): GET /api/relationships/impact busca
+        # relaciones por columna DE ALGÚN PAR (multikey por dotted path).
+        _try("relationships", [("pairs.parentColumnId", 1)]),
+        _try("relationships", [("pairs.childColumnId", 1)]),
+        _try("views", [("flgactive", 1)]),
+        # Las vistas se listan por tabla (PropertiesPanel · tab Views).
+        _try("views", [("tableId", 1)]),
+        # F3: match canónico por fuentes (multi-fuente) — lo usan list_all
+        # ($or contains/$in) y la query del diagrama (showOnCanvas + $in).
+        _try("views", [("sourceTableIds", 1)]),
+        # ── R1a: Folders (jerarquía del Model Explorer) ──────────
+        _try("folders", [("projectId", 1)]),
+        # ── Esquemas como entidad versionada (doc 18) ────────────
+        # `name` soporta el chequeo de unicidad por regex anclado (NO-unique:
+        # Cosmos no permite índices únicos sobre colecciones pobladas — la
+        # garantía vive en service/changesets, como canonical_tables).
+        _try("schemas", [("flgactive", 1)]),
+        _try("schemas", [("name", 1)]),
+        # ── R1c: naming_config (1 doc por scope; _id = scope) ────
+        _try("naming_config", [("scope", 1)]),
+        # ── Auth propia + RBAC + auditoría (2026-07-04) ──────────
+        _try("users", [("email", 1)]),
+        _try("audit_log", [("at", -1)]),
+        _try("audit_log", [("actor", 1)]),
+        # Data Standards: seq ÚNICO — dos apply/rollback concurrentes no pueden
+        # crear dos versiones con el mismo seq/label (el service reintenta ante
+        # la colisión). Sirve para ambos sentidos de orden (el app ordena en Python).
+        _try("standards_versions", [("seq", 1)], unique=True),
+    )
+    log.info("motor indexes ensured")
