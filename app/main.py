@@ -20,6 +20,7 @@ agente de modelado conversacional vive en `app-agents-modeler` (fuera de este MV
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -193,14 +194,30 @@ def create_app() -> FastAPI:
             "unhandled exception",
             extra={"method": request.method, "path": request.url.path},
         )
+        # Reponer los headers CORS a mano: esta respuesta se construye FUERA
+        # del CORSMiddleware, y sin ellos el navegador convierte el 500 en un
+        # opaco "Failed to fetch". (Fix 2026-07-20: referenciaba una variable
+        # `cors_origins` inexistente → NameError en cada 500 de producción.)
         origin = request.headers.get("origin")
+        allowed = bool(origin) and (
+            origin in settings.CORS_ORIGINS
+            or bool(
+                settings.CORS_ORIGIN_REGEX
+                and re.fullmatch(settings.CORS_ORIGIN_REGEX, origin)
+            )
+        )
         headers = (
-            {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
-            if origin and origin in cors_origins else {}
+            {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+            }
+            if allowed
+            else {}
         )
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": "Error interno del servidor. Revisá los logs con el X-Request-ID."},
+            content={"success": False, "error": "Internal server error. Check the logs using the X-Request-ID."},
             headers=headers,
         )
 
