@@ -37,11 +37,22 @@ def get_identity_provider() -> IdentityProvider:
 
 
 def bearer_token(request: Request) -> str | None:
-    """Extrae el token de `Authorization: Bearer <token>` (None si no viene)."""
+    """Extrae el token de sesión del request. Fuentes, en orden:
+
+    1. `Authorization: Bearer <token>` — dev local, curl, tests.
+    2. `X-Session-Token: <token>` — producción en Databricks Apps: el proxy
+       SSO de la plataforma CONSUME el header `Authorization` (es su propio
+       carril de auth programática) y el backend jamás lo recibe — verificado
+       2026-07-20: el navegador enviaba el Bearer y FastAPI lo veía ausente
+       (401 "Authentication required" con token válido en vuelo). Por eso el
+       front manda el token de sesión en un header propio.
+    """
     auth = request.headers.get("Authorization") or ""
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip() or None
-    return None
+        token = auth[7:].strip()
+        if token:
+            return token
+    return (request.headers.get("X-Session-Token") or "").strip() or None
 
 
 def _principal_from_claims(claims: dict) -> Principal:
