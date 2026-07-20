@@ -1,11 +1,15 @@
 """Configuración del backend de plataforma (backend-data-model-hub).
 
-Solo expone la conexión a Cosmos DB y la ruta raíz del proyecto. Las
-variables de Azure AI Foundry / OpenAI / embeddings / engines viven en el
-servicio de agentes (`app-agents-modeler`).
+ÚNICA superficie de configuración por entorno (homologada 2026-07-19):
+- Dev local  → `.env` (gitignored; plantilla en `.env.example`).
+- Databricks Apps → bloque `config.env` del bundle (`databricks.yml`,
+  sección `variables:` = parámetros por entorno).
+- GitHub Actions → solo `DATABRICKS_HOST` (variable) + `DATABRICKS_TOKEN`
+  (secret) para el CLI del bundle; no alimentan este Settings.
 
-MVP sin auth: no hay secretos de autenticación (la identidad/permisos vuelven al
-final como matriz robusta).
+Regla: NINGÚN valor específico de un workspace va hardcodeado aquí como
+default — los defaults son constantes de producto (puertos, nombres de BD
+del producto, flags). Lo específico del entorno entra por env.
 """
 
 import os
@@ -24,6 +28,11 @@ load_dotenv(_PROJECT_ROOT / ".env")
 INSECURE_DEFAULT_SECRET_KEY = "dev-only-insecure-change-me-in-prod"
 
 
+def _csv(name: str) -> list[str]:
+    """Lista desde una env separada por comas (vacía → [])."""
+    return [x.strip() for x in os.getenv(name, "").split(",") if x.strip()]
+
+
 class Settings:
     """Configuración global del backend de plataforma."""
 
@@ -33,44 +42,58 @@ class Settings:
     # cuál hay debajo.
     DB_BACKEND: str = os.getenv("DB_BACKEND", "cosmos").strip().lower()
 
-    # ─── Azure Cosmos DB for MongoDB (legacy / rollback) ───────
-    # Misma cuenta que el servicio de agentes. Cada uno toca colecciones
-    # distintas: el backend administra `users` / `projects` / `project_tables`
-    # / `project_relationships` / `semantic_types` / `udps`; el agente
-    # administra `column_catalog`.
+    # ─── Azure Cosmos DB for MongoDB (fallback / rollback) ─────
+    # Solo se usa con DB_BACKEND=cosmos. La data quedó restaurada a la base
+    # DDV como fallback limpio de la migración a Lakebase (doc 28).
     COSMOS_CONNECTION_STRING: str = os.getenv("COSMOS_CONNECTION_STRING", "")
     COSMOS_DATABASE: str = os.getenv("COSMOS_DATABASE", "db_modeler")
 
     # ─── Databricks Lakebase Postgres (doc 28) ─────────────────
-    # El PAT autentica el SDK ante el workspace; el password real de Postgres
-    # es un token OAuth de ~1h que se acuña por conexión nueva del pool
-    # (lakebase/credentials.py). `PAT_DATABRICKS` se acepta como alias porque
-    # así está hoy en el .env del owner.
-    DATABRICKS_HOST: str = os.getenv(
-        "DATABRICKS_HOST", "https://adb-3871428306507680.0.azuredatabricks.net"
-    )
-    DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "") or os.getenv(
-        "PAT_DATABRICKS", ""
-    )
-    LAKEBASE_ENDPOINT: str = os.getenv(
-        "LAKEBASE_ENDPOINT", "projects/dmh-proj/branches/production/endpoints/primary"
-    )
-    PGHOST: str = os.getenv(
-        "PGHOST", "ep-orange-sunset-e1gjz1qx.database.eastus2.azuredatabricks.net"
-    )
+    # Identidad ante el workspace (para acuñar el token OAuth de BD ~1h que
+    # Postgres acepta como password — lakebase/credentials.py):
+    #   · Dev local: DATABRICKS_HOST + DATABRICKS_TOKEN (PAT) del .env.
+    #   · Databricks Apps: NO se setean — el runtime inyecta DATABRICKS_HOST y
+    #     DATABRICKS_CLIENT_ID/SECRET del service principal (OAuth M2M).
+    DATABRICKS_HOST: str = os.getenv("DATABRICKS_HOST", "")
+    DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "")
+    # Ruta LÓGICA del endpoint (projects/<proyecto>/branches/<branch>/
+    # endpoints/<endpoint>). Es la MISMA en cualquier workspace que respete la
+    # convención de nombres; obligatoria con DB_BACKEND=lakebase.
+    LAKEBASE_ENDPOINT: str = os.getenv("LAKEBASE_ENDPOINT", "")
+    # Host físico del endpoint (ep-…). OPCIONAL: si está vacío se resuelve
+    # solo vía SDK a partir de LAKEBASE_ENDPOINT (credentials.pg_host) — así
+    # ningún entorno necesita hardcodearlo. Setear solo para forzar/depurar.
+    PGHOST: str = os.getenv("PGHOST", "")
     PGPORT: int = int(os.getenv("PGPORT", "5432"))
     # Rol de Postgres = identidad Databricks que acuña el token. En Databricks
     # Apps NO se setea PGUSER: cae al DATABRICKS_CLIENT_ID inyectado (rol PG
     # del service principal de la app — requiere el alta one-time de doc 28 §11).
-    PGUSER: str = (
-        os.getenv("PGUSER", "")
-        or os.getenv("DATABRICKS_CLIENT_ID", "")
-        or "carlosmps97@hotmail.com"
-    )
+    PGUSER: str = os.getenv("PGUSER", "") or os.getenv("DATABRICKS_CLIENT_ID", "")
     PGDATABASE: str = os.getenv("PGDATABASE", "databricks_postgres")
     PGSSLMODE: str = os.getenv("PGSSLMODE", "require")
     # Schema de Postgres donde viven las "colecciones" (tablas id+doc jsonb).
     LAKEBASE_PGSCHEMA: str = os.getenv("LAKEBASE_PGSCHEMA", "dmh")
+
+    # ─── HTTP: CORS y hosts permitidos ─────────────────────────
+    # Regex de orígenes permitidos (adicional a la lista). Permite que el
+    # MISMO bundle sirva en cualquier workspace: el front de Databricks Apps
+    # siempre matchea `https://frnt-data-model-hub-….databricksapps.com`.
+    CORS_ORIGIN_REGEX: str = os.getenv("CORS_ORIGIN_REGEX", "")
+    # Orígenes exactos permitidos, separados por coma. El default (front de
+    # dev en localhost) SOLO aplica si tampoco hay regex — en producción la
+    # regex sola no abre localhost.
+    CORS_ORIGINS: list[str] = _csv("CORS_ORIGINS") or (
+        []
+        if os.getenv("CORS_ORIGIN_REGEX")
+        else ["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
+    # TrustedHostMiddleware (vacío → deshabilitado).
+    ALLOWED_HOSTS: list[str] = _csv("ALLOWED_HOSTS")
+
+    # ─── Logging ───────────────────────────────────────────────
+    # LOG_FORMAT: "pretty" (dev) | "json" (producción). LOG_LEVEL: DEBUG…CRITICAL.
+    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "pretty").strip().lower()
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
     # ─── Identidad / Auth seam ─────────────────────────────────
     # Auth PROPIA (decisión 2026-07-04): login usuario/contraseña en TODOS los
@@ -119,11 +142,11 @@ def assert_secure_config() -> None:
     if using_default:
         if settings.REQUIRE_AUTH:
             raise RuntimeError(
-                "SECRET_KEY inseguro con REQUIRE_AUTH=true: definí SECRET_KEY "
+                "SECRET_KEY inseguro con REQUIRE_AUTH=true: define SECRET_KEY "
                 "(env/secreto) antes de desplegar — con el default público se "
                 "pueden forjar tokens de sesión admin."
             )
         log.warning(
-            "SECRET_KEY usa el default de desarrollo (INSEGURO). Definí SECRET_KEY "
+            "SECRET_KEY usa el default de desarrollo (INSEGURO). Define SECRET_KEY "
             "y REQUIRE_AUTH=true antes de cualquier despliegue."
         )

@@ -21,7 +21,7 @@ import logging
 import asyncpg
 
 from app.core.config import settings
-from app.core.db.lakebase.credentials import fresh_token, invalidate_token
+from app.core.db.lakebase.credentials import fresh_token, invalidate_token, pg_host
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +33,17 @@ async def _password() -> str:
 
 async def create_pool() -> asyncpg.Pool:
     """Crea el pool (lazy: conecta al primer uso) y valida con un ping."""
+    if not settings.PGUSER:
+        raise RuntimeError(
+            "PGUSER no está seteado: en dev local es tu identidad Databricks "
+            "(correo del workspace); en Databricks Apps se toma solo del "
+            "DATABRICKS_CLIENT_ID inyectado."
+        )
+    # PGHOST explícito o auto-resuelto desde LAKEBASE_ENDPOINT (SDK sync →
+    # fuera del event loop).
+    host = await asyncio.to_thread(pg_host)
     pool = await asyncpg.create_pool(
-        host=settings.PGHOST,
+        host=host,
         port=settings.PGPORT,
         user=settings.PGUSER,
         database=settings.PGDATABASE,

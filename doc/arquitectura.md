@@ -599,7 +599,7 @@ erDiagram
 El backend es una app FastAPI servida por Uvicorn. Puede correr en:
 
 - **Azure App Service**: como servicio web Python estándar (Uvicorn como servidor ASGI).
-- **Databricks Apps** (target de producción actual): declarado como app en un Databricks Asset Bundle (`databricks.yml`), con `app.yaml` que arranca `uvicorn app.main:app`. Databricks inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT` automáticamente para FastAPI/uvicorn. Los secretos (Cosmos y `SECRET_KEY`) se resuelven desde un scope respaldado por Key Vault (`kv-scope-datacraft`) vía `valueFrom`.
+- **Databricks Apps** (target de producción actual): declarado como app en un Databricks Asset Bundle (`databricks.yml`), cuyo bloque `config:` arranca `uvicorn app.main:app` y define el env (el viejo `app.yaml` ya no existe; parámetros por entorno en la sección `variables:` — homologación 2026-07-19). Databricks inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT` automáticamente para FastAPI/uvicorn. La BD (Lakebase) se autentica con el service principal de la app (sin secretos); los secretos restantes (Cosmos fallback y `SECRET_KEY`) se resuelven desde un scope respaldado por Key Vault (`kv-scope-datacraft`) vía `value_from`.
 
 En desarrollo local se corre directamente (`python -m app.main` levanta Uvicorn en `0.0.0.0:8000` con `reload=True`).
 

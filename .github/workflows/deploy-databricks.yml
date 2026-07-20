@@ -13,35 +13,39 @@ jobs:
   deploy:
     name: Deploy backend
     runs-on: ubuntu-latest
-    # Auth del CLI por PAT — en GitHub (Settings → Secrets and variables →
-    # Actions) deben existir:
-    #   · variable DATABRICKS_HOST  = https://adb-3871428306507680.0.azuredatabricks.net
-    #   · secret   DATABRICKS_TOKEN = PAT del workspace
-    # La migración a Lakebase (doc 28) NO agrega secrets aquí: en runtime la
-    # app se autentica a la BD con su propio service principal (ver app.yaml);
-    # el PAT solo lo usa este workflow para `databricks bundle ...`.
+    # ⚙️ Config por repositorio (Settings → Secrets and variables → Actions):
+    #   · variable DATABRICKS_HOST  = URL del workspace destino
+    #   · secret   DATABRICKS_TOKEN = PAT de ese workspace (solo lo usa el CLI)
+    #   · variable BUNDLE_TARGET    = target del bundle (opcional; default prod)
+    # El runtime de la app NO usa nada de esto: sus parámetros por entorno
+    # viven en databricks.yml (`variables:` + `config:`) y la BD se autentica
+    # con el service principal de la app (doc 28 §11).
     env:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      BUNDLE_TARGET: ${{ vars.BUNDLE_TARGET || 'prod' }}
     steps:
       - uses: actions/checkout@v4
 
+      # setup-cli@main instala el CLI más reciente (se requiere ≥ 0.283 por el
+      # bloque `config:` del recurso app en databricks.yml).
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
       - name: Validate bundle
-        run: databricks bundle validate --target prod
+        run: databricks bundle validate --target "$BUNDLE_TARGET"
 
       - name: Deploy bundle (sube el código + crea/actualiza la app)
-        run: databricks bundle deploy --target prod
+        run: databricks bundle deploy --target "$BUNDLE_TARGET"
 
       - name: Deploy & (re)start app
-        run: databricks bundle run backend --target prod
+        run: databricks bundle run backend --target "$BUNDLE_TARGET"
 
       - name: Wait for app RUNNING
-        env:
-          APP_NAME: bknd-data-model-hub
         run: |
+          # Nombre real de la app desde el bundle (una sola fuente de verdad).
+          APP_NAME=$(databricks bundle summary --target "$BUNDLE_TARGET" --output json \
+            | jq -r '.resources.apps.backend.name')
           for i in $(seq 1 20); do
             STATE=$(databricks apps get "$APP_NAME" --output json | jq -r '.app_status.state')
             echo "Attempt $i/20: state=$STATE"

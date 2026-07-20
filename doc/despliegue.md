@@ -1,14 +1,14 @@
 # Despliegue y Base de Datos — `backend-data-model-hub`
 
-Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Azure Cosmos DB con API de MongoDB) y **cómo levantarlo en local**. No cubre CI/CD ni pipelines: solo topología de ejecución, configuración por entorno y consideraciones de base de datos.
+Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres; Cosmos DB queda como fallback conmutable — doc 28) y **cómo levantarlo en local**. No cubre CI/CD ni pipelines: solo topología de ejecución, configuración por entorno y consideraciones de base de datos.
 
-Toda la información sale del código real: `app/core/config.py`, `app/core/db/client.py`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más los manifiestos `app.yaml` y `databricks.yml`.
+Toda la información sale del código real: `app/core/config.py` (ÚNICA superficie de settings), `app/core/db/client.py`, `app/core/db/lakebase/`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más el manifiesto `databricks.yml` (bundle: `variables:` por entorno + `config:` de runtime — el viejo `app.yaml` ya no existe).
 
 ---
 
 ## 1. Qué es este servicio
 
-El backend es un **servicio HTTP FastAPI** servido por **Uvicorn** (ASGI). Es un proceso único, sin estado en disco: toda la persistencia vive en Cosmos DB. El punto de entrada es el objeto `app` de `app/main.py`:
+El backend es un **servicio HTTP FastAPI** servido por **Uvicorn** (ASGI). Es un proceso único, sin estado en disco: toda la persistencia vive en la base (Lakebase Postgres, o Cosmos con `DB_BACKEND=cosmos`). El punto de entrada es el objeto `app` de `app/main.py`:
 
 ```python
 # app/main.py
@@ -19,13 +19,13 @@ if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 ```
 
-`create_app()` arma la app y, en el **lifespan** de FastAPI, abre la conexión a Cosmos y asegura los índices al arrancar; los cierra al apagar. El objeto ASGI que exponés a cualquier servidor es siempre `app.main:app`.
+`create_app()` arma la app y, en el **lifespan** de FastAPI, abre la conexión a la base según `DB_BACKEND` y asegura los índices al arrancar; los cierra al apagar. El objeto ASGI que se expone a cualquier servidor es siempre `app.main:app`.
 
 Características del proceso que importan para el despliegue:
 
-- **Sin estado local.** No escribe archivos; todo va a Cosmos DB. Se puede reiniciar sin pérdida.
+- **Sin estado local.** No escribe archivos; todo va a la base. Se puede reiniciar sin pérdida.
 - **Rate limiting en memoria (por proceso).** El estado del limitador de `slowapi` no se comparte entre réplicas (ver sección 6.2).
-- **Un solo pool de conexiones Motor** compartido por todos los repositorios (singleton en `app/core/db/client.py`).
+- **Un solo pool de conexiones** compartido por todos los repositorios (singleton en `app/core/db/client.py`: asyncpg hacia Lakebase, o Motor hacia Cosmos).
 - **Logs a `stdout`** (formato `pretty` o `json`), pensados para que el runtime los capture.
 
 ---
@@ -42,11 +42,12 @@ flowchart TD
       BK["FastAPI + Uvicorn<br/>app.main:app"]
     end
 
-    BK -->|"Motor async<br/>MongoDB API"| COSMOS[("Azure Cosmos DB<br/>API de MongoDB<br/>db_modeler")]
+    BK -->|"asyncpg + token OAuth<br/>adaptador jsonb"| LB[("Databricks Lakebase<br/>Postgres 17 · schema dmh")]
+    BK -.->|"fallback DB_BACKEND=cosmos"| COSMOS[("Azure Cosmos DB<br/>API de MongoDB<br/>db_modeler")]
 
     subgraph OPCIONES["Destinos de ejecucion"]
       A["Azure App Service<br/>startup: uvicorn"]
-      D["Databricks Apps<br/>app.yaml command uvicorn"]
+      D["Databricks Apps<br/>bundle config command uvicorn"]
     end
 
     A -.->|hospeda| RUNTIME
@@ -72,100 +73,118 @@ Consideraciones específicas de App Service:
 
 ### 2.2 Databricks Apps (destino actual)
 
-Es el destino que ya está configurado en el repo. El manifiesto `app.yaml` define el comando de arranque y las variables; Databricks inyecta host y puerto automáticamente.
+Es el destino que ya está configurado en el repo. Desde la homologación
+2026-07-19 **todo vive en `databricks.yml`** (el viejo `app.yaml` no existe):
+la sección `variables:` concentra los parámetros por entorno y el bloque
+`config:` del recurso app define comando y env de runtime (requiere CLI
+≥ 0.283; el workflow usa `setup-cli@main` = último).
 
 ```yaml
-# app.yaml (real)
-command: ['uvicorn', 'app.main:app']
+# databricks.yml (extracto real)
+variables:
+  lakebase_endpoint: { default: projects/dmh-proj/branches/production/endpoints/primary }
+  lakebase_pgschema: { default: dmh }
+  cors_origin_regex: { default: https://frnt-data-model-hub-.*\.databricksapps\.com }
+  cosmos_database:   { default: db_modeler }
+  secret_scope:      { default: kv-scope-datacraft }
+  # …
 
-env:
-  - name: LOG_FORMAT
-    value: 'json'
-  - name: CORS_ORIGINS
-    value: 'https://frnt-data-model-hub-3871428306507680.0.azure.databricksapps.com'
-  - name: COSMOS_DATABASE
-    value: 'db_modeler'
-  - name: COSMOS_CONNECTION_STRING
-    valueFrom: cosmos_secret        # secreto Key Vault-backed
-  - name: REQUIRE_AUTH
-    value: 'true'
-  - name: SECRET_KEY
-    valueFrom: session_secret       # secreto Key Vault-backed
+resources:
+  apps:
+    backend:
+      name: bknd-data-model-hub
+      config:
+        command: ['uvicorn', 'app.main:app']
+        env:
+          - { name: LOG_FORMAT,        value: 'json' }
+          - { name: DB_BACKEND,        value: 'lakebase' }
+          - { name: LAKEBASE_ENDPOINT, value: ${var.lakebase_endpoint} }
+          - { name: LAKEBASE_PGSCHEMA, value: ${var.lakebase_pgschema} }
+          - { name: CORS_ORIGIN_REGEX, value: ${var.cors_origin_regex} }
+          - { name: COSMOS_DATABASE,   value: ${var.cosmos_database} }
+          - { name: COSMOS_CONNECTION_STRING, value_from: cosmos_secret }
+          - { name: REQUIRE_AUTH,      value: 'true' }
+          - { name: SECRET_KEY,        value_from: session_secret }
+      resources:
+        - name: cosmos_secret
+          secret: { scope: ${var.secret_scope}, key: conn-str-cosmos, permission: READ }
+        - name: session_secret
+          secret: { scope: ${var.secret_scope}, key: session-secret-key, permission: READ }
 ```
 
 Puntos clave:
 
 - **Host y puerto los pone Databricks.** El runtime inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT`, por eso `command` no pasa `--host`/`--port`.
-- **Secretos por `valueFrom`.** `COSMOS_CONNECTION_STRING` y `SECRET_KEY` no van en texto plano: se resuelven desde recursos secretos declarados en `databricks.yml` (scope `kv-scope-datacraft`, respaldado por Azure Key Vault), con permiso `READ` para el service principal de la app.
-
-```yaml
-# databricks.yml (extracto) — declaración de los secretos que app.yaml referencia
-resources:
-  apps:
-    backend:
-      name: bknd-data-model-hub
-      resources:
-        - name: cosmos_secret
-          secret: { scope: kv-scope-datacraft, key: conn-str-cosmos, permission: READ }
-        - name: session_secret
-          secret: { scope: kv-scope-datacraft, key: session-secret-key, permission: READ }
-```
-
+- **La BD no necesita secretos.** El backend acuña tokens OAuth de Lakebase con el **service principal de la app** (OAuth M2M inyectado); `PGUSER` cae al `DATABRICKS_CLIENT_ID` y `PGHOST` se resuelve solo desde `LAKEBASE_ENDPOINT`. ONE-TIME por workspace: rol PG del SP + GRANTs (doc 28 §11.3).
+- **Secretos por `value_from`.** `COSMOS_CONNECTION_STRING` (fallback) y `SECRET_KEY` no van en texto plano: se resuelven desde recursos secretos (scope `kv-scope-datacraft`, respaldado por Azure Key Vault) con permiso `READ` para el service principal.
 - **Multi-réplica:** si la app escala a más de una instancia, el rate limiting en memoria deja de ser global (sección 6.2).
 
 ---
 
-## 3. Variables de entorno (completo)
+## 3. Variables de entorno (completo, homologado 2026-07-19)
 
-Todas se leen con `os.getenv`. La mayoría tiene default seguro para desarrollo; en producción hay que fijar explícitamente las de seguridad.
+**Todas se leen en `app/core/config.py`** (única superficie de settings; las
+únicas excepciones son `RATE_LIMIT_ENABLED` en `ratelimit.py` y el
+`DATABRICKS_CLIENT_ID` que inyecta Apps). Ningún default contiene valores de
+un workspace: lo específico del entorno entra por `.env` (dev) o por
+`databricks.yml → variables:` (Apps).
 
-| Variable | Dónde se lee | Default | Para qué sirve |
-|---|---|---|---|
-| `COSMOS_CONNECTION_STRING` | `config.py` | `""` (vacío) | Cadena de conexión a Cosmos. **Sin ella el arranque de DB falla** (`RuntimeError` en `connect()`). Obligatoria. |
-| `COSMOS_DATABASE` | `config.py` | `db_modeler` | Nombre de la base dentro de la cuenta Cosmos. |
-| `SECRET_KEY` | `config.py` | `dev-only-insecure-change-me-in-prod` | Clave HMAC para firmar el token de sesión (JWT HS256). **En prod es obligatoria** (ver sección 8). |
-| `REQUIRE_AUTH` | `config.py` | `false` | Si es `true`, toda request sin token válido es `401`. Activa la **postura de producción** (oculta `/docs`, `/redoc`, `/openapi.json` y enciende el rate limiting). |
-| `ACCESS_TOKEN_TTL_MIN` | `config.py` | `720` (12 h) | Vida del token de acceso, en minutos. |
-| `AUTH_MODE` | `config.py` | `local` | Seam de identidad. Se conserva por compatibilidad; el carril real de identidad es el token de sesión firmado. |
-| `LOCAL_DEV_USER` | `config.py` | `dev@local` | Usuario de desarrollo cuando no hay login (solo con `REQUIRE_AUTH=false`). |
-| `LOCAL_DEV_USERNAME` | `config.py` | `""` | Username de desarrollo (opcional). |
-| `LOCAL_DEV_DISPLAY_NAME` | `config.py` | `""` | Nombre visible de desarrollo (opcional). |
-| `CORS_ORIGINS` | `main.py` | `http://localhost:3000,http://127.0.0.1:3000` | Allowlist de orígenes del frontend, separados por coma. |
-| `ALLOWED_HOSTS` | `main.py` | `""` (desactivado) | Allowlist de `Host` (`TrustedHostMiddleware`). **Solo si se define** se activa el middleware; en prod poné el dominio real. |
-| `RATE_LIMIT_ENABLED` | `ratelimit.py` | `false` | Fuerza el rate limiting. También se enciende solo si `REQUIRE_AUTH=true`. |
-| `LOG_FORMAT` | `logging.py` | `pretty` | `pretty` (dev, legible) o `json` (prod, un objeto por línea). |
-| `LOG_LEVEL` | `logging.py` | `INFO` | Nivel mínimo: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
+| Variable | Default | Para qué sirve |
+|---|---|---|
+| `DB_BACKEND` | `cosmos` | `lakebase` (BD actual) o `cosmos` (fallback/rollback). |
+| `DATABRICKS_HOST` | `""` | URL del workspace. Dev: `.env`. Apps: **la inyecta el runtime** (no se setea). |
+| `DATABRICKS_TOKEN` | `""` | PAT para acuñar tokens de BD en dev. Apps: **no va** (el SP de la app autentica solo). |
+| `LAKEBASE_ENDPOINT` | `""` | Ruta lógica `projects/<p>/branches/<b>/endpoints/<e>`. **Obligatoria con lakebase.** Igual en todo workspace que respete la convención de nombres. |
+| `PGHOST` | `""` | Host físico `ep-…`. **Opcional**: vacío → se resuelve solo desde `LAKEBASE_ENDPOINT` (SDK `get_endpoint`). |
+| `PGPORT` | `5432` | Puerto Postgres. |
+| `PGUSER` | `""` → `DATABRICKS_CLIENT_ID` | Rol PG = identidad que acuña el token. Dev: tu correo del workspace. Apps: client ID del SP (automático). |
+| `PGDATABASE` | `databricks_postgres` | Base Postgres del proyecto Lakebase. |
+| `PGSSLMODE` | `require` | TLS obligatorio. |
+| `LAKEBASE_PGSCHEMA` | `dmh` | Schema PG de las "colecciones" (tablas id + doc jsonb). |
+| `COSMOS_CONNECTION_STRING` | `""` | Solo con `DB_BACKEND=cosmos`. En Apps llega del secreto `cosmos_secret`. |
+| `COSMOS_DATABASE` | `db_modeler` | Base Mongo del fallback. |
+| `SECRET_KEY` | default inseguro de dev | Clave HMAC del token de sesión (JWT HS256). **En prod obligatoria** (secreto `session_secret`). |
+| `REQUIRE_AUTH` | `false` | `true` = postura de producción (401 sin token, docs ocultas, rate limit on). |
+| `ACCESS_TOKEN_TTL_MIN` | `720` (12 h) | Vida del token de acceso, en minutos. |
+| `AUTH_MODE` / `LOCAL_DEV_*` | `local` / — | Seam de identidad heredado (compat); el carril real es el token firmado. |
+| `CORS_ORIGINS` | localhost:3000 (solo si NO hay regex) | Allowlist exacta de orígenes, separados por coma. |
+| `CORS_ORIGIN_REGEX` | `""` | Regex de orígenes (p. ej. `https://frnt-data-model-hub-.*\.databricksapps\.com`): el mismo bundle sirve en cualquier workspace. Si está seteada, el default localhost NO aplica. |
+| `ALLOWED_HOSTS` | `""` (desactivado) | Allowlist de `Host` (`TrustedHostMiddleware`); definir el dominio real en prod para activarlo. |
+| `RATE_LIMIT_ENABLED` | `false` | Fuerza el rate limiting; también se enciende solo con `REQUIRE_AUTH=true`. |
+| `LOG_FORMAT` | `pretty` | `pretty` (dev) o `json` (prod, un objeto por línea). |
+| `LOG_LEVEL` | `INFO` | Nivel mínimo: `DEBUG`…`CRITICAL`. |
 
 ### 3.1 Cómo cada variable cambia el comportamiento
 
-- **`REQUIRE_AUTH=true` es el interruptor maestro de producción.** Con él: (a) sin token → `401`; (b) se ocultan `docs_url`, `redoc_url` y `openapi_url` (se pasan a `None` en `FastAPI(...)`); (c) el rate limiting queda `ENABLED` aunque no pongas `RATE_LIMIT_ENABLED`; (d) `assert_secure_config()` impide arrancar si `SECRET_KEY` sigue siendo el default inseguro.
+- **`REQUIRE_AUTH=true` es el interruptor maestro de producción.** Con él: (a) sin token → `401`; (b) se ocultan `docs_url`, `redoc_url` y `openapi_url` (se pasan a `None` en `FastAPI(...)`); (c) el rate limiting queda `ENABLED` aunque no se ponga `RATE_LIMIT_ENABLED`; (d) `assert_secure_config()` impide arrancar si `SECRET_KEY` sigue siendo el default inseguro.
 - **`ALLOWED_HOSTS` es opt-in.** Si queda vacío no se monta `TrustedHostMiddleware`. En prod conviene fijarlo al dominio público para rechazar `Host` falsos.
-- **`CORS_ORIGINS`** debe ser exactamente la URL del frontend (esquema + host + puerto). La configuración usa `allow_credentials=False` (auth token-first, Bearer, sin cookies) y métodos/headers acotados (`Authorization`, `Content-Type`, `X-Requested-With`).
+- **CORS:** `CORS_ORIGINS` (lista exacta) y/o `CORS_ORIGIN_REGEX` (patrón). La configuración usa `allow_credentials=False` (auth token-first, Bearer, sin cookies) y métodos/headers acotados (`Authorization`, `Content-Type`, `X-Requested-With`).
 
 ### 3.2 Perfiles por entorno (referencia)
 
-| Variable | Local (dev) | Producción |
+| Variable | Local (dev, `.env`) | Databricks Apps (`databricks.yml`) |
 |---|---|---|
-| `COSMOS_CONNECTION_STRING` | cadena a tu cluster | secreto (Key Vault / App Settings) |
-| `COSMOS_DATABASE` | `db_modeler` | `db_modeler` |
-| `SECRET_KEY` | (default, con warning) | **secreto fuerte** `openssl rand -hex 32` |
+| `DB_BACKEND` | `lakebase` | `lakebase` (rollback: `cosmos` + redeploy) |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | del workspace + PAT | — (SP de la app, inyectado) |
+| `LAKEBASE_ENDPOINT` | ruta lógica | `${var.lakebase_endpoint}` |
+| `PGHOST` | opcional (seteado = arranque más rápido) | — (auto-resuelto) |
+| `PGUSER` | tu correo del workspace | — (client ID del SP) |
+| `COSMOS_CONNECTION_STRING` | comentada (fallback) | secreto `cosmos_secret` (KV) |
+| `SECRET_KEY` | (default, con warning) | secreto `session_secret` (KV, `openssl rand -hex 32`) |
 | `REQUIRE_AUTH` | `false` | `true` |
-| `CORS_ORIGINS` | `http://localhost:3000` | URL real del frontend |
-| `ALLOWED_HOSTS` | (vacío) | dominio público del backend |
-| `RATE_LIMIT_ENABLED` | (vacío) | implícito por `REQUIRE_AUTH=true` |
-| `LOG_FORMAT` | `pretty` | `json` |
-| `LOG_LEVEL` | `INFO`/`DEBUG` | `INFO` |
+| `CORS_ORIGINS` / `CORS_ORIGIN_REGEX` | default localhost / — | — / `${var.cors_origin_regex}` |
+| `LOG_FORMAT` / `LOG_LEVEL` | `pretty` / `INFO` | `json` / `INFO` |
 
 ---
 
 ## 4. Levantar en local (Uvicorn)
 
-Requisitos: Python 3.12 (en Databricks Apps corre 3.11; ambos funcionan), acceso a un cluster de Cosmos con API de MongoDB.
+Requisitos: Python 3.12 (en Databricks Apps corre 3.11; ambos funcionan), acceso al workspace de Databricks (PAT) con el proyecto Lakebase creado.
 
 ```bash
-# 1) Configuración: copiar el ejemplo y completar la cadena de Cosmos
+# 1) Configuración: copiar la plantilla y completar workspace + PAT + identidad
 cp .env.example .env
-#    editar .env → COSMOS_CONNECTION_STRING=...
+#    editar .env → DATABRICKS_HOST / DATABRICKS_TOKEN / PGUSER
 
 # 2) Entorno virtual + dependencias
 /opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
@@ -175,17 +194,20 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-`config.py` hace `load_dotenv()` sobre el `.env` de la raíz del repo, así que en local no necesitás exportar variables a mano: alcanza con el archivo `.env`.
+`config.py` hace `load_dotenv()` sobre el `.env` de la raíz del repo, así que en local no hace falta exportar variables a mano: alcanza con el archivo `.env`.
 
-Contenido mínimo de `.env` para desarrollo:
+Contenido mínimo de `.env` para desarrollo (plantilla completa en `.env.example`):
 
 ```bash
 # .env (local)
-COSMOS_CONNECTION_STRING=mongodb+srv://<user>:<password>@<cluster>.global.mongocluster.cosmos.azure.com/?tls=true&authMechanism=SCRAM-SHA-256&retrywrites=false&maxIdleTimeMS=120000
-COSMOS_DATABASE=db_modeler
+DB_BACKEND=lakebase
+DATABRICKS_HOST=https://adb-<workspace-id>.<n>.azuredatabricks.net
+DATABRICKS_TOKEN=dapi<...>
+LAKEBASE_ENDPOINT=projects/dmh-proj/branches/production/endpoints/primary
+PGUSER=<tu-correo-del-workspace>
 LOG_FORMAT=pretty
 LOG_LEVEL=INFO
-# REQUIRE_AUTH sin definir → false (no exige login en dev)
+# PGHOST opcional (se resuelve solo); REQUIRE_AUTH sin definir → false
 ```
 
 Verificar que levantó y que la DB responde:
@@ -202,7 +224,7 @@ open http://localhost:8000/docs        # Swagger UI
 open http://localhost:8000/redoc       # ReDoc
 ```
 
-Si activás `REQUIRE_AUTH=true` en local para probar la postura de producción, una request sin token da `401` y `/docs` desaparece (404):
+Si activas `REQUIRE_AUTH=true` en local para probar la postura de producción, una request sin token da `401` y `/docs` desaparece (404):
 
 ```bash
 curl -i http://localhost:8000/api/projects
@@ -213,22 +235,22 @@ curl -i http://localhost:8000/api/projects
 
 ## 5. Secuencia de arranque (lifespan)
 
-Al iniciar el proceso, el lifespan abre la conexión y **asegura los índices** antes de aceptar tráfico real. Si Cosmos no está disponible, la app **igual arranca** pero marca `db_connected=false` (el health devuelve `degraded`), en vez de quedar caída.
+Al iniciar el proceso, el lifespan abre la conexión y **asegura los índices** antes de aceptar tráfico real. Si la base no está disponible, la app **igual arranca** pero marca `db_connected=false` (el health devuelve `degraded`), en vez de quedar caída. (Con Lakebase, la primera conexión tras idle puede tardar unos segundos por el scale-to-zero del compute — el pool tiene timeout y retry para ese wake.)
 
 ```mermaid
 sequenceDiagram
     participant U as Uvicorn
     participant A as FastAPI app
-    participant M as Motor client
-    participant C as Cosmos DB
+    participant P as Pool (asyncpg | Motor)
+    participant B as Lakebase PG (o Cosmos)
 
     U->>A: startup (lifespan)
     A->>A: assert_secure_config()
-    A->>M: connect()
-    M->>C: abrir pool (maxPoolSize 50)
-    M->>C: ensure_indexes(db)
-    C-->>M: indices creados o ya existentes
-    M-->>A: conectado
+    A->>P: connect()  # según DB_BACKEND
+    P->>B: abrir pool (Lakebase: token OAuth + ensure_base batcheado)
+    P->>B: ensure_indexes(db)
+    B-->>P: indices creados o ya existentes
+    P-->>A: conectado
     A->>A: app.state.db_connected = true
     Note over A: si connect() falla → db_connected=false, la app sigue viva
     A-->>U: listo para recibir requests
@@ -238,9 +260,20 @@ sequenceDiagram
 
 ---
 
-## 6. Consideraciones de la base de datos (Azure Cosmos DB, API de MongoDB)
+## 6. Consideraciones de la base de datos
 
-La persistencia es **Azure Cosmos DB usando la API de MongoDB**. El backend habla con ella vía **Motor** (driver async de MongoDB). Un único cliente singleton se comparte entre todos los repositorios.
+**La base ACTUAL es Databricks Lakebase Postgres** (`DB_BACKEND=lakebase`,
+doc 28): tablas `(id text PK, doc jsonb)` por colección en el schema `dmh`,
+adaptador motor-like en `app/core/db/lakebase/` (los repositorios no
+cambiaron), password = token OAuth de ~1 h acuñado por conexión nueva del
+pool (asyncpg), compute con scale-to-zero (el pool tolera el wake con
+timeout + retry). Detalle completo: `plan-implementacion/28-MIGRACION-LAKEBASE.md`
+y `doc/esquema-datos.md`.
+
+**Todo lo que sigue en esta sección aplica al FALLBACK Cosmos**
+(`DB_BACKEND=cosmos`): Azure Cosmos DB usando la API de MongoDB, vía **Motor**
+(driver async). Un único cliente singleton se comparte entre todos los
+repositorios.
 
 ### 6.1 Cliente Motor y timeouts
 
@@ -288,7 +321,7 @@ En el modelo RU (Request Units), cada operación consume RU y el throughput apro
 
 - **Las lecturas ordenadas y las agregaciones del reporting son las más caras.** El reporting hace `$group`/proyección y recorridos por keyset sobre `canonical_columns` (hasta cientos de miles de documentos). Sin los índices correctos, esas consultas o fallan (sin índice para `.sort()`) o consumen muchas RU.
 - **Aprovisioná pensando en el pico de reporting**, no en el promedio. La prueba de estrés interna (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
-- **`retrywrites=false`** implica que la app no reintenta escrituras automáticamente; si hay throttling en escrituras, se propaga el error. Dimensioná RU para absorber los picos de import/apply de changesets.
+- **`retrywrites=false`** implica que la app no reintenta escrituras automáticamente; si hay throttling en escrituras, se propaga el error. Dimensiona RU para absorber los picos de import/apply de changesets.
 
 ### 6.5 Índices que deben existir (y por qué)
 
@@ -328,7 +361,7 @@ Tabla completa de índices por colección (tal como están en el código):
 
 ### 6.6 Por qué `.sort()` necesita índice
 
-En la API de MongoDB de Cosmos (tier RU), **el motor no ordena en memoria un conjunto no indexado**: si pedís `.sort()` sobre un campo que no tiene índice, la operación se **rechaza con un error de servidor (500)** en lugar de ejecutarse lenta. Esto es distinto de un MongoDB clásico, que sí haría el ordenamiento en memoria (con un tope). Por eso, cada campo que el backend usa para ordenar tiene un índice explícito:
+En la API de MongoDB de Cosmos (tier RU), **el motor no ordena en memoria un conjunto no indexado**: si pides `.sort()` sobre un campo que no tiene índice, la operación se **rechaza con un error de servidor (500)** en lugar de ejecutarse lenta. Esto es distinto de un MongoDB clásico, que sí haría el ordenamiento en memoria (con un tope). Por eso, cada campo que el backend usa para ordenar tiene un índice explícito:
 
 - `canonical_tables.physicalName` y `canonical_columns.physicalName` → orden/keyset del catálogo y del reporting.
 - `changesets.updatedAt` → listado por recientes.
@@ -410,7 +443,7 @@ def assert_secure_config() -> None:
 - Si `REQUIRE_AUTH=true` y `SECRET_KEY` sigue siendo el default público (`dev-only-insecure-change-me-in-prod`), la app **no arranca**: con esa clave conocida cualquiera podría forjar un token de sesión de admin.
 - Si estás en dev (`REQUIRE_AUTH=false`) con el default, arranca pero emite un warning fuerte para que no te olvides de cambiarlo antes de desplegar.
 
-Por eso en `app.yaml` el `SECRET_KEY` viene de un secreto (`session_secret` → Key Vault). Generá un valor fuerte, por ejemplo:
+Por eso en `databricks.yml` el `SECRET_KEY` viene de un secreto (`session_secret` → Key Vault). Genera un valor fuerte, por ejemplo:
 
 ```bash
 openssl rand -hex 32
@@ -422,7 +455,7 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 ## 9. Salud y observabilidad
 
-- **Health endpoint:** `GET /api/health` hace un `ping` vivo a Cosmos con timeout de 2 s. Devuelve `status: ok` si la DB responde, o `degraded` si no. Usalo como readiness/liveness probe.
+- **Health endpoint:** `GET /api/health` hace un `ping` vivo a la base (Lakebase o Cosmos según `DB_BACKEND`). Devuelve `status: ok` si la DB responde, o `degraded` si no (con Lakebase, un `degraded` transitorio tras idle suele ser el wake del compute). Úsalo como readiness/liveness probe.
 
   ```bash
   curl -s http://localhost:8000/api/health | jq
@@ -433,8 +466,8 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
   # }
   ```
 
-- **Logs estructurados:** con `LOG_FORMAT=json` cada línea es un objeto JSON con `timestamp` ISO-8601 UTC, `level`, `logger`, `message` y cualquier `extra`. En prod usá `json` para que el runtime (Databricks Apps o App Service) lo indexe.
-- **Trazabilidad por request:** cada respuesta lleva un header `X-Request-ID` (12 hex). El mismo id aparece en los logs de `request started` / `request completed`, así podés correlacionar un error `500` con su traza.
+- **Logs estructurados:** con `LOG_FORMAT=json` cada línea es un objeto JSON con `timestamp` ISO-8601 UTC, `level`, `logger`, `message` y cualquier `extra`. En prod usa `json` para que el runtime (Databricks Apps o App Service) lo indexe.
+- **Trazabilidad por request:** cada respuesta lleva un header `X-Request-ID` (12 hex). El mismo id aparece en los logs de `request started` / `request completed`, así puedes correlacionar un error `500` con su traza.
 - **Headers de seguridad (defensa en profundidad):** en cada respuesta el middleware agrega `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy` restrictiva y, solo sobre HTTPS (directo o vía `X-Forwarded-Proto`), `Strict-Transport-Security`.
 
 ---
@@ -443,14 +476,14 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 Antes de exponer el backend en cualquiera de los dos destinos:
 
-1. `COSMOS_CONNECTION_STRING` seteada (secreto), con `retrywrites=false` y `tls=true`. Verificá que `COSMOS_DATABASE=db_modeler`.
+1. **Lakebase:** `LAKEBASE_ENDPOINT` correcto y el rol PG de la identidad que corre la app creado con sus GRANTs (en Apps = el service principal; doc 28 §11.3). Con fallback Cosmos: `COSMOS_CONNECTION_STRING` como secreto, `retrywrites=false`, `tls=true`.
 2. `SECRET_KEY` = valor fuerte y secreto (no el default). Si no, con `REQUIRE_AUTH=true` la app no arranca.
 3. `REQUIRE_AUTH=true` (activa 401, oculta docs, enciende rate limiting).
-4. `CORS_ORIGINS` = URL exacta del frontend. `ALLOWED_HOSTS` = dominio público del backend.
+4. `CORS_ORIGIN_REGEX` (o `CORS_ORIGINS` exacta) apuntando al frontend. `ALLOWED_HOSTS` = dominio público del backend.
 5. `LOG_FORMAT=json`, `LOG_LEVEL=INFO`.
-6. Throughput RU dimensionado para el pico de reporting; confirmar que `ensure_indexes` corrió al arrancar (aparece `motor indexes ensured` en logs).
+6. Confirmar que `ensure_indexes` corrió al arrancar (log de índices en el arranque; en Lakebase el DDL va batcheado).
 7. Health probe apuntando a `GET /api/health`; esperar `status: ok`.
-8. Si escalás a más de una réplica, planear el rate limiting a un backend compartido (Redis), ya que el actual es por proceso.
+8. Si escala a más de una réplica, planear el rate limiting a un backend compartido (Redis), ya que el actual es por proceso.
 
 ---
 
@@ -461,6 +494,6 @@ Referencias de código (rutas absolutas):
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/main.py`
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/core/ratelimit.py`
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/core/logging.py`
-- `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app.yaml`
+- `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/core/db/lakebase/` (adaptador jsonb + credenciales)
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/databricks.yml`
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/.env.example`

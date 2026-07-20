@@ -2,8 +2,39 @@
 # Docs: https://learn.microsoft.com/en-us/azure/databricks/dev-tools/bundles/apps-tutorial
 # Deploy:  databricks bundle deploy --target prod
 # Arranca: databricks bundle run backend --target prod
+#
+# ⚙️ PARÁMETROS POR ENTORNO = sección `variables:` (defaults = entorno actual).
+# La config de runtime de la app vive en `config:` (sustituye al viejo
+# app.yaml; requiere CLI ≥ 0.283 — el workflow usa setup-cli@main = último).
+# Para desplegar en OTRO Databricks (doc 28 §11): cambiar `targets.prod.
+# workspace.host` (o agregar un target) + las GitHub vars del CLI; el resto
+# sale de estas variables y de la convención de nombres (proyecto Lakebase
+# `dmh-proj/production/primary`, scope de secretos, nombres de apps).
 bundle:
   name: bknd-data-model-hub
+
+variables:
+  lakebase_endpoint:
+    description: "Ruta lógica del endpoint Lakebase — igual en todo workspace que respete la convención de nombres."
+    default: projects/dmh-proj/branches/production/endpoints/primary
+  lakebase_pgschema:
+    description: "Schema PG donde viven las colecciones (tablas id + doc jsonb)."
+    default: dmh
+  cors_origin_regex:
+    description: "Regex de orígenes CORS — matchea el front (frnt-data-model-hub) en cualquier workspace."
+    default: https://frnt-data-model-hub-.*\.databricksapps\.com
+  cosmos_database:
+    description: "Base Mongo del fallback Cosmos."
+    default: db_modeler
+  secret_scope:
+    description: "Scope de secretos (Key Vault-backed) con la conn-str de Cosmos y la SECRET_KEY."
+    default: kv-scope-datacraft
+  cosmos_secret_key:
+    description: "Key del secreto con la connection string de Cosmos."
+    default: conn-str-cosmos
+  session_secret_key:
+    description: "Key del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
+    default: session-secret-key
 
 resources:
   apps:
@@ -11,29 +42,50 @@ resources:
       name: bknd-data-model-hub   # nombre real de la app en el workspace
       source_code_path: .         # el código de la app está en la raíz del repo
       description: "Data Model Hub — backend de plataforma (FastAPI · Lakebase Postgres, fallback Cosmos)."
+      config:
+        # uvicorn recibe UVICORN_HOST=0.0.0.0 y UVICORN_PORT=$DATABRICKS_APP_PORT
+        # del runtime de Apps — no hace falta pasar host/puerto.
+        command: ['uvicorn', 'app.main:app']
+        env:
+          - name: LOG_FORMAT
+            value: 'json'
+          # ── BD principal: Lakebase (doc 28) ──────────────────────────────
+          # SIN token, SIN PGUSER y SIN PGHOST a propósito: la app se
+          # autentica con su service principal (OAuth M2M inyectado), PGUSER
+          # cae al DATABRICKS_CLIENT_ID y el host físico se resuelve solo
+          # desde la ruta lógica del endpoint.
+          # ONE-TIME por workspace: rol PG del SP + GRANTs (doc 28 §11.3).
+          - name: DB_BACKEND
+            value: 'lakebase'
+          - name: LAKEBASE_ENDPOINT
+            value: ${var.lakebase_endpoint}
+          - name: LAKEBASE_PGSCHEMA
+            value: ${var.lakebase_pgschema}
+          # ── CORS por regex: el mismo bundle sirve en cualquier workspace ─
+          - name: CORS_ORIGIN_REGEX
+            value: ${var.cors_origin_regex}
+          # ── Cosmos (fallback): rollback = DB_BACKEND 'cosmos' + redeploy ─
+          - name: COSMOS_DATABASE
+            value: ${var.cosmos_database}
+          - name: COSMOS_CONNECTION_STRING
+            value_from: cosmos_secret
+          # ── Producción: login obligatorio + clave de firma desde el KV ───
+          - name: REQUIRE_AUTH
+            value: 'true'
+          - name: SECRET_KEY
+            value_from: session_secret
       resources:
-        # NOTA Lakebase (doc 28): la BD principal NO necesita recurso aquí —
-        # la app se autentica con su propio service principal (OAuth M2M
-        # ambiente) y el rol PG del SP se crea one-time en el proyecto
-        # `dmh-proj` (doc 28 §11). Los recursos de abajo quedan para el
-        # fallback Cosmos y la firma de sesión.
-        # Secreto con la connection string de Cosmos. Scope respaldado por Key
-        # Vault (kv-scope-datacraft); el secreto vive en KV como `conn-str-cosmos`.
-        # Da READ al service principal de la app y se referencia con valueFrom.
         - name: cosmos_secret
-          description: "Cosmos connection string (Key Vault-backed scope)."
+          description: "Cosmos connection string (scope Key Vault-backed)."
           secret:
-            scope: kv-scope-datacraft
-            key: conn-str-cosmos
+            scope: ${var.secret_scope}
+            key: ${var.cosmos_secret_key}
             permission: READ
-        # Clave de firma del token de sesión (JWT HS256). Sin ella la app no
-        # arranca en prod (REQUIRE_AUTH=true). Generá un valor aleatorio fuerte
-        # (p.ej. `openssl rand -hex 32`) y guardalo en KV como `session-secret-key`.
         - name: session_secret
-          description: "SECRET_KEY para firmar tokens de sesión (Key Vault-backed)."
+          description: "SECRET_KEY para firmar tokens de sesión."
           secret:
-            scope: kv-scope-datacraft
-            key: session-secret-key
+            scope: ${var.secret_scope}
+            key: ${var.session_secret_key}
             permission: READ
       permissions:
         - level: CAN_USE
@@ -44,5 +96,8 @@ targets:
     mode: production
     default: true
     workspace:
+      # ÚNICO valor de workspace hardcodeado en el repo (además de las GitHub
+      # vars del CLI). Para otro Databricks: cambiar esta línea o agregar un
+      # target nuevo que la sobreescriba.
       host: https://adb-3871428306507680.0.azuredatabricks.net
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

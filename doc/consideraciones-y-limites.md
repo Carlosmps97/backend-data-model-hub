@@ -454,29 +454,39 @@ Este documento no cubre CI/CD ni pipelines. Solo describe **dónde corre el back
 
 El backend es una app FastAPI (`entry: app.main:app`, servida con uvicorn) y puede desplegarse en:
 
-- **Databricks Apps** (destino primario según el README; runtime Python 3.11). Bundle `databricks.yml` + `app.yaml`.
+- **Databricks Apps** (destino primario según el README; runtime Python 3.11). Todo en el bundle `databricks.yml` (`variables:` por entorno + `config:` de runtime; el viejo `app.yaml` ya no existe — homologación 2026-07-19).
 - **Azure App Service** como alternativa de hosting equivalente (mismo entrypoint uvicorn/ASGI).
 
-En ambos casos la app es un **monolito modular** (`app/core/` para infra compartida + `app/features/<x>/` como vertical slices), stateless salvo por el rate limit en memoria (ver 7.1). La conexión a Cosmos se abre/cierra en el lifespan de FastAPI y asegura los índices al arrancar.
+En ambos casos la app es un **monolito modular** (`app/core/` para infra compartida + `app/features/<x>/` como vertical slices), stateless salvo por el rate limit en memoria (ver 7.1). La conexión a la base (Lakebase Postgres, o Cosmos como fallback según `DB_BACKEND` — doc 28) se abre/cierra en el lifespan de FastAPI y asegura los índices al arrancar.
 
 ### 8.2 Variables de entorno
 
+(Homologadas 2026-07-19 — inventario completo en `despliegue.md` §3; todo se lee en `config.py`.)
+
 | Variable | Propósito | Default / nota |
 |---|---|---|
-| `COSMOS_CONNECTION_STRING` | Cadena de conexión a Cosmos (API de Mongo). **Requerida**; sin ella el arranque levanta `RuntimeError` | vacía |
-| `COSMOS_DATABASE` | Nombre de la base | `db_modeler` |
+| `DB_BACKEND` | `lakebase` (BD actual) o `cosmos` (fallback/rollback) | `cosmos` |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Workspace + PAT para acuñar tokens de BD (solo dev; en Apps el SP autentica solo) | vacías |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase. **Requerida con lakebase** | vacía |
+| `PGHOST` / `PGUSER` | Host físico (opcional: se auto-resuelve) / rol PG (en Apps cae al client ID del SP) | vacías |
+| `PGPORT` / `PGDATABASE` / `PGSSLMODE` / `LAKEBASE_PGSCHEMA` | Constantes de producto | `5432` / `databricks_postgres` / `require` / `dmh` |
+| `COSMOS_CONNECTION_STRING` | Cadena de conexión a Cosmos (API de Mongo). Requerida solo con `DB_BACKEND=cosmos` | vacía |
+| `COSMOS_DATABASE` | Nombre de la base del fallback | `db_modeler` |
 | `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **Obligatoria en producción** | default inseguro solo dev; falla-cerrado con `REQUIRE_AUTH` |
 | `REQUIRE_AUTH` | Postura de producción: request sin token válido → 401; oculta `/docs`; activa rate limit | `false` |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token de sesión en minutos | `720` (12 h) |
 | `RATE_LIMIT_ENABLED` | Fuerza el rate limit aun sin `REQUIRE_AUTH` | `false` |
 | `ALLOWED_HOSTS` | Allowlist de Host (activa TrustedHost) | vacío (sin restricción) |
-| `CORS_ORIGINS` | Orígenes del frontend permitidos (coma-separados) | `http://localhost:3000`, `http://127.0.0.1:3000` |
+| `CORS_ORIGINS` | Orígenes exactos del frontend (coma-separados) | localhost:3000 (solo si no hay regex) |
+| `CORS_ORIGIN_REGEX` | Regex de orígenes (el mismo bundle sirve en cualquier workspace) | vacía |
 | `AUTH_MODE` | Seam de identidad (`local` / `databricks`), por compat | `local` |
 | `LOG_FORMAT` / `LOG_LEVEL` | Formato (`pretty` dev / `json` prod) y nivel de log | — |
 
-Checklist mínimo de producción: `COSMOS_CONNECTION_STRING` + `SECRET_KEY` fuerte + `REQUIRE_AUTH=true` + `CORS_ORIGINS` del frontend real + `ALLOWED_HOSTS`. Con `REQUIRE_AUTH=true` y `SECRET_KEY` default, la app **no arranca** (por diseño).
+Checklist mínimo de producción: rol PG del SP con GRANTs (Lakebase, doc 28 §11.3) + `SECRET_KEY` fuerte + `REQUIRE_AUTH=true` + `CORS_ORIGIN_REGEX` (o `CORS_ORIGINS` exacta) + `ALLOWED_HOSTS`. Con `REQUIRE_AUTH=true` y `SECRET_KEY` default, la app **no arranca** (por diseño).
 
-### 8.3 Consideraciones de base de datos (Azure Cosmos DB con API de Mongo)
+### 8.3 Consideraciones de base de datos
+
+**BD actual: Databricks Lakebase Postgres** (`DB_BACKEND=lakebase`, doc 28) — las 19 colecciones viven como tablas `(id, doc jsonb)` en el schema `dmh`, con el adaptador motor-like de `app/core/db/lakebase/`; password = token OAuth acuñado por el SP/PAT y compute con scale-to-zero (el pool tolera el wake). Lo que sigue aplica al **fallback Cosmos** (`DB_BACKEND=cosmos`):
 
 - Un único cluster Cosmos y una única database (`db_modeler`), compartidos con el servicio de agentes (`app-agents-modeler`), sobre **colecciones disjuntas**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports` (**19 colecciones** — referencia campo por campo en `esquema-datos.md`); el agente administra `column_catalog`. El seed de estrés **nunca toca** `column_catalog`.
 - **Dimensionar el RU** (o habilitar autoscale) según la carga del reporting y del canvas. Los `POST /query` sobre `canonical_columns` (400k documentos) son las operaciones más caras; sin RU suficiente aparecen 429 (`code 16500`).
@@ -488,8 +498,9 @@ Checklist mínimo de producción: `COSMOS_CONNECTION_STRING` + `SECRET_KEY` fuer
 
 ```mermaid
 flowchart TD
-    FE["Frontend Vite Next"] -->|Bearer token /api| BE["backend-data-model-hub FastAPI uvicorn"]
-    BE -->|Motor async| COS["Azure Cosmos DB API de Mongo db_modeler"]
+    FE["Frontend Vite SPA"] -->|Bearer token /api| BE["backend-data-model-hub FastAPI uvicorn"]
+    BE -->|asyncpg jsonb| LB["Databricks Lakebase Postgres schema dmh"]
+    BE -.->|fallback DB_BACKEND=cosmos| COS["Azure Cosmos DB API de Mongo db_modeler"]
     AG["app-agents-modeler"] -->|column_catalog| COS
     subgraph Hosting
         BE

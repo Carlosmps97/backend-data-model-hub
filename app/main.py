@@ -19,7 +19,6 @@ agente de modelado conversacional vive en `app-agents-modeler` (fuera de este MV
 
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -118,25 +117,19 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # ─── Host allowlist (solo si ALLOWED_HOSTS está definido: producción) ──
-    allowed_hosts = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
-    if allowed_hosts:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    if settings.ALLOWED_HOSTS:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
 
     # ─── CORS ───────────────────────────────────────────────────────────
-    # Allowlist explícita para el frontend Next.js (origen distinto en dev).
-    # MVP sin identidad propia: no hay cookies; `allow_credentials=True` es no-op
-    # y se deja por compatibilidad.
-    cors_env = os.getenv("CORS_ORIGINS", "").strip()
-    cors_origins = (
-        [o.strip() for o in cors_env.split(",") if o.strip()]
-        if cors_env
-        else ["http://localhost:3000", "http://127.0.0.1:3000"]
-    )
+    # Allowlist explícita (settings.CORS_ORIGINS; default = front de dev) y/o
+    # regex (settings.CORS_ORIGIN_REGEX) para que el mismo bundle sirva en
+    # cualquier workspace de Databricks Apps sin editar orígenes por entorno.
     # Auth token-first (Bearer, sin cookies) → allow_credentials=False; métodos y
     # headers acotados en vez de wildcard (superficie mínima).
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_origin_regex=settings.CORS_ORIGIN_REGEX or None,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Requested-With"],

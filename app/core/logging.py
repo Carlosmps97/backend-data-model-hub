@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -99,8 +98,10 @@ class _PrettyFormatter(logging.Formatter):
 
 
 def _build_handler() -> logging.Handler:
-    """Construye el handler raíz según `LOG_FORMAT`."""
-    fmt = os.getenv("LOG_FORMAT", _DEFAULT_FORMAT).strip().lower()
+    """Construye el handler raíz según `settings.LOG_FORMAT`."""
+    from app.core.config import settings
+
+    fmt = settings.LOG_FORMAT
     if fmt not in _VALID_FORMATS:
         fmt = _DEFAULT_FORMAT
     handler = logging.StreamHandler(stream=sys.stdout)
@@ -114,8 +115,9 @@ def configure_logging() -> None:
     if _configured:
         return
 
-    level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
-    level = getattr(logging, level_name, logging.INFO)
+    from app.core.config import settings
+
+    level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
 
     root = logging.getLogger()
     for h in list(root.handlers):

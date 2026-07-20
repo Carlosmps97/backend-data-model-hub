@@ -271,13 +271,13 @@ curl -X POST http://localhost:8000/api/reporting/query/sql \
 
 ## Cómo correrlo localmente
 
-Requisitos: Python 3.12 y una cadena de conexión a Azure Cosmos DB (API de Mongo).
+Requisitos: Python 3.12 y acceso al workspace de Databricks (PAT) con el proyecto Lakebase creado (`dmh-proj/production/primary`).
 
 ```bash
 cd backend-data-model-hub
 
 # 1) Configuración
-cp .env.example .env            # rellenar COSMOS_CONNECTION_STRING
+cp .env.example .env            # rellenar DATABRICKS_HOST / DATABRICKS_TOKEN / PGUSER
 
 # 2) Entorno virtual + dependencias
 python3.12 -m venv .venv && source .venv/bin/activate
@@ -310,11 +310,19 @@ Bootstrap de datos (opcional, scripts en `scripts/`):
 
 ## Variables de entorno
 
+Homologadas 2026-07-19: **todas** se leen en `app/core/config.py`; lo específico del entorno entra por `.env` (dev) o por `databricks.yml → variables:` (Apps). Tabla completa en `doc/despliegue.md` §3.
+
 | Variable | Default | Descripción |
 |---|---|---|
-| `COSMOS_CONNECTION_STRING` | — (obligatoria) | Cadena de conexión a Cosmos DB (API de Mongo). |
-| `COSMOS_DATABASE` | `db_modeler` | Base de datos. |
-| `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Orígenes del frontend permitidos (coma-separados). |
+| `DB_BACKEND` | `cosmos` | `lakebase` (BD actual, doc 28) o `cosmos` (fallback/rollback). |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | `""` | Workspace + PAT (solo dev; en Apps el service principal autentica solo). |
+| `LAKEBASE_ENDPOINT` | `""` (obligatoria con lakebase) | Ruta lógica `projects/dmh-proj/branches/production/endpoints/primary`. |
+| `PGHOST` | `""` (opcional) | Host físico `ep-…`; vacío → se resuelve solo desde el endpoint lógico. |
+| `PGUSER` | `""` → `DATABRICKS_CLIENT_ID` | Rol PG: tu correo (dev) o el client ID del SP (Apps, automático). |
+| `PGPORT` / `PGDATABASE` / `PGSSLMODE` / `LAKEBASE_PGSCHEMA` | `5432` / `databricks_postgres` / `require` / `dmh` | Constantes de producto. |
+| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | `""` / `db_modeler` | Solo con `DB_BACKEND=cosmos`. |
+| `CORS_ORIGINS` | localhost:3000 (si no hay regex) | Orígenes exactos permitidos (coma-separados). |
+| `CORS_ORIGIN_REGEX` | — | Regex de orígenes (prod: matchea el front en cualquier workspace). |
 | `SECRET_KEY` | default inseguro de dev | Clave HMAC para firmar el JWT. Obligatoria en prod. |
 | `REQUIRE_AUTH` | `false` | `true` en prod: exige token, oculta la doc y activa el fail-closed. |
 | `ACCESS_TOKEN_TTL_MIN` | `720` (12 h) | Vida del token de acceso. |
@@ -348,7 +356,7 @@ backend-data-model-hub/
   scripts/                   # create_admin · seed_modeler · seed_stress · migraciones
   doc/                       # documentación (ver índice abajo)
   requirements.txt  requirements-dev.txt  .env.example
-  app.yaml  databricks.yml   # runtime + bundle de Databricks Apps
+  databricks.yml             # bundle de Databricks Apps (variables por entorno + config de runtime)
 ```
 
 ---
@@ -370,13 +378,13 @@ Los tests de identidad/permisos aprovechan `REQUIRE_AUTH=false` y el override `X
 
 El backend está pensado para correr como servicio ASGI (entrypoint `app.main:app`) detrás de un proxy con TLS. Dos destinos soportados:
 
-- **Databricks Apps** (destino primario). Definido por `app.yaml` (comando `uvicorn app.main:app`; Databricks inyecta host/puerto vía `UVICORN_HOST`/`UVICORN_PORT`) y el Asset Bundle `databricks.yml`. Los secretos (`COSMOS_CONNECTION_STRING`, `SECRET_KEY`) se resuelven desde un scope respaldado por Azure Key Vault con `valueFrom`. En prod se fija `REQUIRE_AUTH=true`, `LOG_FORMAT=json` y `CORS_ORIGINS` apuntando a la URL de la app frontend.
+- **Databricks Apps** (destino primario). Todo definido en el Asset Bundle `databricks.yml`: sección `variables:` (parámetros por entorno) + bloque `config:` del recurso app (comando `uvicorn app.main:app` y env; Databricks inyecta host/puerto vía `UVICORN_HOST`/`UVICORN_PORT`). La BD (Lakebase) NO usa secretos: la app acuña tokens OAuth con su service principal (rol PG one-time, doc 28 §11.3). Los secretos restantes (`COSMOS_CONNECTION_STRING` del fallback, `SECRET_KEY`) se resuelven desde un scope respaldado por Azure Key Vault con `value_from`. En prod se fija `REQUIRE_AUTH=true`, `LOG_FORMAT=json` y `CORS_ORIGIN_REGEX` que matchea el front en cualquier workspace.
 - **Azure App Service** (alternativa). Correr `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y configurar las mismas variables de entorno como *App Settings*.
 
 Checklist mínimo de producción, independientemente del destino:
 
 - `REQUIRE_AUTH=true` y un `SECRET_KEY` aleatorio fuerte (p. ej. `openssl rand -hex 32`). Sin esto la app no arranca (fail-closed).
-- `CORS_ORIGINS` con el origen exacto del frontend (sin comodines).
+- `CORS_ORIGIN_REGEX` acotada al front de Apps (o `CORS_ORIGINS` con el origen exacto; nunca `*`).
 - `LOG_FORMAT=json` para logs estructurados.
 
 ### Consideraciones de base de datos (Azure Cosmos DB con API de Mongo)
