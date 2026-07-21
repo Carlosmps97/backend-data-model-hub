@@ -1,12 +1,21 @@
-"""Deja UNA sola versión base (Model + Data Standards) — enfoque QUIRÚRGICO.
+"""Vuelve la plataforma a la VERSIÓN BASE: solo v1 (Model) + baseline (Standards).
 
-Deshace las versiones de PRUEBA directo en producción usando sus imágenes
-previas (restaura las modificadas, borra las creadas), conserva la versión BASE
-(v1, que no tiene cambios: la migración escribió directo a publicado) y sus
-datos (migración + backfills + correcciones manuales — NO se re-migra, así que
-NADA de eso se pierde), borra los registros de las versiones de prueba, crea un
-baseline de Data Standards (hoy 0 versiones) y asegura el permiso `rollback` en
-los roles.
+Deshace TODAS las versiones posteriores a la base directo en producción usando
+sus imágenes previas (restaura las entidades modificadas, borra las creadas),
+conserva la versión BASE — el changeset `versionLabel="v1"` SIN cambios que
+marca el estado recién migrado del XML — y todos sus datos (la migración y las
+correcciones aplicadas a publicado NO se tocan: acá no se re-migra nada).
+Después borra los registros de las demás versiones (aplicadas, drafts,
+submitted y rejected: el historial de la web queda solo con v1), crea el
+baseline de Data Standards si no existe ninguno y asegura el permiso
+`rollback` en los roles.
+
+Resultado: la web muestra UNA versión por módulo (Model v1 · Standards v1) y
+cualquier versión futura puede volver a la base con el rollback normal de la
+plataforma (doc 27).
+
+Prerrequisito: que exista el changeset base `versionLabel="v1"` (lo dejó la
+migración real; si no existe, el script aborta sin tocar nada).
 
 DESTRUCTIVO. **Dry-run por default**; `--apply` para escribir.
   .venv/bin/python -m scripts.reset_to_base_version            # dry-run
@@ -30,7 +39,6 @@ async def main(apply: bool) -> None:
     from app.core.db.client import connect, disconnect, get_db
     from app.features.changesets.service import rollback_plan
     from app.features.data_standards import service as std_service
-    from scripts.seed_modeler import build_roles
 
     await connect()
     db = await get_db()
@@ -117,9 +125,11 @@ async def main(apply: bool) -> None:
         print(f"Data Standards ya tiene {n_std} versión(es) — no se crea baseline.")
 
     # 6) Asegurar el permiso `rollback` en los roles (sin pisar otros permisos).
-    for r in build_roles():
+    #    Política doc 27: administrador y revisor pueden revertir versiones.
+    for role_id, granted in (("administrador", True), ("revisor", True),
+                             ("modelador", False), ("lector", False)):
         await db["roles"].update_one(
-            {"_id": r["_id"]}, {"$set": {"permissions.rollback": r["permissions"].get("rollback", False)}})
+            {"_id": role_id}, {"$set": {"permissions.rollback": granted}})
     print("Permiso `rollback` asegurado en los roles (administrador/revisor = true).")
 
     print("\nOK · UNA versión base para Model (v1) + baseline de Data Standards. Preservado todo el base.")

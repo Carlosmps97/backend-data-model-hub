@@ -16,19 +16,48 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Matriz de permisos por rol (pantalla 14 + Data Standards). Editable luego
+# desde Admin; acá solo se asegura que los 4 roles EXISTAN con su default.
+_ROLE_GRANTS: dict[str, tuple[str, str, set[str]]] = {
+    "administrador": ("Administrador", "Control total · gestiona usuarios", set()),  # set() → todos
+    "modelador": ("Modelador", "Crea y edita tablas · envía a revisión",
+                  {"model.view", "model.edit", "export"}),
+    "revisor": ("Revisor", "Aprueba o rechaza solicitudes",
+                {"model.view", "review.decide", "publish", "rollback", "export"}),
+    "lector": ("Lector", "Solo lectura · exporta metadata", {"model.view", "export"}),
+}
+
+
+def build_roles() -> list[dict]:
+    from app.features.auth.models import PERMISSIONS
+    now = datetime.now(timezone.utc).isoformat()
+    out = []
+    for key, (name, desc, grants) in _ROLE_GRANTS.items():
+        allowed = set(PERMISSIONS) if not grants else grants
+        out.append({
+            "_id": key, "name": name, "description": desc,
+            "permissions": {p: (p in allowed) for p in PERMISSIONS},
+            "flgactive": True, "createdAt": now, "updatedAt": now,
+        })
+    return out
+
 
 async def main() -> None:
     from app.core.db.client import connect, disconnect, get_db
     from app.core.security import hash_password
-    from scripts.seed_modeler import build_roles
 
     await connect()
     db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
 
     # 1) Asegurar roles (el admin necesita el doc de rol para resolver permisos).
+    #    $setOnInsert: un rol EXISTENTE no se pisa (la matriz editada en Admin manda).
     for r in build_roles():
-        await db["roles"].update_one({"_id": r["_id"]}, {"$set": r}, upsert=True)
+        await db["roles"].update_one(
+            {"_id": r["_id"]},
+            {"$setOnInsert": {k: v for k, v in r.items() if k != "_id"}},
+            upsert=True,
+        )
 
     # 2) Upsert del usuario admin/admin.
     await db["users"].update_one(

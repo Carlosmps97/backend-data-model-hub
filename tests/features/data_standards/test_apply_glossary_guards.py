@@ -20,6 +20,9 @@ def _mock(monkeypatch, *, before_terms=None, ensure=None):
     monkeypatch.setattr(service.dict_repo, "list_entries",
                         AsyncMock(return_value=before_terms or []))
     monkeypatch.setattr(service.udp_repo, "list_udp", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.rules_repo, "list_rules", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.rules_repo, "get_config",
+                        AsyncMock(return_value={"id": "global", "lookups": {}, "functions": []}))
     monkeypatch.setattr(service.dict_svc, "ensure_term_valid", ensure or AsyncMock())
     # Mutaciones: NO deben ejecutarse cuando el guard corta.
     for fn in ("delete_entry", "create_entry", "update_entry"):

@@ -36,9 +36,36 @@ class UdpEdit(BaseModel):
     description: str | None = None
 
 
+class DdlRuleEdit(BaseModel):
+    """Una regla de DDL Export (doc 30). `udpRefs` los deriva/valida el
+    validador server-side (F2) a partir de `condition`/`action`; se aceptan del
+    cliente para el guard de borrado mientras tanto."""
+    id: str | None = None            # None = regla nueva
+    name: str
+    description: str | None = None
+    kind: str = "rule"               # 'rule' | 'generator'
+    target: str | None = "column"    # 'column' | 'table' — solo kind='rule'
+    sourceArtifact: str | None = None  # solo kind='generator'
+    condition: str = ""
+    udpRefs: list[dict] = []         # [{udpId, level}]
+    action: dict = {}
+    appliesTo: list[str] = []
+    priority: int = 100
+    enabled: bool = True
+    validationState: str = "valid"
+    validationReport: dict = {}
+
+
+class DdlConfigPatch(BaseModel):
+    """Patch del ruleset config: cada bloque que venga no-None REEMPLAZA el set
+    completo (payload chico; sin deltas)."""
+    lookups: dict | None = None
+    functions: list | None = None
+
+
 class ApplyBody(BaseModel):
     """Batch de cambios de estándares que se aplican como UNA versión (15d/15e)."""
-    kind: str = "batch"               # glossary | udp | domain | naming | batch
+    kind: str = "batch"               # glossary | udp | domain | naming | ddl | batch
     title: str | None = None
     description: str | None = None
     termsUpsert: list[TermEdit] = []
@@ -48,6 +75,9 @@ class ApplyBody(BaseModel):
     domainsDelete: list[str] = []
     udpUpsert: list[UdpEdit] = []     # definiciones UDP a crear/editar
     udpDelete: list[str] = []         # ids de definiciones UDP a borrar
+    rulesUpsert: list[DdlRuleEdit] = []   # reglas de DDL Export a crear/editar
+    rulesDelete: list[str] = []           # ids de reglas a borrar
+    ddlConfigPatch: DdlConfigPatch | None = None  # lookups/functions del ruleset
 
 
 class RollbackBody(BaseModel):

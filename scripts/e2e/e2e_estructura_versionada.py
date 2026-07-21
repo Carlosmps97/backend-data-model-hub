@@ -7,7 +7,7 @@ submit con revisor → revisor aprueba → producción los ve.
 import sys, uuid
 import httpx
 
-# WAN (Lakebase/Cosmos remotos): publish/approve pueden superar el default de
+# WAN (Lakebase remoto): publish/approve pueden superar el default de
 # 5 s de httpx — todas las llamadas van con timeout explícito.
 def _get(url, **k):
     k.setdefault("timeout", 60)

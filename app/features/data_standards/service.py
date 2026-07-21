@@ -9,12 +9,17 @@ snapshot + diff + impacto + autor.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
 from app.core.audit import audit
 from app.core.logging import get_logger
+from app.features.ddl_rules import repository as rules_repo
+from app.features.ddl_rules import service as rules_svc
+from app.features.ddl_rules.engine import generators as ddl_generators
+from app.features.ddl_rules.engine import validate as ddl_validate
 from app.features.glossary import repository as dict_repo, service as dict_svc
 from app.features.domains import repository as dom_repo, service as dom_svc
 from app.features.settings import repository as set_repo, service as set_svc
@@ -34,7 +39,9 @@ def _now() -> str:
 
 
 def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
-                udp: list[dict] | None = None) -> dict:
+                udp: list[dict] | None = None,
+                ddl_rules: list[dict] | None = None,
+                ddl_config: dict | None = None) -> dict:
     """Snapshot limpio del estado de estándares. Puro."""
     return {
         "domains": [
@@ -57,14 +64,27 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
                                    "allowedValues", "description")}
             for u in (udp or [])
         ],
+        # DDL Export Rules (doc 30 D1): el doc entero — el rollback restaura la
+        # regla tal cual, incluido su estado de validación de ese momento.
+        "ddlRules": [
+            {k: r.get(k) for k in ("id", "name", "description", "kind", "target",
+                                   "sourceArtifact", "condition", "udpRefs", "action",
+                                   "appliesTo", "priority", "enabled",
+                                   "validationState", "validationReport", "updatedBy")}
+            for r in (ddl_rules or [])
+        ],
+        "ddlConfig": {"lookups": (ddl_config or {}).get("lookups") or {},
+                      "functions": (ddl_config or {}).get("functions") or []},
     }
 
 
 def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, dict],
-               before_udp: dict[str, dict] | None = None) -> dict:
+               before_udp: dict[str, dict] | None = None,
+               before_rules: dict[str, dict] | None = None) -> dict:
     """Listas legibles de lo que el batch agrega/edita/quita (para el historial).
     `before_*` = mapas id→doc del estado PREVIO. Puro."""
     before_udp = before_udp or {}
+    before_rules = before_rules or {}
     added: list[str] = []
     edited: list[str] = []
     removed: list[str] = []
@@ -77,6 +97,23 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
     for uid in getattr(body, "udpDelete", []) or []:
         prev = before_udp.get(uid)
         removed.append(f"UDP {prev['name']}" if prev else f"UDP {uid}")
+
+    for r in getattr(body, "rulesUpsert", []) or []:
+        label = "Generator" if r.kind == "generator" else "Rule"
+        if r.id and r.id in before_rules:
+            edited.append(f"{label} {r.name}")
+        else:
+            added.append(f"{label} {r.name}")
+    for rid in getattr(body, "rulesDelete", []) or []:
+        prev = before_rules.get(rid)
+        kind = "Generator" if prev and prev.get("kind") == "generator" else "Rule"
+        removed.append(f"{kind} {prev['name']}" if prev else f"Rule {rid}")
+    patch = getattr(body, "ddlConfigPatch", None)
+    if patch is not None:
+        if patch.lookups is not None:
+            edited.append(f"DDL lookups · {len(patch.lookups)} defined")
+        if patch.functions is not None:
+            edited.append(f"DDL functions · {len(patch.functions)} defined")
 
     for t in body.termsUpsert:
         label = f"{t.term} → {t.abbrev}"
@@ -178,7 +215,9 @@ async def current_snapshot() -> dict:
     terms = await dict_repo.list_entries(None)
     naming = await set_svc.get_naming()
     udp = await udp_repo.list_udp()
-    return snapshot_of(domains, terms, naming, udp)
+    ddl_rules = await rules_repo.list_rules()
+    ddl_config = await rules_repo.get_config()
+    return snapshot_of(domains, terms, naming, udp, ddl_rules, ddl_config)
 
 
 async def history() -> list[dict]:
@@ -205,6 +244,108 @@ async def apply(actor: str, body) -> dict:
     before_domains = {d["id"]: d for d in await dom_repo.list_domains()}
     before_terms = {t["id"]: t for t in await dict_repo.list_entries(None)}
     before_udp = {u["id"]: u for u in await udp_repo.list_udp()}
+    before_rules = {r["id"]: r for r in await rules_repo.list_rules()}
+
+    # ── Guards de DDL Export Rules (doc 30) — fail-fast, sin estado a medias ──
+    rules_upsert = getattr(body, "rulesUpsert", []) or []
+    rules_delete = set(getattr(body, "rulesDelete", []) or [])
+    ddl_patch = getattr(body, "ddlConfigPatch", None)
+
+    # Estado de reglas POST-batch: (previas − borradas) pisadas por los upserts.
+    post_rules: dict[str, dict] = {rid: r for rid, r in before_rules.items()
+                                   if rid not in rules_delete}
+    for i, r in enumerate(rules_upsert):
+        data = r.model_dump()
+        # Key sintética por posición para las nuevas: dos altas con el mismo
+        # name NO deben pisarse en el dict (el guard de unicidad las ve a ambas).
+        rid = data.get("id") or f"__new__{i}"
+        post_rules[rid] = data
+
+    # Unicidad de `name` entre reglas activas (cubre duplicado intra-batch y
+    # colisión con una existente): el slug identifica la regla en el catálogo,
+    # el YAML y el log del export.
+    names_seen: dict[str, str] = {}
+    for rid, r in post_rules.items():
+        n = (r.get("name") or "").strip()
+        if not n:
+            raise HTTPException(status_code=422, detail="Every rule needs a name.")
+        if n in names_seen:
+            raise HTTPException(
+                status_code=409,
+                detail=f"There is already a rule named '{n}'. Rule names must be unique.")
+        names_seen[n] = rid
+
+    # Borrar un UDP referenciado por reglas activas (post-batch) o por el origen
+    # de un lookup se BLOQUEA con la lista (spec §4). Si el mismo batch borra la
+    # regla que lo referenciaba, pasa.
+    udp_delete_ids = set(getattr(body, "udpDelete", []) or [])
+    ddl_config_now = await rules_repo.get_config()
+    post_config = {
+        "lookups": (ddl_patch.lookups if ddl_patch is not None and ddl_patch.lookups is not None
+                    else ddl_config_now.get("lookups") or {}),
+        "functions": (ddl_patch.functions if ddl_patch is not None and ddl_patch.functions is not None
+                      else ddl_config_now.get("functions") or []),
+    }
+    if udp_delete_ids:
+        refs = rules_svc.rules_referencing(list(post_rules.values()), udp_delete_ids)
+        lk_refs = rules_svc.lookups_referencing(post_config["lookups"], udp_delete_ids)
+        if refs or lk_refs:
+            names = ", ".join(f"'{r['name']}'" for r in refs)
+            extra = (f" · lookups: {', '.join(lk_refs)}" if lk_refs else "")
+            raise HTTPException(
+                status_code=409,
+                detail=(f"That UDP is referenced by DDL export rules ({names}{extra}). "
+                        "Delete or edit those rules first."))
+
+    # Validación server-side AUTORITATIVA de las reglas del batch (spec §9:
+    # guardar con errores está bloqueado). Se valida contra el estado POST-batch
+    # de defs de UDP — un UDP creado en este mismo batch ya cuenta (para eso se
+    # pre-asigna id a las altas). Editar solo props sueltas (toggle/priority) de
+    # una regla YA inválida se permite: el export la salta igual.
+    for u in getattr(body, "udpUpsert", []) or []:
+        if not u.id:
+            u.id = str(uuid.uuid4())
+    post_udp: list[dict] = [u for uid, u in before_udp.items() if uid not in udp_delete_ids]
+    for u in getattr(body, "udpUpsert", []) or []:
+        d = u.model_dump()
+        post_udp = [x for x in post_udp if x.get("id") != d["id"]]
+        post_udp.append(d)
+    post_artifacts = [a["id"] for a in rules_svc.artifact_catalog(list(post_rules.values()))]
+    _CORE_FIELDS = ("condition", "action", "appliesTo", "target", "kind", "sourceArtifact")
+    rules_reports: list[tuple[dict, str]] = []   # (reporte, estado a persistir) por upsert
+    for r in rules_upsert:
+        data = r.model_dump()
+        report = ddl_validate.validate_rule(data, post_udp, post_config, post_artifacts)
+        prev = before_rules.get(r.id) if r.id else None
+        core_edited = prev is None or any(data.get(f) != prev.get(f) for f in _CORE_FIELDS)
+        if report["state"] == "invalid" and core_edited:
+            first = report["errors"][0]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rule '{data['name']}' has a validation error: {first['message']}")
+        state = report["state"] if core_edited else ddl_validate.passive_state(report)
+        rules_reports.append((report, state))
+
+    # Cascada de generadores (spec §7.3) — solo si el batch toca reglas: borrar
+    # un generador cuya salida es la FUENTE de otro activo → 409 con la lista;
+    # un ciclo entre generadores del estado post-batch → 400 (se rechaza al
+    # validar, nunca en runtime).
+    if rules_upsert or rules_delete:
+        deleted_emits = {(((before_rules.get(rid) or {}).get("action") or {}).get("emit") or {}).get("artifact")
+                         for rid in rules_delete}
+        deleted_emits.discard(None)
+        if deleted_emits:
+            dependents = sorted(r.get("name") or "" for r in post_rules.values()
+                                if r.get("kind") == "generator"
+                                and r.get("sourceArtifact") in deleted_emits)
+            if dependents:
+                raise HTTPException(
+                    status_code=409,
+                    detail=("That generator's output feeds other generators "
+                            f"({', '.join(dependents)}). Delete or repoint those first."))
+        cycle = ddl_generators.cycle_error(list(post_rules.values()))
+        if cycle:
+            raise HTTPException(status_code=400, detail=cycle)
 
     # F2 #1: guards del glosario ANTES de mutar nada (fail-fast, sin estado a
     # medias). Entradas bloqueadas (D4) → 409 para todos; validación contra
@@ -289,13 +430,53 @@ async def apply(actor: str, body) -> dict:
         else:
             await udp_repo.create_udp(data)
 
+    # 4b) Reglas de DDL Export (doc 30). Tampoco cascadean nada del modelo: solo
+    #     definen transformaciones del texto exportado. Se persiste el resultado
+    #     de la validación autoritativa (estado, reporte, condición canonizada y
+    #     udpRefs derivados server-side).
+    for rid in rules_delete:
+        await rules_repo.delete_rule(rid)
+    for r, (report, state) in zip(rules_upsert, rules_reports):
+        data = r.model_dump()
+        data.update(
+            updatedBy=actor,
+            condition=report["condition"],
+            udpRefs=report["udpRefs"],
+            validationState=state,
+            validationReport={k: report[k] for k in ("state", "checks", "errors", "warnings")},
+        )
+        if r.id and r.id in before_rules:
+            await rules_repo.update_rule(r.id, {k: v for k, v in data.items() if k != "id"})
+        else:
+            await rules_repo.create_rule(data)
+    # 4c) Config del ruleset (lookups/functions): cada bloque no-None reemplaza.
+    if ddl_patch is not None and (ddl_patch.lookups is not None or ddl_patch.functions is not None):
+        await rules_repo.set_config(lookups=ddl_patch.lookups, functions=ddl_patch.functions)
+    # 4d) Cambios de UDP re-validan las reglas NO tocadas del batch: un valor
+    #     eliminado de una lista las marca 'stale' (spec §4); un rename se
+    #     re-canoniza vía udpRefs. Colección chica (docenas) — barato.
+    if (getattr(body, "udpUpsert", []) or []) or udp_delete_ids:
+        touched = {r.id for r in rules_upsert if r.id} | rules_delete
+        for rid, prev in before_rules.items():
+            if rid in touched:
+                continue
+            rep = ddl_validate.validate_rule(prev, post_udp, post_config, post_artifacts)
+            new_state = ddl_validate.passive_state(rep)
+            if (new_state != prev.get("validationState")
+                    or rep["condition"] != prev.get("condition")):
+                await rules_repo.update_rule(rid, {
+                    "condition": rep["condition"], "udpRefs": rep["udpRefs"],
+                    "validationState": new_state,
+                    "validationReport": {k: rep[k] for k in ("state", "checks", "errors", "warnings")},
+                })
+
     # 5) Re-derivar nombres físicos si cambió el glosario o el naming_config.
     rederived = {"tables": 0, "columns": 0}
     if body.termsUpsert or body.termsDelete or body.namingConfig:
         rederived = (await dict_svc.rephysicalize(None))["updated"]
 
     impact = {"tables": rederived["tables"], "columns": rederived["columns"] + domain_cols}
-    diff = build_diff(body, before_domains, before_terms, before_udp)
+    diff = build_diff(body, before_domains, before_terms, before_udp, before_rules)
     # `kind` coaccionado al vocabulario conocido (el historial itera iconos por
     # kind; un valor arbitrario del cliente rompería el render).
     kind = body.kind if body.kind in KINDS else "batch"
@@ -342,6 +523,10 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     await repository.restore_naming(snap.get("namingConfig") or {})
     # Definiciones UDP: restaura las del snapshot (snapshots viejos sin 'udp' → []).
     await udp_repo.restore_udp(snap.get("udp") or [])
+    # Reglas de DDL Export + config del ruleset (doc 30): mismo criterio —
+    # snapshots pre-feature sin 'ddlRules'/'ddlConfig' dejan el catálogo vacío.
+    await rules_repo.restore_rules(snap.get("ddlRules") or [])
+    await rules_repo.restore_config(snap.get("ddlConfig") or {})
 
     # Re-derivar SOLO lo que cambió: nombres físicos si cambió glosario/naming;
     # tipos por dominio si cambiaron los dominios. Un rollback de solo-UDP no toca

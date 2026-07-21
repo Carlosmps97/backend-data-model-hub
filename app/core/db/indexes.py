@@ -39,6 +39,9 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         _try("parent_domains", [("flgactive", 1)]),
         _try("glossary_terms", [("flgactive", 1)]),
         _try("udp_definitions", [("flgactive", 1)]),
+        # DDL Export Rules (doc 30): colección chica (docenas); la unicidad del
+        # `name` la garantiza el apply de standards, no un índice único.
+        _try("ddl_rules", [("flgactive", 1)]),
         _try("canonical_tables", [("flgactive", 1)]),
         # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
         # top-N se ordena en Mongo por physicalName, y Cosmos RU rechaza

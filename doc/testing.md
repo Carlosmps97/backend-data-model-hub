@@ -1,5 +1,12 @@
 # Testing del backend — Data Model Hub
 
+> **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
+> (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
+> **retiraron** — el flujo vigente es únicamente XML → Lakebase
+> (`scripts/README.md`). Esas secciones quedan como evidencia histórica de la
+> validación a escala (resultados en `plan-implementacion/04-STRESS-TEST.md`);
+> las menciones a Cosmos describen la BD de aquella época.
+
 Este documento describe la estrategia y la implementación completa de pruebas del backend `backend-data-model-hub` (FastAPI + Motor/Cosmos DB con API de Mongo). Cubre las cuatro capas de verificación que sostienen el proyecto: pruebas unitarias puras por feature, pruebas de arquitectura que fuerzan invariantes de capas, un harness E2E que ejercita el backend real por rol vía HTTP, y una prueba de estrés a escala real (10.000 tablas / 400.000 columnas). Todo el contenido está basado en el código real de `tests/`, `scripts/e2e/` y `scripts/seed_stress.py` / `arrange_all.py`.
 
 ---
@@ -75,8 +82,7 @@ tests/
 │   ├── settings/                    # naming_config por scope (defaults + validacion)
 │   ├── summary/                     # contadores del Home (global + por proyecto)
 │   └── views/                       # campos aditivos de vista
-└── scripts/
-    └── test_seed_modeler.py         # integridad referencial del seed determinista
+└── scripts/                         # (los tests de seeds se retiraron con sus scripts)
 ```
 
 ---
@@ -235,14 +241,7 @@ El runner (`run_e2e.py`) ejecuta cada escenario, siempre llama a `cleanup()` en 
 ### 4.3 Seed y estrés
 
 ```bash
-# Seed determinista (data chica y consistente para desarrollo/E2E)
-.venv/bin/python scripts/seed_modeler.py
-
-# Estrés a escala completa (10k tablas / 400k columnas)
-.venv/bin/python scripts/seed_stress.py
-
-# Estrés a escala reducida para pruebas rapidas
-N_TABLES=100 BIG_CANVASES=2 .venv/bin/python scripts/seed_stress.py
+# (seeds y estrés retirados 2026-07-20 — ver nota de cabecera)
 
 # Reorganizar (auto-arrange) todos los canvases con ELK
 .venv/bin/python scripts/arrange_all.py
@@ -547,10 +546,7 @@ El backend corre como una app FastAPI (ASGI, `uvicorn app.main:app`) en dos dest
 .venv/bin/python -m scripts.e2e.run_e2e all        # terminal 2
 .venv/bin/python -m scripts.e2e.run_e2e s02_version_lifecycle
 
-# Seed y estres
-.venv/bin/python scripts/seed_modeler.py                          # data chica determinista
-.venv/bin/python scripts/seed_stress.py                           # 10k tablas / 400k columnas
-N_TABLES=100 BIG_CANVASES=2 .venv/bin/python scripts/seed_stress.py
+# Auto-arrange de canvases (los seeds/estrés se retiraron — ver cabecera)
 .venv/bin/python scripts/arrange_all.py                           # auto-arrange con ELK
 ```
 

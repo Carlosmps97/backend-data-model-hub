@@ -1,7 +1,7 @@
 """Harness E2E — cliente HTTP contra el backend EN VIVO (localhost:8000).
 
 Ejercita el stack completo: login real por rol → token JWT → header Authorization
-→ `require_permission` (RBAC) → servicio → repositorio → Cosmos → auditoría.
+→ `require_permission` (RBAC) → servicio → repositorio → Lakebase → auditoría.
 
 - `Client(role)` loguea al usuario canónico del rol y guarda el token.
 - Helpers de fixtures (`create_project`, `create_canvas`, `create_table`, …) hacen

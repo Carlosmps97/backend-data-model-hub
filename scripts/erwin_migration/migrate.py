@@ -1,7 +1,7 @@
 """Migración Erwin XML → colecciones publicadas de Data Model Hub.
 
 SIN `--apply` es un dry-run: parsea, corre el gate de calidad y muestra el
-plan (no abre conexión a la BD). Con `--apply` escribe en Mongo/Cosmos
+plan (no abre conexión a la BD). Con `--apply` escribe en la BD (Lakebase)
 (patrón "Erwin one-shot": directo a colecciones publicadas, sin changeset).
 
 Idempotente: los ids de plataforma son deterministas (uuid5 del Long_Id de

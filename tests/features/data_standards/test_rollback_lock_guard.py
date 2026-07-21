@@ -84,6 +84,10 @@ def _mock_rollback(monkeypatch, *, snapshot, cur_dict):
         monkeypatch.setattr(service.repository, name, m)
     mocks["restore_udp"] = AsyncMock()
     monkeypatch.setattr(service.udp_repo, "restore_udp", mocks["restore_udp"])
+    mocks["restore_rules"] = AsyncMock()
+    monkeypatch.setattr(service.rules_repo, "restore_rules", mocks["restore_rules"])
+    mocks["restore_config"] = AsyncMock()
+    monkeypatch.setattr(service.rules_repo, "restore_config", mocks["restore_config"])
     return mocks
 
 

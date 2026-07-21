@@ -57,6 +57,13 @@ def _mock_apply(monkeypatch, *, before_domains=None, before_terms=None, rephys=N
     monkeypatch.setattr(service.udp_repo, "create_udp", AsyncMock())
     monkeypatch.setattr(service.udp_repo, "update_udp", AsyncMock())
     monkeypatch.setattr(service.udp_repo, "delete_udp", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "list_rules", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.rules_repo, "get_config",
+                        AsyncMock(return_value={"id": "global", "lookups": {}, "functions": []}))
+    monkeypatch.setattr(service.rules_repo, "create_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "update_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "delete_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "set_config", AsyncMock())
     monkeypatch.setattr(service.dict_svc, "rephysicalize",
                         AsyncMock(return_value={"updated": rephys or {"tables": 0, "columns": 0}}))
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={"domains": [], "dict": [], "namingConfig": {}}))
@@ -110,6 +117,8 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
     monkeypatch.setattr(service.repository, "restore_dict", rdi)
     monkeypatch.setattr(service.repository, "restore_naming", rn)
     monkeypatch.setattr(service.udp_repo, "restore_udp", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "restore_rules", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "restore_config", AsyncMock())
     monkeypatch.setattr(service.dict_svc, "rephysicalize", AsyncMock(return_value={"updated": {"tables": 4, "columns": 12}}))
     monkeypatch.setattr(service.dom_svc, "propagate", AsyncMock(return_value={"updated": 5}))
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))

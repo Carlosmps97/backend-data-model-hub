@@ -11,7 +11,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 > btrees por expresión para los sorts. La forma lógica de los documentos — TODO
 > lo que sigue — no cambió. Azure Cosmos DB (Mongo, base `db_modeler`) queda
 > como legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc
-> con `scripts/lakebase/verify_migration.py`.
+> en la migración (2026-07-19; los scripts one-shot de esa copia se retiraron).
 
 ---
 

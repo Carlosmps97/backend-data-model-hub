@@ -19,7 +19,8 @@ from app.core.models import DOC_CONFIG
 # kind de una versión (para el icono/filtro del historial 15f).
 # 'glossary' = ex-'udp' (glosario de términos/abreviaturas que cascadea nombres
 # físicos). 'udp' se reserva para el NUEVO User Defined Properties (etiquetas).
-KINDS = ("glossary", "udp", "domain", "naming", "batch", "baseline", "rollback")
+# 'ddl' = DDL Export Rules (doc 30).
+KINDS = ("glossary", "udp", "domain", "naming", "ddl", "batch", "baseline", "rollback")
 
 
 class StandardsVersionDoc(BaseModel):
