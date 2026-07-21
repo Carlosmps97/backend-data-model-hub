@@ -45,6 +45,24 @@ async def list_tables(q: str | None = None, limit: int | None = None) -> list[di
     return [CanonicalTableDoc.model_validate(_to_doc(d)).model_dump(by_alias=True) for d in docs]
 
 
+async def search_columns(q: str, limit: int) -> list[dict]:
+    """Búsqueda global por nombre de COLUMNA (contains, case-insensitive) para
+    el Database Explorer: proyección liviana ordenada por physicalName (índice
+    canonical_columns.physicalName) y capada a `limit` — a 400k columnas la
+    colección NO se baja para filtrar en el cliente."""
+    db = await get_db()
+    rx = {"$regex": re.escape(q), "$options": "i"}
+    cursor = db[COLUMNS].find(
+        {"flgactive": {"$ne": False}, "$or": [{"physicalName": rx}, {"logicalName": rx}]}
+    ).sort("physicalName", 1).limit(limit)
+    docs = await cursor.to_list(None)
+    return [{
+        "id": str(d["_id"]), "tableId": d.get("tableId"),
+        "physicalName": d.get("physicalName"), "logicalName": d.get("logicalName"),
+        "dataType": d.get("dataType"),
+    } for d in docs]
+
+
 async def list_tables_by_ids(table_ids: list[str]) -> list[dict]:
     """Slice del pool por ids (`$in`): el armado de un canvas de 100 tablas no
     debe cargar las 15k del catálogo para filtrar en Python."""

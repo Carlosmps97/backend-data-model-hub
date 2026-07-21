@@ -1,13 +1,13 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-07-19 · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-07-20 · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
-~50 MB).
+~50 MB). Índice general de TODOS los scripts del backend: `scripts/README.md`.
 
-Todos los scripts viven en `scripts/erwin_migration/` (más dos auxiliares en
+Todos los scripts viven en `scripts/erwin_migration/` (más los auxiliares en
 `scripts/`). **Son agnósticos al archivo**: no hay nombres DDV, esquemas ni
 rutas hardcodeadas — cualquier `.xml` de Erwin que te entreguen sirve. La
-única excepción deliberada es `seed_ddv_synthetic.py` (ver §7).
+única excepción deliberada es `fix_particiones_ddv_20260717.py` (ver §7).
 
 Validación de agnosticismo (2026-07-15): además del DDV real, se corrieron
 parser, extractores, quality gate y migrate dry-run contra un XML sintético
@@ -27,7 +27,9 @@ resolvió por estructura, no por nombres.
 | Cargar el modelo REAL a la plataforma | `migrate` | Sí (con `--apply`) |
 | Ordenar los canvases después de cargar | `arrange_all` | Sí |
 | Validar consistencia después de cargar | `audit_data_consistency` | Solo lee |
-| Re-crear la demo sintética tipo-DDV | `seed_ddv_synthetic` | Sí — **BORRA TODO** |
+| Crear el usuario `admin` (BD nueva, para poder entrar) | `create_admin` | Sí (upsert) |
+| Re-aplicar las 3 correcciones de partición del owner (solo XML DDV actual) | `fix_particiones_ddv_20260717` | Sí (con `--apply`) |
+| Volver a la VERSIÓN BASE (deshace y borra toda versión posterior a v1) | `reset_to_base_version` | Sí (con `--apply`) |
 
 **Flujo recomendado para un XML nuevo:**
 ```
@@ -35,14 +37,13 @@ quality  →  (opcional: extract_* para revisar en frío)  →  migrate (dry-run
         →  (opcional si se REEMPLAZA la BD: reset_for_migration --apply)
         →  migrate --apply  →  arrange_all  →  audit_data_consistency
 ```
-Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo
-(la demo sintética se retiró; `seed_ddv_synthetic` queda como generador de
-entornos de prueba).
+Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo.
+(La demo sintética y sus seeds se retiraron el 2026-07-20 — el flujo es
+únicamente XML → Lakebase.)
 
 **Requisitos:** el `.venv` del backend (el parseo usa solo stdlib; `migrate
---apply`, `arrange_all` y los backfills usan la conexión del `.env` según
-`DB_BACKEND` — hoy `lakebase` = Databricks Lakebase Postgres vía
-`app/core/db/sync.get_sync_db()`; con `cosmos` vuelven a Cosmos, doc 28).
+--apply` y `arrange_all` usan la conexión del `.env` según `DB_BACKEND` —
+`lakebase` = Databricks Lakebase Postgres vía `app/core/db/sync.get_sync_db()`).
 `arrange_all` necesita además **node** y el elkjs del front (o `ELKJS_PATH`).
 Todos se ejecutan **desde la raíz del backend**. Los comandos y flags de esta
 guía NO cambiaron con la migración de BD.
@@ -82,8 +83,7 @@ Extrae **glosario (NSM), parent domains y definiciones UDP** del XML a JSON
   completo de la definición, aunque un valor no se use en ninguna tabla —
   unido a los valores observados. (Antes solo se tomaban los USADOS, lo que
   truncaba enums como "Clasificación del Dato" a las categorías presentes;
-  corregido en el parser. Backfill para BDs ya migradas:
-  `scripts/backfill_udp_allowed_values.py` dry-run + `--apply`.)
+  corregido en el parser — toda migración nueva ya trae la lista completa.)
 
 ## 3. `extract_model` — modelo de datos limpio a archivos
 
@@ -131,16 +131,14 @@ muestra el plan sin abrir conexión a la BD.
   y en orden físico; el DDL de la plataforma emite `PARTITIONED BY` en orden
   físico). Incongruente → no se marca, warning y queda en el audit (C10)
   para decisión humana. `"No Definido"` (default del UDP) no es partición.
-  Backfill quirúrgico para BDs ya migradas:
-  `scripts/backfill_cardinalidad_particion.py` (dry-run + `--apply`).
+  Las incongruencias del XML DDV actual ya tienen decisión del owner: §7.
 - **Entidad `schemas` (doc 18):** también upserta un doc por schema usado
   (ids `sch-<name>`, reusa por nombre case-insensitive).
 - **Definiciones de vista (F5, doc 22):** además del físico, migra la
   definición funcional a nivel VISTA (`views.description`) y a nivel COLUMNA
   DE VISTA (`sources[].description`) — esta última **solo** cuando difiere de
   la definición de la columna física origen (si coincide, la columna de vista
-  HEREDA y no se guarda override). Backfill para BDs ya migradas:
-  `scripts/backfill_view_col_defs.py` (dry-run + `--apply`).
+  HEREDA y no se guarda override).
 - **PKs correctas:** los miembros del Key_Group PK se traducen vía
   `Key_Group_Member.Attribute_Ref` (fix 2026-07-16 — antes NINGUNA columna
   migrada quedaba `isPrimaryKey`).
@@ -189,19 +187,18 @@ físico y lógico).
 Chequeos C1–C9 de integridad referencial y campos requeridos sobre la BD.
 Esperado tras una migración limpia: **0 hallazgos fixables**.
 
-## 7. `seed_ddv_synthetic` — demo sintética (⚠️ AD-HOC y DESTRUCTIVO)
+## 7. `fix_particiones_ddv_20260717` — decisiones del owner (solo XML DDV actual)
 
-El único script NO agnóstico, a propósito: re-crea la BD demo con data
-**sintética parecida al DDV pero obfuscada** (diccionario de sustantivos
-CLIENTE→CONTRAPARTE, esquemas renombrados, usuarios `admin`/`T1234`…).
+El único script NO agnóstico, a propósito: re-aplica las 3 correcciones de
+partición **decididas tabla por tabla por el owner** (doc 21 §3) sobre el DDV
+real — datos de negocio que NO están en el XML, así que **re-migrar el mismo
+XML las pisa** (el audit C10 lo avisa). Correr DESPUÉS de re-migrar
+`DDV - CPYBCA.xml`; para cualquier otro XML no aplica.
 
 ```bash
-.venv/bin/python -m scripts.seed_ddv_synthetic [--xml ruta.xml]   # dry-run
-.venv/bin/python -m scripts.seed_ddv_synthetic --apply            # ⚠️ BORRA la BD y re-siembra
+.venv/bin/python -m scripts.fix_particiones_ddv_20260717           # dry-run
+.venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply
 ```
-- `--xml` default: `../folder_data/DDV - CPYBCA.xml`. Preserva solo
-  `column_catalog`. **No usarlo para cargar modelos reales** — para eso está
-  `migrate` (§4). Detalle en `plan-implementacion/13-DATA-SINTETICA-DDV.md`.
 
 ---
 

@@ -34,7 +34,7 @@ def build_query(table_id: str | None = None, table_ids: list[str] | None = None)
 
     F3: el match canónico es contra `sourceTableIds` (igualdad sobre array =
     contains; `$in` = intersección). El OR con `tableId` cubre docs legacy
-    aún no migrados por `scripts/migrate_view_source_tables.py`."""
+    (anteriores a la materialización de `sourceTableIds`)."""
     query: dict = {"flgactive": {"$ne": False}}
     if table_id is not None:
         query["$or"] = [{"sourceTableIds": table_id}, {"tableId": table_id}]

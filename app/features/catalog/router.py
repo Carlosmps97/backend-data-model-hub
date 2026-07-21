@@ -29,6 +29,16 @@ async def create_table(body: CanonicalTableBody):
     return ok(await service.create_table(body))
 
 
+@router.get("/columns")
+async def search_columns(
+    q: str = Query(min_length=1, description="búsqueda por nombre de columna (contains, case-insensitive)"),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """Búsqueda global por COLUMNA (Database Explorer): hits con su tabla
+    resuelta (`table` + `schema`) para mostrarse como esquema.tabla."""
+    return ok(await service.search_columns(q, limit))
+
+
 @router.get("/tables/{table_id}/columns")
 async def list_columns(table_id: str):
     return ok(await service.list_columns(table_id))

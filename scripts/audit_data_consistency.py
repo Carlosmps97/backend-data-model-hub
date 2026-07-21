@@ -1,7 +1,7 @@
-"""Auditoría/saneo de la data (sintética) contra las reglas del lote doc 10.
+"""Auditoría/saneo de la data de la BD contra las reglas de la plataforma.
 
-La data sembrada ANTES del lote puede violar reglas que hoy los routers
-imponen (se creó cuando no existían) y generar inconsistencias visibles:
+Data cargada ANTES de una regla (migraciones, lotes viejos) puede violar lo
+que hoy los routers imponen y generar inconsistencias visibles:
 duplicados que el guard #9 ya no dejaría crear, relaciones huérfanas que el
 impact #8 listaría contra columnas muertas, vistas con fuentes rotas, keys
 UDP muertas en reportes, etc. Este script deja la base en un estado que las

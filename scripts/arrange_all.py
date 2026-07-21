@@ -65,8 +65,8 @@ async def main() -> None:
 
     print("[1/6] dims de columnas por tabla…")
     dims: dict[str, tuple[int, int]] = {}
-    # maxphys/maxlog por separado (el $max de expresiones anidado no es fiable
-    # en Cosmos); el máximo entre ambos modos se resuelve en Python.
+    # maxphys/maxlog por separado; el máximo entre ambos modos se resuelve
+    # en Python (evita $max de expresiones anidadas en el adaptador).
     pipe = [{"$group": {"_id": "$tableId", "n": {"$sum": 1},
                         "maxphys": {"$max": {"$add": [
                             {"$strLenCP": {"$ifNull": ["$physicalName", ""]}},

@@ -41,6 +41,7 @@ from app.features.admin.router import router as admin_router
 from app.features.auth.router import router as auth_router
 from app.features.catalog.router import router as catalog_router
 from app.features.data_standards.router import router as data_standards_router
+from app.features.ddl_rules.router import router as ddl_rules_router
 from app.features.glossary.router import router as glossary_router
 from app.features.domains.router import router as domains_router
 from app.features.udp.router import router as udp_router
@@ -273,6 +274,7 @@ def create_app() -> FastAPI:
     app.include_router(udp_router)
     app.include_router(glossary_router)
     app.include_router(data_standards_router)
+    app.include_router(ddl_rules_router)
     app.include_router(catalog_router)
     app.include_router(changesets_router)
     app.include_router(versions_router)

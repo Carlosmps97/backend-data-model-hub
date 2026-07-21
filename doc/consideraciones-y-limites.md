@@ -10,7 +10,7 @@ Se basa en el código real (`app/features/reporting/query/`, `app/core/`, `app/f
 
 | Dimensión | Límite / valor | Dónde vive en el código |
 |---|---|---|
-| Escala validada | 10.000 tablas · 400.000 columnas · 9.178 vistas · 150 canvases · 7.336 relaciones | `scripts/seed_stress.py`, doc `04` |
+| Escala validada | 10.000 tablas · 400.000 columnas · 9.178 vistas · 150 canvases · 7.336 relaciones | prueba de estrés 2026-07-05 (script retirado), doc `04` |
 | Circuit-breaker de consulta | `maxTimeMS = 15000` (15 s) | `reporting/query/executor.py` |
 | Tope de página de una consulta | `QuerySpec.limit`: default 100, mínimo 1, **máximo 5000** | `reporting/query/spec.py` |
 | Página interna del export | 2000 filas por lote (keyset, streaming) | `reporting/query/router.py` |
@@ -27,7 +27,7 @@ Se basa en el código real (`app/features/reporting/query/`, `app/core/`, `app/f
 
 ## 2. Escala probada (10k tablas / 400k columnas)
 
-La prueba de estrés (`scripts/seed_stress.py`, doc `04-STRESS-TEST`) cargó data sintética al volumen objetivo (aproximadamente 15k tablas de techo) y midió los endpoints calientes con autenticación por token y RBAC activos.
+La prueba de estrés (2026-07-05, doc `04-STRESS-TEST`; su script se retiró del repo) cargó data sintética al volumen objetivo (aproximadamente 15k tablas de techo) y midió los endpoints calientes con autenticación por token y RBAC activos.
 
 ### 2.1 Data cargada
 

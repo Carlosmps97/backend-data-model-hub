@@ -22,6 +22,22 @@ async def list_tables(q: str | None = None, limit: int | None = None) -> list[di
     return await repository.list_tables(q, limit)
 
 
+async def search_columns(q: str, limit: int = 50) -> list[dict]:
+    """Búsqueda por COLUMNA del Database Explorer: cada hit sale con su tabla
+    resuelta (`table` = nombre físico + `schema`) para mostrarse como
+    esquema.tabla. Hits cuya tabla ya no está activa se descartan (huérfanos)."""
+    cols = await repository.search_columns(q, limit)
+    table_ids = sorted({c["tableId"] for c in cols if c.get("tableId")})
+    tables = {t["id"]: t for t in await repository.list_tables_by_ids(table_ids)}
+    out: list[dict] = []
+    for c in cols:
+        t = tables.get(c.get("tableId") or "")
+        if not t:
+            continue
+        out.append({**c, "table": t.get("physicalName") or "", "schema": t.get("schema")})
+    return out
+
+
 async def create_table(body: CanonicalTableBody) -> dict:
     data = body.model_dump(exclude_none=True, by_alias=True)
     if not data.get("physicalName"):
