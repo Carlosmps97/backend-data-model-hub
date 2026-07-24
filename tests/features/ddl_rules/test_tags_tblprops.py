@@ -98,6 +98,25 @@ def test_tblproperties_lookup_null_no_emite_nada():
     assert out == CREATE_BASE
 
 
+def test_tblproperties_vacuum_default_del_lookup_para_tabla_sin_valor():
+    """Enfoque B (decisión owner 07-21): la tabla SIN 'Frecuencia Vacuum'
+    asignado (como las 163 del DDV real, usedBy=0) + condición ABIERTA + el
+    campo `default` del lookup → emite el default del lookup. El motor sigue
+    leyendo solo lo explícito (no inyecta el default del def); el 'sin valor →
+    default' se declara EN LA REGLA. Ver 30b-HALLAZGOS-UDP-DEFAULTS.md."""
+    sin_vac = {**TABLE, "udpValues": {k: v for k, v in TABLE["udpValues"].items()
+                                      if k != "u-vac"}}
+    base = {"tabla": table_ctx(sin_vac, N), "modelo": {"nombre": "", "udp": {}}}
+    assert "Frecuencia Vacuum" not in base["tabla"]["udp"]      # el motor NO rellena
+    rule = {**VACUUM, "condition": ""}                          # aplica siempre
+    config = {"lookups": {"vacuum_map": {**CONFIG["lookups"]["vacuum_map"],
+                                         "default": "interval 90 days"}}}
+    out, log = render.apply_tblproperties(CREATE_BASE, [rule], "ddl.tabla_fisica",
+                                          base, config)
+    assert "'delta.deletedFileRetentionDuration'='interval 90 days'" in out.replace(" = ", "=")
+    assert any(e["status"] == "applied" for e in log)
+
+
 def test_tblproperties_no_pisa_key_del_base():
     base_con_prop = CREATE_BASE.replace(
         "USING delta;", "USING delta\nTBLPROPERTIES ('delta.deletedFileRetentionDuration' = 'interval 7 days');")

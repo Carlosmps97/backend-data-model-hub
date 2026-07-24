@@ -31,6 +31,7 @@ from .schemas import (
     ChangeBody,
     ChangesetCreate,
     CommentBody,
+    DiffDetailsBody,
     ReviewBody,
     ReviewDecisionBody,
     SchemaRenameBody,
@@ -123,6 +124,21 @@ async def effective(
 async def diff(cs_id: str):
     """Diff estructurado por colección (added/edited/deleted con nombres) + impacto (p5)."""
     return ok(await service.diff(cs_id))
+
+
+@router.post("/{cs_id}/diff/details")
+async def diff_details(cs_id: str, body: DiffDetailsBody):
+    """Diff de campos ANTES→DESPUÉS de entidades puntuales del changeset
+    (doc 31): alimenta el popup "Change details" de la revisión. READ-ONLY;
+    las entidades que no pertenecen al changeset se omiten de la respuesta."""
+    bad = sorted({i.collection for i in body.items} - set(VERSIONED))
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown collection(s): {', '.join(bad)}.")
+    res = await service.diff_details(cs_id, [(i.collection, i.entityId) for i in body.items])
+    if res is None:
+        raise HTTPException(status_code=404, detail="That changeset doesn't exist.")
+    return ok(res)
 
 
 @router.post("/{cs_id}/submit")
