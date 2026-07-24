@@ -3,11 +3,23 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChangesetCreate(BaseModel):
     title: str
+
+
+class DiffDetailItem(BaseModel):
+    """Una entidad puntual del changeset a detallar (popup doc 31)."""
+    collection: str
+    entityId: str
+
+
+class DiffDetailsBody(BaseModel):
+    """Body de `POST /{cs_id}/diff/details` — lote acotado; el front trocea
+    si necesita más de 200 entidades (carga bajo demanda por selección)."""
+    items: list[DiffDetailItem] = Field(min_length=1, max_length=200)
 
 
 class SnapshotBody(BaseModel):

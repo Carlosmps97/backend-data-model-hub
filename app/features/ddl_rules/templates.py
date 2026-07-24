@@ -46,10 +46,16 @@ SEED_RULES: list[dict] = [
                             "tipo_entidad": "{udp:Tipo de Entidad}"}},
         "appliesTo": ["ddl.tabla_fisica"], "priority": 50, "enabled": True,
     },
-    {   # 8.4 — retención de vacuum desde UDP (vía lookup)
+    {   # 8.4 — retención de vacuum desde UDP (vía lookup). Condición ABIERTA
+        # (aplica a toda tabla física): en el DDV real NINGUNA tabla asigna
+        # "Frecuencia Vacuum" (usedBy=0, viven del default de Erwin CUSTOM_90
+        # days). El "sin valor → default" se resuelve en el LOOKUP (campo
+        # `default`), no en el motor (decisión owner 07-21, enfoque B —
+        # 30b-HALLAZGOS-UDP-DEFAULTS.md). Una tabla con valor explícito mapea a
+        # lo suyo; sin valor cae al default del lookup.
         "name": "tblproperties_vacuum", "kind": "rule", "target": "table",
-        "description": "delta.deletedFileRetentionDuration según Frecuencia Vacuum",
-        "condition": 'tabla.udp["Frecuencia Vacuum"] IS NOT NULL',
+        "description": "delta.deletedFileRetentionDuration según Frecuencia Vacuum (default del lookup si no hay valor)",
+        "condition": "",
         "action": {"tblproperties": {"delta.deletedFileRetentionDuration": "{lookup:vacuum_map}"}},
         "appliesTo": ["ddl.tabla_fisica"], "priority": 40, "enabled": True,
     },
@@ -108,7 +114,10 @@ SEED_LOOKUPS: dict = {
             "YEARLY_730 days": "interval 730 days",
             "EVENTUAL_90 days": "interval 90 days",
         },
-        "default": None,
+        # default (unmapped) = el "case de default desde la regla" (enfoque B):
+        # una tabla SIN "Frecuencia Vacuum" asignada cae acá. = el default de
+        # Erwin (CUSTOM_90 days) ya mapeado. Editable en Lookups & Functions.
+        "default": "interval 90 days",
     },
     # DAC-XXXX → 'XXXX' (el 2º parámetro de bcp_ddv_desencrypt). Los valores
     # no-críticos ('No DAC', 'No Definido') quedan sin mapear con default null

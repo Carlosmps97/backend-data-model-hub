@@ -7,7 +7,13 @@ from __future__ import annotations
 
 
 def _udp_by_name(udp_values: dict | None, name_by_id: dict[str, str]) -> dict:
-    """{defId: valor} → {nombreUDP: valor}. Ids sin definición se ignoran."""
+    """{defId: valor} → {nombreUDP: valor}. Ids sin definición se ignoran.
+
+    OJO (decisión owner 07-21, enfoque B): el motor lee SOLO los valores
+    EXPLÍCITOS — fiel a lo que guardó el XML. El `defaultValue` de la def NO se
+    inyecta acá; el "sin valor → usar default" se declara en la REGLA (condición
+    abierta + `default` del lookup, spec §6.7). Ver
+    `plan-implementacion/30b-HALLAZGOS-UDP-DEFAULTS.md`."""
     out: dict[str, str] = {}
     for def_id, value in (udp_values or {}).items():
         name = name_by_id.get(def_id)

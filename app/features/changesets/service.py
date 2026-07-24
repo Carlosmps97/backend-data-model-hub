@@ -17,7 +17,7 @@ from app.features.schemas import service as schemas_service
 from app.features.settings import service as settings_service
 from app.features.views.models import normalize_source_tables
 
-from . import repository, validation
+from . import diffdetail, repository, validation
 from .repository import VERSIONED
 from .validation import (
     DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError)
@@ -1197,6 +1197,107 @@ async def diff(cs_id: str) -> dict | None:
     result["structure"] = tree["structure"]
     result["impact"]["projectsAffected"] = tree["projectsAffected"]
     return result
+
+
+# ── Diff de campos por entidad (doc 31 — popup "Change details") ──────────
+
+
+async def _detail_resolvers(wanted: list[tuple[str, str]], changes: dict,
+                            before_by: dict[tuple[str, str], dict | None]) -> dict:
+    """Mapas id→nombre para que el detalle sea legible: UDP, dominios, tablas/
+    columnas referenciadas por relaciones y vistas, proyectos/folders. Slices
+    puntuales — nunca colecciones completas de datos (solo estructura chica)."""
+    from app.features.domains import repository as dom_repo
+    from app.features.udp import repository as udp_repo
+
+    cols = {c for c, _ in wanted}
+    res: dict = {"udp": {}, "domains": {}, "tables": {}, "columns": {},
+                 "projects": {}, "folders": {}}
+    if cols & {"canonical_tables", "canonical_columns", "subject_areas"}:
+        res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp()}
+    if "canonical_columns" in cols:
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+
+    entries = []
+    for c, e in wanted:
+        ch = changes[c][e]
+        before = ch.get("before") if ch.get("beforeAt") else before_by.get((c, e))
+        entries.append((c, before, ch.get("payload")))
+    tids, cids = diffdetail.collect_ref_ids(entries)
+
+    def _merge_change_names(key: str, coll: str, ids: set[str]) -> None:
+        # Entidad referida que también es NUEVA en este changeset: su nombre
+        # solo existe en el payload del cambio (aún no publicada).
+        for eid, ch in (changes.get(coll) or {}).items():
+            if eid not in ids or eid in res[key]:
+                continue
+            p = ch.get("payload") or {}
+            nm = p.get("physicalName") or p.get("logicalName") or p.get("name")
+            if nm:
+                res[key][eid] = nm
+
+    if tids:
+        docs = await repository.published("canonical_tables", {"_id": {"$in": sorted(tids)}})
+        res["tables"] = {d["id"]: d.get("physicalName") or d.get("logicalName") or d["id"]
+                         for d in docs}
+        _merge_change_names("tables", "canonical_tables", tids)
+    if cids:
+        docs = await repository.published("canonical_columns", {"_id": {"$in": sorted(cids)}})
+        res["columns"] = {d["id"]: d.get("physicalName") or d.get("logicalName") or d["id"]
+                          for d in docs}
+        _merge_change_names("columns", "canonical_columns", cids)
+    if cols & {"folders", "subject_areas"}:
+        res["projects"] = {d["id"]: d.get("name") or d["id"]
+                           for d in await repository.published("projects")}
+        _merge_change_names("projects", "projects", set(res["projects"]) | set(changes.get("projects") or {}))
+    if "subject_areas" in cols:
+        res["folders"] = {d["id"]: d.get("name") or d["id"]
+                          for d in await repository.published("folders")}
+        _merge_change_names("folders", "folders", set(res["folders"]) | set(changes.get("folders") or {}))
+    return res
+
+
+async def diff_details(cs_id: str, items: list[tuple[str, str]]) -> dict | None:
+    """Diff de campos ANTES→DESPUÉS de entidades puntuales del changeset
+    (doc 31). READ-ONLY y bajo demanda desde el popup de la revisión: no toca
+    estado ni contrato de /diff. `before` = imagen histórica si el cambio la
+    trae estampada (changeset aplicado), o el publicado VIVO en revisión;
+    entidades que no pertenecen al changeset se OMITEN de la respuesta."""
+    cs = await repository.get(cs_id)
+    if not cs:
+        return None
+    wanted_cols = {c for c, _ in items}
+    # Colecciones extra para resolver nombres de entidades referidas que también
+    # cambian en este mismo changeset (tabla nueva + relación nueva, etc.).
+    extra: set[str] = set()
+    if wanted_cols & {"relationships", "views"}:
+        extra |= {"canonical_tables", "canonical_columns"}
+    if wanted_cols & {"folders", "subject_areas"}:
+        extra |= {"projects", "folders"}
+    changes = await repository.changes_map(cs_id, collections=sorted(wanted_cols | extra))
+
+    seen: set[tuple[str, str]] = set()
+    wanted: list[tuple[str, str]] = []
+    for c, e in items:
+        if (c, e) in seen:
+            continue
+        seen.add((c, e))
+        if (changes.get(c) or {}).get(e):
+            wanted.append((c, e))
+
+    # `before` publicado vivo SOLO para cambios sin imagen estampada.
+    before_by: dict[tuple[str, str], dict | None] = {}
+    for col in {c for c, _ in wanted}:
+        need = [e for c, e in wanted if c == col and not changes[col][e].get("beforeAt")]
+        pubs = {d["id"]: d for d in await repository.published(col, {"_id": {"$in": need}})} \
+            if need else {}
+        for c, e in wanted:
+            if c == col:
+                before_by[(c, e)] = pubs.get(e)
+
+    res = await _detail_resolvers(wanted, changes, before_by)
+    return {"items": [diffdetail.entity_detail(c, e, changes[c][e], before_by[(c, e)], res)
+                      for c, e in wanted]}
 
 
 # Los compat M-series /approve y /reject ya NO tienen funciones propias: el
