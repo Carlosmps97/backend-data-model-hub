@@ -238,10 +238,12 @@ def main():
     report("C6c pares con columna hija sin FK (INFORME, no auto-fix)", bad_child)
 
     # ── C10 · partición: UDP PART_nn vs orden físico y flag nativo (INFORME) ──
-    # Política 07-17 (migración): isPartition se marca desde el UDP "Particion"
-    # SOLO si el correlativo respeta el orden físico (el DDL emite PARTITIONED
-    # BY en orden físico). Acá se vigila que la BD siga congruente después de
-    # reordenes/ediciones. Incongruencias = decisión del owner, no auto-fix.
+    # Política v2 (owner 2026-07-24, doc 32b R6): TODA columna PART_nn se
+    # marca isPartition; el orden EFECTIVO es el físico (lo que emite el DDL).
+    # Correlativos duplicados/en desorden = REASIGNADOS por orden físico al
+    # migrar — acá solo se INFORMA que el valor UDP no coincide con el orden
+    # (útil para corregirlo en Erwin algún día). C10b vigila lo accionable:
+    # columnas con PART_nn que quedaron SIN marcar (cargas pre-política).
     from scripts.erwin_migration import policies as pol
     part_def = db.udp_definitions.find_one(
         {**ACTIVE, "name": "Particion", "level": "column"}, {"_id": 1})
@@ -264,11 +266,11 @@ def main():
             nums = [n for n, _ in entries]
             if len(nums) != len(set(nums)) or nums != sorted(nums):
                 part_bad.append(f"{tnames.get(tid, tid)}: correlativos en orden físico {nums}")
-            else:
-                part_unmarked += sum(1 for _, c in entries if not c.get("isPartition"))
-    report("C10 partición UDP incongruente con orden físico (INFORME, decisión owner)",
-           len(part_bad), f"{part_bad[:5]}")
-    report("C10b columnas PART_nn congruentes SIN isPartition (INFORME)", part_unmarked)
+            part_unmarked += sum(1 for _, c in entries if not c.get("isPartition"))
+    report("C10 correlativo PART_nn ≠ orden físico (INFORME — reasignado por "
+           "orden físico al migrar, doc 32b R6)", len(part_bad), f"{part_bad[:5]}")
+    report("C10b columnas PART_nn SIN isPartition (INFORME — cargas pre-política)",
+           part_unmarked)
 
     # ── C8 · udpValues: keys muertas / valores fuera de enum ────────────────
     defs = {d["_id"]: d for d in db.udp_definitions.find(ACTIVE)}

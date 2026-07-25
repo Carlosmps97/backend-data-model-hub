@@ -1,13 +1,15 @@
 # Scripts del backend — kit XML → Lakebase
 
-**Actualizado:** 2026-07-20 · Limpieza hecha: se retiraron seeds sintéticos,
-backfills ya aplicados, one-shots históricos y la migración Cosmos→Lakebase
-(recuperables del historial git). **Todo lo que queda corre contra Lakebase**
-(`DB_BACKEND=lakebase`, conexión del `.env`). Todos se ejecutan **desde la
-raíz del backend** con su `.venv`.
+**Actualizado:** 2026-07-24 (doc 32b: kit multi-archivo) · **Todo corre contra
+Lakebase** (`DB_BACKEND=lakebase`, conexión del `.env`), **desde la raíz del
+backend** con su `.venv`.
 
 Guía detallada de la migración (flags, políticas, qué migra y qué no):
-`doc/migracion-erwin.md`.
+`doc/migracion-erwin.md`. Un modelo Erwin llega partido en ~15 archivos: el
+kit hace **merge incremental** (adopción por clave natural, conflictos por
+score de uso, dedup de FKs repetidas, fusión de folders/canvases homónimos)
+y escribe por LOTES (`bulk_write`) — un XML de 1.8 GB carga en minutos, no
+horas. Cada `--apply` deja su reporte en `migration-reports/`.
 
 ---
 
@@ -15,28 +17,30 @@ Guía detallada de la migración (flags, políticas, qué migra y qué no):
 
 | Paso | Script | ¿Qué hace? | ¿Toca la BD? |
 |---|---|---|---|
-| 1 | `quality` | **Gate de calidad del XML**: audita el archivo contra las reglas de la plataforma ANTES de cargar (ERROR/WARN/INFO; exit 1 si hay ERRORs) | No |
-| 2 | `extract_standards` | **Resumen a archivos**: glosario, dominios y definiciones UDP → JSON/CSV | No |
-| 3 | `extract_model` | **Resumen a archivos**: tablas, columnas, vistas, relaciones, canvases + `summary.json` con los conteos | No |
+| 1 | `quality` | **Gate 1 — el archivo en frío**: audita contra las reglas de la plataforma (ERROR/WARN/INFO; exit 1 si hay ERRORs) | No |
+| 2 | `crosscheck` | **Gate 2 — el archivo contra la BD** (y entre archivos): solapes de tablas/vistas/schemas con veredicto ADOPTA/ACTUALIZA (score), estándares (enums que crecen, defs A4), estimación de carga | Solo lee |
+| 3 | `extract_standards` / `extract_model` | **Resúmenes a archivos** (JSON/CSV): glosario/dominios/UDP · tablas/columnas/vistas/relaciones/canvases | No |
 | 4 | `reset_for_migration` | Vacía modelo+estándares+governance para carga limpia. **Preserva** usuarios/roles, naming_config, `column_catalog` y audit_log | Sí (`--apply`) |
-| 5 | `migrate` | **La carga real**: XML → colecciones publicadas (sin `--apply` = dry-run con plan) | Sí (`--apply`) |
+| 5 | `migrate` | **La carga real** (merge multi-archivo + lotes). Sin `--apply` = dry-run. `--project` obligatorio si el proyecto ya existe | Sí (`--apply`) |
 
 ```bash
-# 1. Auditar el XML (siempre primero)
-.venv/bin/python -m scripts.erwin_migration.quality "../folder_data/DDV - CPYBCA.xml"
+# 1. Gate 1: auditar el XML (siempre primero)
+.venv/bin/python -m scripts.erwin_migration.quality "../folder_data/modelo.xml"
 
-# 2-3. Resúmenes en frío (opcional): ¿cuántas tablas/columnas/vistas/UDP trae?
-.venv/bin/python -m scripts.erwin_migration.extract_standards "../folder_data/DDV - CPYBCA.xml" --csv
-.venv/bin/python -m scripts.erwin_migration.extract_model     "../folder_data/DDV - CPYBCA.xml" --csv
-#    → model_out/<xml>/summary.json y tables/columns/views/relationships.csv
+# 2. Gate 2: cruzarlo contra la BD viva (y contra otros XML si pasas varios)
+.venv/bin/python -m scripts.erwin_migration.crosscheck "../folder_data/modelo.xml" [--json out.json]
+
+# 3. Resúmenes en frío (opcional)
+.venv/bin/python -m scripts.erwin_migration.extract_standards "../folder_data/modelo.xml" --csv
+.venv/bin/python -m scripts.erwin_migration.extract_model     "../folder_data/modelo.xml" --csv
 
 # 4. (solo si REEMPLAZAS la BD) reset previo
-.venv/bin/python -m scripts.reset_for_migration            # dry-run
 .venv/bin/python -m scripts.reset_for_migration --apply
 
-# 5. Migrar
-.venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/DDV - CPYBCA.xml"           # dry-run
-.venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/DDV - CPYBCA.xml" --apply
+# 5. Migrar (los archivos de una familia comparten proyecto — R8)
+.venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia"           # dry-run
+.venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia" --apply
+#   flags: --report ruta.json · --keep-unused-udp-defs · --only-sa SA · --force
 ```
 
 `erwin_parser.py` y `policies.py` son librerías internas de estos comandos
@@ -46,7 +50,7 @@ Guía detallada de la migración (flags, políticas, qué migra y qué no):
 
 | Script | ¿Qué hace? | ¿Cuándo? |
 |---|---|---|
-| `arrange_all` | Auto-arrange ELK de TODOS los canvases (tablas + vistas) | Siempre tras `migrate --apply` |
+| `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros) | Siempre tras `migrate --apply` |
 | `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C10 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes…) | Siempre tras migrar (esperado: 0 fixables) |
 | `create_admin` | Crea/actualiza el usuario `admin`/`admin` + los 4 roles (idempotente) | BD nueva, para poder entrar |
 | `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 30): 8 reglas (masking técnico, desencriptación de negocio `bcp_ddv_desencrypt`, tags, TBLPROPERTIES vacuum, cascada `_rej` + vista técnica) + lookups `vacuum_map`/`dac_map`, como UNA versión de Data Standards. Aborta si ya hay reglas | BD nueva, tras `create_admin` |

@@ -201,12 +201,12 @@ def test_particion_correlativo_y_marks():
     assert pol.partition_marks([("a", 1), ("b", 2)]) == ({"a", "b"}, None)
     # Huecos 1..n tolerados (el orden sigue bien definido).
     assert pol.partition_marks([("a", 1), ("b", 3)]) == ({"a", "b"}, None)
-    # Correlativo duplicado → nada se marca, con motivo.
+    # v2 (doc 32b R6): duplicado o desorden → se marca IGUAL (el orden
+    # efectivo es el físico) y el motivo va al reporte como reasignación.
     ids, motivo = pol.partition_marks([("a", 1), ("b", 1)])
-    assert ids == set() and "duplicado" in motivo
-    # Orden por correlativo ≠ orden físico → nada se marca, con motivo.
+    assert ids == {"a", "b"} and "duplicado" in motivo and "reasignado" in motivo
     ids, motivo = pol.partition_marks([("a", 2), ("b", 1)])
-    assert ids == set() and "orden" in motivo
+    assert ids == {"a", "b"} and "orden" in motivo and "reasignado" in motivo
     assert pol.partition_marks([]) == (set(), None)
 
 
@@ -259,12 +259,14 @@ def test_quality_detecta_las_incongruencias(model):
     assert by_code["W-NO-SCHEMA-TABLE"]["count"] == 1        # E2
     assert by_code["W-MACRO-PHYSNAME"]["count"] == 1         # E1
     assert by_code["W-DUP-COLUMN"]["count"] == 1             # NOMBRE ×2
-    assert by_code["E-VIEW-NO-SOURCE"]["items"] == ["VW_SIN_FUENTE"]
+    # política 2026-07-24 (doc 32b R7): sin fuente = WARN, se descarta
+    assert by_code["W-VIEW-NO-SOURCE"]["items"] == ["VW_SIN_FUENTE"]
+    assert by_code["W-VIEW-NO-SOURCE"]["severity"] == "WARN"
     assert by_code["W-VIEWCOL-NO-ORIGIN"]["count"] == 1      # HUERFANA
     assert by_code["E-GLOSSARY-DUP-TERM"]["count"] == 1      # Codigo ×2
     assert by_code["I-ANNOTATIONS-DISCARDED"]["count"] == 1
     assert by_code["I-INDEXES-SKIPPED"]["count"] == 1
-    assert "E-DUP-TABLE" not in by_code
+    assert "W-DUP-TABLE" not in by_code and "E-DUP-TABLE" not in by_code
     s = summarize(model)
     assert s["tablas"] == 2 and s["vistas"] == 2 and s["diagramas"] == 1
     assert s["columnas_tabla"] == 5 and s["columnas_vista"] == 2

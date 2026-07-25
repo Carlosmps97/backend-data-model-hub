@@ -7,10 +7,15 @@ derivación tabla→vista) → ELK las separa y persistimos su posición tambié
 
 Pipeline: Python (datos) → arrange_all.cjs (elkjs) → Python (persistir).
 
-    .venv/bin/python scripts/arrange_all.py
+    .venv/bin/python scripts/arrange_all.py [--project "Nombre"]
+
+`--project` (doc 32b): limita el arrange a los canvases de ESE proyecto —
+imprescindible en cargas incrementales para no pisar los layouts ya
+trabajados de los proyectos/archivos anteriores.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -58,10 +63,20 @@ def view_src_ids(v: dict) -> list[str]:
     return s if s else ([v["tableId"]] if v.get("tableId") else [])
 
 
-async def main() -> None:
+async def main(project: str | None = None) -> None:
     from app.core.db.client import connect, disconnect, get_db
     await connect()
     db = await get_db()
+
+    sa_filter = dict(ACTIVE)
+    if project:
+        p = await db["projects"].find_one({"name": project, **ACTIVE}, {"_id": 1})
+        if not p:
+            print(f"⛔ proyecto '{project}' no existe")
+            await disconnect()
+            return
+        sa_filter["projectId"] = str(p["_id"])
+        print(f"(solo canvases del proyecto '{project}')")
 
     print("[1/6] dims de columnas por tabla…")
     dims: dict[str, tuple[int, int]] = {}
@@ -100,7 +115,7 @@ async def main() -> None:
         v["_id"] = str(v["_id"])
         views.append(v)
     sas = [(str(sa["_id"]), sa.get("tableIds") or [])
-           async for sa in db["subject_areas"].find(ACTIVE, {"tableIds": 1})]
+           async for sa in db["subject_areas"].find(sa_filter, {"tableIds": 1})]
     print(f"      {len(rels)} relaciones · {len(views)} vistas · {len(sas)} canvases")
 
     graphs: dict[str, dict] = {}
@@ -138,4 +153,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    ap = argparse.ArgumentParser(description="Auto-arrange ELK de canvases")
+    ap.add_argument("--project", help="limitar al proyecto con este nombre")
+    args = ap.parse_args()
+    asyncio.run(main(args.project))

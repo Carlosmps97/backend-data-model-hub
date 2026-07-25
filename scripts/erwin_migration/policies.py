@@ -1,10 +1,12 @@
-"""Decisiones de negocio de la migración Erwin (owner, 2026-07-12, doc 12 §8).
+"""Decisiones de negocio de la migración Erwin (owner, doc 12 §8 + doc 32b).
 
 Reglas aprobadas:
   - Tablas/vistas sin Hive_Database → schema "No_Definido".
-  - Columnas duplicadas dentro de un objeto → se conserva la 1ª (por orden
-    físico) y se descartan las demás.
-  - Vistas: TODAS se migran con showOnCanvas=True.
+  - Columnas duplicadas dentro de un objeto → queda UNA: la de MAYOR metadata
+    (participa en relaciones, PK, definición, dominio, UDPs — doc 32b R5);
+    empate total → la 1ª por orden físico (regla original).
+  - Vistas: TODAS se migran con showOnCanvas=True; vistas sin fuente física
+    se DESCARTAN (owner 2026-07-24).
   - Anotaciones de diagrama: se descartan.
   - Índices (Key_Group IF*): NO se migran (pendiente decidir feature web).
   - UDP: Entity→'table', Attribute→'column', Model→'canvas'; el resto de
@@ -14,11 +16,15 @@ Reglas aprobadas:
   - Glosario: scope='column', wordType=None (defaults de plataforma).
   - Cardinalidad del lado PADRE: del Null_Option_Type de la relación
     ("100" nulls allowed → 0..1; "101"/otro → exactamente 1) — 2026-07-17.
-  - Partición (2026-07-17): el UDP de columna "Particion" con valor PART_nn
-    marca `isPartition` NATIVO; el correlativo nn debe coincidir con el orden
-    físico (el DDL de la plataforma ordena la partición por orden físico).
-    Tablas incongruentes (correlativo duplicado u orden distinto) NO se
-    marcan — se reportan para decisión del owner; el valor UDP queda visible.
+  - Partición (v2, owner 2026-07-24, doc 32b R6): TODA columna con UDP
+    "Particion" = PART_nn se marca `isPartition`; el orden EFECTIVO es el
+    orden físico (lo que el DDL emite). Correlativos duplicados o en desorden
+    se entienden REASIGNADOS por orden físico y se reportan; el valor UDP
+    queda visible tal cual llegó.
+  - Multi-archivo (doc 32b, owner 2026-07-24): un modelo Erwin puede venir
+    partido en ~15 archivos. La identidad cross-archivo es la CLAVE NATURAL
+    (schema+nombre); en conflicto de versiones gana la de MÁS USO
+    (`score_usage`); los enums de UDP convergen case/espacios-insensitive.
 """
 from __future__ import annotations
 
@@ -47,21 +53,92 @@ def schema_or_default(schema: str | None) -> str:
     return (schema or "").strip() or NO_SCHEMA
 
 
-def dedupe_columns(attrs: list) -> tuple[list, list]:
-    """Conserva la 1ª ocurrencia (case-insensitive) por orden físico.
+def dedupe_columns(attrs: list, scorer=None) -> tuple[list, list]:
+    """Dedup de columnas homónimas (case-insensitive) dentro de un objeto.
 
-    Devuelve (columnas_únicas, descartadas).
+    Sin `scorer`: conserva la 1ª por orden físico (regla original — la usan
+    quality/extract para reportar). Con `scorer` (callable attr → tupla
+    comparable, doc 32b R5): conserva la copia de MAYOR score — "la de más
+    metadata" — manteniendo su posición física; empate → la 1ª.
+
+    Devuelve (columnas_únicas EN ORDEN FÍSICO, descartadas).
     """
-    seen: set[str] = set()
-    keep, dropped = [], []
+    by_key: dict[str, list] = {}
+    order: list[str] = []
     for a in attrs:
         key = a.physical.upper()
-        if key in seen:
-            dropped.append(a)
+        if key not in by_key:
+            order.append(key)
+        by_key.setdefault(key, []).append(a)
+    keep, dropped = [], []
+    winners: dict[int, object] = {}
+    for key in order:
+        copies = by_key[key]
+        if len(copies) == 1 or scorer is None:
+            win = copies[0]
         else:
-            seen.add(key)
-            keep.append(a)
+            win = max(copies, key=scorer)  # max estable: empate → la 1ª
+        winners[id(win)] = win
+        dropped.extend(a for a in copies if a is not win)
+    keep = [a for a in attrs if id(a) in winners]
     return keep, dropped
+
+
+def column_score(attr, *, fk_attr_ids: set[str] = frozenset(),
+                 pk_attr_ids: set[str] = frozenset(),
+                 udp_count: int = 0) -> tuple:
+    """Score de una copia de columna (doc 32b R5): gana la de MÁS metadata.
+
+    Lexicográfico: participa en relaciones (propio FK o referenciada como
+    padre) > es PK > tiene definición > tiene dominio > # valores UDP >
+    posición física más temprana (desempate = regla original "la 1ª")."""
+    return (
+        int(bool(attr.parent_attr_ref) or attr.id in fk_attr_ids),
+        int(attr.id in pk_attr_ids),
+        int(bool(attr.definition or attr.comment)),
+        int(bool(attr.domain_ref)),
+        udp_count,
+        -attr.order,
+    )
+
+
+# ── Merge multi-archivo (doc 32b) ─────────────────────────────────────────
+
+def score_usage(n_rels: int, n_canvases: int, n_views: int) -> int:
+    """Score de USO de una tabla/vista (doc 32b R2): decide qué versión
+    prevalece cuando la misma clave natural viene con estructuras distintas.
+    Las relaciones pesan doble (señal más fuerte de uso real). Es simétrico:
+    se computa igual para una copia del XML y para el doc vivo en BD."""
+    return 2 * n_rels + n_canvases + n_views
+
+
+def norm_enum(value: str | None) -> str:
+    """Clave de comparación de un valor de enum UDP (doc 32b A3):
+    case-insensitive, trim y espacios internos colapsados."""
+    return re.sub(r"\s+", " ", (value or "").strip()).upper()
+
+
+def merge_allowed_values(existing: list[str], incoming: list[str]) -> list[str]:
+    """Valores de `incoming` que FALTAN en `existing`, comparando con
+    `norm_enum` (así 'NO DAC' no duplica 'No DAC'). La primera grafía vista
+    (la de la BD) gana; el orden de llegada se respeta."""
+    seen = {norm_enum(v) for v in existing}
+    out: list[str] = []
+    for v in incoming:
+        k = norm_enum(v)
+        if v and k not in seen:
+            seen.add(k)
+            out.append(v)
+    return out
+
+
+def rel_nat_key(parent_tid: str, child_tid: str,
+                name_pairs: list[tuple[str, str]]) -> tuple:
+    """Clave natural de una relación (doc 32b R4): con N archivos del mismo
+    modelo, la MISMA FK conceptual llega repetida con ids Erwin distintos —
+    se identifica por extremos + pares de columnas POR NOMBRE."""
+    return (parent_tid, child_tid,
+            tuple(sorted((p.upper(), c.upper()) for p, c in name_pairs)))
 
 
 def map_cardinality(erwin_code: str) -> str:
@@ -94,23 +171,26 @@ def partition_correlative(value: str | None) -> int | None:
 def partition_marks(vals: list[tuple[str, int]]) -> tuple[set[str], str | None]:
     """Qué columnas de una tabla marcar `isPartition` a partir de sus UDP.
 
-    `vals` = [(attr_id, correlativo)] EN ORDEN FÍSICO. La plataforma emite el
-    `PARTITIONED BY` en orden físico, así que sólo es seguro marcar cuando el
-    orden por correlativo coincide con el físico y no hay correlativos
-    duplicados (huecos 1..n se toleran: el orden sigue bien definido).
+    `vals` = [(attr_id, correlativo)] EN ORDEN FÍSICO. Política v2 (owner
+    2026-07-24, doc 32b R6): se marcan TODAS las columnas PART_nn — el orden
+    EFECTIVO de la partición es el físico, que es lo que el DDL de la
+    plataforma emite. Si los correlativos vienen duplicados o en desorden se
+    entienden REASIGNADOS por orden físico: se marca igual y se devuelve el
+    motivo para el reporte (el valor UDP original no se toca).
 
-    Devuelve (ids_a_marcar, None) si es congruente, o (set(), motivo) si NO —
-    en ese caso no se marca nada y el motivo va al reporte para el owner."""
+    Devuelve (ids_a_marcar, motivo_de_reasignación | None)."""
     if not vals:
         return set(), None
+    ids = {aid for aid, _ in vals}
     nums = [n for _, n in vals]
     if len(nums) != len(set(nums)):
         dup = sorted({n for n in nums if nums.count(n) > 1})
-        return set(), f"correlativo duplicado (PART_{dup[0]:02d} aparece {nums.count(dup[0])} veces)"
+        return ids, (f"correlativo duplicado (PART_{dup[0]:02d} aparece "
+                     f"{nums.count(dup[0])} veces) → reasignado por orden físico")
     if nums != sorted(nums):
-        return set(), ("orden por correlativo ≠ orden físico "
-                       f"(correlativos en orden físico: {nums})")
-    return {aid for aid, _ in vals}, None
+        return ids, ("orden por correlativo ≠ orden físico "
+                     f"(correlativos leídos: {nums}) → reasignado por orden físico")
+    return ids, None
 
 
 def udp_datatype(code: str) -> str:

@@ -429,6 +429,31 @@ def test_agg_column_counts_group_by_tableid(coll):
     assert {r["_id"]: r["n"] for r in rows} == {"T1": 2, "T2": 1}
 
 
+def test_agg_arrange_all_max_de_suma_de_longitudes(coll):
+    """Shape de scripts/arrange_all.py (ancho de nodo): $max de
+    $add($strLenCP(physicalName), $strLenCP(dataType)) por tabla — destapado
+    2026-07-24 al correr arrange_all por primera vez contra Lakebase."""
+    seed(coll, [
+        {"_id": "a1", "tableId": "T1", "physicalName": "COD", "dataType": "INT",
+         "logicalName": "Codigo"},
+        {"_id": "a2", "tableId": "T1", "physicalName": "NOMBRELARGO",
+         "dataType": "VARCHAR(120)", "logicalName": "N"},
+        {"_id": "a3", "tableId": "T2", "physicalName": "X"},   # sin dataType
+    ])
+    rows = run(coll.aggregate([{"$group": {"_id": "$tableId", "n": {"$sum": 1},
+        "maxphys": {"$max": {"$add": [
+            {"$strLenCP": {"$ifNull": ["$physicalName", ""]}},
+            {"$strLenCP": {"$ifNull": ["$dataType", ""]}}]}},
+        "maxlog": {"$max": {"$add": [
+            {"$strLenCP": {"$ifNull": ["$logicalName", ""]}},
+            {"$strLenCP": {"$ifNull": ["$dataType", ""]}}]}}}}]).to_list(None))
+    by = {r["_id"]: r for r in rows}
+    assert by["T1"]["n"] == 2
+    assert by["T1"]["maxphys"] == len("NOMBRELARGO") + len("VARCHAR(120)")
+    assert by["T1"]["maxlog"] == 1 + len("VARCHAR(120)")
+    assert by["T2"]["maxphys"] == 1                     # dataType ausente → ""
+
+
 def test_agg_scorecard_col_stats(coll):
     NULLISH = [None, ""]
     seed(coll, [

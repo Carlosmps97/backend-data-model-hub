@@ -242,6 +242,17 @@ def _expr(e: Any, s: Sql) -> str:
             return f"to_jsonb(NOT {_bool(inner, s)})"
         if op == "$size":
             return f"to_jsonb(jsonb_array_length({_expr(arg, s)}))"
+        if op == "$add":
+            # suma numérica; un operando no-numérico/missing → NULL (como el
+            # null de Mongo). Lo usa scripts/arrange_all.py (ancho de nodo).
+            parts = " + ".join(f"({_num(_expr(a, s))})" for a in arg)
+            return f"to_jsonb({parts})"
+        if op == "$strLenCP":
+            e2 = _expr(arg, s)
+            return (
+                f"to_jsonb(char_length(CASE WHEN jsonb_typeof({e2}) = 'string' "
+                f"THEN {e2} #>> '{{}}' END))"
+            )
         if op == "$objectToArray":
             return (
                 f"(SELECT COALESCE(jsonb_agg(jsonb_build_object('k', _k, 'v', _v)), "
