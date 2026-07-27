@@ -13,7 +13,7 @@ jobs:
   deploy:
     name: Deploy backend
     runs-on: ubuntu-latest
-    # ⚙️ Config por repositorio (Settings → Secrets and variables → Actions):
+    # Config por repositorio (Settings → Secrets and variables → Actions):
     #   · variable DATABRICKS_HOST  = URL del workspace destino
     #   · secret   DATABRICKS_TOKEN = PAT de ese workspace (solo lo usa el CLI)
     #   · variable BUNDLE_TARGET    = target del bundle (opcional; default prod)
@@ -31,6 +31,34 @@ jobs:
       # bloque `config:` del recurso app en databricks.yml).
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
+
+      # Parámetros por ambiente SIN tocar el repo: cada GitHub Variable se
+      # exporta como BUNDLE_VAR_<variable del bundle>. Se exportan SOLO si
+      # traen valor — una variable vacía PISARÍA el default del databricks.yml
+      # (verificado), así que "no definida en GitHub" = "usa el default".
+      # El workspace destino NO va acá: sale de la variable DATABRICKS_HOST que
+      # ya usa el CLI (el bundle dejó de hardcodear `workspace.host`).
+      - name: Parámetros del bundle desde GitHub Variables
+        env:
+          LAKEBASE_ENDPOINT: ${{ vars.LAKEBASE_ENDPOINT }}
+          LAKEBASE_PGSCHEMA: ${{ vars.LAKEBASE_PGSCHEMA }}
+          CORS_ORIGIN_REGEX: ${{ vars.CORS_ORIGIN_REGEX }}
+          SECRET_SCOPE: ${{ vars.SECRET_SCOPE }}
+          SESSION_SECRET_KEY: ${{ vars.SESSION_SECRET_KEY }}
+          APP_ADMIN_USER: ${{ vars.APP_ADMIN_USER }}
+        run: |
+          set_var() {   # $1 = variable del bundle · $2 = valor de GitHub
+            if [ -z "$2" ]; then echo "· $1 → default del databricks.yml"; return; fi
+            echo "BUNDLE_VAR_$1=$2" >> "$GITHUB_ENV"
+            echo "· $1 = $2   (GitHub Variables)"
+          }
+          echo "Workspace (DATABRICKS_HOST): $DATABRICKS_HOST"
+          set_var lakebase_endpoint   "$LAKEBASE_ENDPOINT"
+          set_var lakebase_pgschema   "$LAKEBASE_PGSCHEMA"
+          set_var cors_origin_regex   "$CORS_ORIGIN_REGEX"
+          set_var secret_scope        "$SECRET_SCOPE"
+          set_var session_secret_key  "$SESSION_SECRET_KEY"
+          set_var app_admin_user      "$APP_ADMIN_USER"
 
       # `bundle deploy` instala el provider Terraform de Databricks. El CLI usa
       # OpenTofu por debajo y fija el provider a registry.opentofu.org; en el
@@ -51,6 +79,37 @@ jobs:
 
       - name: Validate bundle
         run: databricks bundle validate --target "$BUNDLE_TARGET"
+
+      # Adopción de una app PRE-CREADA a mano. En workspaces con cupo de
+      # apps (corporativos: se llenan y ya no dejan crear más) conviene
+      # reservar el slot creando la app en la UI ANTES del primer deploy.
+      # Terraform no la tiene en su estado → `bundle deploy` intenta CREARLA y
+      # la API responde 409 ALREADY_EXISTS. `bind` la importa al estado del
+      # bundle y desde ahí el deploy la ACTUALIZA en su sitio.
+      # Idempotente: si la app no existe no hace nada; si ya estaba bindeada,
+      # avisa y sigue. Requisitos: (a) el nombre creado a mano debe ser
+      # IDÉNTICO al del bundle (si difiere, Terraform destruiría y recrearía);
+      # (b) la identidad del DATABRICKS_TOKEN necesita CAN_MANAGE sobre esa
+      # app — si la creó otra persona, dárselo en la app → Permissions.
+      - name: Bind app pre-existente (evita 409 ALREADY_EXISTS)
+        run: |
+          APP_NAME=$(databricks bundle validate --target "$BUNDLE_TARGET" --output json \
+            | jq -r '.resources.apps.backend.name')
+          if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
+            echo "No pude resolver el nombre de la app desde el bundle." >&2; exit 1
+          fi
+          echo "App del bundle: $APP_NAME"
+          if databricks apps get "$APP_NAME" >/dev/null 2>&1; then
+            echo "→ La app YA existe en el workspace: la bindeo al bundle."
+            if ! databricks bundle deployment bind backend "$APP_NAME" \
+                   --target "$BUNDLE_TARGET" --auto-approve; then
+              echo "OJO: bind no aplicó."
+              echo "   · Si el error dice que el recurso ya está en el estado → es normal, el deploy sigue."
+              echo "   · Si dice 403 / PERMISSION_DENIED → al dueño del DATABRICKS_TOKEN le falta CAN_MANAGE sobre '$APP_NAME'."
+            fi
+          else
+            echo "→ La app no existe todavía: el deploy la creará."
+          fi
 
       - name: Deploy bundle (sube el código + crea/actualiza la app)
         run: databricks bundle deploy --target "$BUNDLE_TARGET"

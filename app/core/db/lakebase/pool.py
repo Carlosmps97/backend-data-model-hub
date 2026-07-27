@@ -27,6 +27,10 @@ log = logging.getLogger(__name__)
 
 
 async def _password() -> str:
+    # Escape hatch para scripts: password pegado a mano (el "OAuth token" que
+    # la consola de Lakebase deja copiar). Sin SDK de por medio.
+    if settings.PGPASSWORD:
+        return settings.PGPASSWORD
     # El SDK es sync (HTTP): fuera del event loop.
     return await asyncio.to_thread(fresh_token)
 
@@ -65,6 +69,13 @@ async def create_pool() -> asyncpg.Pool:
             return pool
         except asyncpg.exceptions.InvalidPasswordError as exc:
             last = exc
+            if settings.PGPASSWORD:
+                await pool.close()
+                raise RuntimeError(
+                    "Lakebase rechazó el PGPASSWORD del .env: el token de la "
+                    "consola dura ~1 h. Copia uno nuevo (Connect > Copy OAuth "
+                    "token) y vuelve a correr."
+                ) from exc
             invalidate_token()
             log.warning("lakebase: password inválido, re-acuñando token (intento %d)", attempt + 1)
         except Exception as exc:  # noqa: BLE001 — compute despertando / red
