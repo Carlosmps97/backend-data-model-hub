@@ -20,7 +20,14 @@
 # MAGIC    de 16 GB alcanza (el XML grande pide ~0.5 GB de RAM).
 # MAGIC 2. Este notebook abierto **desde el repo** (Git folder de `back-dmh-01`),
 # MAGIC    para que las rutas relativas al repo funcionen solas.
-# MAGIC 3. El cluster con acceso al ADLS (el mismo que ya usas para leer datos).
+# MAGIC 3. Los XML accesibles. El notebook resuelve solo, en este orden: Volume
+# MAGIC    explicito (widget 0) -> Volume AUTO-detectado que cubra la URI ->
+# MAGIC    copia unica al disco del driver. La copia requiere access mode
+# MAGIC    **Dedicated** (antes "Single user"). OJO: la **Policy** del cluster
+# MAGIC    ("Unrestricted") NO es el access mode; el access mode vive en
+# MAGIC    Compute > Edit > Advanced > Access mode, y con el form simple + UC
+# MAGIC    suele quedar en "Standard" (antes "Shared") -- exactamente lo que
+# MAGIC    dice el error "on Shared cluster".
 # MAGIC 4. Tu usuario con rol de Postgres en el proyecto Lakebase.
 
 # COMMAND ----------
@@ -34,7 +41,15 @@
 # linters de escritorio no lo marquen como indefinido.
 dbutils = globals()["dbutils"]  # type: ignore[assignment]
 
-# --- Origen de los XML (ADLS) -------------------------------------------------
+# --- Origen de los XML --------------------------------------------------------
+# Dos formas, segun el modo de acceso del cluster:
+#   a) volume_path CON valor -> los XML se leen EN SU SITIO, sin copiar. Es la
+#      unica que funciona en clusters "Shared" y es la recomendada. Requiere un
+#      Volume de UC (externo) apuntando al ADLS.
+#   b) volume_path VACIO -> se arma la URI abfss:// y se materializa en el disco
+#      del driver. Necesita cluster en modo "Single user / Dedicated": en Shared
+#      Databricks bloquea escribir en file:/local_disk0.
+dbutils.widgets.text("volume_path", "", "0. Volume UC (/Volumes/cat/esq/vol/carpeta)")
 dbutils.widgets.text("storage_account", "adlsagentslab01", "1. Storage account")
 dbutils.widgets.text("container", "agentsdata", "2. Container")
 dbutils.widgets.text("folder_path", "", "3. Carpeta dentro del container")
@@ -104,6 +119,7 @@ import os
 dbutils = globals()["dbutils"]  # type: ignore[assignment]
 W = dbutils.widgets.get
 
+VOLUME = W("volume_path").strip().rstrip("/")
 ACCOUNT, CONTAINER = W("storage_account").strip(), W("container").strip()
 FOLDER = W("folder_path").strip().strip("/")
 PROJECT = W("project").strip()
@@ -112,7 +128,10 @@ PGHOST, PGUSER = W("pghost").strip(), W("pguser").strip()
 PGSCHEMA = W("pgschema").strip() or "dmh"
 
 
-def adls(nombre: str) -> str:
+def origen(nombre: str) -> str:
+    """Volume de UC -> ruta tal cual (se lee en su sitio). Si no, URI abfss."""
+    if VOLUME:
+        return f"{VOLUME}/{nombre}"
     ruta = f"{FOLDER}/{nombre}" if FOLDER else nombre
     return f"abfss://{CONTAINER}@{ACCOUNT}.dfs.core.windows.net/{ruta}"
 
@@ -120,15 +139,15 @@ def adls(nombre: str) -> str:
 # Slots opcionales: para una carga incremental deja uno vacio y pon el archivo
 # nuevo en el otro. Las celdas de un slot vacio no hacen nada.
 _n1, _n2 = W("xml1_name").strip(), W("xml2_name").strip()
-XML1_SRC = adls(_n1) if _n1 else ""
-XML2_SRC = adls(_n2) if _n2 else ""
+XML1_SRC = origen(_n1) if _n1 else ""
+XML2_SRC = origen(_n2) if _n2 else ""
 RESET_PREVIO = W("reset_previo").strip().lower() == "si"
 
 REPO_DIR = W("repo_dir").strip()
-if not REPO_DIR:   # autodetectar: el notebook vive en <repo>/scripts/databricks/
-    _nb = (dbutils.notebook.entry_point.getDbutils().notebook()
-           .getContext().notebookPath().get())
-    REPO_DIR = "/Workspace" + _nb.rsplit("/scripts/databricks/", 1)[0]
+if not REPO_DIR:
+    # El notebook vive en <repo>/scripts/databricks/ y su CWD es esa carpeta.
+    # (os.getcwd() funciona en cualquier modo de acceso del cluster.)
+    REPO_DIR = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
 if not os.path.isfile(os.path.join(REPO_DIR, "requirements.txt")):
     raise ValueError(f"REPO_DIR no parece la raiz del backend: {REPO_DIR}")
 
@@ -142,27 +161,86 @@ print(f"reset    : {'SI - se borra lo ya cargado' if RESET_PREVIO else 'no'}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Materializar los XML en el driver
-# MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Los scripts trabajan
-# MAGIC sobre archivo, asi que se baja una vez al disco local del driver (se
-# MAGIC saltea si ya esta).
+# MAGIC ## 4. Resolver los XML a una ruta que Python pueda abrir
+# MAGIC Los scripts leen con `open()` y `abfss://` no es filesystem. Escalera:
+# MAGIC 1. Widget `volume_path` con valor -> se leen en su sitio (cero copia).
+# MAGIC 2. **Auto-descubrimiento**: se busca en `system.information_schema.volumes`
+# MAGIC    un Volume cuya `storage_location` cubra la URI -> en su sitio, cero
+# MAGIC    copia, sin que nadie tenga que saberse la ruta.
+# MAGIC 3. Copia unica al disco del driver (`dbutils.fs.cp`). Solo posible con
+# MAGIC    access mode **Dedicated**; en "Standard/Shared" el error de abajo
+# MAGIC    explica exactamente que cambiar.
 
 # COMMAND ----------
 
+# `spark` tambien lo inyecta el runtime (consulta a information_schema).
+spark = globals()["spark"]  # type: ignore[assignment]
+
 WORK = "/local_disk0/tmp/erwin" if os.path.isdir("/local_disk0") else "/tmp/erwin"
-os.makedirs(WORK, exist_ok=True)
 
 
-def bajar(uri: str) -> str:
-    dst = os.path.join(WORK, uri.rsplit("/", 1)[-1])
+def _volumen_que_cubre(uri: str) -> str | None:
+    """Busca un Volume de UC cuya storage_location cubra la URI abfss y arma
+    la ruta /Volumes equivalente (el archivo se lee EN SU SITIO, cero copia).
+    Best-effort: sin acceso a system.information_schema devuelve None."""
+    try:
+        filas = spark.sql(
+            "SELECT volume_catalog, volume_schema, volume_name, storage_location "
+            "FROM system.information_schema.volumes "
+            "WHERE storage_location IS NOT NULL"
+        ).collect()
+    except Exception:
+        return None
+    candidatos = []
+    for f in filas:
+        base = (f.storage_location or "").rstrip("/")
+        if base and (uri == base or uri.startswith(base + "/")):
+            candidatos.append((len(base), f, base))
+    if not candidatos:
+        return None
+    _, f, base = max(candidatos, key=lambda t: t[0])   # el prefijo mas especifico
+    resto = uri[len(base):].lstrip("/")
+    return f"/Volumes/{f.volume_catalog}/{f.volume_schema}/{f.volume_name}/{resto}"
+
+
+def resolver(src: str) -> str:
+    # 1) Ruta de filesystem (widget volume_path): en su sitio.
+    if src.startswith("/"):
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"No existe: {src}")
+        print(f"{src}: {os.path.getsize(src) / 1e6:,.0f} MB (en su sitio)")
+        return src
+    # 2) Un Volume ya cubre esa ruta del ADLS: en su sitio, cero copia.
+    via_volume = _volumen_que_cubre(src)
+    if via_volume and os.path.isfile(via_volume):
+        print(f"{via_volume}: {os.path.getsize(via_volume) / 1e6:,.0f} MB "
+              "(Volume detectado automaticamente, cero copia)")
+        return via_volume
+    # 3) Materializar una vez en el disco del driver (access mode Dedicated).
+    os.makedirs(WORK, exist_ok=True)
+    dst = os.path.join(WORK, src.rsplit("/", 1)[-1])
     if not os.path.isfile(dst):
-        dbutils.fs.cp(uri, "file:" + dst)
+        try:
+            dbutils.fs.cp(src, "file:" + dst)
+        except Exception as exc:
+            if "Shared cluster" in str(exc) or "non /Workspace" in str(exc):
+                raise RuntimeError(
+                    "El cluster corre con ACCESS MODE 'Standard' (antes "
+                    "'Shared') y ahi Databricks prohibe escribir al disco del "
+                    "driver. OJO: la Policy 'Unrestricted' es otra perilla "
+                    "(quien puede configurar el cluster), NO el access mode. "
+                    "Arreglo: Compute > Edit > Advanced > Access mode > "
+                    "'Dedicated' (antes 'Single user'), reiniciar y reintentar. "
+                    "Alternativa sin tocar el cluster: registrar un Volume de "
+                    "UC sobre ese ADLS (el paso 2 lo detecta solo, cero copia)."
+                ) from exc
+            raise
     print(f"{dst}: {os.path.getsize(dst) / 1e6:,.0f} MB")
     return dst
 
 
-XML1 = bajar(XML1_SRC) if XML1_SRC else None
-XML2 = bajar(XML2_SRC) if XML2_SRC else None
+XML1 = resolver(XML1_SRC) if XML1_SRC else None
+XML2 = resolver(XML2_SRC) if XML2_SRC else None
 
 # COMMAND ----------
 
@@ -176,13 +254,19 @@ XML2 = bajar(XML2_SRC) if XML2_SRC else None
 import subprocess
 import sys
 
-_ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+from databricks.sdk import WorkspaceClient
+
+# Credencial del propio notebook, por el SDK: funciona en cualquier modo de
+# acceso (en clusters Shared, `dbutils.notebook.entry_point` esta bloqueado).
+_w = WorkspaceClient()
+_HOST = _w.config.host
+_TOKEN = _w.config.authenticate()["Authorization"].split(" ", 1)[1]
 
 ENV = {
     **os.environ,
     "DB_BACKEND": "lakebase",
-    "DATABRICKS_HOST": "https://" + _ctx.browserHostName().get(),
-    "DATABRICKS_TOKEN": _ctx.apiToken().get(),
+    "DATABRICKS_HOST": _HOST,
+    "DATABRICKS_TOKEN": _TOKEN,
     "LAKEBASE_ENDPOINT": LAKEBASE_ENDPOINT,
     "PGHOST": PGHOST,
     "PGPORT": "5432",
@@ -208,6 +292,16 @@ def run(*args: str) -> None:
     if p.returncode != 0:
         raise RuntimeError(f"El script termino con codigo {p.returncode}")
 
+
+# Transparencia: el ACCESS MODE real del cluster (no confundir con la Policy).
+# SINGLE_USER / DEDICATED = puede copiar al driver; USER_ISOLATION / STANDARD
+# = solo Volumes.
+try:
+    _mode = _w.clusters.get(spark.conf.get(
+        "spark.databricks.clusterUsageTags.clusterId")).data_security_mode
+    print("access mode del cluster:", _mode)
+except Exception:
+    pass
 
 print("listo | python:", sys.version.split()[0])
 
