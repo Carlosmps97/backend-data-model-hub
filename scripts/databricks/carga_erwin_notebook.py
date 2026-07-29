@@ -53,6 +53,11 @@ dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "9. PGUSER (Role de Lak
 dbutils.widgets.text("pgschema", "dmh", "10. Schema PG")
 dbutils.widgets.text("repo_dir", "", "11. Ruta del repo (vacio = autodetectar)")
 
+# DESTRUCTIVO. Solo para la PRIMERA carga o para rehacerla desde cero.
+# Cuando lleguen mas XML para sumar al mismo modelo, esto va en "no".
+dbutils.widgets.dropdown("reset_previo", "no", ["no", "si"],
+                         "12. RESET previo (BORRA lo ya cargado)")
+
 print("Widgets creados.")
 
 # COMMAND ----------
@@ -112,7 +117,12 @@ def adls(nombre: str) -> str:
     return f"abfss://{CONTAINER}@{ACCOUNT}.dfs.core.windows.net/{ruta}"
 
 
-XML1_SRC, XML2_SRC = adls(W("xml1_name").strip()), adls(W("xml2_name").strip())
+# Slots opcionales: para una carga incremental deja uno vacio y pon el archivo
+# nuevo en el otro. Las celdas de un slot vacio no hacen nada.
+_n1, _n2 = W("xml1_name").strip(), W("xml2_name").strip()
+XML1_SRC = adls(_n1) if _n1 else ""
+XML2_SRC = adls(_n2) if _n2 else ""
+RESET_PREVIO = W("reset_previo").strip().lower() == "si"
 
 REPO_DIR = W("repo_dir").strip()
 if not REPO_DIR:   # autodetectar: el notebook vive en <repo>/scripts/databricks/
@@ -124,9 +134,10 @@ if not os.path.isfile(os.path.join(REPO_DIR, "requirements.txt")):
 
 print(f"repo     : {REPO_DIR}")
 print(f"proyecto : {PROJECT}")
-print(f"xml 1    : {XML1_SRC}")
-print(f"xml 2    : {XML2_SRC}")
+print(f"xml 1    : {XML1_SRC or '(slot vacio: se saltea)'}")
+print(f"xml 2    : {XML2_SRC or '(slot vacio: se saltea)'}")
 print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
+print(f"reset    : {'SI - se borra lo ya cargado' if RESET_PREVIO else 'no'}")
 
 # COMMAND ----------
 
@@ -150,7 +161,8 @@ def bajar(uri: str) -> str:
     return dst
 
 
-XML1, XML2 = bajar(XML1_SRC), bajar(XML2_SRC)
+XML1 = bajar(XML1_SRC) if XML1_SRC else None
+XML2 = bajar(XML2_SRC) if XML2_SRC else None
 
 # COMMAND ----------
 
@@ -202,7 +214,37 @@ print("listo | python:", sys.version.split()[0])
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Usuario para entrar a la web
+# MAGIC ## 6. RESET previo (opcional, DESTRUCTIVO)
+# MAGIC
+# MAGIC Deja la base lista para una carga limpia: vacia **modelo**
+# MAGIC (proyectos, folders, canvases, schemas, tablas, columnas, relaciones,
+# MAGIC vistas), **estandares** (dominios, glosario, definiciones UDP, versiones)
+# MAGIC y **governance** (changesets). PRESERVA usuarios, roles, `naming_config`,
+# MAGIC `column_catalog` y el audit log.
+# MAGIC
+# MAGIC **Cuando SI**: primera carga sobre una base que quedo con restos de
+# MAGIC pruebas, o rehacer todo desde cero.
+# MAGIC **Cuando NO**: cargas incrementales (llego un XML nuevo del mismo
+# MAGIC modelo). Ahi borrarias justamente lo que ya cargaste.
+# MAGIC
+# MAGIC Dos candados: la celda de abajo es solo dry-run, y el `--apply` no corre
+# MAGIC salvo que el widget `reset_previo` diga `si`.
+
+# COMMAND ----------
+
+run("-m", "scripts.reset_for_migration")          # dry-run: solo lista que borraria
+
+# COMMAND ----------
+
+if RESET_PREVIO:
+    run("-m", "scripts.reset_for_migration", "--apply")
+else:
+    print("reset_previo = no -> no se borro nada (revisa el dry-run de arriba).")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. Usuario para entrar a la web
 # MAGIC Crea `admin` / `admin` y los 4 roles con su matriz de permisos default.
 # MAGIC Los usuarios reales se crean despues desde Admin (la plataforma tiene su
 # MAGIC propio padron, no hereda los del workspace). Cambia esa clave al entrar.
@@ -214,54 +256,62 @@ run("scripts/create_admin.py")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. XML 1 (CPYBCA): calidad -> cruce vs BD -> dry-run -> apply
+# MAGIC ## 8. XML 1 (CPYBCA): calidad -> cruce vs BD -> dry-run -> apply
 # MAGIC El orden importa: CPYBCA primero, Otros despues (el desempate por uso
 # MAGIC actualiza sobre lo ya cargado).
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.quality", XML1)
+if XML1:
+    run("-m", "scripts.erwin_migration.quality", XML1)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.crosscheck", XML1)
+if XML1:
+    run("-m", "scripts.erwin_migration.crosscheck", XML1)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT)
+if XML1:
+    run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT, "--apply")
+if XML1:
+    run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT, "--apply")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. XML 2 (Otros V0.214): mismo flujo, MISMO proyecto
+# MAGIC ## 9. XML 2 (Otros V0.214): mismo flujo, MISMO proyecto
 # MAGIC Aca actua el merge multi-archivo: adopcion por clave natural, conflicto
 # MAGIC resuelto por score de uso, dedup de FKs, fusion de folders y canvases
 # MAGIC homonimos, particiones por orden fisico, vistas sin fuente descartadas.
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.quality", XML2)
+if XML2:
+    run("-m", "scripts.erwin_migration.quality", XML2)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.crosscheck", XML2)
+if XML2:
+    run("-m", "scripts.erwin_migration.crosscheck", XML2)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT)
+if XML2:
+    run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT)
 
 # COMMAND ----------
 
-run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT, "--apply")
+if XML2:
+    run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT, "--apply")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Validacion de la data cargada
+# MAGIC ## 10. Validacion de la data cargada
 # MAGIC Esperado: 0 fixables. Los informativos son politicas conocidas (doc 34).
 
 # COMMAND ----------
@@ -271,7 +321,7 @@ run("-m", "scripts.audit_data_consistency")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 10. Reglas base de DDL Export
+# MAGIC ## 11. Reglas base de DDL Export
 # MAGIC Glosario, dominios padre y definiciones UDP ya entraron con `migrate`.
 # MAGIC Esto siembra el ruleset de exportacion: 8 reglas + los lookups
 # MAGIC `vacuum_map` / `dac_map`, como una version de Data Standards.
@@ -287,7 +337,7 @@ run("-m", "scripts.seed_ddl_export_rules", "--apply")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 11. Layout de canvases (opcional: necesita Node)
+# MAGIC ## 12. Layout de canvases (opcional: necesita Node)
 # MAGIC `arrange_all` corre elkjs. Si el cluster no trae Node se saltea: la
 # MAGIC migracion ya deja layout en grilla y la web tiene el boton "Autoarrange"
 # MAGIC por canvas.
@@ -306,7 +356,7 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 12. Cierre
+# MAGIC ## 13. Cierre
 # MAGIC
 # MAGIC En la web: crear una version vacia **v1 Base** (submit + approve, 0
 # MAGIC cambios). Recien despues tiene sentido `reset_to_base_version --apply`,
