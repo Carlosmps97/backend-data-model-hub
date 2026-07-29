@@ -71,6 +71,17 @@ class Settings:
     PGUSER: str = os.getenv("PGUSER", "") or os.getenv("DATABRICKS_CLIENT_ID", "")
     PGDATABASE: str = os.getenv("PGDATABASE", "databricks_postgres")
     PGSSLMODE: str = os.getenv("PGSSLMODE", "require")
+    # Password de Postgres FIJO (el "OAuth token" que la consola de Lakebase
+    # deja copiar; dura ~1 h). OPCIONAL y solo para correr scripts desde una
+    # máquina donde no se puede autenticar el SDK: si está seteado, el pool lo
+    # usa tal cual y NO acuña token (tampoco hace falta LAKEBASE_ENDPOINT si
+    # además se setea PGHOST). En la app desplegada nunca se usa.
+    PGPASSWORD: str = os.getenv("PGPASSWORD", "")
+    # Sabor de negociacion TLS de Postgres: vacio = auto (prueba el clasico y,
+    # si el servidor resetea, el DIRECTO). "true" fuerza TLS directo (front-ends
+    # que enrutan por SNI/ALPN, p.ej. Databricks "service direct"); "false"
+    # fuerza el clasico. Ver app/core/db/lakebase/pool.py.
+    PGDIRECTTLS: str = os.getenv("PGDIRECTTLS", "")
     # Schema de Postgres donde viven las "colecciones" (tablas id+doc jsonb).
     LAKEBASE_PGSCHEMA: str = os.getenv("LAKEBASE_PGSCHEMA", "dmh")
 

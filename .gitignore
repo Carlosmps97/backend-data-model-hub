@@ -15,3 +15,5 @@ scripts/_backup_*.json
 .superpowers/
 .pytest_cache/
 standards_out/
+migration-reports/
+model_out/

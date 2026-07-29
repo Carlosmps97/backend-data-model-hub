@@ -60,11 +60,25 @@ def _workspace_client():
         )
     if os.getenv("DATABRICKS_CLIENT_ID"):
         return WorkspaceClient()  # Apps: OAuth M2M ambiente del SP
-    raise RuntimeError(
-        "Sin credenciales para Lakebase: define DATABRICKS_TOKEN (+ "
-        "DATABRICKS_HOST) en dev local, o corre dentro de Databricks Apps "
-        "(service principal inyectado)."
-    )
+    # Dev SIN PAT (workspaces corporativos que no dejan crear tokens): se deja
+    # que el SDK resuelva por su cadena unificada — OAuth U2M de
+    # `databricks auth login`, perfil de `~/.databrickscfg`, Azure CLI…
+    # NO se le pasa `host=`: con host explícito el SDK deja de buscar el perfil
+    # en el archivo de config (verificado 2026-07-27). El host sale del perfil
+    # o de la variable DATABRICKS_HOST, que el SDK lee solo.
+    # La identidad resultante es TU usuario → `PGUSER` debe ser tu correo del
+    # workspace, y ese correo necesita rol en el proyecto Lakebase.
+    profile = os.getenv("DATABRICKS_CONFIG_PROFILE")
+    try:
+        return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+    except Exception as exc:  # noqa: BLE001 — el SDK levanta su propio error
+        raise RuntimeError(
+            "Sin credenciales para Lakebase. Opciones: (a) DATABRICKS_TOKEN + "
+            "DATABRICKS_HOST en el .env; (b) `databricks auth login --host "
+            "<workspace>` y dejar DATABRICKS_TOKEN vacía (si el perfil no es "
+            "el DEFAULT, indícalo con DATABRICKS_CONFIG_PROFILE); (c) correr "
+            "dentro de Databricks Apps (service principal inyectado)."
+        ) from exc
 
 
 def fresh_token() -> str:

@@ -52,15 +52,17 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
              "Physical_Name con macro Erwin sin resolver (%…)",
              "se usa User_Formatted_Physical_Name", macros)
 
-    # duplicados de tabla por (schema efectivo + nombre físico), regla #9
+    # duplicados de tabla por (schema efectivo + nombre físico) — política
+    # multi-archivo doc 32b R3 (owner 2026-07-24): score de uso + alias.
     by_key: dict[str, list[str]] = defaultdict(list)
     for e in m.entities.values():
         key = f"{pol.schema_or_default(schema_of.get(e.id))}.{e.physical}".upper()
         by_key[key].append(e.name)
     dup_tables = [f"{k} ×{len(v)}" for k, v in by_key.items() if len(v) > 1]
-    _finding(f, "E-DUP-TABLE", "ERROR",
-             "Tablas duplicadas por schema+nombre físico (regla #9)",
-             "la migración conserva la 1ª y OMITE las demás — confirmar",
+    _finding(f, "W-DUP-TABLE", "WARN",
+             "Tablas duplicadas por schema+nombre físico",
+             "gana la copia MÁS USADA (score doc 32b R3); las demás quedan "
+             "como alias — el detalle sale en el reporte de migración",
              dup_tables)
 
     # columnas duplicadas dentro del mismo objeto
@@ -91,9 +93,9 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     # ── Vistas ────────────────────────────────────────────────────────────
     no_source = [v.name for v in m.views.values()
                  if not any(r.parent_ref in m.entities for r in view_rels.get(v.id, []))]
-    _finding(f, "E-VIEW-NO-SOURCE", "ERROR",
+    _finding(f, "W-VIEW-NO-SOURCE", "WARN",
              "Vistas sin relación de derivación válida (sin tabla fuente)",
-             "la plataforma exige ≥1 fuente: la migración las OMITE — confirmar",
+             "se DESCARTAN (política aprobada 2026-07-24, doc 32b R7)",
              no_source)
 
     vcol_no_origin = [f"{v.name}.{a.physical}" for v in m.views.values()
@@ -112,10 +114,10 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     dup_views: dict[str, int] = Counter(
         f"{pol.schema_or_default(schema_of.get(v.id))}.{v.name}".upper()
         for v in m.views.values())
-    _finding(f, "E-DUP-VIEW", "ERROR",
+    _finding(f, "W-DUP-VIEW", "WARN",
              "Vistas duplicadas por schema+nombre",
-             "la migración conserva la 1ª y OMITE las demás — confirmar",
-             [f"{k} ×{n}" for k, n in dup_views.items() if n > 1])
+             "gana la copia más usada/completa (doc 32b R3); las demás quedan "
+             "como alias", [f"{k} ×{n}" for k, n in dup_views.items() if n > 1])
 
     # ── Relaciones ────────────────────────────────────────────────────────
     broken_rels, no_pairs = [], []
@@ -211,6 +213,24 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     empty_diagrams = [f"{d.subject_area}/{d.name}" for d in m.diagrams if not d.shapes]
     _finding(f, "I-DIAGRAM-EMPTY", "INFO",
              "Diagramas sin shapes", "se crean como canvas vacíos", empty_diagrams)
+
+    # ── Partición (política v2, doc 32b R6) ──────────────────────────────
+    udp_vals = pol.resolve_udp_values(m.udp_values, pol.collapse_udp_defs(m.udp_defs))
+    reassign = []
+    for e in m.entities.values():
+        vals = [(a.id, corr) for a in e.attributes
+                if (corr := pol.partition_correlative(
+                    udp_vals.get((a.id, pol.PARTITION_UDP_KEY)))) is not None]
+        if not vals:
+            continue
+        _ids, motivo = pol.partition_marks(vals)
+        if motivo:
+            reassign.append(f"{e.physical}: {motivo}")
+    _finding(f, "I-PARTITION-REASSIGN", "INFO",
+             "Particiones PART_nn con correlativo duplicado o en desorden",
+             "se marcan igual; el orden EFECTIVO es el físico (política "
+             "2026-07-24, doc 32b R6) — quedan en el reporte de migración",
+             reassign)
 
     # ── Pérdidas aceptadas por decisión ──────────────────────────────────
     n_indexes = sum(e.index_key_groups for e in m.entities.values())

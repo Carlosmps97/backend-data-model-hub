@@ -1,8 +1,19 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-07-20 · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-07-24 · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
-~50 MB). Índice general de TODOS los scripts del backend: `scripts/README.md`.
+50 MB y de **1.8 GB** — el parser es streaming: ~38 s y ~0.4 GB de RAM por
+GB de XML). Índice general de TODOS los scripts: `scripts/README.md`.
+
+**Multi-archivo (doc 32b, owner 2026-07-24):** un modelo Erwin llega partido
+en ~15 archivos → el kit hace **MERGE incremental**: la identidad
+cross-archivo es la clave natural (`schema.nombre`); lo repetido se ADOPTA
+(y el uso nuevo se suma), los conflictos de versión los decide el **score de
+uso** (2×relaciones + canvases + vistas), la misma FK en dos archivos no se
+duplica, y folders/canvases homónimos del mismo proyecto se fusionan. Todos
+los archivos de una familia cargan al MISMO proyecto (`--project` explícito,
+obligatorio si ya existe). Cada carga deja un reporte JSON de decisiones en
+`migration-reports/`.
 
 Todos los scripts viven en `scripts/erwin_migration/` (más los auxiliares en
 `scripts/`). **Son agnósticos al archivo**: no hay nombres DDV, esquemas ni
@@ -21,6 +32,7 @@ resolvió por estructura, no por nombres.
 | Quiero… | Script | ¿Toca la BD? |
 |---|---|---|
 | Auditar un XML antes de cargarlo | `quality` | No |
+| Cruzar XML(s) contra la BD viva y entre sí (solapes, score, estándares, estimación) | `crosscheck` | Solo lee |
 | Sacar glosario/dominios/UDP a archivos | `extract_standards` | No |
 | Sacar tablas/columnas/vistas/relaciones/canvases a archivos | `extract_model` | No |
 | Vaciar modelo+estándares+governance ANTES de una carga limpia | `reset_for_migration` | Sí (con `--apply`) — preserva users/roles/naming_config/column_catalog/audit_log |
@@ -33,9 +45,10 @@ resolvió por estructura, no por nombres.
 
 **Flujo recomendado para un XML nuevo:**
 ```
-quality  →  (opcional: extract_* para revisar en frío)  →  migrate (dry-run)
+quality  →  crosscheck (vs BD)  →  migrate (dry-run)
         →  (opcional si se REEMPLAZA la BD: reset_for_migration --apply)
-        →  migrate --apply  →  arrange_all  →  audit_data_consistency
+        →  migrate --project "Familia" --apply
+        →  arrange_all --project "Familia"  →  audit_data_consistency
 ```
 Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo.
 (La demo sintética y sus seeds se retiraron el 2026-07-20 — el flujo es
@@ -62,9 +75,29 @@ migración con cada incongruencia. No toca la BD.
 - **Salida esperada:** conteos del modelo + hallazgos por severidad:
   - `ERROR` — requiere decisión manual (la migración lo omite o corta).
   - `WARN` — la migración lo resuelve sola con política aprobada
-    (p.ej. tabla sin schema → `No_Definido`).
-  - `INFO` — pérdida aceptada, solo para conocimiento.
+    (p.ej. tabla sin schema → `No_Definido`; duplicados internos → gana la
+    copia más usada y las demás quedan como ALIAS; vista sin fuente →
+    descartada — políticas owner 2026-07-24, doc 32b).
+  - `INFO` — pérdida aceptada o particularidad (p.ej. particiones PART_nn
+    con correlativo incongruente → se marcan igual, orden efectivo físico).
 - **Exit code 1 si hay ERRORs** (sirve de gate en CI o corridas encadenadas).
+
+## 1b. `crosscheck` — gate 2: el archivo CONTRA la BD viva (y entre archivos)
+
+Lo que `quality` no puede ver: solapes con lo ya cargado y el veredicto de la
+política multi-archivo. Solo lectura; correr SIEMPRE antes de un `--apply`
+incremental.
+
+```bash
+.venv/bin/python -m scripts.erwin_migration.crosscheck "a.xml" [b.xml ...] [--json out.json] [--no-db]
+```
+- Por archivo: duplicados internos (con score y si las copias son idénticas),
+  particiones a reasignar (R6), defs UDP sin uso (candidatas A4).
+- Contra BD: tablas/vistas/schemas solapados con veredicto **ADOPTA/ACTUALIZA**
+  (score de uso de cada lado) y diff de columnas; glosario/dominios nuevos o
+  distintos; enums UDP que crecerían y variantes de grafía ignoradas (A3);
+  **estimación de la carga** (upserts, lotes, minutos según latencia medida).
+- Con 2+ archivos: solape de tablas entre ellos.
 
 ## 2. `extract_standards` — estándares limpios a archivos
 
