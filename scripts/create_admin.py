@@ -16,6 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Consola en UTF-8 (Windows viene en cp1252 y estos prints llevan acentos).
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 # Matriz de permisos por rol (pantalla 14 + Data Standards). Editable luego
 # desde Admin; acá solo se asegura que los 4 roles EXISTAN con su default.
 _ROLE_GRANTS: dict[str, tuple[str, str, set[str]]] = {

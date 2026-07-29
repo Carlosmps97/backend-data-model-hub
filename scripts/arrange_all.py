@@ -26,6 +26,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Consola en UTF-8 (Windows viene en cp1252 y estos prints llevan acentos).
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from pymongo import UpdateOne
 
 # Directorio temporal para el hand-off Python↔elkjs (estable, no acoplado a una
@@ -72,7 +79,7 @@ async def main(project: str | None = None) -> None:
     if project:
         p = await db["projects"].find_one({"name": project, **ACTIVE}, {"_id": 1})
         if not p:
-            print(f"⛔ proyecto '{project}' no existe")
+            print(f"ERROR: el proyecto '{project}' no existe")
             await disconnect()
             return
         sa_filter["projectId"] = str(p["_id"])
@@ -139,10 +146,10 @@ async def main(project: str | None = None) -> None:
         graphs[sa_id] = {"nodes": nodes, "edges": edges}
 
     gin, gout = os.path.join(SCRATCH, "arrange_graphs.json"), os.path.join(SCRATCH, "arrange_positions.json")
-    Path(gin).write_text(json.dumps(graphs))
+    Path(gin).write_text(json.dumps(graphs), encoding="utf-8")
     print(f"[4/6] elkjs sobre {len(graphs)} canvases (tablas+vistas)…")
     subprocess.run(["node", str(Path(__file__).parent / "arrange_all.cjs"), gin, gout], check=True)
-    positions = json.loads(Path(gout).read_text())
+    positions = json.loads(Path(gout).read_text(encoding="utf-8"))
 
     print("[5/6] persistiendo layouts (bulk)…")
     ops = [UpdateOne({"_id": sa_id}, {"$set": {"layout": layout}}) for sa_id, layout in positions.items()]
