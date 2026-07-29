@@ -2,126 +2,182 @@
 # MAGIC %md
 # MAGIC # Carga Erwin (XML) -> Lakebase, desde dentro de Databricks
 # MAGIC
-# MAGIC Plan B de la doc `plan-implementacion/35-MIGRACION-A-OTRO-DATABRICKS.md`:
-# MAGIC se usa cuando el endpoint Lakebase NO es alcanzable desde la laptop
-# MAGIC (el front-end "service direct" acepta el TCP y descarta el trafico).
-# MAGIC Desde un cluster del mismo workspace si se llega.
+# MAGIC Plan B de `plan-implementacion/35-MIGRACION-A-OTRO-DATABRICKS.md`: se usa
+# MAGIC cuando el endpoint Lakebase no es alcanzable desde la laptop (el
+# MAGIC front-end "service direct" acepta el TCP y descarta el trafico). Desde un
+# MAGIC cluster del mismo workspace si se llega.
 # MAGIC
-# MAGIC **Este notebook no reimplementa nada**: invoca los MISMOS scripts del repo
-# MAGIC (`scripts.erwin_migration.*`), con las mismas reglas de merge, limpieza y
-# MAGIC prioridad. Solo cambia desde donde se ejecutan.
+# MAGIC **No reimplementa nada**: invoca los MISMOS scripts del repo, con las
+# MAGIC mismas reglas de merge, limpieza y prioridad. Solo cambia desde donde se
+# MAGIC ejecutan.
+# MAGIC
+# MAGIC **Todo se parametriza en los widgets de arriba.** Los defaults son los
+# MAGIC del entorno actual: al migrar a otro Databricks, esa lista de widgets es
+# MAGIC exactamente lo que hay que volver a apuntar.
 # MAGIC
 # MAGIC ## Prerequisitos
-# MAGIC 1. **Cluster classic** (no serverless), DBR con Python 3.10+, single node
-# MAGIC    con 16 GB de driver alcanza (el XML grande pide ~0.5 GB de RAM).
-# MAGIC 2. **El repo del backend en el workspace**: Git folder apuntando a
-# MAGIC    `back-dmh-01`, o subido con `databricks workspace import-dir`.
-# MAGIC 3. **Los 2 XML en ADLS / Volume**, accesibles con `dbutils.fs`.
+# MAGIC 1. Cluster **classic** (no serverless), DBR con Python 3.10+, single node
+# MAGIC    de 16 GB alcanza (el XML grande pide ~0.5 GB de RAM).
+# MAGIC 2. Este notebook abierto **desde el repo** (Git folder de `back-dmh-01`),
+# MAGIC    para que las rutas relativas al repo funcionen solas.
+# MAGIC 3. El cluster con acceso al ADLS (el mismo que ya usas para leer datos).
 # MAGIC 4. Tu usuario con rol de Postgres en el proyecto Lakebase.
-# MAGIC
-# MAGIC ## Antes de nada: verifica que desde este cluster SI se llega
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 0. Widgets (correr una vez; quedan en la barra de arriba)
+
+# COMMAND ----------
+
+# `dbutils` lo inyecta el runtime de Databricks; esta linea es solo para que los
+# linters de escritorio no lo marquen como indefinido.
+dbutils = globals()["dbutils"]  # type: ignore[assignment]
+
+# --- Origen de los XML (ADLS) -------------------------------------------------
+dbutils.widgets.text("storage_account", "adlsagentslab01", "1. Storage account")
+dbutils.widgets.text("container", "agentsdata", "2. Container")
+dbutils.widgets.text("folder_path", "", "3. Carpeta dentro del container")
+dbutils.widgets.text("xml1_name", "DDV - CPYBCA.xml", "4. Archivo XML 1")
+dbutils.widgets.text("xml2_name", "DDV Modelo de Datos Fisico Otros V0.214.xml", "5. Archivo XML 2")
+
+# --- Destino ------------------------------------------------------------------
+dbutils.widgets.text("project", "Modelo de Datos DDV_FISICO", "6. Proyecto destino")
+dbutils.widgets.text("lakebase_endpoint",
+                     "projects/lkbs-model-hub/branches/production/endpoints/primary",
+                     "7. Lakebase endpoint")
+dbutils.widgets.text("pghost",
+                     "ep-morning-fog-e8ms4ebo.database.centralus.azuredatabricks.net",
+                     "8. PGHOST")
+dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "9. PGUSER (Role de Lakebase)")
+dbutils.widgets.text("pgschema", "dmh", "10. Schema PG")
+dbutils.widgets.text("repo_dir", "", "11. Ruta del repo (vacio = autodetectar)")
+
+print("Widgets creados.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. Sonda: verifica que DESDE ESTE CLUSTER se llega al 5432
+# MAGIC Si no imprime `b'S'`, el cluster tampoco alcanza el endpoint y no hay
+# MAGIC nada mas que hacer aca (va el pedido a plataforma).
 
 # COMMAND ----------
 
 import socket
 import struct
 
-PGHOST_TEST = "ep-morning-fog-e8ms4ebo.database.centralus.azuredatabricks.net"
-
-s = socket.create_connection((PGHOST_TEST, 5432), 15)
-s.sendall(struct.pack("!ii", 8, 80877103))   # SSLRequest de Postgres
-print("respuesta:", s.recv(1), "  (b'S' = el camino sirve)")
-s.close()
+_s = socket.create_connection((dbutils.widgets.get("pghost"), 5432), 15)
+_s.sendall(struct.pack("!ii", 8, 80877103))   # SSLRequest de Postgres
+print("respuesta:", _s.recv(1), "  (b'S' = el camino sirve)")
+_s.close()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Dependencias
-# MAGIC Instala las del repo en el entorno del notebook y reinicia Python.
-# MAGIC Al reiniciar se pierden las variables: por eso los parametros van DESPUES.
+# MAGIC ## 2. Dependencias
+# MAGIC Ruta relativa: este notebook vive en `<repo>/scripts/databricks/`.
 
 # COMMAND ----------
 
-# MAGIC %pip install -r /Workspace/Repos/<tu-usuario>/back-dmh-01/requirements.txt
-# MAGIC %restart_python
+# MAGIC %pip install -r ../../requirements.txt
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 2. Parametros (lo unico que editas)
-
-# COMMAND ----------
-
-REPO_DIR = "/Workspace/Repos/<tu-usuario>/back-dmh-01"      # raiz del repo backend
-
-# Origen de los XML (ADLS con abfss://, o /Volumes/... si es un Volume de UC)
-XML1_SRC = "abfss://<container>@<cuenta>.dfs.core.windows.net/<ruta>/DDV - CPYBCA.xml"
-XML2_SRC = "abfss://<container>@<cuenta>.dfs.core.windows.net/<ruta>/DDV Modelo de Datos Fisico Otros V0.214.xml"
-
-PROJECT = "Modelo de Datos DDV_FISICO"                      # proyecto destino (mismo para los 2)
-
-# Conexion a Lakebase
-LAKEBASE_ENDPOINT = "projects/lkbs-model-hub/branches/production/endpoints/primary"
-PGHOST = "ep-morning-fog-e8ms4ebo.database.centralus.azuredatabricks.net"
-PGUSER = "carlosperez@bcp.com.pe"                           # el Role que muestra la consola Lakebase
-PGDATABASE = "databricks_postgres"
-LAKEBASE_PGSCHEMA = "dmh"
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Copiar los XML al disco local del driver
-# MAGIC Los scripts leen con `open()` normal: necesitan una ruta de filesystem.
-# MAGIC Copiar al disco local es mas rapido y seguro que leer por FUSE.
-# MAGIC (Si tus XML ya estan en un Volume de UC, puedes saltarte esta celda y
-# MAGIC apuntar XML1/XML2 directo a `/Volumes/...`.)
+# MAGIC ## 3. Parametros desde los widgets
+# MAGIC (Se leen DESPUES del restart: el restart borra las variables, no los widgets.)
 
 # COMMAND ----------
 
 import os
-import shutil
 
-WORK = "/local_disk0/tmp/erwin" if os.path.isdir("/local_disk0") else "/tmp/erwin"
-os.makedirs(WORK, exist_ok=True)
+dbutils = globals()["dbutils"]  # type: ignore[assignment]
+W = dbutils.widgets.get
 
-XML1 = os.path.join(WORK, "xml1.xml")
-XML2 = os.path.join(WORK, "xml2.xml")
+ACCOUNT, CONTAINER = W("storage_account").strip(), W("container").strip()
+FOLDER = W("folder_path").strip().strip("/")
+PROJECT = W("project").strip()
+LAKEBASE_ENDPOINT = W("lakebase_endpoint").strip()
+PGHOST, PGUSER = W("pghost").strip(), W("pguser").strip()
+PGSCHEMA = W("pgschema").strip() or "dmh"
 
-for src, dst in ((XML1_SRC, XML1), (XML2_SRC, XML2)):
-    if src.startswith("/Volumes/") or src.startswith("/dbfs/"):
-        shutil.copyfile(src, dst)
-    else:
-        dbutils.fs.cp(src, "file:" + dst)                   # noqa: F821 (dbutils)
-    print(f"{dst}: {os.path.getsize(dst) / 1e6:,.0f} MB")
+
+def adls(nombre: str) -> str:
+    ruta = f"{FOLDER}/{nombre}" if FOLDER else nombre
+    return f"abfss://{CONTAINER}@{ACCOUNT}.dfs.core.windows.net/{ruta}"
+
+
+XML1_SRC, XML2_SRC = adls(W("xml1_name").strip()), adls(W("xml2_name").strip())
+
+REPO_DIR = W("repo_dir").strip()
+if not REPO_DIR:   # autodetectar: el notebook vive en <repo>/scripts/databricks/
+    _nb = (dbutils.notebook.entry_point.getDbutils().notebook()
+           .getContext().notebookPath().get())
+    REPO_DIR = "/Workspace" + _nb.rsplit("/scripts/databricks/", 1)[0]
+if not os.path.isfile(os.path.join(REPO_DIR, "requirements.txt")):
+    raise ValueError(f"REPO_DIR no parece la raiz del backend: {REPO_DIR}")
+
+print(f"repo     : {REPO_DIR}")
+print(f"proyecto : {PROJECT}")
+print(f"xml 1    : {XML1_SRC}")
+print(f"xml 2    : {XML2_SRC}")
+print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Entorno + helper que ejecuta los scripts
-# MAGIC El token del notebook autentica ante el workspace; el backend lo usa para
-# MAGIC acunar el password de Postgres (dura ~1 h y se renueva solo).
+# MAGIC ## 4. Materializar los XML en el driver
+# MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Los scripts trabajan
+# MAGIC sobre archivo, asi que se baja una vez al disco local del driver (se
+# MAGIC saltea si ya esta).
+
+# COMMAND ----------
+
+WORK = "/local_disk0/tmp/erwin" if os.path.isdir("/local_disk0") else "/tmp/erwin"
+os.makedirs(WORK, exist_ok=True)
+
+
+def bajar(uri: str) -> str:
+    dst = os.path.join(WORK, uri.rsplit("/", 1)[-1])
+    if not os.path.isfile(dst):
+        dbutils.fs.cp(uri, "file:" + dst)
+    print(f"{dst}: {os.path.getsize(dst) / 1e6:,.0f} MB")
+    return dst
+
+
+XML1, XML2 = bajar(XML1_SRC), bajar(XML2_SRC)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Entorno + helper que ejecuta los scripts
+# MAGIC El token del propio notebook autentica ante el workspace; el backend acuna
+# MAGIC con el el password de Postgres (dura ~1 h y se renueva solo).
 
 # COMMAND ----------
 
 import subprocess
 import sys
 
-_ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()   # noqa: F821
-DATABRICKS_HOST = "https://" + _ctx.browserHostName().get()
-DATABRICKS_TOKEN = _ctx.apiToken().get()
+_ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 
 ENV = {
     **os.environ,
     "DB_BACKEND": "lakebase",
-    "DATABRICKS_HOST": DATABRICKS_HOST,
-    "DATABRICKS_TOKEN": DATABRICKS_TOKEN,
+    "DATABRICKS_HOST": "https://" + _ctx.browserHostName().get(),
+    "DATABRICKS_TOKEN": _ctx.apiToken().get(),
     "LAKEBASE_ENDPOINT": LAKEBASE_ENDPOINT,
     "PGHOST": PGHOST,
     "PGPORT": "5432",
     "PGUSER": PGUSER,
-    "PGDATABASE": PGDATABASE,
+    "PGDATABASE": "databricks_postgres",
     "PGSSLMODE": "require",
-    "LAKEBASE_PGSCHEMA": LAKEBASE_PGSCHEMA,
+    "LAKEBASE_PGSCHEMA": PGSCHEMA,
     "PYTHONUTF8": "1",
     "PYTHONPATH": REPO_DIR,
 }
@@ -141,13 +197,15 @@ def run(*args: str) -> None:
         raise RuntimeError(f"El script termino con codigo {p.returncode}")
 
 
-print("host:", DATABRICKS_HOST, "| python:", sys.version.split()[0])
+print("listo | python:", sys.version.split()[0])
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Usuario para poder entrar a la web
-# MAGIC Crea `admin` / `admin` y los 4 roles. Cambia esa clave en el primer login.
+# MAGIC ## 6. Usuario para entrar a la web
+# MAGIC Crea `admin` / `admin` y los 4 roles con su matriz de permisos default.
+# MAGIC Los usuarios reales se crean despues desde Admin (la plataforma tiene su
+# MAGIC propio padron, no hereda los del workspace). Cambia esa clave al entrar.
 
 # COMMAND ----------
 
@@ -156,7 +214,7 @@ run("scripts/create_admin.py")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. XML 1 (CPYBCA): gate de calidad -> cruce vs BD -> dry-run -> apply
+# MAGIC ## 7. XML 1 (CPYBCA): calidad -> cruce vs BD -> dry-run -> apply
 # MAGIC El orden importa: CPYBCA primero, Otros despues (el desempate por uso
 # MAGIC actualiza sobre lo ya cargado).
 
@@ -179,9 +237,10 @@ run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT, "--appl
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. XML 2 (Otros V0.214): mismo flujo, MISMO proyecto
-# MAGIC Aca actua el merge multi-archivo (adopcion por clave natural, conflicto
-# MAGIC por score de uso, dedup de FKs, fusion de folders/canvases homonimos).
+# MAGIC ## 8. XML 2 (Otros V0.214): mismo flujo, MISMO proyecto
+# MAGIC Aca actua el merge multi-archivo: adopcion por clave natural, conflicto
+# MAGIC resuelto por score de uso, dedup de FKs, fusion de folders y canvases
+# MAGIC homonimos, particiones por orden fisico, vistas sin fuente descartadas.
 
 # COMMAND ----------
 
@@ -202,7 +261,8 @@ run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT, "--appl
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Validacion de la data cargada
+# MAGIC ## 9. Validacion de la data cargada
+# MAGIC Esperado: 0 fixables. Los informativos son politicas conocidas (doc 34).
 
 # COMMAND ----------
 
@@ -211,9 +271,10 @@ run("-m", "scripts.audit_data_consistency")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Reglas base de DDL Export (Data Standards)
-# MAGIC El glosario, dominios y definiciones UDP ya entraron con `migrate`.
-# MAGIC Esto siembra el ruleset de exportacion (8 reglas + 2 lookups).
+# MAGIC ## 10. Reglas base de DDL Export
+# MAGIC Glosario, dominios padre y definiciones UDP ya entraron con `migrate`.
+# MAGIC Esto siembra el ruleset de exportacion: 8 reglas + los lookups
+# MAGIC `vacuum_map` / `dac_map`, como una version de Data Standards.
 
 # COMMAND ----------
 
@@ -226,10 +287,10 @@ run("-m", "scripts.seed_ddl_export_rules", "--apply")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 10. Layout de canvases (opcional, necesita Node)
-# MAGIC `arrange_all` corre elkjs. Si el cluster no trae Node, saltea esta parte:
-# MAGIC la migracion ya deja un layout en grilla y el boton "Autoarrange" de la
-# MAGIC web reordena canvas por canvas.
+# MAGIC ## 11. Layout de canvases (opcional: necesita Node)
+# MAGIC `arrange_all` corre elkjs. Si el cluster no trae Node se saltea: la
+# MAGIC migracion ya deja layout en grilla y la web tiene el boton "Autoarrange"
+# MAGIC por canvas.
 
 # COMMAND ----------
 
@@ -245,10 +306,17 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 11. Cierre
-# MAGIC En la web: crear una version vacia "v1 Base" (submit + approve, 0 cambios)
-# MAGIC y recien despues correr `reset_to_base_version` si quieres el baseline de
-# MAGIC Data Standards y el boton Restore.
+# MAGIC ## 12. Cierre
 # MAGIC
-# MAGIC Conteos esperados con los 2 archivos cargados: 1 proyecto, 2108 tablas,
-# MAGIC 96184 columnas, 1630 relaciones, 1932 vistas, 275 canvases, 388 schemas.
+# MAGIC En la web: crear una version vacia **v1 Base** (submit + approve, 0
+# MAGIC cambios). Recien despues tiene sentido `reset_to_base_version --apply`,
+# MAGIC que ademas deja el baseline de Data Standards y el permiso de rollback.
+# MAGIC
+# MAGIC Conteos esperados con los 2 archivos: 1 proyecto, 2108 tablas, 96184
+# MAGIC columnas, 1630 relaciones, 1932 vistas, 275 canvases, 388 schemas,
+# MAGIC 48 folders.
+
+# COMMAND ----------
+
+# run("-m", "scripts.reset_to_base_version")             # dry-run
+# run("-m", "scripts.reset_to_base_version", "--apply")  # DESTRUCTIVO: leer el dry-run antes
