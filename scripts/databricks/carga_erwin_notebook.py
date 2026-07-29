@@ -432,29 +432,53 @@ run("-m", "scripts.seed_ddl_export_rules", "--apply")
 
 # MAGIC %md
 # MAGIC ## 12. Layout de canvases (opcional: necesita Node)
-# MAGIC `arrange_all` corre elkjs. Si el cluster no trae Node se saltea: la
-# MAGIC migracion ya deja layout en grilla y la web tiene el boton "Autoarrange"
-# MAGIC por canvas.
+# MAGIC `arrange_all` corre elkjs sobre Node. Los DBR suelen traer `node` PELADO
+# MAGIC (sin npm), asi que elkjs no se instala: se baja el tarball del registry
+# MAGIC y se usa su `elk.bundled.js` via `ELKJS_PATH` (mismo bundle y version
+# MAGIC que el front -> mismo layout que el boton "Autoarrange" de la web).
+# MAGIC Si no hay Node o no hay salida al registry, se saltea: la migracion ya
+# MAGIC deja layout en grilla y la web puede reordenar canvas por canvas.
 
 # COMMAND ----------
 
-if subprocess.run(["which", "node"], capture_output=True).returncode == 0:
-    npm_dir = os.path.join(WORK, "elk")
-    os.makedirs(npm_dir, exist_ok=True)
-    subprocess.run(["npm", "install", "elkjs"], cwd=npm_dir, check=True)
-    ENV["ELKJS_PATH"] = os.path.join(npm_dir, "node_modules", "elkjs", "lib", "elk.bundled.js")
-    run("scripts/arrange_all.py", "--project", PROJECT)
-else:
+import shutil
+import tarfile
+import urllib.request
+
+ELKJS_VERSION = "0.11.1"     # = web-data-model-hub/package.json (mantener en sync)
+
+if not shutil.which("node"):
     print("Node no esta disponible en el cluster: saltear el auto-arrange.")
+else:
+    elk_dir = os.path.join(WORK, "elk")
+    os.makedirs(elk_dir, exist_ok=True)
+    bundle = os.path.join(elk_dir, "package", "lib", "elk.bundled.js")
+    if not os.path.isfile(bundle):
+        try:
+            tgz = os.path.join(elk_dir, f"elkjs-{ELKJS_VERSION}.tgz")
+            urllib.request.urlretrieve(
+                f"https://registry.npmjs.org/elkjs/-/elkjs-{ELKJS_VERSION}.tgz", tgz)
+            with tarfile.open(tgz) as t:
+                try:
+                    t.extractall(elk_dir, filter="data")
+                except TypeError:        # Python viejo sin `filter`
+                    t.extractall(elk_dir)
+        except Exception as exc:
+            print(f"No se pudo bajar elkjs del registry ({exc}): saltear el auto-arrange.")
+    if os.path.isfile(bundle):
+        ENV["ELKJS_PATH"] = bundle
+        run("scripts/arrange_all.py", "--project", PROJECT)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 13. Cierre
-# MAGIC
-# MAGIC En la web: crear una version vacia **v1 Base** (submit + approve, 0
-# MAGIC cambios). Recien despues tiene sentido `reset_to_base_version --apply`,
-# MAGIC que ademas deja el baseline de Data Standards y el permiso de rollback.
+# MAGIC ## 13. Version base v1 (cierre)
+# MAGIC La migracion escribe directo a publicado y NO crea versiones; sin una
+# MAGIC version aplicada, la web bloquea Model. `mark_base_version` crea el
+# MAGIC marcador **v1** (approved, 0 cambios) = "todo lo cargado es la base",
+# MAGIC deja el baseline de Data Standards (si hace falta) y activa el permiso
+# MAGIC de rollback. Correr AL FINAL de la carga completa (con 15 XML: despues
+# MAGIC del ultimo). Idempotente: si v1 ya existe, no toca nada.
 # MAGIC
 # MAGIC Conteos esperados con los 2 archivos: 1 proyecto, 2108 tablas, 96184
 # MAGIC columnas, 1630 relaciones, 1932 vistas, 275 canvases, 388 schemas,
@@ -462,5 +486,14 @@ else:
 
 # COMMAND ----------
 
-# run("-m", "scripts.reset_to_base_version")             # dry-run
-# run("-m", "scripts.reset_to_base_version", "--apply")  # DESTRUCTIVO: leer el dry-run antes
+run("-m", "scripts.mark_base_version")             # dry-run: muestra el plan
+
+# COMMAND ----------
+
+run("-m", "scripts.mark_base_version", "--apply")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC (`reset_to_base_version` NO es parte de la carga: queda para el futuro,
+# MAGIC cuando quieras limpiar versiones de prueba y volver a v1.)

@@ -53,6 +53,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros) | Siempre tras `migrate --apply` |
 | `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C10 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes…) | Siempre tras migrar (esperado: 0 fixables) |
 | `create_admin` | Crea/actualiza el usuario `admin`/`admin` + los 4 roles (idempotente) | BD nueva, para poder entrar |
+| `mark_base_version` | **Marca lo cargado como versión base**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards si el stream está vacío y permiso `rollback`. Idempotente; aborta si ya hay versiones aplicadas | UNA vez, al FINAL de la carga completa (después del último XML) |
 | `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 30): 8 reglas (masking técnico, desencriptación de negocio `bcp_ddv_desencrypt`, tags, TBLPROPERTIES vacuum, cascada `_rej` + vista técnica) + lookups `vacuum_map`/`dac_map`, como UNA versión de Data Standards. Aborta si ya hay reglas | BD nueva, tras `create_admin` |
 | `fix_particiones_ddv_20260717` | Re-aplica las **3 correcciones de partición decididas por el owner** (doc 21 §3). No están en el XML: re-migrar el DDV las pisa (C10 avisa) | Solo si re-migras `DDV - CPYBCA.xml` |
 
@@ -123,14 +124,17 @@ aborta sin tocar nada). Preserva usuarios/roles, naming_config,
 .venv/bin/python scripts/create_admin.py
 .venv/bin/python -m scripts.seed_ddl_export_rules --apply               # ruleset base de export
 .venv/bin/python -m scripts.audit_data_consistency                      # esperado: 0
+.venv/bin/python -m scripts.mark_base_version --apply                   # marcador v1 + baseline + rollback
 # solo si el XML es el DDV actual:
 .venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply
 ```
 
-> Para el flujo "rollback a la base" (§4) hace falta el changeset marcador
-> `versionLabel="v1"` con 0 cambios. En la BD actual ya existe ("Base — Modelo
-> DDV real"); en una BD recién migrada créalo una vez (versión vacía publicada)
-> — `migrate` no lo crea porque escribe directo a publicado.
+> El marcador `versionLabel="v1"` (0 cambios) es OBLIGATORIO tras migrar a una
+> BD nueva: `migrate` escribe directo a publicado sin crear versiones, y sin
+> una versión aplicada la web bloquea el módulo Model (huevo-y-gallina: el
+> diálogo "Open model" exige producción publicada). Lo crea
+> `mark_base_version --apply` al final de la carga completa. En Databricks:
+> `scripts/databricks/carga_erwin_notebook.py` §13.
 
 ## Retirados (2026-07-20, en historial git)
 
