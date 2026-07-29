@@ -44,10 +44,10 @@ dbutils.widgets.text("xml2_name", "DDV Modelo de Datos Fisico Otros V0.214.xml",
 # --- Destino ------------------------------------------------------------------
 dbutils.widgets.text("project", "Modelo de Datos DDV_FISICO", "6. Proyecto destino")
 dbutils.widgets.text("lakebase_endpoint",
-                     "projects/lkbs-model-hub/branches/production/endpoints/primary",
+                     "projects/dmh-proj/branches/production/endpoints/primary",
                      "7. Lakebase endpoint")
 dbutils.widgets.text("pghost",
-                     "ep-morning-fog-e8ms4ebo.database.centralus.azuredatabricks.net",
+                     "ep-orange-sunset-e1gjz1qx.database.eastus2.azuredatabricks.net",
                      "8. PGHOST")
 dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "9. PGUSER (Role de Lakebase)")
 dbutils.widgets.text("pgschema", "dmh", "10. Schema PG")
