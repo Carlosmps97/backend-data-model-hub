@@ -3,12 +3,18 @@
   POST /api/auth/login   {username, password} → {token, user}   (401 si falla)
   POST /api/auth/logout                        → {ok}            (audita)
   GET  /api/auth/me                            → usuario en sesión enriquecido
+  GET  /api/auth/warmup?next=<url>             → 302 a `next`    (doc 36)
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+import re
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import RedirectResponse
 
 from app.core.api.envelope import ok
+from app.core.config import settings
 from app.core.identity import Principal, current_principal
 from app.core.ratelimit import limiter
 
@@ -33,6 +39,41 @@ async def login(request: Request, response: Response, body: LoginBody):
             detail="Incorrect username or password.",
         )
     return ok(result)
+
+
+def warmup_next_allowed(next_url: str) -> bool:
+    """¿`next` apunta a un origen del FRONT permitido? Mismo allowlist que el
+    CORS (lista exacta + regex, `fullmatch` igual que Starlette): anti
+    open-redirect. Puro, para testear sin app."""
+    try:
+        parts = urlsplit(next_url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return False
+    origin = f"{parts.scheme}://{parts.netloc}"
+    if origin in settings.CORS_ORIGINS:
+        return True
+    if settings.CORS_ORIGIN_REGEX:
+        try:
+            return re.fullmatch(settings.CORS_ORIGIN_REGEX, origin) is not None
+        except re.error:
+            return False
+    return False
+
+
+@router.get("/warmup")
+async def warmup(next_url: str = Query(alias="next")):
+    """Warm-up de sesión para Databricks Apps (doc 36). Cada app vive detrás
+    de su PROPIO muro SSO por subdominio; un fetch() del front no puede
+    completar ese SSO (redirect cross-origin a Microsoft = imposible en XHR).
+    El front navega ACÁ top-level: el proxy de Databricks hace el SSO de este
+    dominio, la cookie queda puesta y este endpoint solo rebota de vuelta al
+    front. Público a propósito (como /login); `next` validado contra el
+    allowlist CORS para no ser un open redirect."""
+    if not warmup_next_allowed(next_url):
+        raise HTTPException(status_code=400, detail="Invalid next URL.")
+    return RedirectResponse(next_url, status_code=302)
 
 
 @router.post("/logout")
