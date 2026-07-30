@@ -7,10 +7,12 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from app.core.api.envelope import ok
@@ -62,18 +64,29 @@ def warmup_next_allowed(next_url: str) -> bool:
     return False
 
 
-@router.get("/warmup")
-async def warmup(next_url: str = Query(alias="next")):
+@router.get("/warmup/{next_b64}")
+async def warmup(next_b64: str):
     """Warm-up de sesión para Databricks Apps (doc 36). Cada app vive detrás
     de su PROPIO muro SSO por subdominio; un fetch() del front no puede
     completar ese SSO (redirect cross-origin a Microsoft = imposible en XHR).
     El front navega ACÁ top-level: el proxy de Databricks hace el SSO de este
     dominio, la cookie queda puesta y este endpoint solo rebota de vuelta al
     front. Público a propósito (como /login); `next` validado contra el
-    allowlist CORS para no ser un open redirect."""
+    allowlist CORS para no ser un open redirect.
+
+    `next` viaja EN EL PATH (base64url), NO como query string: el replay
+    post-SSO del proxy de Databricks se atora con query strings (el usuario
+    quedaba varado en un `{}` del proxy — visto 2026-07-30 en corporativo;
+    con URL sin query, p.ej. /api/health, el replay siempre llega a la app)."""
+    try:
+        pad = "=" * (-len(next_b64) % 4)
+        next_url = base64.urlsafe_b64decode(next_b64 + pad).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid next URL.")
     if not warmup_next_allowed(next_url):
         raise HTTPException(status_code=400, detail="Invalid next URL.")
-    return RedirectResponse(next_url, status_code=302)
+    return RedirectResponse(next_url, status_code=302,
+                            headers={"Cache-Control": "no-store"})
 
 
 @router.post("/logout")
