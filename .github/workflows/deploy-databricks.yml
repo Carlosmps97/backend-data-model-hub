@@ -114,6 +114,33 @@ jobs:
       - name: Deploy bundle (sube el código + crea/actualiza la app)
         run: databricks bundle deploy --target "$BUNDLE_TARGET"
 
+      # El bloque `permissions:` del bundle es AUTORITATIVO: el deploy de
+      # arriba deja la ACL exactamente como la declara databricks.yml, o sea
+      # que el CAN_USE del SP del FRONT (necesario para el proxy /api del
+      # server del front, doc 36 §6.3) se acaba de BORRAR si existía. Este
+      # paso lo re-aplica en cada deploy, resolviendo el SP real de la app
+      # del front en ESTE workspace (PATCH = agrega sin pisar el resto).
+      # Si la app del front aún no existe (primer deploy del backend), se
+      # salta: el workflow del front hace el mismo grant al final del suyo.
+      - name: Autorizar al SP del front sobre esta app (proxy /api)
+        env:
+          FRONTEND_APP_NAME: ${{ vars.FRONTEND_APP_NAME || 'frnt-data-model-hub' }}
+        run: |
+          BACKEND_APP=$(databricks bundle validate --target "$BUNDLE_TARGET" --output json \
+            | jq -r '.resources.apps.backend.name')
+          FRONT_SP=$(databricks apps get "$FRONTEND_APP_NAME" --output json 2>/dev/null \
+            | jq -r '.service_principal_client_id // empty')
+          if [ -z "$FRONT_SP" ]; then
+            echo "La app del front '$FRONTEND_APP_NAME' no existe todavia: se salta"
+            echo "(el workflow del front aplica este grant al final del suyo)."
+            exit 0
+          fi
+          databricks api patch "/api/2.0/permissions/apps/$BACKEND_APP" --json "{
+            \"access_control_list\": [
+              {\"service_principal_name\": \"$FRONT_SP\", \"permission_level\": \"CAN_USE\"}
+            ]}" > /dev/null
+          echo "CAN_USE re-aplicado: SP del front ($FRONT_SP) -> $BACKEND_APP"
+
       - name: Deploy & (re)start app
         run: databricks bundle run backend --target "$BUNDLE_TARGET"
 
