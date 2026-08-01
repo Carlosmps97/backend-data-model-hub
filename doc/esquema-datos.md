@@ -1,6 +1,6 @@
 # Esquema de datos — Data Model Hub (referencia completa de colecciones)
 
-**Actualizado:** 2026-07-19 · Fuente: los modelos Pydantic `*Doc` reales de `app/features/*/models.py` + `app/core/models.py`, los `repository.py` (nombres de colección) y `app/core/db/indexes.py` (índices).
+**Actualizado:** 2026-07-31 · Fuente: los modelos Pydantic `*Doc` reales de `app/features/*/models.py` + `app/core/models.py`, los `repository.py` (nombres de colección) y `app/core/db/indexes.py` (índices).
 
 Referencia **campo por campo** de todas las colecciones que administra este backend. Describe el **estado actual**, no cómo migrar. Complementa `arquitectura.md` (§7, visión) y `migracion-erwin.md` (carga desde XML de Erwin).
 
@@ -8,29 +8,34 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 > Lakebase Postgres** (`databricks_postgres`, schema PG `dmh`): cada colección
 > de este documento vive como una tabla `(id text PRIMARY KEY, doc jsonb)` con
 > el documento COMPLETO (con `_id`) en `doc` + índice GIN `jsonb_path_ops` +
-> btrees por expresión para los sorts. La forma lógica de los documentos — TODO
-> lo que sigue — no cambió. Azure Cosmos DB (Mongo, base `db_modeler`) queda
-> como legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc
-> en la migración (2026-07-19; los scripts one-shot de esa copia se retiraron).
+> btrees por expresión para los sorts. `ensure_indexes()` declara además 36
+> índices lógicos (entre ellos el wildcard `udpValues.$**` en tablas, columnas
+> y canvases; el compuesto `changeset_changes(csId, collection)`; y
+> `standards_versions.seq`, el ÚNICO unique de todo el sistema). La forma
+> lógica de los documentos — TODO lo que sigue — no cambió, tampoco con la
+> migración al workspace Databricks CORPORATIVO (2026-07-27→31, docs 35–36 de
+> plan-implementacion/). Azure Cosmos DB (Mongo, base `db_modeler`) queda como
+> legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc en
+> la migración (2026-07-19; los scripts one-shot de esa copia se retiraron).
 
 ---
 
 ## 0. Convenciones globales (aplican a TODA colección)
 
 - **`model_config = DOC_CONFIG`** (`app/core/models.py`): `ConfigDict(extra="ignore", populate_by_name=True)`.
-  - `extra="ignore"` ⇒ al **leer**, cualquier campo del doc de Mongo que NO esté declarado en el `*Doc` se **descarta silenciosamente** (no llega a la app). Implicación de migración: para no perder datos hay que mirar el **doc real en Mongo**, no solo el modelo — puede haber campos legacy o aditivos (p. ej. `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`) que persisten en Mongo pero el modelo ignora.
+  - `extra="ignore"` ⇒ al **leer**, cualquier campo del doc persistido que NO esté declarado en el `*Doc` se **descarta silenciosamente** (no llega a la app). Implicación de migración: para no perder datos hay que mirar el **doc real en la BD**, no solo el modelo — puede haber campos legacy o aditivos (p. ej. `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`) que persisten en el doc pero el modelo ignora.
   - `populate_by_name=True` ⇒ los campos con `alias` aceptan el nombre del atributo o el alias en la entrada.
-- **`_id` vs `id`**: el repositorio guarda el `id` (o la clave natural) del modelo como `_id` de Mongo al insertar, y lo revierte a `id` al leer. Donde el `_id` es especial se anota en cada colección.
+- **`_id` vs `id`**: el repositorio guarda el `id` (o la clave natural) del modelo como `_id` del doc al insertar, y lo revierte a `id` al leer. Donde el `_id` es especial se anota en cada colección.
 - **Soft-delete**: la mayoría **no borra**; marca `flgactive: false` + `deletedAt` (ISO) y las lecturas filtran `flgactive != false`. Excepciones: `audit_log` es append-only; `changesets` / `changeset_changes` / `standards_versions` no usan `flgactive` (se gobiernan por estado/seq).
-- **Sin integridad referencial**: todas las referencias entre colecciones son **strings** (un `id`, o a veces un **nombre**). Mongo no las valida — la consistencia la garantiza la app. Ver §Referencias (final).
-- **Timestamps**: strings ISO-8601 (`datetime.now(timezone.utc).isoformat()`), no `Date` de Mongo.
-- **Trazabilidad de migración Erwin**: los docs cargados desde XML llevan además `migratedFrom: "erwin"` + `erwinLongId` (no declarados en el modelo → se ignoran al leer, pero **persisten** en Mongo).
+- **Sin integridad referencial**: todas las referencias entre colecciones son **strings** (un `id`, o a veces un **nombre**). El almacén no las valida (el `doc` jsonb es opaco para Postgres) — la consistencia la garantiza la app. Ver §Referencias (final).
+- **Timestamps**: strings ISO-8601 (`datetime.now(timezone.utc).isoformat()`), nunca tipos fecha nativos del almacén (`Date` de Mongo / `timestamptz`).
+- **Trazabilidad de migración Erwin**: los docs cargados desde XML llevan además `migratedFrom: "erwin"` + `erwinLongId` (no declarados en el modelo → se ignoran al leer, pero **persisten** en el doc).
 
 **Notación de las tablas de campos:** `str?` = opcional/nullable; `dict[str,str]` = mapa embebido; “ref X.y” = referencia por string a la colección X campo y.
 
 ---
 
-## 1. Mapa de colecciones (19 propias)
+## 1. Mapa de colecciones (21 propias)
 
 | Colección | Modelo `*Doc` | Versionada (changeset) | Soft-delete | `_id` |
 |---|---|:--:|:--:|---|
@@ -49,6 +54,8 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 | `glossary_terms` | AbbreviationDoc | — (Data Standards) | ✅ | `id` (uuid) |
 | `udp_definitions` | UdpDefinitionDoc | — (Data Standards) | ✅ | `id` (uuid) |
 | `naming_config` | NamingConfigDoc | — (Data Standards) | — | **`scope`** (clave natural; NO hay campo `id`) |
+| `ddl_rules` | DdlRuleDoc | — (Data Standards) | ✅ | `id` (uuid) |
+| `ddl_ruleset_config` | DdlRulesetConfigDoc | — (Data Standards) | — | **`global`** (singleton) |
 | `users` | UserDoc | — | via `status=disabled` | **`username`** |
 | `roles` | RoleDoc | — | — | **`key`** (slug del rol) |
 | `saved_reports` | SavedReportDoc (en `reporting/query/reports.py`, no en `models/`) | — | ✅ | `id` (uuid) |
@@ -57,6 +64,8 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 > **`column_catalog` NO es de este backend.** Lo administra el servicio de agentes (`app-agents-modeler`) sobre la MISMA base; los scripts (`reset_for_migration`, `seed_*`) lo **preservan**. No confundir con `canonical_columns` (el store real de columnas de esta app).
 >
 > **Entidades virtuales del reporting** (no son colecciones): `COLL_OF` en `reporting/query/executor.py` mapea `view_columns → views` y `models → subject_areas`.
+>
+> **Tablas físicas en Lakebase:** el adaptador pre-crea 20 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = 19 de este mapa + la ajena `column_catalog`); `ddl_rules` y `ddl_ruleset_config` (doc 30) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
 
 ---
 
@@ -70,7 +79,7 @@ projects · folders · subject_areas · schemas · canonical_tables · canonical
 
 Un cambio no toca la colección publicada hasta el **apply del approve**: vive como un doc en `changeset_changes` con el **doc completo** en `payload`. El `overlay(publicado, cambios)` produce el estado efectivo del draft.
 
-**Data Standards** se versiona **aparte** (no por el changeset): `parent_domains`, `glossary_terms`, `udp_definitions` y `naming_config` se escriben directo a producción y cada apply/rollback deja una versión con **snapshot completo** en `standards_versions`.
+**Data Standards** se versiona **aparte** (no por el changeset): `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config` y (doc 30) `ddl_rules` + `ddl_ruleset_config` se escriben directo a producción y cada apply/rollback deja una versión con **snapshot completo** en `standards_versions`. Las reglas DDL y su config mutan SOLO vía `POST /api/standards/apply` (`rulesUpsert`/`rulesDelete`/`ddlConfigPatch`); el router `/api/ddl-rules` es de lectura.
 
 **No versionado**: `users`, `roles`, `saved_reports`, `audit_log`, `changesets`, `changeset_changes`.
 
@@ -230,16 +239,16 @@ Un doc **por cambio**. `_id` determinista ⇒ last-write-wins por entidad.
 
 ---
 
-## 7. Data Standards (glosario, dominios, UDP, naming) — versionado propio
+## 7. Data Standards (glosario, dominios, UDP, naming, reglas DDL) — versionado propio
 
 ### `standards_versions` — StandardsVersionDoc
 Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | Campo | Tipo | Default | Notas |
 |---|---|---|---|
 | id | str | — | PK (uuid) |
-| seq | int | — | monotónico; **índice único**; `label = f"v{seq}"` |
+| seq | int | — | monotónico; **índice único** — el ÚNICO unique de todo el sistema; `label = f"v{seq}"` |
 | label | str | — | |
-| kind | str | "batch" | enum KINDS (§12) |
+| kind | str | "batch" | enum KINDS (§12; incluye `ddl` desde el doc 30) |
 | title | str | — | |
 | description | str? | null | |
 | author | str | — | |
@@ -247,8 +256,10 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | status | str | "applied" | `applied` \| `baseline` |
 | diff | dict | `{added:[],edited:[],removed:[]}` | listas de strings legibles |
 | impact | dict | `{tables:0,columns:0}` | conteo de impacto |
-| snapshot | dict | {} | estado COMPLETO tras aplicar: `{domains[], dict[], namingConfig{}}` (rollback determinista) |
+| snapshot | dict | {} | estado COMPLETO tras aplicar: `{domains[], dict[], namingConfig{}, udp[], ddlRules[], ddlConfig{}}` (rollback determinista) |
 | revertsSeq | int? | null | si `kind=rollback`: la versión a la que revirtió |
+
+> El snapshot (`snapshot_of` en `data_standards/service.py`, puro) incluye — además de dominios, diccionario y naming — `udp[]` (defs UDP), `ddlRules[]` (las reglas COMPLETAS, con el `validationState` de ese momento) y `ddlConfig{}` (lookups + functions): el rollback restaura estándares y reglas DDL JUNTOS (doc 30 D1). Snapshots anteriores a la feature, sin `ddlRules`/`ddlConfig`, se leen como lista/config vacía.
 
 ### `parent_domains` — ParentDomainDoc
 | Campo | Tipo | Default | Notas |
@@ -292,6 +303,40 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | maxLength | int | 150 | límite de caracteres del nombre físico |
 
 Si falta un scope, el repo lo siembra con `DEFAULTS` (`separator:"", case:"upper", maxLength:150` para ambos).
+
+### `ddl_rules` — DdlRuleDoc  *(DDL Export Rules, doc 30)*
+Reglas que transforman el TEXTO SQL del Export DDL según valores de UDP; nunca tocan el modelo ni la data (los artefactos que generan viven solo en el `.sql` exportado). Sin versionado propio: entran al snapshot de `standards_versions` y mutan SOLO vía `POST /api/standards/apply` (`rulesUpsert`/`rulesDelete`); el router `/api/ddl-rules` es de lectura.
+| Campo | Tipo | Default | Notas |
+|---|---|---|---|
+| id | str | uuid4 | PK |
+| name | str | — | slug único entre reglas ACTIVAS (p. ej. `enmascarar_dac`); la unicidad la garantiza el apply de standards, NO un índice único |
+| description | str? | null | |
+| kind | str | "rule" | `rule` \| `generator` |
+| target | str? | "column" | `column` \| `table`; solo `kind='rule'` (en generators el repo lo fuerza a null) |
+| sourceArtifact | str? | null | artefacto de entrada; solo `kind='generator'` (en rules va null) |
+| condition | str | "" | DSL SQL-like en forma canónica con corchetes; vacía = la regla aplica siempre |
+| udpRefs | list[UdpRef] | [] | binding regla→UDP **por id**, derivado de `condition`/`action` al validar |
+| action | dict | {} | una de 4 formas: `expression` \| `tags` \| `tblproperties` \| `emit` |
+| appliesTo | list[str] | [] | artefactos destino; solo `kind='rule'` (en generators el repo lo vacía) |
+| priority | int | 100 | orden de ejecución `(priority DESC, name ASC)` |
+| enabled | bool | true | |
+| validationState | str | "valid" | `valid` \| `invalid` \| `stale`; las invalid/stale se guardan igual — el export las salta y las reporta |
+| validationReport | dict | {} | resultado del último ciclo de validación (los 5 checks) |
+| updatedBy | str? | null | |
+
+**Embebido `UdpRef`**: `{ udpId: str (ref udp_definitions.id), level: str ('table'|'column'|'canvas') }`. El binding por **id** hace que renombrar un UDP no rompa la regla (el nombre se resuelve al renderizar); borrar un UDP referenciado por reglas activas se bloquea (409 en el apply).
+
+El repositorio persiste además `flgactive`/`createdAt`/`updatedAt`/`deletedAt` fuera del modelo (se descartan al leer; patrón §0). Artefactos RAÍZ del export (siempre existen): `ddl.tabla_fisica` y `ddl.vista_negocio`; los generadores declaran los suyos vía `action.emit.artifact` — el catálogo es raíces + declarados, nunca un enum cerrado.
+
+### `ddl_ruleset_config` — DdlRulesetConfigDoc  *(singleton, `_id='global'`)*
+Config del ruleset: lookups (mapeo valor-de-UDP → valor emitido, con default) y funciones reusables. Hoy solo existe el scope `global`.
+| Campo | Tipo | Default | Notas |
+|---|---|---|---|
+| id | str | "global" | PK (`_id='global'`); 1 solo doc |
+| lookups | dict | {} | `{nombre: {fromUdpId (ref udp_definitions.id), fromLevel, values: {valorUdp: emitido o null}, default: str o null}}` |
+| functions | list | [] | `[{name, params: [str], body: str}]` |
+
+`ddlConfigPatch` del apply manda el set COMPLETO de lookups/functions (no deltas); si el doc no existe, la lectura devuelve el default vacío.
 
 ---
 
@@ -370,6 +415,8 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 | users | role | roles.id | key |
 | saved_reports | owner | users.id | username |
 | audit_log | actor | users.id | username |
+| ddl_rules | udpRefs[].udpId | udp_definitions.id | id |
+| ddl_ruleset_config | lookups.*.fromUdpId | udp_definitions.id | id |
 | *.udpValues (keys) | — | udp_definitions.id | id |
 
 ---
@@ -377,9 +424,10 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 ## 12. Catálogos de valores (enums del código)
 
 - **Cardinalidad de relación** (`relationships/models.py CARDINALITIES`): `one`, `many`, `one-only`, `zero-one`, `one-many`, `zero-many`. (`_ONEISH = {one, zero-one, one-only}`, `_MANYISH = {many, one-many, zero-many}`.)
-- **Permisos RBAC** (`auth/models.py PERMISSIONS`): `model.view`, `model.edit`, `review.decide`, `publish`, `export`, `standards.edit`, `admin.manage`. `ACCESS_LEVELS = (full, edit, read)`.
+- **Permisos RBAC** (`auth/models.py PERMISSIONS`): `model.view`, `model.edit`, `review.decide`, `publish`, `rollback`, `export`, `standards.edit`, `admin.manage`. `ACCESS_LEVELS = (full, edit, read)`.
 - **UDP** (`udp/models.py`): `UDP_TYPES = (string, number, boolean, date, list)`, `UDP_LEVELS = (table, column, canvas)`.
-- **Standards version kind** (`data_standards/models.py KINDS`): `glossary`, `udp`, `domain`, `naming`, `batch`, `baseline`, `rollback`.
+- **Standards version kind** (`data_standards/models.py KINDS`): `glossary`, `udp`, `domain`, `naming`, `ddl`, `batch`, `baseline`, `rollback`.
+- **Reglas DDL** (`ddl_rules/models.py`): `RULE_KINDS = (rule, generator)`, `RULE_TARGETS = (column, table)`, `VALIDATION_STATES = (valid, invalid, stale)`.
 - **Estado de changeset**: `draft`, `submitted`, `approved`, `rejected`.
 - **Estado de usuario**: `active`, `invited`, `disabled`.
 - **naming case**: `upper`, `lower`, `camel`. **naming scope**: `column`, `table`.
@@ -390,14 +438,16 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 
 Solo **descripción del estado actual** (no recomendaciones de destino):
 
-1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas), `layout` (map → `{x,y}`) y `drawings` (list) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`.
-2. **Referencias sin integridad referencial**: todo apunta por string (id o **nombre** — `schema` y `sources[].column` son por nombre). Nada lo valida Mongo.
+1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas), `layout` (map → `{x,y}`) y `drawings` (list) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`, `udpRefs`/`action` en `ddl_rules`, `lookups`/`functions` en `ddl_ruleset_config`.
+2. **Referencias sin integridad referencial**: todo apunta por string (id o **nombre** — `schema` y `sources[].column` son por nombre). Nada lo valida el almacén.
 3. **Soft-delete** por `flgactive:false` + `deletedAt` en casi todo; `audit_log` es append-only; `changesets`/`changeset_changes`/`standards_versions` no usan `flgactive`.
-4. **`_id` especiales**: `changeset_changes._id` es DETERMINISTA (`{csId}::{collection}::{entityId}`); `naming_config._id = scope`; `users._id = username`; `roles._id = key`; `audit_log._id` = ObjectId auto. El resto = `id` uuid4.
-5. **Alias `schema`**: en `canonical_tables` y `views` el atributo Python es `sql_schema` pero el campo en Mongo es `schema`.
-6. **Campos legacy/aditivos fuera del modelo**: por `extra="ignore"`, docs de Mongo pueden traer `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`, y (relaciones pre-v2) `sourceTableId`/`targetTableId`. **Están en Mongo aunque el modelo no los liste** — mirar el doc real al migrar.
+4. **`_id` especiales**: `changeset_changes._id` es DETERMINISTA (`{csId}::{collection}::{entityId}`); `naming_config._id = scope`; `users._id = username`; `roles._id = key`; `ddl_ruleset_config._id = 'global'`; `audit_log._id` = ObjectId auto. El resto = `id` uuid4.
+5. **Alias `schema`**: en `canonical_tables` y `views` el atributo Python es `sql_schema` pero el campo persistido es `schema`.
+6. **Campos legacy/aditivos fuera del modelo**: por `extra="ignore"`, los docs persistidos pueden traer `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`, y (relaciones pre-v2) `sourceTableId`/`targetTableId`. **Están en la BD aunque el modelo no los liste** — mirar el doc real al migrar.
 7. **Colecciones sin `*Doc`**: `saved_reports` (modelo en `reporting/query/reports.py`) y `audit_log` (shape en `core/audit.py`).
 8. **Ajenas a este backend**: `column_catalog` (servicio de agentes) — se preserva, no se administra acá.
+9. **Foto de la data (verificada 2026-07-26; doc 34 de plan-implementacion/)**: un solo proyecto-familia `Modelo de Datos DDV_FISICO` (XML CPYBCA + "Otros"; quedan ~13 XML de la familia por cargar al MISMO proyecto) — 48 `folders` · 275 `subject_areas` (canvases) · 388 `schemas` · 2,108 `canonical_tables` · 96,184 `canonical_columns` · 1,630 `relationships` · 1,932 `views` · 17 `udp_definitions` · 48 `parent_domains` · 120 `glossary_terms` (activos).
+10. **Versiones vigentes**: el Model tiene SOLO `v1 Base` — un changeset MARCADOR (status `approved`, `appliedAt` estampado, 0 docs en `changeset_changes`) creado por `scripts/mark_base_version.py`; sin él la web bloquea el módulo Model. Las cargas de migración Erwin escriben DIRECTO a las colecciones publicadas, sin crear changesets. Data Standards tiene `v1` (baseline) + `v2` "Base — DDL export rules"; los estándares vivos DERIVARON de esos snapshots — no hacer rollback de Standards hasta registrar una baseline nueva.
 
 ---
 

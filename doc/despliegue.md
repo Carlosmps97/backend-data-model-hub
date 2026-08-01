@@ -1,8 +1,10 @@
 # Despliegue y Base de Datos — `backend-data-model-hub`
 
-Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres; Cosmos DB queda como fallback conmutable — doc 28) y **cómo levantarlo en local**. No cubre CI/CD ni pipelines: solo topología de ejecución, configuración por entorno y consideraciones de base de datos.
+> **Actualización 2026-07-31.** El despliegue quedó homologado al workspace **CORPORATIVO** de Databricks (docs 35 y 36 de `plan-implementacion/`), **parametrizado 100% por GitHub Variables**: el mismo repo despliega en cualquier workspace sin editar un solo archivo. Novedades de esta actualización: topología de dos apps con proxy del front (§2), deploy por GitHub Variables (§2.3), bind de apps pre-creadas por cupo (§2.4), grant automatizado del SP del front (§2.5), one-time del workspace destino (§2.6), identidad local y private link (§4.1–§4.2), secuencia de carga de data con `mark_base_version` (§4.3) y checklist de cierre (§10). Historial: homologación previa 2026-07-19 (doc 28: Lakebase + `databricks.yml` sin `app.yaml`).
 
-Toda la información sale del código real: `app/core/config.py` (ÚNICA superficie de settings), `app/core/db/client.py`, `app/core/db/lakebase/`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más el manifiesto `databricks.yml` (bundle: `variables:` por entorno + `config:` de runtime — el viejo `app.yaml` ya no existe).
+Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **cómo se despliega** (Databricks Apps vía bundle + GitHub Actions parametrizado por GitHub Variables), **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres; Cosmos DB queda como fallback legacy conmutable — doc 28) y **cómo levantarlo en local**.
+
+Toda la información sale del código real: `app/core/config.py` (ÚNICA superficie de settings), `app/core/db/client.py`, `app/core/db/lakebase/`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más el manifiesto `databricks.yml` (bundle: `variables:` por entorno + `config:` de runtime — el viejo `app.yaml` ya no existe) y el workflow `.github/workflows/deploy-databricks.yml`.
 
 ---
 
@@ -32,18 +34,21 @@ Características del proceso que importan para el despliegue:
 
 ## 2. Topología: dónde corre
 
+En producción (workspace corporativo de Databricks) la plataforma son **dos Databricks Apps**: **`bknd-data-model-hub`** (este backend) y **`frnt-data-model-hub`** (la SPA servida por un server Node propio, `server.mjs`, en el repo del front). Desde el cierre del doc 36 (2026-07-31), **el navegador solo habla con el front**: `server.mjs` sirve `dist/` y **proxya `/api/*` al backend servidor-a-servidor** con un token OAuth **M2M** del service principal del front — un solo origen, sin CORS ni doble muro SSO en el navegador (cada Databricks App tiene su propio muro SSO por subdominio, y un `fetch()` cross-origin no puede ejecutar ese baile). El backend, por lo tanto, **no recibe tráfico directo de navegadores**: recibe requests servidor-a-servidor del server del front, autenticadas con Bearer del SP; el JWT propio de la plataforma viaja aparte en el header `X-Session-Token`.
+
 El mismo artefacto (`app.main:app` servido por Uvicorn) puede correr en dos destinos. La diferencia está en **cómo se inyectan las variables de entorno y los secretos**, y en **quién asigna el puerto**.
 
 ```mermaid
 flowchart TD
-    FE["Frontend Vite/Next.js<br/>navegador del usuario"] -->|"HTTPS /api/*"| BK
+    NAV["Navegador del usuario"] -->|"HTTPS · un solo origen<br/>SSO solo contra el front"| FR["frnt-data-model-hub<br/>server.mjs: sirve dist/ + proxy /api"]
+    FR -->|"servidor-a-servidor<br/>Bearer OAuth M2M del SP del front<br/>JWT propio en X-Session-Token"| BK
 
     subgraph RUNTIME["Runtime del backend"]
-      BK["FastAPI + Uvicorn<br/>app.main:app"]
+      BK["bknd-data-model-hub<br/>FastAPI + Uvicorn · app.main:app"]
     end
 
     BK -->|"asyncpg + token OAuth<br/>adaptador jsonb"| LB[("Databricks Lakebase<br/>Postgres 17 · schema dmh")]
-    BK -.->|"fallback DB_BACKEND=cosmos"| COSMOS[("Azure Cosmos DB<br/>API de MongoDB<br/>db_modeler")]
+    BK -.->|"fallback legacy DB_BACKEND=cosmos"| COSMOS[("Azure Cosmos DB<br/>API de MongoDB<br/>db_modeler")]
 
     subgraph OPCIONES["Destinos de ejecucion"]
       A["Azure App Service<br/>startup: uvicorn"]
@@ -66,10 +71,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Consideraciones específicas de App Service:
 
-- **Puerto:** App Service enruta al puerto que expone el contenedor. Usá `--port 8000` (o el que definas) y alineá `WEBSITES_PORT=8000` en las Application Settings si el proxy no lo detecta solo.
+- **Puerto:** App Service enruta al puerto que expone el contenedor. Usa `--port 8000` (o el que se defina) y alinea `WEBSITES_PORT=8000` en las Application Settings si el proxy no lo detecta solo.
 - **Variables de entorno = Application Settings.** Se cargan como variables de proceso; `config.py` las lee con `os.getenv`. No hace falta `.env` en el servidor.
-- **Health probe:** apuntá el health check a `GET /api/health` (devuelve `status: ok | degraded` y `db_connected`).
-- **HTTPS y HSTS:** App Service termina TLS en el borde y reenvía HTTP interno con `X-Forwarded-Proto: https`. El middleware de `app/main.py` detecta ese header y agrega `Strict-Transport-Security`; no necesitás tocar nada.
+- **Health probe:** apunta el health check a `GET /api/health` (devuelve `status: ok | degraded` y `db_connected`).
+- **HTTPS y HSTS:** App Service termina TLS en el borde y reenvía HTTP interno con `X-Forwarded-Proto: https`. El middleware de `app/main.py` detecta ese header y agrega `Strict-Transport-Security`; no hay que tocar nada.
 
 ### 2.2 Databricks Apps (destino actual)
 
@@ -77,22 +82,29 @@ Es el destino que ya está configurado en el repo. Desde la homologación
 2026-07-19 **todo vive en `databricks.yml`** (el viejo `app.yaml` no existe):
 la sección `variables:` concentra los parámetros por entorno y el bloque
 `config:` del recurso app define comando y env de runtime (requiere CLI
-≥ 0.283; el workflow usa `setup-cli@main` = último).
+≥ 0.283; el workflow usa `setup-cli@main` = último). Desde 2026-07-27 el
+manifiesto está pensado para desplegar en **cualquier workspace sin editar
+el repo**: cada variable puede venir de una GitHub Variable (§2.3) y el
+workspace destino sale de `DATABRICKS_HOST`.
 
 ```yaml
-# databricks.yml (extracto real)
-variables:
-  lakebase_endpoint: { default: projects/dmh-proj/branches/production/endpoints/primary }
-  lakebase_pgschema: { default: dmh }
-  cors_origin_regex: { default: https://frnt-data-model-hub-.*\.databricksapps\.com }
-  cosmos_database:   { default: db_modeler }
-  secret_scope:      { default: kv-scope-datacraft }
-  # …
+# databricks.yml (extracto real, 2026-07-31)
+bundle:
+  name: bknd-data-model-hub
+
+variables:                        # cada una alimentable por GitHub Variables (BUNDLE_VAR_*)
+  lakebase_endpoint:  { default: projects/dmh-proj/branches/production/endpoints/primary }
+  lakebase_pgschema:  { default: dmh }
+  cors_origin_regex:  { default: https://frnt-data-model-hub-.*\.databricksapps\.com }
+  secret_scope:       { default: kv-scope-datacraft }
+  session_secret_key: { default: session-secret-key }
+  app_admin_user:     { default: ${workspace.current_user.userName} }   # ver §2.4
 
 resources:
   apps:
-    backend:
-      name: bknd-data-model-hub
+    backend:                      # resource key (lo usa `databricks bundle run backend`)
+      name: bknd-data-model-hub   # nombre real de la app en el workspace
+      source_code_path: .
       config:
         command: ['uvicorn', 'app.main:app']
         env:
@@ -101,53 +113,157 @@ resources:
           - { name: LAKEBASE_ENDPOINT, value: ${var.lakebase_endpoint} }
           - { name: LAKEBASE_PGSCHEMA, value: ${var.lakebase_pgschema} }
           - { name: CORS_ORIGIN_REGEX, value: ${var.cors_origin_regex} }
-          - { name: COSMOS_DATABASE,   value: ${var.cosmos_database} }
-          - { name: COSMOS_CONNECTION_STRING, value_from: cosmos_secret }
           - { name: REQUIRE_AUTH,      value: 'true' }
           - { name: SECRET_KEY,        value_from: session_secret }
       resources:
-        - name: cosmos_secret
-          secret: { scope: ${var.secret_scope}, key: conn-str-cosmos, permission: READ }
         - name: session_secret
-          secret: { scope: ${var.secret_scope}, key: session-secret-key, permission: READ }
+          secret: { scope: ${var.secret_scope}, key: ${var.session_secret_key}, permission: READ }
+      permissions:
+        - { level: CAN_MANAGE, user_name: ${var.app_admin_user} }   # el humano dueño
+        - { level: CAN_USE,    group_name: users }                  # todo el workspace puede abrir la app
+
+targets:
+  prod:
+    mode: production
+    default: true
+    workspace:
+      # SIN `host:` a propósito (2026-07-27) — ver el punto clave de abajo.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 ```
 
 Puntos clave:
 
 - **Host y puerto los pone Databricks.** El runtime inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT`, por eso `command` no pasa `--host`/`--port`.
-- **La BD no necesita secretos.** El backend acuña tokens OAuth de Lakebase con el **service principal de la app** (OAuth M2M inyectado); `PGUSER` cae al `DATABRICKS_CLIENT_ID` y `PGHOST` se resuelve solo desde `LAKEBASE_ENDPOINT`. ONE-TIME por workspace: rol PG del SP + GRANTs (doc 28 §11.3).
-- **Secretos por `value_from`.** `COSMOS_CONNECTION_STRING` (fallback) y `SECRET_KEY` no van en texto plano: se resuelven desde recursos secretos (scope `kv-scope-datacraft`, respaldado por Azure Key Vault) con permiso `READ` para el service principal.
+- **SIN `workspace.host` en el bundle — a propósito.** El workspace destino sale de la variable de entorno `DATABRICKS_HOST` (la GitHub Variable que ya usa el CLI). Un `host:` escrito en el bundle **GANA sobre esa variable** (verificado): hardcodearlo obligaba a editar el repo por cada ambiente y, peor, podía desplegar **callado al workspace equivocado** si alguien olvidaba cambiarlo.
+- **La BD no necesita secretos.** El backend acuña tokens OAuth de Lakebase con el **service principal de la app** (OAuth M2M inyectado); `PGUSER` cae al `DATABRICKS_CLIENT_ID` y `PGHOST` se resuelve solo desde `LAKEBASE_ENDPOINT`. ONE-TIME por workspace: rol PG del SP (§2.6).
+- **Un solo secreto, por `value_from`.** `SECRET_KEY` no va en texto plano: se resuelve desde el recurso secreto `session_secret` (scope `kv-scope-datacraft`, respaldado por Azure Key Vault) con permiso `READ` para el service principal. Cosmos quedó **FUERA del bundle** (2026-07-19, 3ª pasada): el seam `DB_BACKEND=cosmos` vive solo en el código como rollback dormido.
+- **`permissions:` es declarativo y AUTORITATIVO.** Se re-aplica en cada deploy; los grants hechos a mano en la UI se pierden (§2.4 y §2.5).
 - **Multi-réplica:** si la app escala a más de una instancia, el rate limiting en memoria deja de ser global (sección 6.2).
+
+### 2.3 Deploy parametrizado por GitHub Variables (cero edición por ambiente)
+
+El workflow `.github/workflows/deploy-databricks.yml` (push a `main` o `workflow_dispatch`) despliega el bundle leyendo **toda** la configuración por ambiente de GitHub (`Settings → Secrets and variables → Actions`). Migrar la plataforma a otro workspace = cambiar GitHub Variables, no archivos (runbook completo: doc 35 de `plan-implementacion/`).
+
+| Repo | Tipo | Nombre en GitHub | Variable del bundle | Si no se define |
+|---|---|---|---|---|
+| ambos | Variable | `DATABRICKS_HOST` | (la usa el CLI) | el deploy **falla** |
+| ambos | Secret | `DATABRICKS_TOKEN` | (la usa el CLI) | el deploy **falla** |
+| ambos | Variable | `BUNDLE_TARGET` | (target del bundle) | `prod` |
+| ambos | Variable | `APP_ADMIN_USER` | `app_admin_user` | solo el SP que despliega queda con CAN_MANAGE |
+| front | Variable | `BACKEND_API_URL` | `backend_api_url` | default del repo del front (workspace original) |
+| backend | Variable | `LAKEBASE_ENDPOINT` | `lakebase_endpoint` | `projects/dmh-proj/branches/production/endpoints/primary` |
+| backend | Variable | `LAKEBASE_PGSCHEMA` | `lakebase_pgschema` | `dmh` |
+| backend | Variable | `CORS_ORIGIN_REGEX` | `cors_origin_regex` | regex de `frnt-data-model-hub-*.databricksapps.com` |
+| backend | Variable | `SECRET_SCOPE` | `secret_scope` | `kv-scope-datacraft` |
+| backend | Variable | `SESSION_SECRET_KEY` | `session_secret_key` | `session-secret-key` |
+
+La mecánica: el workflow exporta cada GitHub Variable como **`BUNDLE_VAR_<variable del bundle>`** — pero **SOLO si trae valor**. Una variable exportada vacía **PISARÍA el default del `databricks.yml`** (verificado); por eso "no definida en GitHub" = "usa el default del repo":
+
+```bash
+# .github/workflows/deploy-databricks.yml (extracto real)
+set_var() {   # $1 = variable del bundle · $2 = valor de GitHub
+  if [ -z "$2" ]; then echo "· $1 → default del databricks.yml"; return; fi
+  echo "BUNDLE_VAR_$1=$2" >> "$GITHUB_ENV"
+}
+set_var lakebase_endpoint   "$LAKEBASE_ENDPOINT"
+set_var lakebase_pgschema   "$LAKEBASE_PGSCHEMA"
+set_var cors_origin_regex   "$CORS_ORIGIN_REGEX"
+set_var secret_scope        "$SECRET_SCOPE"
+set_var session_secret_key  "$SESSION_SECRET_KEY"
+set_var app_admin_user      "$APP_ADMIN_USER"
+```
+
+Dos notas operativas:
+
+- **Orden de deploy en un workspace nuevo:** primero el backend → copiar la URL de la app → cargarla en la GitHub Variable `BACKEND_API_URL` del repo del front → desplegar el front.
+- **Nada de Lakebase viaja como secreto a GitHub:** el password de Postgres es un token OAuth de ~1 hora que la app acuña sola con su service principal.
+
+### 2.4 Apps pre-creadas (cupo) y `bundle deployment bind`
+
+En workspaces corporativos hay **cupo de Databricks Apps** (el límite se llena y ya no deja crear más), así que las apps `bknd-data-model-hub` y `frnt-data-model-hub` se crean **a mano en la UI** para reservar el slot antes del primer deploy. El estado Terraform del bundle no las conoce → `bundle deploy` planifica un create → la API responde **`409 ALREADY_EXISTS`**.
+
+La solución vive en los dos workflows como paso **"Bind app pre-existente"**, entre `bundle validate` y `bundle deploy`:
+
+```bash
+databricks bundle deployment bind <resource-key> <app-name> --target prod --auto-approve
+# backend:  resource-key = backend   · app-name = bknd-data-model-hub
+# frontend: resource-key = frontend  · app-name = frnt-data-model-hub
+```
+
+`bind` importa la app al estado del bundle y desde ahí el deploy la ACTUALIZA en su sitio. El paso es **idempotente**: si la app no existe, no hace nada (el deploy la creará); si ya estaba bindeada, avisa y sigue. Condiciones:
+
+- El nombre creado a mano debe ser **IDÉNTICO** al del bundle (si difiere, Terraform destruiría y recrearía).
+- La identidad del `DATABRICKS_TOKEN` necesita **CAN_MANAGE** sobre esa app (si la creó otra persona, otorgarlo en la app → Permissions; un `403 PERMISSION_DENIED` en el bind significa exactamente eso).
+- Ojo: `bundle destroy` sobre un recurso bindeado **SÍ borra la app** del workspace (por eso no se usa).
+
+**Control humano de la app.** Con `mode: production` y deploy por service principal de CI, el CLI da CAN_MANAGE **solo a ese SP** — el humano que creó la app pierde hasta el botón de Stop. La variable **`app_admin_user`** (GitHub Variable `APP_ADMIN_USER`; default = la identidad que despliega) lo repara: el bloque `permissions:` del bundle le devuelve CAN_MANAGE en cada deploy. Ese bloque es **AUTORITATIVO**: el deploy deja la ACL exactamente como la declara `databricks.yml`, o sea que cualquier grant manual hecho en la UI **se pierde en el siguiente deploy** (por eso el grant del SP del front también está automatizado, §2.5). Niveles válidos para apps: exactamente **`CAN_MANAGE`** y **`CAN_USE`**.
+
+### 2.5 Grant automatizado en CI: SP del front → `CAN_USE` sobre la app backend
+
+El proxy `/api` del server del front (§2) necesita que el **service principal del front** tenga **`CAN_USE` sobre la app backend** — sin eso, el muro SSO del backend rechaza sus llamadas M2M. Un grant manual NO sirve: el `permissions:` del bundle resetea la ACL en cada deploy (§2.4). Por eso el grant vive en **los workflows de AMBOS repos** (doc 36 §6.3): tras cada `bundle deploy`, el workflow
+
+1. resuelve el SP real de la app del front en ESE workspace (`databricks apps get <front> → service_principal_client_id`), y
+2. lo re-aplica sobre la app backend con `databricks api patch /api/2.0/permissions/apps/<backend>` (PATCH **agrega sin pisar** el resto de la ACL; idempotente).
+
+```bash
+# extracto real del workflow (backend)
+FRONT_SP=$(databricks apps get "$FRONTEND_APP_NAME" --output json | jq -r '.service_principal_client_id // empty')
+databricks api patch "/api/2.0/permissions/apps/$BACKEND_APP" --json "{
+  \"access_control_list\": [
+    {\"service_principal_name\": \"$FRONT_SP\", \"permission_level\": \"CAN_USE\"}
+  ]}"
+```
+
+GitHub Variables opcionales **`FRONTEND_APP_NAME`** (en este repo) y **`BACKEND_APP_NAME`** (en el repo del front) por si los nombres difieren de la convención (`frnt-data-model-hub` / `bknd-data-model-hub`). Si la app del front todavía no existe (primer deploy del backend), el paso se salta: el workflow del front hace el mismo grant al final del suyo. Resultado: **cero pasos manuales por workspace** para que el proxy funcione.
+
+### 2.6 One-time del workspace destino
+
+Lo ÚNICO que se prepara a mano, una vez, en cada workspace nuevo (convención de nombres = los defaults del bundle):
+
+1. **Proyecto Lakebase** `dmh-proj` · branch `production` · endpoint `primary`. La base `databricks_postgres` y el schema `dmh` **no se crean a mano**: el backend los asegura lazy al arrancar (`ensure_base`).
+2. **Scope de secretos** `kv-scope-datacraft` con la key `session-secret-key`. Sin este secreto el `bundle deploy` del backend **FALLA** (el recurso `session_secret` no resuelve). Generar el valor con:
+
+   ```bash
+   openssl rand -base64 48
+   ```
+
+3. **Apps pre-creadas** `bknd-data-model-hub` y `frnt-data-model-hub` si el workspace tiene cupo limitado (§2.4).
+4. **Rol PG del service principal del BACKEND**: la opción usada es `databricks_superuser`; la alternativa granular son GRANTs sobre el schema `dmh` (doc 28 §11.3). **El SP del FRONT no necesita rol**: ni la SPA ni el proxy tocan jamás la base.
+
+Todo lo demás (variables, permisos de apps, grant del proxy) lo re-aplica el CI en cada deploy.
 
 ---
 
-## 3. Variables de entorno (completo, homologado 2026-07-19)
+## 3. Variables de entorno (completo, homologado 2026-07-31)
 
 **Todas se leen en `app/core/config.py`** (única superficie de settings; las
-únicas excepciones son `RATE_LIMIT_ENABLED` en `ratelimit.py` y el
-`DATABRICKS_CLIENT_ID` que inyecta Apps). Ningún default contiene valores de
-un workspace: lo específico del entorno entra por `.env` (dev) o por
-`databricks.yml → variables:` (Apps).
+únicas excepciones son `RATE_LIMIT_ENABLED` en `ratelimit.py`, `ARRANGE_SCRATCH`
+en `arrange_all.py` y el `DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET` que
+inyecta Apps). Ningún default contiene valores de un workspace: lo específico
+del entorno entra por `.env` (dev) o por `databricks.yml → variables:` (Apps),
+alimentadas a su vez por GitHub Variables (§2.3).
 
 | Variable | Default | Para qué sirve |
 |---|---|---|
-| `DB_BACKEND` | `cosmos` | `lakebase` (BD actual) o `cosmos` (fallback/rollback). |
+| `DB_BACKEND` | `lakebase` | `lakebase` (BD actual) o `cosmos` (fallback legacy/rollback). |
 | `DATABRICKS_HOST` | `""` | URL del workspace. Dev: `.env`. Apps: **la inyecta el runtime** (no se setea). |
-| `DATABRICKS_TOKEN` | `""` | PAT para acuñar tokens de BD en dev. Apps: **no va** (el SP de la app autentica solo). |
+| `DATABRICKS_TOKEN` | `""` | PAT para acuñar tokens de BD en dev. Apps: **no va** (el SP de la app autentica solo). Dev sin PAT: OAuth U2M (§4.1). |
 | `LAKEBASE_ENDPOINT` | `""` | Ruta lógica `projects/<p>/branches/<b>/endpoints/<e>`. **Obligatoria con lakebase.** Igual en todo workspace que respete la convención de nombres. |
 | `PGHOST` | `""` | Host físico `ep-…`. **Opcional**: vacío → se resuelve solo desde `LAKEBASE_ENDPOINT` (SDK `get_endpoint`). |
 | `PGPORT` | `5432` | Puerto Postgres. |
-| `PGUSER` | `""` → `DATABRICKS_CLIENT_ID` | Rol PG = identidad que acuña el token. Dev: tu correo del workspace. Apps: client ID del SP (automático). |
+| `PGUSER` | `""` → fallback `DATABRICKS_CLIENT_ID` | Rol PG = identidad que acuña el token. Dev: el correo del workspace. Apps: client ID del SP (automático, por el fallback). |
+| `PGPASSWORD` | `""` | **Escape hatch**: password fijo para scripts (p. ej. token pegado de la consola Lakebase, §4.1); seteado, se evita el SDK. |
 | `PGDATABASE` | `databricks_postgres` | Base Postgres del proyecto Lakebase. |
 | `PGSSLMODE` | `require` | TLS obligatorio. |
+| `PGDIRECTTLS` | `""` (auto) | `true` fuerza TLS **directo** (ALPN `postgresql`, para front-ends "service direct"); `false` fuerza el handshake clásico; vacío = auto. |
 | `LAKEBASE_PGSCHEMA` | `dmh` | Schema PG de las "colecciones" (tablas id + doc jsonb). |
-| `COSMOS_CONNECTION_STRING` | `""` | Solo con `DB_BACKEND=cosmos`. En Apps llega del secreto `cosmos_secret`. |
-| `COSMOS_DATABASE` | `db_modeler` | Base Mongo del fallback. |
+| `COSMOS_CONNECTION_STRING` | `""` | Solo con `DB_BACKEND=cosmos` (legacy). Ya **no viaja en el bundle**: rollback = seam en código + configurarla a mano. |
+| `COSMOS_DATABASE` | `db_modeler` | Base Mongo del fallback legacy. |
 | `SECRET_KEY` | default inseguro de dev | Clave HMAC del token de sesión (JWT HS256). **En prod obligatoria** (secreto `session_secret`). |
 | `REQUIRE_AUTH` | `false` | `true` = postura de producción (401 sin token, docs ocultas, rate limit on). |
 | `ACCESS_TOKEN_TTL_MIN` | `720` (12 h) | Vida del token de acceso, en minutos. |
 | `AUTH_MODE` / `LOCAL_DEV_*` | `local` / — | Seam de identidad heredado (compat); el carril real es el token firmado. |
-| `CORS_ORIGINS` | localhost:3000 (solo si NO hay regex) | Allowlist exacta de orígenes, separados por coma. |
+| `CORS_ORIGINS` | `localhost:3000` + `127.0.0.1:3000` (solo si NO hay regex) | Allowlist exacta de orígenes, separados por coma. |
 | `CORS_ORIGIN_REGEX` | `""` | Regex de orígenes (p. ej. `https://frnt-data-model-hub-.*\.databricksapps\.com`): el mismo bundle sirve en cualquier workspace. Si está seteada, el default localhost NO aplica. |
 | `ALLOWED_HOSTS` | `""` (desactivado) | Allowlist de `Host` (`TrustedHostMiddleware`); definir el dominio real en prod para activarlo. |
 | `RATE_LIMIT_ENABLED` | `false` | Fuerza el rate limiting; también se enciende solo con `REQUIRE_AUTH=true`. |
@@ -158,19 +274,19 @@ un workspace: lo específico del entorno entra por `.env` (dev) o por
 
 - **`REQUIRE_AUTH=true` es el interruptor maestro de producción.** Con él: (a) sin token → `401`; (b) se ocultan `docs_url`, `redoc_url` y `openapi_url` (se pasan a `None` en `FastAPI(...)`); (c) el rate limiting queda `ENABLED` aunque no se ponga `RATE_LIMIT_ENABLED`; (d) `assert_secure_config()` impide arrancar si `SECRET_KEY` sigue siendo el default inseguro.
 - **`ALLOWED_HOSTS` es opt-in.** Si queda vacío no se monta `TrustedHostMiddleware`. En prod conviene fijarlo al dominio público para rechazar `Host` falsos.
-- **CORS:** `CORS_ORIGINS` (lista exacta) y/o `CORS_ORIGIN_REGEX` (patrón). La configuración usa `allow_credentials=False` (auth token-first, Bearer, sin cookies) y métodos/headers acotados (`Authorization`, `Content-Type`, `X-Requested-With`).
+- **CORS:** `CORS_ORIGINS` (lista exacta) y/o `CORS_ORIGIN_REGEX` (patrón). La configuración usa `allow_credentials=True` y métodos/headers acotados (`Authorization`, `Content-Type`, `X-Requested-With`, `X-Dev-User`, `X-Session-Token`; `max_age=600`). En la topología corporativa (§2) el navegador ya no habla directo con el backend — el tráfico entra por el proxy del front, mismo origen — así que CORS solo interviene para accesos directos al subdominio del backend o en desarrollo.
 
 ### 3.2 Perfiles por entorno (referencia)
 
 | Variable | Local (dev, `.env`) | Databricks Apps (`databricks.yml`) |
 |---|---|---|
 | `DB_BACKEND` | `lakebase` | `lakebase` (rollback: `cosmos` + redeploy) |
-| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | del workspace + PAT | — (SP de la app, inyectado) |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | del workspace + PAT (u OAuth U2M sin token, §4.1) | — (SP de la app, inyectado) |
 | `LAKEBASE_ENDPOINT` | ruta lógica | `${var.lakebase_endpoint}` |
 | `PGHOST` | opcional (seteado = arranque más rápido) | — (auto-resuelto) |
 | `PGUSER` | tu correo del workspace | — (client ID del SP) |
-| `COSMOS_CONNECTION_STRING` | comentada (fallback) | secreto `cosmos_secret` (KV) |
-| `SECRET_KEY` | (default, con warning) | secreto `session_secret` (KV, `openssl rand -hex 32`) |
+| `COSMOS_CONNECTION_STRING` | comentada (fallback legacy) | — (fuera del bundle; rollback = seam en código) |
+| `SECRET_KEY` | (default, con warning) | secreto `session_secret` (KV, `openssl rand -base64 48`) |
 | `REQUIRE_AUTH` | `false` | `true` |
 | `CORS_ORIGINS` / `CORS_ORIGIN_REGEX` | default localhost / — | — / `${var.cors_origin_regex}` |
 | `LOG_FORMAT` / `LOG_LEVEL` | `pretty` / `INFO` | `json` / `INFO` |
@@ -179,7 +295,7 @@ un workspace: lo específico del entorno entra por `.env` (dev) o por
 
 ## 4. Levantar en local (Uvicorn)
 
-Requisitos: Python 3.12 (en Databricks Apps corre 3.11; ambos funcionan), acceso al workspace de Databricks (PAT) con el proyecto Lakebase creado.
+Requisitos: Python 3.12 (en Databricks Apps corre 3.11; ambos funcionan), acceso al workspace de Databricks (PAT u OAuth U2M — §4.1) con el proyecto Lakebase creado.
 
 ```bash
 # 1) Configuración: copiar la plantilla y completar workspace + PAT + identidad
@@ -230,6 +346,50 @@ Si activas `REQUIRE_AUTH=true` en local para probar la postura de producción, u
 curl -i http://localhost:8000/api/projects
 # → HTTP/1.1 401 Unauthorized   (sin Authorization: Bearer <token>)
 ```
+
+### 4.1 Identidad contra el workspace: tres formas (doc 35 §4.0)
+
+Para acuñar el token OAuth de Lakebase desde la laptop hay tres caminos; el backend y TODOS los scripts usan la misma cadena de resolución (`app/core/db/lakebase/credentials.py`):
+
+1. **PAT** — `DATABRICKS_TOKEN` en `.env` (el camino clásico documentado arriba).
+2. **OAuth U2M** — `databricks auth login --host <workspace>` deja un perfil en `~/.databrickscfg`; habilitado 2026-07-27: sin PAT y sin `DATABRICKS_CLIENT_ID`, el SDK resuelve la identidad por su cadena por defecto (incluye el perfil U2M). Útil en workspaces corporativos donde no se emiten PATs.
+3. **Token de la consola Lakebase** (~1 hora de vida) — copiarlo de la UI del endpoint (o generarlo con `databricks postgres generate-database-credential`) y pegarlo en `PGPASSWORD`: con esa variable seteada el backend/los scripts NO tocan el SDK. Sirve para corridas puntuales; caduca rápido.
+
+Sonda de conectividad antes de culpar a la configuración — dos niveles, porque el TCP puede abrir y aun así el handshake fallar (§4.2):
+
+```bash
+# 1) ¿abre el TCP al endpoint? (host físico visible en la consola Lakebase)
+nc -vz ep-<...>.database.<region>.azuredatabricks.net 5432
+
+# 2) ¿completa el handshake Postgres/TLS? (psql 17; password = token de la consola)
+psql "host=ep-<...>.database.<region>.azuredatabricks.net port=5432 \
+      dbname=databricks_postgres user=<correo-del-workspace> sslmode=require" -c "select 1"
+```
+
+### 4.2 Workspaces con private link: Lakebase inalcanzable desde la laptop
+
+En workspaces con **Service Direct private link** (el caso del workspace corporativo) el endpoint Lakebase puede ser inalcanzable desde fuera: el front-end **acepta el TCP pero resetea el handshake Postgres/TLS** (verificado 2026-07-28) — la sonda 1 de arriba pasa y la 2 falla. Ni `PGDIRECTTLS` ni el modo clásico lo salvan: el tráfico de datos simplemente no está permitido desde la red pública.
+
+La salida es correr la carga de data **DESDE un cluster del mismo workspace** con el notebook `scripts/databricks/carga_erwin_notebook.py`:
+
+- No reimplementa nada: invoca los **MISMOS scripts** del kit (`scripts/erwin_migration/`, seeds, `mark_base_version`) vía `subprocess`.
+- Cluster **classic** con access mode **Dedicated** (los XML en ADLS `abfss://` se copian una vez al disco del driver; los otros access modes lo impiden).
+- La credencial sale del `WorkspaceClient()` dentro del notebook (identidad del usuario del cluster); la primera celda es una sonda TCP al 5432.
+- `arrange_all` corre solo si el cluster tiene Node disponible; si no, el layout queda en grilla y el botón "Autoarrange" de la web reordena canvas por canvas.
+
+### 4.3 Carga de data en un workspace nuevo (resumen)
+
+La guía completa del kit es [migracion-erwin.md](migracion-erwin.md); esta es la secuencia (camino A, recomendado: re-migrar los XML de Erwin). Todo se corre desde la raíz del repo con el `.venv` activo y el `.env` apuntando al workspace NUEVO (o desde el notebook de §4.2):
+
+1. `scripts/create_admin.py` — usuario `admin/admin` + los 4 roles (idempotente).
+2. Por CADA XML de la familia, en orden: `quality` (gate 1, el archivo en frío) → `crosscheck` (gate 2, contra la BD y entre archivos) → `migrate --project "Modelo de Datos DDV_FISICO"` en dry-run → `--apply`.
+3. Al final de TODOS los archivos: `arrange_all.py --project "Modelo de Datos DDV_FISICO"` (requiere node + elkjs del repo front) → `audit_data_consistency.py` (esperado: 0 fixables).
+4. `seed_ddl_export_rules.py` (dry-run → `--apply`) — ruleset base del DDL Export; desde 2026-07-30 auto-crea las dos defs UDP que el kit omite por `usedBy=0` ("Tipo de Vista" y "Frecuencia Vacuum").
+5. **`mark_base_version.py`** (dry-run → `--apply`) — **NUEVO 2026-07-29 y OBLIGATORIO al cierre**: la migración escribe directo a publicado sin crear versiones, y **sin una versión aplicada la web bloquea el módulo Model** ("Open model" exige producción publicada). El script crea el changeset marcador `v1` (status `approved` + `appliedAt`, 0 cambios), la baseline de Data Standards si el stream está vacío y el permiso `rollback` en los roles. Idempotente. Con una familia multi-archivo: todos los `migrate` primero, el marcador **UNA sola vez al final**.
+
+Qué NO se lleva el camino A: usuarios/contraseñas, `audit_log`, historial de versiones y movimientos manuales de nodos.
+
+**Camino B (alternativo):** `pg_dump`/`pg_restore` del schema `dmh` completo (cliente PostgreSQL 17; password = token vía `databricks postgres generate-database-credential`). Se lleva TODO, incluidos usuarios, auditoría e historial de versiones.
 
 ---
 
@@ -294,6 +454,8 @@ Estos timeouts son deliberados: sin ellos, un socket colgado bloquearía el requ
 
 El limitador de `slowapi` guarda estado **en memoria, por proceso**. Con una sola instancia funciona bien. Si el backend escala a varias réplicas (por ejemplo, varias instancias en Databricks Apps o App Service), cada réplica cuenta por separado y el límite efectivo se multiplica por el número de réplicas. Para un límite global real habría que mover el estado a Redis (`Limiter(storage_uri="redis://...")`). Esto no afecta la base de datos, pero es una consideración de topología a tener presente al escalar.
 
+Desde 2026-07-31 la **key** del limitador es la **PRIMERA IP de `X-Forwarded-For`** (fallback: la IP del peer). Sin eso, detrás de la cadena de proxies de la topología corporativa (§2) todas las requests llegaban con la IP del proxy y el límite de login de `5/minute` era de hecho **global para todos los usuarios**; con la key por XFF vuelve a ser por usuario final.
+
 ### 6.3 Anatomía de la cadena de conexión
 
 La cadena de ejemplo (`.env.example`) apunta a un cluster de **Cosmos DB for MongoDB (vCore)**:
@@ -320,7 +482,7 @@ mongodb+srv://<user>:<password>@<cluster>.global.mongocluster.cosmos.azure.com/
 En el modelo RU (Request Units), cada operación consume RU y el throughput aprovisionado marca el techo antes de recibir `429 (throttling)`. Consideraciones prácticas para este backend:
 
 - **Las lecturas ordenadas y las agregaciones del reporting son las más caras.** El reporting hace `$group`/proyección y recorridos por keyset sobre `canonical_columns` (hasta cientos de miles de documentos). Sin los índices correctos, esas consultas o fallan (sin índice para `.sort()`) o consumen muchas RU.
-- **Aprovisioná pensando en el pico de reporting**, no en el promedio. La prueba de estrés interna (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
+- **Aprovisionar pensando en el pico de reporting**, no en el promedio. La prueba de estrés interna (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
 - **`retrywrites=false`** implica que la app no reintenta escrituras automáticamente; si hay throttling en escrituras, se propaga el error. Dimensiona RU para absorber los picos de import/apply de changesets.
 
 ### 6.5 Índices que deben existir (y por qué)
@@ -374,7 +536,7 @@ flowchart TD
     IDX -->|No| ERR["Cosmos RU rechaza el sort<br/>error 500 en toda la busqueda"]
 ```
 
-Regla operativa: **antes de agregar cualquier `.sort()` nuevo en el código, agregá su índice en `indexes.py`**, o esa ruta empezará a devolver 500 en producción.
+Regla operativa: **antes de agregar cualquier `.sort()` nuevo en el código, agrega su índice en `indexes.py`**, o esa ruta empezará a devolver 500 en producción.
 
 El índice **wildcard** `udpValues.$**` es un caso especial: los UDP son etiquetas key-value que el usuario crea en runtime. Un índice por clave requeriría DDL cada vez que alguien crea un UDP nuevo; el wildcard cubre todas las claves presentes y futuras del mapa embebido, de modo que filtrar por cualquier UDP hace *seek* sin cambios de esquema.
 
@@ -382,7 +544,7 @@ El índice **wildcard** `udpValues.$**` es un caso especial: los UDP son etiquet
 
 ## 7. Modelo lógico de datos (colecciones)
 
-Las colecciones del backend viven todas en la misma base (`db_modeler`), en la misma cuenta Cosmos que el servicio de agentes (que administra `column_catalog`). No hay joins a nivel de motor: las relaciones son por identificadores y las resuelve la aplicación.
+Las colecciones del backend viven todas en la misma base — en Lakebase (la BD actual): una tabla `(id, doc jsonb)` por colección en el schema `dmh` de `databricks_postgres`; en el fallback legacy Cosmos: la base `db_modeler`, en la misma cuenta que el servicio de agentes (que administra `column_catalog`). No hay joins a nivel de motor: las relaciones son por identificadores y las resuelve la aplicación.
 
 ```mermaid
 flowchart TD
@@ -443,10 +605,10 @@ def assert_secure_config() -> None:
 - Si `REQUIRE_AUTH=true` y `SECRET_KEY` sigue siendo el default público (`dev-only-insecure-change-me-in-prod`), la app **no arranca**: con esa clave conocida cualquiera podría forjar un token de sesión de admin.
 - Si estás en dev (`REQUIRE_AUTH=false`) con el default, arranca pero emite un warning fuerte para que no te olvides de cambiarlo antes de desplegar.
 
-Por eso en `databricks.yml` el `SECRET_KEY` viene de un secreto (`session_secret` → Key Vault). Genera un valor fuerte, por ejemplo:
+Por eso en `databricks.yml` el `SECRET_KEY` viene de un secreto (`session_secret` → scope `kv-scope-datacraft`, key `session-secret-key`; creado one-time por workspace, §2.6). Genera un valor fuerte, por ejemplo:
 
 ```bash
-openssl rand -hex 32
+openssl rand -base64 48
 ```
 
 Además, en postura de producción la app oculta la superficie de fingerprinting: `docs_url`, `redoc_url` y `openapi_url` se ponen en `None` cuando `REQUIRE_AUTH=true`.
@@ -472,18 +634,25 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 ---
 
-## 10. Checklist de despliegue (sin CI/CD)
+## 10. Checklist de despliegue
 
-Antes de exponer el backend en cualquiera de los dos destinos:
+**Configuración, antes de exponer el backend** (en Databricks Apps los puntos 2–5 ya los trae el bundle; verificarlos aplica sobre todo al destino Azure App Service o a un deploy manual):
 
-1. **Lakebase:** `LAKEBASE_ENDPOINT` correcto y el rol PG de la identidad que corre la app creado con sus GRANTs (en Apps = el service principal; doc 28 §11.3). Con fallback Cosmos: `COSMOS_CONNECTION_STRING` como secreto, `retrywrites=false`, `tls=true`.
+1. **Lakebase:** `LAKEBASE_ENDPOINT` correcto, el one-time del workspace hecho (§2.6: proyecto `dmh-proj`, scope `kv-scope-datacraft` + key `session-secret-key`, rol PG del service principal del backend). Con fallback legacy Cosmos: `COSMOS_CONNECTION_STRING` como secreto, `retrywrites=false`, `tls=true`.
 2. `SECRET_KEY` = valor fuerte y secreto (no el default). Si no, con `REQUIRE_AUTH=true` la app no arranca.
 3. `REQUIRE_AUTH=true` (activa 401, oculta docs, enciende rate limiting).
 4. `CORS_ORIGIN_REGEX` (o `CORS_ORIGINS` exacta) apuntando al frontend. `ALLOWED_HOSTS` = dominio público del backend.
 5. `LOG_FORMAT=json`, `LOG_LEVEL=INFO`.
 6. Confirmar que `ensure_indexes` corrió al arrancar (log de índices en el arranque; en Lakebase el DDL va batcheado).
-7. Health probe apuntando a `GET /api/health`; esperar `status: ok`.
-8. Si escala a más de una réplica, planear el rate limiting a un backend compartido (Redis), ya que el actual es por proceso.
+7. Si escala a más de una réplica, planear el rate limiting a un backend compartido (Redis), ya que el actual es por proceso.
+
+**Cierre en un workspace nuevo, tras el deploy + la carga de data** (doc 35; §4.3 de este documento):
+
+1. `GET /api/health` → `status: ok` y **`db_connected: true`** (usarlo también como health probe permanente).
+2. **Conteos** contra la foto verificada 2026-07-26 (doc 34 §2): 1 proyecto · 2,108 tablas · 96,184 columnas · 1,630 relaciones · 1,932 vistas · 275 canvases · 388 schemas.
+3. `audit_data_consistency` → **0 fixables** (los 176 informativos son esperados: particiones reasignadas, vistas multi-fuente, grafías fieles al XML).
+4. Prueba funcional real: **login** en la web + abrir un **canvas grande** (p. ej. Analytics, 392 nodos) + un **Export DDL** de prueba con reglas.
+5. Opcional: la suite E2E contra el backend vivo (`python -m scripts.e2e.run_e2e all`; el runner se invoca como módulo, ver [testing.md](testing.md)).
 
 ---
 
@@ -496,4 +665,7 @@ Referencias de código (rutas absolutas):
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/core/logging.py`
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/app/core/db/lakebase/` (adaptador jsonb + credenciales)
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/databricks.yml`
+- `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/.github/workflows/deploy-databricks.yml`
+- `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/scripts/mark_base_version.py`
+- `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/scripts/databricks/carga_erwin_notebook.py`
 - `/Users/carlosperez/Desktop/Projects/Agentes/GitHub/WebApp/MODELER/backend-data-model-hub/.env.example`
