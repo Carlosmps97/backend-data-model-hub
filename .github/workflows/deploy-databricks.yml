@@ -38,11 +38,11 @@ jobs:
       # (verificado), así que "no definida en GitHub" = "usa el default".
       # El workspace destino NO va acá: sale de la variable DATABRICKS_HOST que
       # ya usa el CLI (el bundle dejó de hardcodear `workspace.host`).
+      # OJO: endpoint/schema/CORS del Lakebase ya NO son variables del bundle
+      # (se movieron a app.yaml como env de runtime). Solo quedan las que
+      # alimentan el binding del secreto y los permisos, que el bundle SÍ aplica.
       - name: Parámetros del bundle desde GitHub Variables
         env:
-          LAKEBASE_ENDPOINT: ${{ vars.LAKEBASE_ENDPOINT }}
-          LAKEBASE_PGSCHEMA: ${{ vars.LAKEBASE_PGSCHEMA }}
-          CORS_ORIGIN_REGEX: ${{ vars.CORS_ORIGIN_REGEX }}
           SECRET_SCOPE: ${{ vars.SECRET_SCOPE }}
           SESSION_SECRET_KEY: ${{ vars.SESSION_SECRET_KEY }}
           APP_ADMIN_USER: ${{ vars.APP_ADMIN_USER }}
@@ -53,9 +53,6 @@ jobs:
             echo "· $1 = $2   (GitHub Variables)"
           }
           echo "Workspace (DATABRICKS_HOST): $DATABRICKS_HOST"
-          set_var lakebase_endpoint   "$LAKEBASE_ENDPOINT"
-          set_var lakebase_pgschema   "$LAKEBASE_PGSCHEMA"
-          set_var cors_origin_regex   "$CORS_ORIGIN_REGEX"
           set_var secret_scope        "$SECRET_SCOPE"
           set_var session_secret_key  "$SESSION_SECRET_KEY"
           set_var app_admin_user      "$APP_ADMIN_USER"

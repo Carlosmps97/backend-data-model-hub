@@ -4,11 +4,15 @@
 # Arranca: databricks bundle run backend --target prod
 #
 # PARÁMETROS POR ENTORNO = sección `variables:`.
-# La config de runtime de la app vive en `config:` (sustituye al viejo
-# app.yaml; requiere CLI ≥ 0.283 — el workflow usa setup-cli@main = último).
-# Para desplegar en OTRO Databricks (doc 35): NO se edita este archivo — el
-# workspace sale de la GitHub Variable DATABRICKS_HOST y cada valor de abajo
-# de su GitHub Variable (el workflow las exporta como BUNDLE_VAR_*).
+# La config de RUNTIME de la app (command + env) vive en `app.yaml` (raíz del
+# repo), NO acá. Databricks lo lee en cada arranque, así que sobrevive a un
+# stop/start. Antes vivía en un bloque `config:` de este archivo, pero el CLI
+# lo IGNORA en silencio (bug databricks/cli #4901) → al prender la app decía
+# "Failed to load app spec". Ver app.yaml para el detalle.
+# Este archivo solo declara lo que el bundle SÍ aplica bien: el binding del
+# secreto de sesión, los permisos y el destino del deploy.
+# Para desplegar en OTRO Databricks (doc 35): el workspace sale de la GitHub
+# Variable DATABRICKS_HOST; los valores de runtime portables van en app.yaml.
 bundle:
   name: bknd-data-model-hub
 
@@ -16,18 +20,9 @@ bundle:
 # `BUNDLE_VAR_<nombre>` desde las GitHub Variables del repo cuando existen, y si
 # no existen mandan estos defaults.
 variables:
-  lakebase_endpoint:
-    # GitHub Variable: LAKEBASE_ENDPOINT
-    description: "Ruta lógica del endpoint Lakebase — igual en todo workspace que respete la convención de nombres."
-    default: projects/dmh-proj/branches/production/endpoints/primary
-  lakebase_pgschema:
-    # GitHub Variable: LAKEBASE_PGSCHEMA
-    description: "Schema PG donde viven las colecciones (tablas id + doc jsonb)."
-    default: dmh
-  cors_origin_regex:
-    # GitHub Variable: CORS_ORIGIN_REGEX
-    description: "Regex de orígenes CORS — matchea el front (frnt-data-model-hub) en cualquier workspace."
-    default: https://frnt-data-model-hub-.*\.databricksapps\.com
+  # NOTA: endpoint/schema/CORS del Lakebase se movieron a app.yaml (env de
+  # runtime). Acá solo quedan las variables que alimentan cosas que el bundle
+  # SÍ aplica: el binding del secreto y los permisos.
   secret_scope:
     # GitHub Variable: SECRET_SCOPE
     description: "Scope de secretos (Key Vault-backed) que guarda la SECRET_KEY de firma de sesión."
@@ -54,33 +49,8 @@ resources:
       name: bknd-data-model-hub   # nombre real de la app en el workspace
       source_code_path: .         # el código de la app está en la raíz del repo
       description: "Data Model Hub — backend de plataforma (FastAPI · Databricks Lakebase Postgres)."
-      config:
-        # uvicorn recibe UVICORN_HOST=0.0.0.0 y UVICORN_PORT=$DATABRICKS_APP_PORT
-        # del runtime de Apps — no hace falta pasar host/puerto.
-        command: ['uvicorn', 'app.main:app']
-        env:
-          - name: LOG_FORMAT
-            value: 'json'
-          # ── BD principal: Lakebase (doc 28) ──────────────────────────────
-          # SIN token, SIN PGUSER y SIN PGHOST a propósito: la app se
-          # autentica con su service principal (OAuth M2M inyectado), PGUSER
-          # cae al DATABRICKS_CLIENT_ID y el host físico se resuelve solo
-          # desde la ruta lógica del endpoint.
-          # ONE-TIME por workspace: rol PG del SP + GRANTs (doc 28 §11.3).
-          - name: DB_BACKEND
-            value: 'lakebase'
-          - name: LAKEBASE_ENDPOINT
-            value: ${var.lakebase_endpoint}
-          - name: LAKEBASE_PGSCHEMA
-            value: ${var.lakebase_pgschema}
-          # ── CORS por regex: el mismo bundle sirve en cualquier workspace ─
-          - name: CORS_ORIGIN_REGEX
-            value: ${var.cors_origin_regex}
-          # ── Producción: login obligatorio + clave de firma desde el KV ───
-          - name: REQUIRE_AUTH
-            value: 'true'
-          - name: SECRET_KEY
-            value_from: session_secret
+      # command + env → app.yaml (raíz del repo). Ver el comentario de cabecera
+      # de este archivo y app.yaml: el bloque `config:` no funciona (bug #4901).
       resources:
         - name: session_secret
           description: "SECRET_KEY para firmar tokens de sesión."
