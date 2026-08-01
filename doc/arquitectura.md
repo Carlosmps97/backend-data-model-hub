@@ -2,23 +2,25 @@
 
 Documento de arquitectura del servicio de plataforma del Data Model Hub. Describe la visión, las capas, el stack, el árbol de carpetas, el ciclo de vida de un request, los flujos de negocio clave, las consideraciones de base de datos y el despliegue. Está escrito a partir del código real de `app/main.py`, `app/core/` y `app/features/`.
 
-> **ACTUALIZACIÓN 2026-07-19 (doc 28 de `plan-implementacion/`):** la base de
-> datos productiva es **Databricks Lakebase Postgres** (proyecto `dmh-proj`,
-> branch `production`, base `databricks_postgres`, schema PG `dmh`). Donde este
-> documento dice "Cosmos/Motor", el acceso pasa hoy por el seam
+> **ACTUALIZACIÓN 2026-07-31 (docs 28, 35 y 36 de `plan-implementacion/`):** la
+> base de datos productiva es **Databricks Lakebase Postgres** en el workspace
+> **corporativo** de Databricks (proyecto `dmh-proj`, branch `production`, base
+> `databricks_postgres`, schema PG `dmh`). El acceso pasa por el seam
 > `app/core/db/client.py` con `DB_BACKEND=lakebase|cosmos`: el adaptador
 > `app/core/db/lakebase/` emula la superficie Motor sobre tablas
 > `(id text PK, doc jsonb)` — una por colección — con credenciales OAuth
-> rotativas del SDK de Databricks. Los repositorios NO cambiaron: el contrato
-> de documentos, filtros y pipelines descrito acá sigue siendo el vigente.
-> Cosmos queda como legacy/rollback (`DB_BACKEND=cosmos`). Detalle completo:
-> `plan-implementacion/28-MIGRACION-LAKEBASE.md`.
+> rotativas del SDK de Databricks; los repositorios NO cambiaron (el contrato
+> de documentos, filtros y pipelines sigue vigente). Cosmos quedó como seam
+> **legacy/rollback** (`DB_BACKEND=cosmos`), fuera del bundle de despliegue.
+> El deploy está parametrizado por GitHub Variables (`BUNDLE_VAR_*`, sin
+> `workspace.host` en `databricks.yml`): el mismo repo despliega a cualquier
+> workspace sin editar archivos (detalle en §7 y §8).
 
 ---
 
 ## 1. Visión y responsabilidades
 
-El backend es el **composition root** de la plataforma del Data Modeler: una API REST en FastAPI que administra proyectos, el modelo de datos canónico y su persistencia en Azure Cosmos DB (API de Mongo). Es el cerebro de gobierno del modelo: gobierna quién puede editar, cómo se versiona un cambio, cómo se aprueba y publica a producción, y cómo se consulta la metadata para reporting.
+El backend es el **composition root** de la plataforma del Data Modeler: una API REST en FastAPI que administra proyectos, el modelo de datos canónico y su persistencia en **Databricks Lakebase Postgres** (modelo documental JSONB vía el adaptador Motor-like de §7; Azure Cosmos DB queda como fallback dormido con `DB_BACKEND=cosmos`). Es el cerebro de gobierno del modelo: gobierna quién puede editar, cómo se versiona un cambio, cómo se aprueba y publica a producción, y cómo se consulta la metadata para reporting.
 
 Responsabilidades concretas, tomadas del docstring de `main.py` y de las features:
 
@@ -26,6 +28,7 @@ Responsabilidades concretas, tomadas del docstring de `main.py` y de las feature
 - **Estructura tipo Erwin**: proyectos, carpetas del Model Explorer y subject areas (canvases) que referencian un subconjunto del pool y guardan su layout.
 - **Versionado y aprobación del modelo**: sesión de edición (working copy) → changeset → submit → review → approve → publish a producción, con política de unanimidad de revisores.
 - **Data Standards versionados**: glosario de abreviaturas, Parent Domains, definiciones UDP y configuración de naming, con historial append-only y rollback determinista.
+- **Motor de reglas del DDL Export** (`ddl_rules`): reglas versionadas (sqlglot) que transforman el texto SQL del Export DDL según los valores UDP del modelo, con render puro vía `POST /api/ddl-rules/render` (ver §6.4).
 - **Motor de consulta del reporting**: un IR (`QuerySpec`) que produce el query-builder visual o un parser SQL (sqlglot), compilable a un pipeline de Mongo, con paginación keyset a escala de cientos de miles de columnas.
 - **Identidad, RBAC y auditoría**: login propio usuario/contraseña (bcrypt + JWT), matriz de permisos data-driven por rol y log de auditoría de acciones.
 
@@ -35,7 +38,7 @@ Lo que **NO** vive acá: el agente conversacional de modelado (vive en `app-agen
 
 ## 2. Arquitectura por capas
 
-El backend separa dos grandes zonas: **`core`** (infraestructura transversal reutilizable, sin lógica de negocio de una feature) y **`features`** (verticales de negocio autónomas). Cada feature sigue el patrón **router → service → repository → Motor/Cosmos**, con `models` (documentos Pydantic persistidos) y `schemas` (contratos de request/response) como piezas de datos.
+El backend separa dos grandes zonas: **`core`** (infraestructura transversal reutilizable, sin lógica de negocio de una feature) y **`features`** (**20 verticales de negocio autónomas**, listadas en el árbol de §4). Cada feature sigue el patrón **router → service → repository → BD** (seam Lakebase/Cosmos vía `get_db()`), con `models` (documentos Pydantic persistidos) y `schemas` (contratos de request/response) como piezas de datos. Algunas features suman módulos puros adicionales al patrón: `changesets` tiene `diffdetail.py` (diff antes/después resuelto a nombres, §6.5) y `validation.py`; `ddl_rules` tiene el subpaquete `engine/` (motor puro de reglas del DDL Export, §6.4) y `templates.py`.
 
 ### 2.1 Diagrama de capas
 
@@ -52,14 +55,14 @@ flowchart TD
     subgraph Feature[Feature vertical]
         RT[router.py - endpoints HTTP + envelope + guards RBAC]
         SV[service.py - logica de negocio, funciones puras testeables]
-        RP[repository.py - CRUD async contra Cosmos]
+        RP[repository.py - CRUD async contra la BD via get_db]
         MD[models.py - documentos Pydantic persistidos]
         SC[schemas.py - contratos request/response]
     end
 
     subgraph Core[app.core - transversal]
         CFG[config - settings + assert_secure_config]
-        DB[db - cliente Motor singleton + ensure_indexes]
+        DB[db - seam Lakebase/Cosmos + ensure_indexes]
         ID[identity - seam de identidad + current_principal]
         SEC[security - bcrypt + JWT HS256]
         NAM[naming.engine - logico a fisico]
@@ -69,13 +72,13 @@ flowchart TD
         ENV[api.envelope - ok wrapper]
     end
 
-    COSMOS[(Azure Cosmos DB - API Mongo)]
+    LAKEBASE[(Databricks Lakebase Postgres - tablas id + doc jsonb)]
 
     FE -->|HTTP JSON| MW
     MW --> RT
     RT --> SV
     SV --> RP
-    RP --> COSMOS
+    RP --> LAKEBASE
     RT -.envelope.-> ENV
     RT -.guards.-> ID
     RT -.guards.-> SEC
@@ -83,7 +86,7 @@ flowchart TD
     SV -.usa.-> VER
     SV -.usa.-> AUD
     RP -.get_db.-> DB
-    DB --> COSMOS
+    DB --> LAKEBASE
     App -.arranque.-> CFG
 ```
 
@@ -92,8 +95,8 @@ flowchart TD
 | Capa | Archivo | Responsabilidad | Regla |
 |------|---------|-----------------|-------|
 | Router | `router.py` | Declara endpoints, valida el body (schema), aplica guards RBAC, envuelve la respuesta en el envelope y traduce errores de negocio a códigos HTTP (403/404/409/422). | No contiene lógica de negocio. |
-| Service | `service.py` | Orquesta el flujo. La política pura (versionado, aprobación, diff, permisos efectivos) vive en funciones **puras** testeables sin DB; las funciones `async` solo coordinan repository + puras + audit. | No toca Mongo directo salvo excepciones puntuales. |
-| Repository | `repository.py` | CRUD async contra Cosmos vía `get_db()`. Traduce documento Mongo (`_id`) a modelo (`id`), aplica soft-delete (`flgactive`), bulk writes, guards atómicos. | Único punto que conoce paths de Mongo. |
+| Service | `service.py` | Orquesta el flujo. La política pura (versionado, aprobación, diff, permisos efectivos) vive en funciones **puras** testeables sin DB; las funciones `async` solo coordinan repository + puras + audit. | No toca la BD directo salvo excepciones puntuales. |
+| Repository | `repository.py` | CRUD async contra la BD vía `get_db()` (superficie Motor; en producción el adaptador Lakebase la traduce a SQL/JSONB). Traduce documento (`_id`) a modelo (`id`), aplica soft-delete (`flgactive`), bulk writes, guards atómicos. | Único punto que conoce paths de documento. |
 | Models | `models.py` | Documentos Pydantic persistidos (`*Doc`). Config base `DOC_CONFIG` (`extra="ignore"`, `populate_by_name`). | Invariante de round-trip: un campo que no está en el modelo se descarta al leer. |
 | Schemas | `schemas.py` | Contratos de entrada/salida del router (bodies). | Separan la forma de la API de la forma de almacenamiento. |
 
@@ -116,26 +119,30 @@ Como `DOC_CONFIG` usa `extra="ignore"`, un campo nuevo que se quiera persistir n
 
 ## 3. Stack tecnológico
 
-| Componente | Tecnología | Versión (de `requirements.txt`) | Rol |
-|------------|-----------|--------------------------------|-----|
+| Componente | Tecnología | Versión (pin `==` de `requirements.txt`) | Uso real |
+|------------|-----------|------------------------------------------|----------|
 | Lenguaje | Python | 3.12 | Runtime |
-| Framework web | FastAPI | >=0.104.0 | Routing, validación, OpenAPI |
-| Servidor ASGI | Uvicorn | >=0.24.0 (`[standard]`) | Servidor HTTP async |
-| Driver async DB | Motor | >=3.3.0 | Cliente async de MongoDB/Cosmos |
-| Driver base | PyMongo | >=4.0 | Tipos y `UpdateOne`/`ReturnDocument` |
-| Base de datos | Azure Cosmos DB (API de Mongo) | tier RU | Persistencia documental |
-| Validación/modelos | Pydantic | v2 (>=2.0) | Modelos de documento y schemas |
-| Config/env | python-dotenv | — | Carga de `.env` |
-| Hash de contraseñas | bcrypt | >=4.0 | Hash con salt de passwords |
-| Token de sesión | PyJWT | >=2.8 | JWT HS256 firmado |
-| Parser SQL | sqlglot | >=25 | SQL de texto → `QuerySpec` |
-| Rate limiting | slowapi | >=0.1.9 | Anti fuerza bruta (login) |
-| Testing | pytest + httpx | >=8.0 / >=0.27 | Tests (solo dev) |
+| Framework web | `fastapi` | 0.136.1 | Routing, validación, OpenAPI |
+| Toolkit ASGI | `starlette` | 1.0.0 | `TrustedHostMiddleware`, `Response`/`JSONResponse` en `main.py` |
+| Servidor ASGI | `uvicorn[standard]` | 0.47.0 | Servidor HTTP async |
+| Validación/modelos | `pydantic` | 2.13.4 | Modelos de documento (`*Doc`) y schemas de la API |
+| Config/env | `python-dotenv` | 1.2.2 | Carga de `.env` en `config.py` y scripts |
+| Driver Postgres | `asyncpg` | 0.31.0 | Pool y queries del adaptador Lakebase |
+| SDK Databricks | `databricks-sdk` | 0.121.0 | `WorkspaceClient`: token OAuth de BD + resolución del host PG |
+| Driver Mongo async | `motor` | 3.7.1 | `AsyncIOMotorClient` — solo camino `DB_BACKEND=cosmos` (legacy) |
+| Driver Mongo base | `pymongo` | 4.17.0 | Compatibilidad de tipos/errores (`DuplicateKeyError`, `UpdateOne`) y handle sync — legacy/rollback |
+| Hash de contraseñas | `bcrypt` | 5.0.0 | Hash con salt de passwords |
+| Token de sesión | `pyjwt` | 2.12.1 | JWT HS256 firmado |
+| Parser SQL | `sqlglot` | 30.12.0 | SQL de texto → `QuerySpec` del reporting **y** motor de reglas del DDL Export |
+| Rate limiting | `slowapi` | 0.1.10 | Anti fuerza bruta del login (5/minute) |
+| Testing | `pytest` + `httpx` | >=8.0 / >=0.27 (`requirements-dev.txt`) | Tests; solo dev, no van al runtime |
+
+**Política de pines exactos (`==`, 2026-07-31):** todas las dependencias de runtime están pineadas con `==` a las versiones EXACTAS del venv validado (pytest 543 verde + 43 de la suite viva del adaptador con `LAKEBASE_TESTS=1` + `pip check` limpio). El motivo es doble: (a) la imagen base de Databricks Apps trae pre-instalados fastapi/starlette/uvicorn viejos que con rangos abiertos pip daría por satisfechos, produciendo combinaciones jamás testeadas; (b) orden — local, CI y Apps corren idéntico. Para subir una librería: cambiar el pin, correr pytest + `pip check`, y recién commitear. Además, el encabezado del `requirements.txt` es **ASCII puro a propósito**: pip decodifica el archivo con la codificación local del SO (cp1252 en Windows en español) y un carácter UTF-8 en un comentario revienta el `pip install -r requirements.txt` — sin tildes ni flechas ahí.
 
 Notas de diseño del stack:
 
-- **Async de punta a punta**: Motor + FastAPI. Un único cliente Motor singleton (`app/core/db/client.py`) compartido por todos los repositorios; se abre en el lifespan y se cierra en el teardown. Pool `maxPoolSize=50` con timeouts explícitos (`serverSelectionTimeoutMS=15000`, `connectTimeoutMS=10000`, `socketTimeoutMS=60000`) para que un socket colgado no agote el pool.
-- **Pureza y testeo sin DB**: las políticas (aprobación, diff, permisos, naming, overlay, compilación de queries) están aisladas como funciones puras, testeables con pytest sin montar Cosmos.
+- **Async de punta a punta**: FastAPI + asyncpg (Lakebase). Un único singleton de BD (`app/core/db/client.py`) compartido por todos los repositorios; se abre en el lifespan y se cierra en el teardown. En el camino legacy Cosmos, el cliente Motor lleva pool `maxPoolSize=50` con timeouts explícitos (`serverSelectionTimeoutMS=15000`, `connectTimeoutMS=10000`, `socketTimeoutMS=60000`).
+- **Pureza y testeo sin DB**: las políticas (aprobación, diff, permisos, naming, overlay, compilación de queries, motor de reglas DDL) están aisladas como funciones puras, testeables con pytest sin montar una base de datos.
 
 ---
 
@@ -151,13 +158,20 @@ app/
 │   ├── logging.py                  Logging estructurado (pretty|json), get_logger, configure_logging
 │   ├── audit.py                    audit() best-effort → colección audit_log (append-only)
 │   ├── models.py                   DOC_CONFIG (extra=ignore, populate_by_name), TagDoc, coerce_tags
-│   ├── ratelimit.py                Limiter de slowapi (key=IP), activo en prod / RATE_LIMIT_ENABLED
+│   ├── ratelimit.py                Limiter de slowapi (key = 1ª IP de X-Forwarded-For), activo en prod / RATE_LIMIT_ENABLED
 │   ├── security.py                 hash_password/verify_password (bcrypt) + create/decode_access_token (JWT HS256)
 │   ├── api/
 │   │   └── envelope.py             ok(data) → {success, data}
 │   ├── db/
-│   │   ├── client.py               Cliente Motor singleton: connect/disconnect/get_db
-│   │   └── indexes.py              ensure_indexes: crea índices idempotentes (traga códigos 48/11000)
+│   │   ├── client.py               Singleton con seam de doble backend (DB_BACKEND=lakebase|cosmos): connect/disconnect/get_db
+│   │   ├── indexes.py              ensure_indexes: índices idempotentes (traga códigos 48/11000)
+│   │   ├── sync.py                 get_sync_db(): puente sync para scripts (loop async en thread de fondo)
+│   │   └── lakebase/               Adaptador Motor-like sobre Postgres (ver §7)
+│   │       ├── collection.py       LakebaseDatabase / PgCollection / PgCursor / PgCommandCursor
+│   │       ├── translate.py        Traducción Mongo→SQL/JSONB (filtros, updates, proyección, orden)
+│   │       ├── aggregate.py        Compilador de pipelines de aggregation → un SELECT
+│   │       ├── credentials.py      Token OAuth de BD + descubrimiento del host vía SDK
+│   │       └── pool.py             Pool asyncpg (password rotativo, wake del compute, TLS clásico/directo)
 │   ├── identity/
 │   │   ├── models.py               Principal (email, username, display_name, source)
 │   │   ├── provider.py             LocalIdentityProvider / DatabricksIdentityProvider (seam)
@@ -167,24 +181,28 @@ app/
 │   └── versioning/
 │       └── overlay.py              overlay(published, changes) + summarize_diff (puro)
 │
-└── features/                       Verticales de negocio (router→service→repository)
-    ├── health/                     GET /api/health (ping vivo a Cosmos)
-    ├── auth/                        Login propio + sesión (deps.py: require_permission / write_guard)
+└── features/                       20 verticales de negocio (router→service→repository)
+    ├── health/                     GET /api/health (ping vivo a la BD)
+    ├── auth/                       Login propio + sesión (deps.py: require_permission / write_guard) + warmup
     ├── admin/                      /api/admin/* (users, roles+matriz, permissions, audit) — admin.manage
-    ├── identity/                   /api/me, /api/users (Principal + usuarios simulados)
+    ├── identity/                   /api/me, /api/users
     ├── domains/                    /api/domains (Parent Domains: tipo default + cascada) — standards.edit
     ├── udp/                        /api/udp (solo lectura de definiciones UDP)
-    ├── glossary/                   /api/glossary (abreviaturas + physicalize/logicalize) — standards.edit
-    ├── data_standards/            /api/standards (snapshot, apply, rollback, versions) — standards.edit
-    ├── catalog/                    /api/catalog (tablas+columnas canónicas) — model.edit
-    ├── changesets/                /api/changesets, /api/versions, /api/requests — model.edit / review.decide
+    ├── glossary/                   /api/glossary (abreviaturas + physicalize/logicalize + lock) — standards.edit
+    ├── data_standards/             /api/standards (snapshot, apply, rollback, versions) — standards.edit
+    ├── ddl_rules/                  /api/ddl-rules (reglas del DDL Export: validate/test/impact/render) + templates.py
+    │   └── engine/                 Motor puro: conditions, context, expressions, generators, pipeline, render, validate
+    ├── catalog/                    /api/catalog (tablas+columnas canónicas + búsqueda por columna) — model.edit
+    ├── changesets/                 /api/changesets, /api/versions, /api/requests — model.edit / review.decide / rollback
+    │                               + diffdetail.py (diff antes/después a nombres) + validation.py
     ├── projects/                   /api/projects, /api/subject-areas (canvases + layout + diagram) — model.edit
     ├── folders/                    /api/folders (jerarquía del Model Explorer)
-    ├── relationships/             /api/relationships (PK/FK entre tablas)
-    ├── views/                      /api/views (vistas SQL)
-    ├── summary/                    /api/summary (5 cards del Home)
+    ├── schemas/                    /api/schemas (esquema físico de BD como entidad, guard de uso) — model.edit
+    ├── relationships/              /api/relationships (relaciones v2: parent/child + pairs)
+    ├── views/                      /api/views (vistas SQL versionadas, multifuente sources[])
+    ├── summary/                    /api/summary (contadores del Home)
     ├── settings/                   /api/settings/naming (separador/case por scope) — standards.edit
-    └── reporting/                  /api/reporting/tables|columns (tabla de metadata)
+    └── reporting/                  /api/reporting/tables|columns|views (tabla de metadata legacy)
         └── query/                  Motor de consulta: spec, schema (Field Catalog), compiler,
                                     parser (SQL→spec), executor (keyset), reports, views (insights), router
 ```
@@ -192,7 +210,7 @@ app/
 ### 4.1 Qué es cada carpeta de `core`
 
 - **`config`**: expone `settings` (un objeto plano con variables de entorno) y `assert_secure_config()`, que impide arrancar en producción (`REQUIRE_AUTH=true`) con el `SECRET_KEY` de desarrollo público.
-- **`db`**: `client.py` es el singleton Motor; `indexes.py` crea los índices al conectar y es idempotente (ignora `NamespaceExists` code 48 y duplicate-key 11000).
+- **`db`**: `client.py` es el singleton con el seam de doble backend (`DB_BACKEND=lakebase` → `LakebaseDatabase` sobre pool asyncpg; `cosmos` → `AsyncIOMotorClient` legacy) con contrato idéntico `connect()/get_db()/disconnect()`; `indexes.py` crea los índices al conectar y es idempotente (ignora `NamespaceExists` code 48 y duplicate-key 11000); `sync.py` expone `get_sync_db()` para scripts; el subpaquete `lakebase/` es el adaptador Motor-like (detalle en §7).
 - **`identity`**: el seam de identidad. `Principal` es el usuario en sesión; `provider.py` tiene el modo `local` (usuario fake, header `X-Dev-User` para actuar como otro) y `databricks` (lee headers OBO del proxy SSO); `dependencies.py` implementa `current_principal` con estrategia token-first.
 - **`security`**: primitivas puras de auth (bcrypt para passwords; JWT HS256 para el token de sesión).
 - **`naming`**: motor puro de conversión nombre lógico↔físico, data-driven vía un diccionario de abreviaturas, con longest-match multi-palabra y `case ∈ {upper, lower, camel}`.
@@ -217,16 +235,16 @@ Una feature es un vertical de negocio autónomo. La ilustramos con `catalog`:
 
 ### 5.1 Arranque (lifespan)
 
-`create_app()` primero llama `assert_secure_config()` (falla-cerrado del `SECRET_KEY`). El `lifespan` async abre la conexión Motor (`db_client.connect()`, que a su vez ejecuta `ensure_indexes`) y marca `app.state.db_connected`; si Cosmos no responde, la app igual arranca pero en estado degradado. En el teardown cierra la conexión.
+`create_app()` primero llama `assert_secure_config()` (falla-cerrado: con `REQUIRE_AUTH=true` y el `SECRET_KEY` de desarrollo, la app no arranca). Con `REQUIRE_AUTH=true` además se ocultan `/docs`, `/redoc` y `/openapi.json` (menos fingerprinting). El `lifespan` async abre la conexión (`db_client.connect()`: pool + DDL `ensure_base` de las tablas-colección + `ensure_indexes`) y marca `app.state.db_connected`; si la BD no responde (p. ej. compute Lakebase dormido por scale-to-zero), la app igual arranca en estado degradado y un task en background reintenta la conexión con backoff 15→120 s hasta lograrla — `/api/health` se recupera solo. **No hay seeds en el startup**: los seeds son scripts explícitos (`create_admin`, `seed_ddl_export_rules`, `mark_base_version`). En el teardown cancela el retry y cierra la conexión.
 
 ### 5.2 Pila de middlewares (en el orden de `create_app`)
 
-1. **Rate limiting (slowapi)**: `app.state.limiter` + handler de `RateLimitExceeded` → 429 con `Retry-After`. Se aplica por-ruta (el login lleva `@limiter.limit("5/minute")`).
+1. **Rate limiting (slowapi)**: `app.state.limiter` + handler de `RateLimitExceeded` → 429 con `Retry-After`. Se aplica por-ruta (el login lleva `@limiter.limit("5/minute")`); la key es la **primera IP de `X-Forwarded-For`** (fallback al peer) — detrás de los proxies de Databricks Apps, keyear por la IP del peer volvía el límite del login global para todos los usuarios.
 2. **TrustedHostMiddleware**: solo si `ALLOWED_HOSTS` está definido (postura de producción); rechaza hosts no permitidos.
-3. **CORSMiddleware**: allowlist explícita de orígenes (`CORS_ORIGINS`, default `localhost:3000`), `allow_credentials=False` (auth token-first, sin cookies), métodos y headers acotados (no wildcard).
+3. **CORSMiddleware**: allowlist explícita (`CORS_ORIGINS`, default front de dev) y/o regex (`CORS_ORIGIN_REGEX`, para que el mismo bundle sirva en cualquier workspace de Databricks Apps). `allow_credentials=True`: la auth propia sigue siendo token-first (sin cookies propias), pero en Databricks Apps el fetch del front lleva la cookie del proxy SSO — con `False` el POST de login ni se enviaba. Métodos y headers acotados (no wildcard): `Authorization`, `Content-Type`, `X-Requested-With`, `X-Dev-User` y `X-Session-Token` (el token de sesión propio viaja ahí en Databricks Apps, porque el proxy SSO de la plataforma consume `Authorization`). `max_age=600`.
 4. **GZipMiddleware**: comprime respuestas > 1024 bytes (los payloads de metadata comprimen 5-10x).
-5. **Exception handler de `Exception`**: convierte cualquier crash no controlado en el envelope de error 500. Como corre en `ServerErrorMiddleware` (el más externo), la respuesta no pasa por CORS, así que el handler agrega a mano `Access-Control-Allow-Origin` si el origen está permitido (sin eso el browser vería "Failed to fetch").
-6. **Middleware de logging + security headers**: genera un `request_id` de 12 chars, loguea inicio/fin con latencia en ms, y en la respuesta agrega `X-Request-ID`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy` y, solo sobre HTTPS, `Strict-Transport-Security`.
+5. **Exception handler de `Exception`**: convierte cualquier crash no controlado en el envelope de error 500. Como corre en `ServerErrorMiddleware` (el más externo), la respuesta no pasa por CORS, así que el handler repone a mano `Access-Control-Allow-Origin` + `Access-Control-Allow-Credentials` + `Vary: Origin` si el origen está permitido por lista o regex (sin eso el browser vería "Failed to fetch").
+6. **Middleware de logging + security headers**: genera un `request_id` de 12 chars, loguea inicio/fin con latencia en ms, y en la respuesta agrega `X-Request-ID`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy` (geolocalización/micrófono/cámara off) y, solo sobre HTTPS (detectado también por `X-Forwarded-Proto`), `Strict-Transport-Security`.
 
 ### 5.3 Diagrama de secuencia de un request
 
@@ -238,7 +256,7 @@ sequenceDiagram
     participant AUTH as current_principal / guard RBAC
     participant SV as Service
     participant RP as Repository
-    participant DB as Cosmos DB
+    participant DB as Lakebase Postgres
 
     C->>MW: HTTP request (Authorization Bearer)
     MW->>MW: genera request_id, arranca timer
@@ -249,7 +267,7 @@ sequenceDiagram
     else autorizado
         RT->>SV: llama al service con el body validado
         SV->>RP: operacion async (get/put/bulk)
-        RP->>DB: query Motor
+        RP->>DB: query (superficie Motor -> SQL/JSONB)
         DB-->>RP: documentos
         RP-->>SV: modelos (id, sin flgactive)
         SV-->>RT: resultado
@@ -332,7 +350,7 @@ Routers hermanos: `GET /api/versions` (filas de versiones cross-project), `GET /
 
 ### 6.2 Versionado de Data Standards con rollback
 
-Los estándares (Parent Domains, glosario, definiciones UDP y naming) **no** pasan por el changeset del canvas: se aplican directo a las colecciones publicadas y cada apply/rollback genera una versión en `standards_versions` con el **snapshot completo** del estado tras aplicar (suficiente para rollback determinista). El snapshot es acotado (decenas de dominios + cientos-miles de términos + 2 docs de naming), muy por debajo de 2MB/doc.
+Los estándares (Parent Domains, glosario, definiciones UDP, naming y — desde el doc 30 — las reglas del DDL Export con su config de lookups) **no** pasan por el changeset del canvas: se aplican directo a las colecciones publicadas y cada apply/rollback genera una versión en `standards_versions` con el **snapshot completo** del estado tras aplicar (suficiente para rollback determinista; incluye `ddlRules` + `ddlConfig` — snapshots anteriores a la feature se leen como lista vacía). El snapshot es acotado (decenas de dominios + cientos-miles de términos + 2 docs de naming + decenas de reglas), muy por debajo de 2MB/doc.
 
 Flujo (`data_standards/service.py`):
 
@@ -360,7 +378,7 @@ Detalles:
 
 - **`seq` único**: `insert_version_next_seq` asigna `seq = max+1` y `label = v{seq}`; el índice único en `seq` impide dos versiones con el mismo número ante apply/rollback concurrentes (reintenta hasta 8 veces ante `DuplicateKeyError`).
 - **Re-derivación mínima**: el rollback compara `_naming_key` y `_domains_key` del snapshot vs el estado actual; solo re-physicaliza si cambió glosario/naming, y solo re-propaga tipos si cambiaron los dominios. Un rollback de solo-UDP no barre las 400k columnas.
-- **RBAC**: apply/rollback exigen `standards.edit`; la lectura de snapshot/versions queda abierta a quien ve el módulo.
+- **RBAC**: el apply exige `standards.edit`; el rollback exige el permiso `rollback` (propio, compartido con el rollback de versiones del Model); la lectura de snapshot/versions queda abierta a quien ve el módulo.
 - **Cascada de dominios**: al cambiar el `defaultDataType` de un dominio, se re-tipan las columnas sin override (`typeOverridden != true`), respetando el override manual por-dato.
 
 ### 6.3 Motor de consulta del reporting
@@ -375,14 +393,14 @@ flowchart LR
     SPEC --> COMP[compiler.py - valida field/op + castea + planner]
     CAT[schema.py - Field Catalog: estaticos + UDP dinamicos] --> COMP
     COMP --> EX[executor.py - keyset + maxTimeMS + hidratacion]
-    EX --> COSMOS[(Cosmos: canonical_columns / tables / relationships / views)]
+    EX --> DB[(Lakebase: canonical_columns / tables / relationships / views)]
     EX --> GRID[Grilla virtualizada / export CSV streaming]
 ```
 
 Piezas y garantías de escala:
 
 - **Field Catalog dinámico** (`schema.py`): cada vista (`columns`/`tables`/`relationships`/`views`) expone `FieldDef` estáticos + campos UDP dinámicos derivados de `udp_definitions`. Crear un UDP agrega columnas filtrables/agrupables sin tocar código. La `key` pública (`udp.<defId>`) se traduce al `path` de Mongo (`udpValues.<defId>`), cubierto por el índice wildcard `udpValues.$**`.
-- **Compiler puro** (`compiler.py`): valida cada campo/op contra el catálogo, castea el value al tipo, y aplica el **planner**: un orden por un campo sin índice se **rechaza** (Cosmos tira 500 en `.sort()` sin índice). `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
+- **Compiler puro** (`compiler.py`): valida cada campo/op contra el catálogo, castea el value al tipo, y aplica el **planner**: un orden por un campo sin índice se **rechaza** (regla nacida en Cosmos RU — que tira 500 en `.sort()` sin índice — y mantenida como invariante de escala sobre Lakebase). `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
 - **Parser SQL** (`parser.py`): capa fina sobre el mismo IR. Parsea con sqlglot a un AST tipado, camina con allowlist estricto y emite el mismo `QuerySpec`. Rechaza JOIN, subquery, CTE, UNION, DDL/DML y múltiples statements.
 - **Executor con keyset** (`executor.py`): paginación por keyset (no skip/limit profundo) sobre el primer campo de orden + `_id` de desempate; `maxTimeMS=15000` como circuit-breaker; proyección mínima; hidratación de nombres (dominio, UDP, schema) en Python post-fetch. El cursor se valida para aceptar solo escalares (un dict/list inyectaría operadores Mongo).
 - **Export CSV por streaming**: `POST /api/reporting/export` keyset-pagina internamente y hace yield línea por línea (O(1) memoria).
@@ -407,11 +425,54 @@ curl -X POST https://API/api/reporting/query/sql -H "Content-Type: application/j
 
 Además, hay vistas curadas de insights (`/api/reporting/insights/scorecard`, `/udp-coverage`, `/domain-usage`, `/glossary-usage`, `/relationships`) y reportes guardados por usuario (`/api/reporting/reports`, colección `saved_reports`, validados como `QuerySpec` bien formado antes de persistir).
 
+### 6.4 Export DDL con reglas (`ddl_rules`)
+
+Las reglas del DDL Export transforman el **texto SQL** del export según los valores de UDP del modelo (enmascarado de columnas DAC, tabla de rechazos `_rej`, vista técnica, tags de gobierno, tblproperties de vacuum). Nunca tocan el modelo ni la data: los artefactos generados existen solo dentro del `.sql` exportado. Las reglas se autoran y versionan en la pestaña "DDL Export rules" de Data Standards sobre el **mismo stream `standards_versions`** (mutaciones SOLO vía `POST /api/standards/apply` con `rulesUpsert`/`rulesDelete`/`ddlConfigPatch`; el router `/api/ddl-rules` es read-only). Colecciones: `ddl_rules` + `ddl_ruleset_config` (lookups y funciones).
+
+```mermaid
+flowchart LR
+    FE[Front: genera DDL base] --> RENDER[POST /api/ddl-rules/render - permiso export]
+    RULES[(ddl_rules + ddl_ruleset_config)] --> RENDER
+    RENDER --> ENGINE[engine/ - motor PURO sqlglot sin BD]
+    ENGINE --> OUT[statements + log + sello Export rules: vN]
+```
+
+- **Motor puro** (`ddl_rules/engine/`): condiciones en un DSL con allowlist de operadores (`=`, `<>`, `IN`, `LIKE`, `IS NULL`, `AND/OR/NOT`…), expresiones donde `{col}` es un nodo AST acumulado (nunca string), generadores con toposort de dependencias (ciclo = error de validación) y render determinista: orden `(priority DESC, name ASC)`, tblproperties/tags en orden alfabético → salida byte-identical.
+- **`POST /render` es puro**: el front manda `{ruleIds, context, base[]}` (contexto = tablas/columnas/vistas con `udpValues`) y recibe `{statements[], log[], rulesetVersion}`. Exige el permiso `export`; el `.sql` sale con el sello `-- Export rules: v<seq> · N applied · M skipped`. Sin reglas seleccionadas, el export es byte-identical al flujo sin reglas.
+- **Endpoints de soporte** (leen el catálogo publicado): `POST /validate` (5 checks: sintaxis de condición, UDP existe, valor permitido, sintaxis de expresión Databricks, placeholders resueltos), `POST /test` (regla + tableId → fragmentos por columna match) y `POST /impact` (conteo de columnas/tablas afectadas, con fast-path por filtro cuando la condición es `udp[..] op literal`).
+- **Defaults declarados en la regla, no en el motor**: el motor lee SOLO valores de UDP explícitos; el "sin valor → default" se expresa con condición vacía + `default` del lookup (p. ej. `tblproperties_vacuum` con `vacuum_map.default='interval 90 days'`, fiel al XML de Erwin donde el default vive en la definición del UDP).
+- **Guard de consistencia**: un `udpDelete` en `/api/standards/apply` que intersecte los `udpRefs` de reglas activas devuelve 409 con la lista de reglas; borrar un valor de la lista de un UDP deja las reglas afectadas en `stale` (no bloquea).
+- **Semilla**: `scripts/seed_ddl_export_rules.py` (dry-run + `--apply`) registra la versión "Base — DDL export rules" con 8 reglas activas + lookups `vacuum_map`/`dac_map`, y auto-crea las definiciones UDP "Tipo de Vista" y "Frecuencia Vacuum" si faltan (el kit de migración no crea defs sin uso).
+
+### 6.5 Review con detalle de cambios (`diff/details`)
+
+Complemento read-only del review (§6.1): el panel del request muestra un resumen de conteos por verbo (derivado del `GET /diff` existente) y un popup con el detalle campo por campo, alimentado por un endpoint propio:
+
+- **`POST /api/changesets/{cs_id}/diff/details`** — read-only; body `{items: [{collection, entityId}]}` con cap de 200 ítems por llamada (el front trocea). Mismo guard de lectura que `GET /diff`; no modifica la mecánica de versionado.
+- Respuesta por ítem: `{collection, entityId, action, name, fields: [{key, label, before, after}]}` con SOLO los campos que realmente cambian. `before` = documento publicado (o la imagen estampada si el changeset ya fue aplicado, para que el historial no derive); `after` = `payload` del cambio (`op=delete` → after nulo).
+- **Resolución a nombres** (implementación pura en `changesets/diffdetail.py`): `udpValues` → una fila por UDP con su nombre; `parentDomainId` → nombre del Parent Domain; relaciones → nombres de tabla y pares `PADRE.col → HIJO.col`; vistas → resumen de columnas `+a, +b, −c`; `subject_areas.tableIds` → conteos `+N added · −N removed`.
+- Ruido excluido (`id/_id/csId/updatedAt/createdAt/flgactive` y el `layout` de subject_areas); un modificado solo-ruido devuelve `fields: []` y la UI muestra "No visible field changes".
+
 ---
 
-## 7. Consideraciones de base de datos (Azure Cosmos DB, API de Mongo)
+## 7. Consideraciones de base de datos (Databricks Lakebase Postgres)
 
-### 7.1 Colecciones principales
+La persistencia productiva es Databricks Lakebase Postgres, pero el modelo de datos sigue siendo **documental**: los repositorios hablan la superficie de Motor y el adaptador `app/core/db/lakebase/` la traduce a SQL/JSONB. Cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema PG `LAKEBASE_PGSCHEMA` (default `dmh`), con índice GIN `jsonb_path_ops`; el documento se guarda completo (incluido `_id`).
+
+### 7.1 El adaptador Motor-like (`app/core/db/lakebase/`)
+
+- **Colecciones pre-creadas**: `ensure_base()` crea las **20 colecciones conocidas** (`KNOWN_COLLECTIONS`): las 19 de la tabla de §7.3 más `column_catalog` (del servicio de agentes); cualquier otra se crea on-demand.
+- **Superficie soportada**: `find` / `find_one` / `count_documents` / `distinct` / `aggregate` / `insert_one` / `insert_many` / `update_one` / `update_many` / `replace_one` / `find_one_and_update` / `delete_one` / `delete_many` / `bulk_write` / `create_index` / `drop` / `list_collection_names` / `command`.
+- **Operadores con fail-fast**: filtros `$and/$or/$nor`, `$eq/$ne/$in/$nin`, `$gt/$gte/$lt/$lte` (strings comparados con `COLLATE "C"`), `$exists`, `$regex` (+`$options`); la igualdad simple compila a jsonpath (`doc @? …`, GIN-indexable). Updates: `$set`, `$setOnInsert`, `$unset`, `$inc`, `$push`. Aggregation de alcance cerrado: stages `$match/$group/$project/$sort/$skip/$limit/$count/$unwind`, acumuladores `$sum/$avg/$min/$max/$addToSet` y expresiones `$cond/$ifNull/$eq/$gt/$in/$size/$not/$objectToArray` más **`$add` y `$strLenCP`** (agregados el 2026-07-25, cuando la primera corrida de `arrange_all.py` contra Lakebase los necesitó). Todo lo no soportado levanta `NotImplementedError` — fail-fast, nunca un resultado silenciosamente incorrecto; la truthiness de Mongo está replicada y el `$project` de exclusión no está soportado.
+- **Atomicidad y unicidad**: las mutaciones condicionales usan `WITH target … LIMIT 1 FOR UPDATE`; una violación de índice único se traduce al `DuplicateKeyError` de pymongo, así los repositorios no cambian su manejo de errores. El único índice único es `standards_versions.seq` (§6.2).
+- **`bulk_write` por lotes**: fast-path para operaciones por `_id` — cada lote va en **2 round-trips** (un `UPDATE` masivo con `unnest` + un `INSERT … ON CONFLICT DO NOTHING`) dentro de una transacción. Es lo que permite cargar un XML Erwin de 1.8 GB en minutos (97,577 escrituras en 116 s, carga real del 2026-07-25).
+
+### 7.2 Credenciales, pool y TLS
+
+- **Token OAuth rotativo**: el password de Postgres es un token OAuth de ~60 min que la app acuña sola con el SDK de Databricks (`credentials.py`); `fresh_token()` lo cachea thread-safe por 50 min. `pg_host()` auto-resuelve el host físico (`ep-…`) desde la ruta lógica `LAKEBASE_ENDPOINT` si `PGHOST` está vacío. Identidad según entorno: en Apps, el service principal de la app (`DATABRICKS_CLIENT_ID/SECRET` inyectados, M2M); en dev local, PAT u OAuth U2M (perfil de `~/.databrickscfg`, sin PAT); `PGPASSWORD` seteado es el escape hatch que evita el SDK (scripts).
+- **Pool asyncpg** (`pool.py`): `password` es un callable async (token fresco por conexión nueva), `statement_cache_size=256`, retry para el wake del compute (scale-to-zero a los 5 min) y TLS **clásico o directo** (ALPN `postgresql`, para front-ends "service direct" corporativos) controlado por `PGDIRECTTLS` (vacío = auto).
+
+### 7.3 Colecciones principales
 
 | Colección | Contenido | Feature |
 |-----------|-----------|---------|
@@ -435,7 +496,7 @@ Además, hay vistas curadas de insights (`/api/reporting/insights/scorecard`, `/
 | `saved_reports` | Reportes guardados por usuario | reporting |
 | `audit_log` | Log de auditoría append-only (`at`, `actor`, `action`) | core.audit |
 
-### 7.2 Modelo de datos principal (erDiagram)
+### 7.4 Modelo de datos principal (erDiagram)
 
 > **Referencia completa campo por campo:** `esquema-datos.md` (todas las colecciones, tipos, defaults, embebidos, enums y referencias). El erDiagram de abajo es la vista de alto nivel; los campos que muestra son un subconjunto.
 
@@ -559,9 +620,9 @@ erDiagram
     }
 ```
 
-### 7.3 Índices requeridos (`app/core/db/indexes.py`)
+### 7.5 Índices requeridos (`app/core/db/indexes.py`)
 
-`ensure_indexes` se ejecuta al conectar y es idempotente (ignora `NamespaceExists` code 48 y duplicate-key 11000). Índices creados:
+`ensure_indexes` se ejecuta al conectar y es idempotente (ignora `NamespaceExists` code 48 y duplicate-key 11000); el adaptador Lakebase materializa estas declaraciones sobre las tablas JSONB. Índices creados:
 
 | Colección | Índice | Por qué |
 |-----------|--------|---------|
@@ -581,14 +642,22 @@ erDiagram
 | `audit_log` | `at` (desc), `actor` | Lectura del log |
 | `standards_versions` | `seq` (**único**) | Impide seq duplicado en apply/rollback concurrentes |
 
-### 7.4 Reglas de oro de Cosmos RU
+### 7.6 Reglas transversales del modelo documental
 
-- **`.sort()` requiere índice**: Cosmos (tier RU) tira **500** si ordenás por un campo sin índice. Por eso muchos repositorios ordenan en Python (p. ej. `folders`, `list_all` de changesets) y el planner del reporting **rechaza** órdenes por campos no indexados en vez de dejar que Cosmos falle. El único sort en Mongo es sobre campos con índice (p. ej. `canonical_tables.physicalName`).
-- **RU y 429 (throttling)**: bajo carga Cosmos devuelve **429**. El apply del changeset es idempotente (upserts por `_id`) precisamente para poder reintentar tras throttling y converger; un fallo devuelve el request a `submitted`.
-- **Índice wildcard `udpValues.$**`**: cubre todas las keys UDP presentes y futuras (el usuario crea UDP en runtime), de modo que equality/`$in`/`$exists` sobre cualquier UDP hace seek sin necesidad de un índice por-key.
-- **Límite de 2MB/doc**: motivó sacar los cambios del changeset a `changeset_changes` (un doc por cambio) y mantener el snapshot de estándares acotado.
+Válidas con cualquiera de los dos backends:
+
 - **Soft-delete**: casi todo se marca `flgactive: false` + `deletedAt` en vez de borrarse; las lecturas filtran `flgactive != false`.
-- **`_id` vs `id`**: los documentos usan `_id` en Mongo; los repositorios lo traducen a `id` al leer y lo re-mapean a `_id` al escribir. Los `_id` deterministas (changeset_changes) dan last-write-wins por entidad.
+- **`_id` vs `id`**: los documentos usan `_id` en la BD; los repositorios lo traducen a `id` al leer y lo re-mapean a `_id` al escribir. Los `_id` deterministas (`changeset_changes`) dan last-write-wins por entidad.
+- **Documentos acotados**: el límite de 2MB/doc de Cosmos RU motivó sacar los cambios del changeset a `changeset_changes` (un doc por cambio) y mantener el snapshot de estándares acotado; ambas decisiones se conservan sobre Lakebase (documentos chicos = updates JSONB baratos y diffs manejables).
+- **Sorts solo sobre campos indexados**: el planner del reporting rechaza órdenes por campos no indexados (§6.3) y varios repositorios ordenan en Python (p. ej. `folders`, `list_all` de changesets). La regla nació en Cosmos RU y se mantiene como invariante de escala.
+- **Índice wildcard `udpValues.$**`**: cubre todas las keys UDP presentes y futuras (el usuario crea UDP en runtime), de modo que equality/`$in`/`$exists` sobre cualquier UDP hace seek sin un índice por-key.
+
+### 7.7 Legacy/rollback: Azure Cosmos DB (API de Mongo, `DB_BACKEND=cosmos`)
+
+Cosmos fue la base productiva hasta la migración del 2026-07-19 (doc 28 de `plan-implementacion/`) y queda como **seam de rollback dormido**: `DB_BACKEND=cosmos` reactiva el cliente Motor (`COSMOS_CONNECTION_STRING` + `COSMOS_DATABASE`) sin tocar los repositorios. Sus variables y secretos están FUERA del bundle de despliegue — reactivarlo exige reintroducirlos a mano. Reglas específicas del tier RU, vigentes solo en ese camino:
+
+- **`.sort()` requiere índice**: Cosmos RU tira **500** al ordenar por un campo sin índice (origen histórico de la regla transversal de sorts).
+- **RU y 429 (throttling)**: bajo carga Cosmos devuelve **429**. El apply del changeset es idempotente (upserts por `_id`) precisamente para poder reintentar tras throttling y converger; un fallo devuelve el request a `submitted`.
 
 ---
 
@@ -596,10 +665,14 @@ erDiagram
 
 ### 8.1 Dónde corre
 
-El backend es una app FastAPI servida por Uvicorn. Puede correr en:
+El backend es una app FastAPI servida por Uvicorn. El target de producción es **Databricks Apps en el workspace corporativo** (runbook completo en [despliegue.md](despliegue.md); docs 35 y 36 de `plan-implementacion/` como referencia histórica), declarado como app en un Databricks Asset Bundle (`databricks.yml`) cuyo bloque `config:` arranca `uvicorn app.main:app` y define el env. Databricks inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT` automáticamente. Resumen del modelo de despliegue (2026-07-27→31):
 
-- **Azure App Service**: como servicio web Python estándar (Uvicorn como servidor ASGI).
-- **Databricks Apps** (target de producción actual): declarado como app en un Databricks Asset Bundle (`databricks.yml`), cuyo bloque `config:` arranca `uvicorn app.main:app` y define el env (el viejo `app.yaml` ya no existe; parámetros por entorno en la sección `variables:` — homologación 2026-07-19). Databricks inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT` automáticamente para FastAPI/uvicorn. La BD (Lakebase) se autentica con el service principal de la app (sin secretos); los secretos restantes (Cosmos fallback y `SECRET_KEY`) se resuelven desde un scope respaldado por Key Vault (`kv-scope-datacraft`) vía `value_from`.
+- **Parametrizado por GitHub Variables, cero edición de archivos por ambiente**: el workflow (`.github/workflows/deploy-databricks.yml`, push a `main` o manual) exporta cada GitHub Variable como `BUNDLE_VAR_<variable del bundle>` **solo si trae valor** (una variable vacía pisaría el default del `databricks.yml`). Variables del bundle: `lakebase_endpoint`, `lakebase_pgschema`, `cors_origin_regex`, `secret_scope`, `session_secret_key`, `app_admin_user`. El CLI usa `DATABRICKS_HOST` (Variable) + `DATABRICKS_TOKEN` (Secret) + `BUNDLE_TARGET` opcional.
+- **Sin `workspace.host` en el bundle**: el workspace destino sale de `DATABRICKS_HOST` — un `host:` hardcodeado ganaría sobre la variable y podría desplegar callado al workspace equivocado.
+- **Apps pre-creadas con bind**: en el corporativo las apps se crean a mano para reservar cupo, así que el estado Terraform del bundle no las conoce y el deploy daría `409 ALREADY_EXISTS`. El workflow ejecuta `databricks bundle deployment bind backend bknd-data-model-hub --target prod --auto-approve` (idempotente) entre Validate y Deploy; el nombre creado a mano debe ser idéntico al del bundle.
+- **Control humano de la app**: el bloque `permissions:` del bundle es autoritativo (se re-aplica en cada deploy y pisa grants manuales): `CAN_MANAGE` para `${var.app_admin_user}` (default: quien despliega) y `CAN_USE` para el grupo `users`.
+- **Secretos y credenciales**: la BD Lakebase se autentica con el service principal de la app (OAuth M2M, sin secretos en GitHub — el password de Postgres es un token de ~1 h que la app acuña sola); el único secreto del bundle es el `SECRET_KEY` de sesión, resuelto vía `value_from` desde el scope `kv-scope-datacraft`, key `session-secret-key` (sin ese scope/key el `bundle deploy` falla). Cosmos está fuera del bundle (§7.7).
+- **Grant del SP del front automatizado**: el proxy del front (server propio, doc 36) llama al backend servidor-a-servidor, así que su service principal necesita `CAN_USE` sobre la app backend; como `permissions:` resetea la ACL en cada deploy, el workflow re-aplica ese grant vía `databricks api patch /api/2.0/permissions/apps/...` tras cada deploy de cualquiera de los dos repos.
 
 En desarrollo local se corre directamente (`python -m app.main` levanta Uvicorn en `0.0.0.0:8000` con `reload=True`).
 
@@ -607,12 +680,21 @@ En desarrollo local se corre directamente (`python -m app.main` levanta Uvicorn 
 
 | Variable | Default | Rol |
 |----------|---------|-----|
-| `COSMOS_CONNECTION_STRING` | vacío (obligatorio en runtime) | Connection string de Cosmos; sin ella las operaciones async levantan `RuntimeError` |
-| `COSMOS_DATABASE` | `db_modeler` | Nombre de la base de datos |
+| `DB_BACKEND` | `lakebase` | Seam de backend de BD: `lakebase` (producción) o `cosmos` (legacy/rollback, §7.7) |
+| `LAKEBASE_ENDPOINT` | vacío | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria con lakebase |
+| `LAKEBASE_PGSCHEMA` | `dmh` | Schema PG de las tablas-colección |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | vacío | Workspace del SDK / PAT para dev local (en Apps la identidad es el SP; en local también sirve OAuth U2M) |
+| `PGHOST` | vacío | Opcional: host físico PG (auto-resuelto vía SDK desde `LAKEBASE_ENDPOINT` si está vacío) |
+| `PGPORT` / `PGDATABASE` / `PGSSLMODE` | `5432` / `databricks_postgres` / `require` | Conexión PG |
+| `PGUSER` | vacío (fallback `DATABRICKS_CLIENT_ID`) | Rol PG = identidad que acuña el token |
+| `PGPASSWORD` | vacío | Password fijo para scripts (escape hatch sin SDK) |
+| `PGDIRECTTLS` | vacío (auto) | `true` fuerza TLS directo (ALPN `postgresql`); `false` clásico |
+| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | vacío / `db_modeler` | Solo con `DB_BACKEND=cosmos` (legacy) |
 | `SECRET_KEY` | `dev-only-insecure-change-me-in-prod` | Clave HMAC del JWT de sesión. Con el default y `REQUIRE_AUTH=true`, **la app no arranca** (`assert_secure_config`) |
 | `REQUIRE_AUTH` | `false` | En `true`: sin token válido → 401 (login obligatorio en prod); oculta `/docs`, `/redoc`, `/openapi.json` |
 | `ACCESS_TOKEN_TTL_MIN` | `720` (12h) | Vida del token de acceso |
-| `CORS_ORIGINS` | `localhost:3000` | Allowlist de orígenes del frontend (coma-separado) |
+| `CORS_ORIGINS` | `localhost:3000` + `127.0.0.1:3000` (solo sin regex) | Allowlist de orígenes del frontend (coma-separado) |
+| `CORS_ORIGIN_REGEX` | vacío | Regex de orígenes (el mismo bundle sirve en cualquier workspace de Apps) |
 | `ALLOWED_HOSTS` | vacío | Si se define, activa `TrustedHostMiddleware` (Host allowlist de producción) |
 | `RATE_LIMIT_ENABLED` | `false` | Fuerza el rate limiting fuera de prod (en prod ya está activo por `REQUIRE_AUTH`) |
 | `AUTH_MODE` | `local` | Seam de identidad: `local` (usuario fake / `X-Dev-User`) o `databricks` (headers OBO) |
@@ -620,44 +702,46 @@ En desarrollo local se corre directamente (`python -m app.main` levanta Uvicorn 
 | `LOG_FORMAT` | `pretty` | `pretty` (dev) o `json` (prod) |
 | `LOG_LEVEL` | `INFO` | Nivel mínimo de logging |
 
-Ejemplo de `.env` de producción (postura endurecida):
+En producción el env NO vive en un `.env`: lo define el `config.env` del `databricks.yml` (`LOG_FORMAT=json`, `DB_BACKEND=lakebase`, `LAKEBASE_ENDPOINT`, `LAKEBASE_PGSCHEMA`, `CORS_ORIGIN_REGEX`, `REQUIRE_AUTH=true` y `SECRET_KEY` vía `value_from`). Ejemplo de `.env` de desarrollo local contra el Lakebase del workspace:
 
 ```bash
-COSMOS_CONNECTION_STRING="mongodb://...cosmos.azure.com:.../?ssl=true&..."
-COSMOS_DATABASE="db_modeler"
-SECRET_KEY="<openssl rand -hex 32>"
-REQUIRE_AUTH="true"
-ACCESS_TOKEN_TTL_MIN="720"
-CORS_ORIGINS="https://frnt-data-model-hub.azuredatabricksapps.com"
-ALLOWED_HOSTS="bknd-data-model-hub.azuredatabricksapps.com"
-LOG_FORMAT="json"
+DB_BACKEND="lakebase"
+DATABRICKS_HOST="https://<workspace>.azuredatabricks.net"
+DATABRICKS_TOKEN="<PAT, u omitir si hay perfil OAuth U2M en ~/.databrickscfg>"
+LAKEBASE_ENDPOINT="projects/dmh-proj/branches/production/endpoints/primary"
+LAKEBASE_PGSCHEMA="dmh"
 ```
 
 ### 8.3 Consideraciones de base de datos para el despliegue
 
-- **Misma cuenta Cosmos, colecciones distintas**: este backend administra las colecciones de plataforma; el servicio de agentes (`app-agents-modeler`) administra `column_catalog` sobre la misma cuenta.
-- **Índices al arranque**: `ensure_indexes` corre en el `connect()` del lifespan; en el primer arranque contra una base vacía crea todos los índices requeridos. La creación es idempotente y tolera colecciones creadas implícitamente.
-- **Aprovisionamiento de RU**: como `.sort()` sin índice falla y el reporting opera a escala (cientos de miles de columnas), conviene dimensionar RU con holgura para las agregaciones (`$group`) del reporting y los `bulk_write` del apply; el `maxTimeMS=15000` actúa como circuit-breaker de consultas caras.
+- **Misma base, colecciones distintas**: este backend administra las colecciones de plataforma; el servicio de agentes (`app-agents-modeler`) administra `column_catalog` sobre el mismo schema PG (por eso está en `KNOWN_COLLECTIONS`).
+- **Base y schema lazy + índices al arranque**: el `connect()` del lifespan ejecuta el DDL de `ensure_base` (schema `dmh` + tablas-colección) y `ensure_indexes`; contra una base vacía el primer arranque crea todo. La creación es idempotente.
+- **Rol PG del service principal**: el SP del BACKEND necesita rol sobre la base (en el corporativo se resolvió con `databricks_superuser`; la alternativa son GRANTs granulares sobre el schema `dmh`). El SP del FRONT no necesita rol: la SPA jamás toca la BD.
+- **Scale-to-zero**: el compute Lakebase se duerme a los 5 min sin tráfico; el pool reintenta el wake por conexión y el lifespan reintenta en background si la BD no estaba al arrancar (§5.1). El `maxTimeMS=15000` del reporting actúa como circuit-breaker de consultas caras.
 - **Rate limiting multi-réplica**: el estado del limiter es en memoria por proceso. Con varias réplicas (Databricks Apps escalado), el límite efectivo se multiplica por el número de réplicas; para un enforcement estricto habría que migrar a un backend compartido (Redis).
 - **Recuperación de publish interrumpido**: un changeset `approved` sin `appliedAt` indica que el proceso murió entre el claim y el apply; es detectable y re-aplicable con `scripts/reapply_changeset.py` (el apply es idempotente).
+- **Carga de datos desde dentro del workspace**: si el endpoint Lakebase no es alcanzable desde la laptop (private link "service direct" corporativo), la carga Erwin corre desde un cluster del mismo workspace con `scripts/databricks/carga_erwin_notebook.py` (invoca el mismo kit; cluster con access mode Dedicated).
 
 ---
 
 ## 9. Resumen de superficie de API por feature
 
+La superficie total es de **128 rutas repartidas en 22 routers** montados en `main.py` (los 20 verticales de features más los routers hermanos `versions` y `requests` de changesets, y el `query` del reporting; el inventario ruta por ruta vive en [api-contract.md](api-contract.md)):
+
 | Prefijo | Feature | Endpoints representativos | Guard |
 |---------|---------|---------------------------|-------|
-| `/api/health` | health | `GET /` (ping vivo a Cosmos) | abierto |
-| `/api/auth` | auth | `POST /login` (5/min), `POST /logout`, `GET /me` | login |
+| `/api/health` | health | `GET /` (ping vivo a la BD) | abierto |
+| `/api/auth` | auth | `POST /login` (5/min), `POST /logout`, `GET /me`, `GET /warmup/{next_b64}` | login |
 | `/api/admin` | admin | users, roles, permissions, audit | `admin.manage` |
 | `/api` | identity | `GET /me`, `GET /users` | sesión |
-| `/api/catalog` | catalog | tables, columns | `model.edit` (escritura) |
-| `/api/changesets` `/api/versions` `/api/requests` | changesets | snapshot, changes, submit, review, diff, versions | `model.edit` / `review.decide` |
+| `/api/catalog` | catalog | tables, `GET /columns` (búsqueda por columna, `q` obligatorio, `limit` 1–500), columns por tabla, usage | `model.edit` (escritura) |
+| `/api/changesets` `/api/versions` `/api/requests` | changesets | snapshot, changes, submit, review, diff, `POST /{cs_id}/diff/details` (§6.5), rollback, versions | `model.edit` / `review.decide` / `rollback` |
+| `/api/ddl-rules` | ddl_rules | 8 rutas: reglas, config, artifacts, templates (lectura) + validate, test, impact (cómputo) + render | sesión; `render` exige `export` |
 | `/api` | projects | projects, subject-areas, layout, diagram | `model.edit` (escritura) |
-| `/api/folders` `/api/relationships` `/api/views` | folders/rel/views | CRUD del canvas | `model.edit` (escritura) |
+| `/api/folders` `/api/schemas` `/api/relationships` `/api/views` | folders/schemas/rel/views | CRUD del canvas y del esquema físico | `model.edit` (escritura) |
 | `/api/domains` `/api/glossary` `/api/udp` `/api/settings` | estándares | dominios, glosario, UDP (lectura), naming | `standards.edit` (escritura) |
-| `/api/standards` | data_standards | snapshot, apply, rollback, versions | `standards.edit` |
-| `/api/summary` | summary | 5 cards del Home | abierto |
-| `/api/reporting` | reporting + query | tables, columns, query, sql, catalog, facets, insights, reports, export | sesión |
+| `/api/standards` | data_standards | snapshot, apply (incluye `rulesUpsert`/`rulesDelete`/`ddlConfigPatch`), rollback, versions | `standards.edit`; rollback exige `rollback` |
+| `/api/summary` | summary | contadores del Home | sesión |
+| `/api/reporting` | reporting + query | tables, columns, views, query, sql, catalog, facets, insights, reports, export | sesión |
 
-El modelo de permisos (matriz data-driven en `roles`) tiene el catálogo: `model.view`, `model.edit`, `review.decide`, `publish`, `export`, `standards.edit`, `admin.manage`. Las lecturas (GET/HEAD/OPTIONS) solo exigen sesión válida; las escrituras (POST/PUT/PATCH/DELETE) exigen el permiso del router (`write_guard`) y se auditan (salvo los guardados de alta frecuencia del canvas: `/layout`, `/drawings`, `/tables`).
+El modelo de permisos (matriz data-driven en `roles`) tiene el catálogo: `model.view`, `model.edit`, `review.decide`, `publish`, `rollback`, `export`, `standards.edit`, `admin.manage`. Las lecturas (GET/HEAD/OPTIONS) solo exigen sesión válida; las escrituras (POST/PUT/PATCH/DELETE) exigen el permiso del router (`write_guard`) y se auditan (salvo los guardados de alta frecuencia del canvas: `/layout`, `/drawings`, `/tables`, `/udp`).

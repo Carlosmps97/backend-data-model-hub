@@ -1,6 +1,6 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-07-24 · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-07-31 · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
 50 MB y de **1.8 GB** — el parser es streaming: ~38 s y ~0.4 GB de RAM por
 GB de XML). Índice general de TODOS los scripts: `scripts/README.md`.
@@ -40,6 +40,8 @@ resolvió por estructura, no por nombres.
 | Ordenar los canvases después de cargar | `arrange_all` | Sí |
 | Validar consistencia después de cargar | `audit_data_consistency` | Solo lee |
 | Crear el usuario `admin` (BD nueva, para poder entrar) | `create_admin` | Sí (upsert) |
+| Sembrar el ruleset base del DDL Export (8 reglas + lookups) | `seed_ddl_export_rules` | Sí (con `--apply`) |
+| Marcar la versión base `v1` al cerrar la carga (sin él la web bloquea Model) | `mark_base_version` | Sí (con `--apply`) |
 | Re-aplicar las 3 correcciones de partición del owner (solo XML DDV actual) | `fix_particiones_ddv_20260717` | Sí (con `--apply`) |
 | Volver a la VERSIÓN BASE (deshace y borra toda versión posterior a v1) | `reset_to_base_version` | Sí (con `--apply`) |
 
@@ -53,6 +55,32 @@ quality  →  crosscheck (vs BD)  →  migrate (dry-run)
 Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo.
 (La demo sintética y sus seeds se retiraron el 2026-07-20 — el flujo es
 únicamente XML → Lakebase.)
+
+**Secuencia COMPLETA en una BD vacía** (doc 35 camino A de plan-implementacion/
+— p. ej. estrenar otro workspace Databricks; desde la raíz del backend, con el
+`.env` apuntando al destino):
+```
+0)    create_admin                     # admin/admin + los 4 roles (idempotente)
+1..N) por CADA XML de la familia (orden usado: 1º CPYBCA, 2º Otros):
+      quality → crosscheck → migrate --project "Modelo de Datos DDV_FISICO" (dry-run) → --apply
+Al final, UNA sola vez:
+      arrange_all --project "Modelo de Datos DDV_FISICO"
+      audit_data_consistency           # esperado: 0 fixables + ~176 informativos conocidos (§6)
+      seed_ddl_export_rules (dry-run) → --apply    # ruleset del DDL Export (§6b)
+      mark_base_version (dry-run) → --apply        # marcador v1 (§6c)
+```
+El orden CPYBCA → Otros reproduce la foto actual de la BD; como los ids son
+deterministas (`uuid5` del Long_Id de Erwin), la BD nueva queda con los
+MISMOS ids que la original. A la fecha (2026-07-31) quedan ~13 XML de la
+familia por cargar al MISMO proyecto; tras toda carga que mueva estándares
+(glosario/dominios/UDP), registrar una baseline nueva de Data Standards
+ANTES de usar Restore.
+
+**Plan B corporativo (Lakebase inalcanzable desde la laptop — private link):**
+la misma secuencia corre desde un cluster del PROPIO workspace (access mode
+**Dedicated**) con el notebook `scripts/databricks/carga_erwin_notebook.py`.
+No reimplementa nada: invoca estos mismos scripts vía subprocess (detalle en
+el doc 35 §4.1 de plan-implementacion/).
 
 **Requisitos:** el `.venv` del backend (el parseo usa solo stdlib; `migrate
 --apply` y `arrange_all` usan la conexión del `.env` según `DB_BACKEND` —
@@ -194,8 +222,16 @@ muestra el plan sin abrir conexión a la BD.
   ya existentes (glosario/dominios/UDP) se **reusan por clave natural**; las
   tablas/vistas en conflicto con docs creados a mano se **omiten con aviso**.
   Nunca borra datos.
+- **Rendimiento real (2026-07-25):** el XML2 "Otros" (**1.8 GB**) cargó en
+  **116 s con 97,577 escrituras** — buffers por colección con `bulk_write`
+  en lotes de 1,000 (fast-path del adaptador Lakebase: 2 round-trips por
+  lote) + prefetch de claves naturales.
+- **Reporte de decisiones:** cada `--apply` deja
+  `migration_report_<archivo>_<fecha>.json` en `migration-reports/`
+  (adopciones, conflictos resueltos por score, alias, fusiones).
 - **Después de `--apply`:** layout inicial en grilla → correr `arrange_all`
-  (§5) y `audit_data_consistency` (§6).
+  (§5) y `audit_data_consistency` (§6). En una BD estrenada, cerrar con
+  `seed_ddl_export_rules` (§6b) y `mark_base_version` (§6c).
 
 ## 5. `arrange_all` — auto-arrange ELK de todos los canvases
 
@@ -205,8 +241,9 @@ nodos de vista** (estimando el tamaño renderizado real, máx. entre naming
 físico y lógico).
 
 ```bash
-.venv/bin/python scripts/arrange_all.py
+.venv/bin/python scripts/arrange_all.py [--project "Nombre"]
 ```
+- **`--project`** (doc 32b): limita el arrange a los canvases de ESE proyecto.
 - **Requiere:** node + elkjs. Resolución del bundle: env `ELKJS_PATH` →
   `../web-data-model-hub/node_modules/elkjs/...` (repo hermano) → `require`
   normal. Env opcional `ARRANGE_SCRATCH` para el directorio temporal.
@@ -217,8 +254,49 @@ físico y lógico).
 ```bash
 .venv/bin/python -m scripts.audit_data_consistency
 ```
-Chequeos C1–C9 de integridad referencial y campos requeridos sobre la BD.
-Esperado tras una migración limpia: **0 hallazgos fixables**.
+Chequeos C1–C10 de integridad referencial y campos requeridos sobre la BD.
+Esperado tras una migración limpia: **0 hallazgos fixables**. Con la carga
+actual (CPYBCA + Otros) el esperado es **0 fixables + ~176 informativos
+conocidos**: C10×78 particiones reasignadas, C5×9 vistas multi-fuente,
+C8b×89 grafías variantes fieles al XML.
+
+## 6b. `seed_ddl_export_rules` — ruleset base del DDL Export
+
+Siembra, como UNA versión de Data Standards ("Base — DDL export rules"), las
+**8 reglas activas** del Export DDL (masking técnico, desencriptación de
+negocio `bcp_ddv_desencrypt`, tags de governance, TBLPROPERTIES de vacuum,
+cascada `_rej` + vista técnica) **más los lookups `vacuum_map`/`dac_map`**
+(doc 30 de plan-implementacion/). Aborta si ya hay reglas.
+
+```bash
+.venv/bin/python -m scripts.seed_ddl_export_rules           # dry-run
+.venv/bin/python -m scripts.seed_ddl_export_rules --apply
+```
+- **Fix corporativo (2026-07-30, doc 36 anexo):** el kit multi-archivo NO
+  crea defs UDP con usedBy=0 (política A4) y en el DDV real ninguna tabla
+  asigna "Tipo de Vista" — la 1ª corrida en el workspace corporativo falló
+  con `Unknown UDP 'Tipo de Vista'`. Resuelto EN el script: la seed auto-crea
+  en el MISMO batch las dos defs que el kit omite — **"Tipo de Vista"**
+  (table, list, `[Regular, Personalizada]`) y **"Frecuencia Vacuum"** (table,
+  list, allowedValues = las 9 claves de `vacuum_map`, default
+  `CUSTOM_90 days`). Idempotente. Cualquier OTRO UDP referenciado que falte
+  = modelo sin migrar → aborta limpio con la lista.
+
+## 6c. `mark_base_version` — marcador de versión base v1 (cierre OBLIGATORIO)
+
+NUEVO 2026-07-29. La migración escribe DIRECTO a las colecciones publicadas
+sin crear changesets, y sin una versión aplicada la web **bloquea el módulo
+Model** ("Open model" exige producción publicada). El script crea el
+changeset marcador **`v1`** (status `approved` + `appliedAt`, **0 cambios**),
+registra la baseline de Data Standards si el stream está vacío y asegura el
+permiso `rollback` en los roles. Idempotente; aborta si ya hay versiones
+aplicadas. Con una familia multi-archivo (~15 XML): TODOS los
+`migrate --apply` primero, el marcador UNA sola vez al final.
+
+```bash
+.venv/bin/python -m scripts.mark_base_version           # dry-run
+.venv/bin/python -m scripts.mark_base_version --apply
+```
 
 ## 7. `fix_particiones_ddv_20260717` — decisiones del owner (solo XML DDV actual)
 

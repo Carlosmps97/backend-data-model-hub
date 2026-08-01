@@ -1,8 +1,8 @@
 # Políticas de seguridad del backend — Data Model Hub
 
-Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI y Motor sobre Azure Cosmos DB (API de Mongo). Cubre todo lo implementado hasta el hardening del 2026-07-06: autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, y auditoría. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
+Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador Motor-like en `app/core/db/lakebase/`; Azure Cosmos DB queda solo como fallback legacy vía `DB_BACKEND=cosmos`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
 
-La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders técnicos que necesitan entender la postura de riesgo. Todo lo que sigue está verificado contra el código real; cuando decimos "falla-cerrado" o "tiempo constante" es porque el código lo hace, no porque suene bien.
+La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders técnicos que necesitan entender la postura de riesgo. Todo lo que sigue está verificado contra el código real; cuando el texto afirma "falla-cerrado" o "tiempo constante" es porque el código lo hace, no porque suene bien.
 
 ---
 
@@ -11,7 +11,7 @@ La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders 
 El backend adopta cuatro principios transversales que explican casi todas las decisiones concretas más abajo:
 
 1. **Falla-cerrado en producción.** La postura de producción se activa con la variable `REQUIRE_AUTH=true`. Con ella, la app no arranca si sigue usando la clave de firma de desarrollo, exige login en toda request sin token, oculta la documentación interactiva y activa el rate limiting. Si algo no está bien configurado, el sistema prefiere no arrancar o rechazar antes que abrir un hueco.
-2. **Identidad token-first.** La identidad del usuario sale del token de sesión firmado (`Authorization: Bearer …`), no de cabeceras manipulables por el cliente. En desarrollo local hay un fallback conmutable, pero en producción ese fallback está apagado.
+2. **Identidad token-first.** La identidad del usuario sale del token de sesión firmado, no de cabeceras manipulables por el cliente. El token se lee de dos fuentes, en este orden: `Authorization: Bearer …` (desarrollo local, curl, tests) y `X-Session-Token` (producción en Databricks Apps, donde el proxy SSO de la plataforma consume el header `Authorization` para su propia sesión). En desarrollo local hay un fallback conmutable, pero en producción ese fallback está apagado.
 3. **Superficie mínima.** CORS con allowlist explícita (sin comodines), métodos y cabeceras acotados, documentación oculta en producción, host allowlist opcional, y mensajes de error genéricos que no filtran stack traces.
 4. **Defensa en profundidad.** El rate limiting por IP y el lockout por cuenta se complementan; el RBAC gatea a nivel de router y de endpoint; el motor de reporting valida el spec en varias capas aunque una sola bastaría.
 
@@ -26,9 +26,28 @@ flowchart TD
 
 ---
 
+## 1b. Capas de autenticación en producción (Databricks Apps)
+
+Desde la migración al workspace corporativo (2026-07-27 → 07-31; detalle en los docs 35 y 36 de plan-implementacion/), el backend corre como Databricks App (`bknd-data-model-hub`) y la autenticación efectiva se compone de **tres capas independientes**, que conviene distinguir porque cada una falla y se diagnostica distinto:
+
+1. **Muro SSO del proxy OAuth de Databricks Apps, POR app.** Cada app (front `frnt-…` y backend `bknd-…`) vive en su propio subdominio detrás de su propio proxy OAuth. Como `databricksapps.com` está en la **Public Suffix List**, la cookie de sesión del SSO es por app y no se comparte entre subdominios. Un `fetch()` del front hacia el subdominio del backend no puede completar ese SSO (el redirect cross-site a Microsoft es imposible dentro de XHR): el proxy del backend respondía su propio 401 (`{}`, 2 bytes, sin headers CORS) sin llegar jamás a FastAPI. La solución definitiva (2026-07-31) es el **server propio del front** (`server.mjs`, cero dependencias): sirve la SPA y **proxya `/api/*` al backend servidor-a-servidor** con un token OAuth **M2M del service principal del front**, de modo que el navegador habla con **un solo origen**. El grant `CAN_USE` del SP del front sobre la app backend lo **re-aplica CI tras cada deploy** (el bloque `permissions:` del bundle resetea la ACL en cada despliegue; un grant manual no sobrevive).
+2. **Login propio de la plataforma.** Usuario/contraseña contra la colección `users` (bcrypt) más sesión como JWT HS256 (secciones 2.1–2.7). En producción el token de sesión viaja en el header **`X-Session-Token`**: el header `Authorization` que llega al backend es **el del proxy de Databricks** (su carril de auth programática lo consume/reemplaza), **no el del usuario** — el backend nunca debe derivar identidad de negocio de ese `Authorization`.
+3. **Backend → Lakebase con service principal.** El pool de Postgres se autentica con un token OAuth (~1 h, auto-renovado) acuñado con el SP del backend. Los usuarios finales **jamás tocan la base de datos**: toda escritura pasa por el RBAC propio de la app.
+
+```mermaid
+flowchart LR
+    B[Navegador] -->|origen unico frnt| P[Proxy OAuth Apps front]
+    P --> S[server.mjs sirve dist y proxya /api]
+    S -->|Bearer OAuth M2M del SP front + X-Session-Token| Q[Proxy OAuth Apps backend]
+    Q --> F[FastAPI backend]
+    F -->|token OAuth del SP backend approx 1h| L[(Lakebase Postgres)]
+```
+
+---
+
 ## 2. Autenticación
 
-La autenticación es propia: usuario y contraseña contra la colección `users` de Cosmos, con el hash guardado por bcrypt y una sesión emitida como JWT firmado. No hay dependencia de un IdP externo para autenticar (el modo Databricks solo derivaría identidad de cabeceras SSO si se reactivara, pero hoy no se usa para autenticar).
+La autenticación es propia: usuario y contraseña contra la colección `users` de la base de datos (Lakebase en producción), con el hash guardado por bcrypt y una sesión emitida como JWT firmado. No hay dependencia de un IdP externo para autenticar dentro de la app (el modo Databricks solo derivaría identidad de cabeceras SSO si se reactivara, pero hoy no se usa para autenticar); el SSO de Databricks Apps es una capa previa e independiente (sección 1b).
 
 ### 2.1 Hash de contraseñas: bcrypt en tiempo constante
 
@@ -116,7 +135,7 @@ def assert_secure_config() -> None:
     if using_default:
         if settings.REQUIRE_AUTH:
             raise RuntimeError(
-                "SECRET_KEY inseguro con REQUIRE_AUTH=true: definí SECRET_KEY "
+                "SECRET_KEY inseguro con REQUIRE_AUTH=true: define SECRET_KEY "
                 "(env/secreto) antes de desplegar — con el default público se "
                 "pueden forjar tokens de sesión admin."
             )
@@ -136,11 +155,13 @@ def current_principal(request: Request) -> Principal:
         claims = decode_access_token(token)
         if claims and claims.get("sub"):
             return _principal_from_claims(claims)      # source="session"
-        raise HTTPException(401, "Sesión inválida o expirada. Iniciá sesión de nuevo.")
+        raise HTTPException(401, "Invalid or expired session. Sign in again.")
     if settings.REQUIRE_AUTH:
-        raise HTTPException(401, "Autenticación requerida. Iniciá sesión.")
+        raise HTTPException(401, "Authentication required. Sign in.")
     return get_identity_provider().principal_from_request(request)
 ```
+
+`bearer_token` extrae el token de sesión de dos fuentes, en orden: (1) `Authorization: Bearer <token>` — dev local, curl, tests; (2) **`X-Session-Token: <token>` — producción en Databricks Apps**, porque el proxy SSO de la plataforma consume el header `Authorization` como su propio carril de auth programática y el backend jamás recibe el Bearer del front (verificado 2026-07-20: el navegador enviaba el token y FastAPI lo veía ausente). Por eso el front manda el JWT propio en un header dedicado.
 
 Reglas:
 
@@ -151,7 +172,7 @@ Reglas:
 
 ```mermaid
 flowchart TD
-    A[Request entrante] --> B{Header Authorization Bearer presente?}
+    A[Request entrante] --> B{Token presente? Authorization Bearer o X-Session-Token}
     B -->|Si| C{Token valido y con sub?}
     C -->|Si| D[Principal source session]
     C -->|No| E[401 sesion invalida o expirada]
@@ -166,9 +187,10 @@ Definidos en `app/features/auth/router.py`:
 
 | Método y ruta | Descripción | Respuesta |
 |---|---|---|
-| `POST /api/auth/login` | Login usuario/contraseña. Rate-limited `5/minute` por IP. | `{token, user}` o 401 |
+| `POST /api/auth/login` | Login usuario/contraseña. Rate-limited `5/minute` por IP real. | `{token, user}` o 401 |
 | `POST /api/auth/logout` | Cierra sesión (audita `logout`). | `{ok: true}` |
 | `GET /api/auth/me` | Usuario en sesión enriquecido con rol y permisos efectivos. | usuario o Principal básico |
+| `GET /api/auth/warmup/{next_b64}` | Warm-up SSO para Databricks Apps (doc 36): `next` viaja en el path como base64url y se valida contra el mismo allowlist de CORS (lista + regex, anti open-redirect). Quedó **inerte** en producción tras el proxy del front (sección 1b); útil solo en dev apuntando a otro backend. | 302 a `next` o 400 |
 
 Ejemplo de login exitoso:
 
@@ -206,7 +228,7 @@ sequenceDiagram
     participant R as Router auth
     participant L as slowapi Limiter
     participant S as Service login
-    participant DB as Cosmos users
+    participant DB as coleccion users
     C->>R: POST /api/auth/login
     R->>L: chequear 5 por minuto por IP
     alt limite excedido
@@ -249,12 +271,21 @@ async def login(request: Request, body: LoginBody): ...
 ```python
 # app/core/ratelimit.py
 _ENABLED = settings.REQUIRE_AUTH or os.getenv("RATE_LIMIT_ENABLED", "").lower() in ("1", "true", "yes")
-limiter = Limiter(key_func=get_remote_address, headers_enabled=True, enabled=_ENABLED)
+
+def client_ip(request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=client_ip, headers_enabled=True, enabled=_ENABLED)
 ```
 
 Características:
 
-- **Clave = IP del cliente** (`get_remote_address`).
+- **Clave = IP real del cliente (cambio 2026-07-31): la PRIMERA IP de `X-Forwarded-For`, con fallback al peer** (`get_remote_address`) cuando no hay header (dev local directo). En Databricks Apps el backend nunca ve al navegador: recibe del proxy de Databricks y, desde el doc 36, también del server del front. Con la key anterior por `request.client`, todos los usuarios compartían la IP del último salto y el límite de 5/min se volvía **global**: con usuarios en paralelo, los logins legítimos rebotaban en 429. La IP real viaja en `X-Forwarded-For` (el proxy de Databricks la pone; `server.mjs` la preserva).
 - **Solo por-ruta, no global.** El canvas y el reporting disparan muchos requests legítimos; un límite global los frenaría. El límite estricto va donde importa: el login.
 - **Gateado por postura.** Activo en producción (`REQUIRE_AUTH`) o cuando se fuerza con `RATE_LIMIT_ENABLED=true`. En dev y tests queda apagado por defecto para no frenar el harness (muchos logins desde localhost) ni el uso local.
 - **Respuesta 429 con `Retry-After`.** El handler `_rate_limit_exceeded_handler` se registra en `main.py`; con `headers_enabled=True` se agregan las cabeceras de límite.
@@ -340,36 +371,40 @@ if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == 
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 ```
 
-HSTS solo se emite sobre HTTPS para no romper el desarrollo local en HTTP. Detrás de un proxy (Azure App Service, Databricks Apps), el esquema real se detecta por `X-Forwarded-Proto`.
+HSTS solo se emite sobre HTTPS para no romper el desarrollo local en HTTP. Detrás del proxy de Databricks Apps, el esquema real se detecta por `X-Forwarded-Proto`.
 
 ---
 
 ## 7. CORS estricto
 
-Configurado en `create_app()` (`app/main.py`) con allowlist explícita, sin comodines:
+Configurado en `create_app()` (`app/main.py`) con allowlist explícita más regex, sin comodines:
 
 ```python
-cors_origins = (
-    [o.strip() for o in cors_env.split(",") if o.strip()]
-    if cors_env else ["http://localhost:3000", "http://127.0.0.1:3000"]
-)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=False,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX or None,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Requested-With",
+        "X-Dev-User",
+        "X-Session-Token",
+    ],
     max_age=600,
 )
 ```
 
 Decisiones:
 
-- **Orígenes de allowlist.** En producción se define con `CORS_ORIGINS` (lista separada por comas); el default apunta al frontend local.
-- **`allow_credentials=False`.** La auth es token-first (Bearer, sin cookies), así que no se necesitan credenciales cross-origin. Apagarlo reduce el riesgo de CSRF por cookies y permite mantener la allowlist estricta sin la interacción problemática entre `allow_credentials=True` y comodines.
-- **Métodos y cabeceras acotados** en vez de `*`: superficie mínima. Solo se aceptan `Authorization`, `Content-Type` y `X-Requested-With`.
+- **Allowlist + regex.** `CORS_ORIGINS` (lista exacta separada por comas; su default de localhost:3000 SOLO aplica si tampoco hay regex — en producción la regex sola no abre localhost) y `CORS_ORIGIN_REGEX`. En el bundle corporativo el default de la variable es `https://frnt-data-model-hub-.*\.databricksapps\.com`: el mismo bundle sirve en cualquier workspace de Databricks Apps sin editar orígenes por entorno. Nunca comodines.
+- **`allow_credentials=True` (cambio respecto de 2026-07-06).** La auth propia sigue siendo token-first (sin cookies propias), pero en Databricks Apps el `fetch` del front lleva la cookie de sesión del **proxy SSO** de la app backend (`credentials: 'include'`). Con `False`, el navegador bloqueaba el preflight y el POST de login ni se enviaba ("CORS error", visto 2026-07-20 en Apps). Es seguro porque los orígenes están acotados (lista/regex, jamás wildcard) y la identidad de negocio sale SOLO del token firmado.
+- **Métodos y cabeceras acotados** en vez de `*`. Se suman dos headers al trío original: `X-Dev-User` (seam de identidad de desarrollo; permitirlo en CORS no autentica nada — con `REQUIRE_AUTH` se ignora — pero evita que un front que lo mande muera en el preflight) y `X-Session-Token` (el carril del token de sesión propio en producción, sección 2.5).
+- **En producción CORS casi no interviene.** Con el proxy del front (doc 36) el tráfico real llega **mismo-origen**: el navegador solo habla con `frnt-…` y el server del front llama al backend servidor-a-servidor. La política CORS queda como defensa en profundidad para accesos directos al subdominio del backend.
 
-Nota sobre errores: el handler global de `Exception` corre en el middleware más externo (`ServerErrorMiddleware`), **fuera** de `CORSMiddleware`. Por eso, en un 500, el backend re-agrega manualmente `Access-Control-Allow-Origin` (solo si el `Origin` está en la allowlist) para que el frontend pueda leer el envelope de error en vez de un opaco "Failed to fetch". Es una excepción controlada que **no** amplía la política CORS: valida el origen contra la misma lista.
+Nota sobre errores: el handler global de `Exception` corre en el middleware más externo (`ServerErrorMiddleware`), **fuera** de `CORSMiddleware`. Por eso, en un 500, el backend re-agrega manualmente `Access-Control-Allow-Origin` (solo si el `Origin` matchea la lista o la regex, con `re.fullmatch` igual que Starlette) para que el frontend pueda leer el envelope de error en vez de un opaco "Failed to fetch". Es una excepción controlada que **no** amplía la política CORS: valida el origen contra las mismas reglas.
 
 ---
 
@@ -406,7 +441,7 @@ En dev siguen disponibles en `/docs`, `/redoc` y `/openapi.json`.
 
 ## 9. Control de acceso basado en roles (RBAC)
 
-El modelo de permisos es data-driven: los roles y su matriz de permisos viven en la colección `roles` de Cosmos y se editan desde el módulo Admin. No hay permisos hardcodeados en el flujo de negocio.
+El modelo de permisos es data-driven: los roles y su matriz de permisos viven en la colección `roles` de la base de datos y se editan desde el módulo Admin. No hay permisos hardcodeados en el flujo de negocio.
 
 ### 9.1 Catálogo de permisos
 
@@ -414,24 +449,32 @@ Definido en `app/features/auth/models.py`:
 
 ```python
 PERMISSIONS = (
-    "model.view",      # Ver modelo / Canvas
-    "model.edit",      # Crear / editar tablas (working copy)
-    "review.decide",   # Aprobar / rechazar solicitudes
-    "publish",         # Publicar a producción
-    "export",          # Exportar DDL / metadata
-    "standards.edit",  # Editar Data Standards (UDP / Parent Domains)
-    "admin.manage",    # Administrar usuarios y permisos
+    "model.view",       # Ver modelo / Canvas
+    "model.edit",       # Crear / editar tablas (working copy)
+    "review.decide",    # Aprobar / rechazar solicitudes
+    "publish",          # Publicar a producción
+    "rollback",         # Revertir a una versión publicada (Model + Data Standards)
+    "export",           # Exportar DDL / metadata
+    "standards.edit",   # Editar Data Standards (UDP / Parent Domains)
+    "admin.manage",     # Administrar usuarios y permisos
 )
 ```
 
 Los permisos efectivos de un usuario se derivan de su rol de forma pura y **filtrando keys desconocidas** (`effective_permissions`): cualquier permiso que el rol no declare queda en `False`, y cualquier key fuera del catálogo se descarta. Un usuario sin rol (o con rol vacío) no tiene ningún permiso.
 
+Dos permisos tienen gates puntuales que conviene conocer:
+
+- **`rollback`** (permiso propio desde el doc 27, 2026-07-19; separado de `review.decide` y de `standards.edit`): gatea `POST /api/changesets/{cs_id}/rollback` (crea un draft inverso que restaura el modelo a esa versión, deshaciendo las posteriores) y `POST /api/standards/rollback` (restaura una versión de Data Standards por `targetSeq`). Revertir producción es una acción distinta de aprobar o de editar estándares, y su blast radius amerita asignación separada en la matriz.
+- **`export`**: gatea `POST /api/ddl-rules/render` (el motor de reglas del Export DDL, doc 30) — el único endpoint del router `ddl_rules` que no es de lectura/cómputo con sesión.
+
 ### 9.2 Dos dependencias de autorización
 
 En `app/features/auth/deps.py`:
 
-- **`require_permission(perm)`** — exige el permiso siempre, sin importar el método. Se usa para endpoints que en su totalidad requieren un permiso (todo el módulo Admin usa `require_permission("admin.manage")`).
-- **`write_guard(perm)`** — dependency de router que gatea por método: lecturas (`GET`/`HEAD`/`OPTIONS`) solo exigen sesión válida; escrituras (`POST`/`PUT`/`PATCH`/`DELETE`) exigen el permiso. Se monta con `dependencies=[Depends(write_guard(...))]` para cerrar de una todos los endpoints directos de un router. Esto cerró un hueco: antes había routers cuyos endpoints directos no tenían ninguna dependencia de auth y aceptaban requests anónimos.
+- **`require_permission(perm)`** — exige el permiso siempre, sin importar el método. Se usa para endpoints que en su totalidad requieren un permiso: todo el módulo Admin usa `require_permission("admin.manage")`, y las acciones de governance van por-endpoint (`model.edit` para crear/editar changesets, `review.decide` para decidir, `rollback` para revertir, `standards.edit` para `POST /api/standards/apply`, `export` para `POST /api/ddl-rules/render`).
+- **`write_guard(perm)`** — dependency de router que gatea por método: lecturas (`GET`/`HEAD`/`OPTIONS`) solo exigen sesión válida; escrituras (`POST`/`PUT`/`PATCH`/`DELETE`) exigen el permiso **y auditan la acción**. Se monta con `dependencies=[Depends(write_guard(...))]` para cerrar de una todos los endpoints directos de un router (catalog, projects, folders, schemas, relationships y views con `model.edit`; domains y settings con `standards.edit`). Esto cerró un hueco: antes había routers cuyos endpoints directos no tenían ninguna dependencia de auth y aceptaban requests anónimos.
+
+Esa es la convención del backend: **`write_guard` a nivel router para los CRUD de entidades (GET = sesión, escritura = permiso + auditoría); `require_permission` por endpoint para las acciones que siempre exigen permiso**.
 
 ```python
 def write_guard(perm: str):
@@ -440,10 +483,10 @@ def write_guard(perm: str):
             return None
         user = await service.resolve_session_user(principal.username)
         if user is None or not user["permissions"].get(perm):
-            raise HTTPException(403, f"No tenés permiso para esta acción ({perm}).")
+            raise HTTPException(403, f"You don't have permission for this action ({perm}).")
         # Auditoría de la acción (best-effort, salta los guardados ruidosos)
         path = request.url.path
-        if not any(path.endswith(sfx) for sfx in _NO_AUDIT):   # /layout, /drawings, /tables
+        if not any(path.endswith(sfx) for sfx in _NO_AUDIT):   # /layout, /drawings, /tables, /udp
             await audit(user["username"], f"{request.method.lower()} {path}", target_type="api")
         return user
     return _dep
@@ -549,7 +592,7 @@ def _validate_report_spec(spec: dict) -> None:
         raise HTTPException(422, "El spec del reporte no es una consulta válida.") from e
 ```
 
-**Nota de superficie:** las lecturas de reporting (`/query`, `/facets`, `/export`, `/insights`) están abiertas por diseño; en producción el login global de `current_principal` las gatea cuando `REQUIRE_AUTH=true`. Reforzar estas rutas con `current_principal` explícito está listado en pendientes para reducir la superficie de DoS.
+**Nota de superficie:** las lecturas de reporting (`/query`, `/facets`, `/export`, `/insights`) siguen sin dependencia de `current_principal` (abiertas a nivel de la app). En el despliegue corporativo quedan detrás del muro SSO del proxy de Databricks Apps (sección 1b: solo identidades del workspace con `CAN_USE` llegan a la app), pero reforzarlas con `current_principal` explícito sigue listado en pendientes para reducir la superficie de DoS.
 
 ---
 
@@ -571,10 +614,16 @@ async def audit(actor, action, *, target=None, target_type=None, meta=None) -> N
 Qué se audita:
 
 - **Eventos de sesión:** `login`, `login_failed`, `login_locked`, `logout`.
-- **Acciones de escritura** vía `write_guard`: `POST/PUT/PATCH/DELETE <ruta>` con actor. Se saltan los guardados de alta frecuencia del canvas (`/layout`, `/drawings`, `/tables`) para no inundar el log.
-- **Operaciones de Admin:** creación, edición y borrado de usuarios y roles.
+- **Acciones de escritura** vía `write_guard`: `POST/PUT/PATCH/DELETE <ruta>` con actor. Se saltan los guardados de alta frecuencia del canvas (`/layout`, `/drawings`, `/tables`) para no inundar el log, y `/udp` porque su service ya audita con verbo específico (`canvas.udp.update`).
+- **Eventos de negocio con verbo propio** (todos verificados en código al 2026-07-31):
+  - Ciclo de vida de versiones: `changeset.submit`, `changeset.decide`, `changeset.withdraw`, `changeset.reopen`, `changeset.rollback_draft`, `changeset.schema_rename`, `changeset.schema_delete`.
+  - Data Standards: `standards.apply`, `standards.rollback`.
+  - Export DDL con reglas (doc 30): `ddl.export_render` — cada `POST /api/ddl-rules/render` deja actor, versión del ruleset aplicada y conteos.
+  - Glosario: `glossary.lock` / `glossary.unlock`.
+  - Canvas: `canvas.udp.update`.
+- **Operaciones de Admin:** `admin.user.create`, `admin.user.update`, `admin.user.delete`, `admin.role.update`, `admin.role.delete`.
 
-La lectura del log está protegida: `GET /api/admin/audit` exige `admin.manage`. Además de auditoría, todas las requests llevan un `X-Request-ID` correlacionado en los logs estructurados de entrada y salida, útil para el diagnóstico ("revisá los logs con el X-Request-ID" es lo que devuelve el envelope de error 500).
+La lectura del log está protegida: `GET /api/admin/audit` exige `admin.manage`. Además de auditoría, todas las requests llevan un `X-Request-ID` correlacionado en los logs estructurados de entrada y salida, útil para el diagnóstico ("Check the logs using the X-Request-ID" es lo que devuelve el envelope de error 500).
 
 ---
 
@@ -587,11 +636,11 @@ La lectura del log está protegida: `GET /api/admin/audit` exige `admin.manage`.
 | 3 | JWT HS256 con `algorithms` fijado y `exp` obligatorio | `core/security.py` | Siempre |
 | 4 | `assert_secure_config` falla-cerrado con SECRET_KEY default | `core/config.py`, `main.py` | `REQUIRE_AUTH` |
 | 5 | Identidad token-first; sin token y `REQUIRE_AUTH` → 401 | `core/identity/dependencies.py` | `REQUIRE_AUTH` |
-| 6 | Rate limiting del login `5/minute` por IP → 429 | `core/ratelimit.py`, `features/auth/router.py`, `main.py` | `REQUIRE_AUTH` o `RATE_LIMIT_ENABLED` |
+| 6 | Rate limiting del login `5/minute` por IP real (1ª IP de `X-Forwarded-For`, fallback peer) → 429 | `core/ratelimit.py`, `features/auth/router.py`, `main.py` | `REQUIRE_AUTH` o `RATE_LIMIT_ENABLED` |
 | 7 | Lockout por intentos fallidos (8 fallos → 15 min, `$inc` atómico) | `features/auth/service.py`, `repository.py` | Siempre |
 | 8 | Política de contraseñas (min 10 / max 128) al crear o cambiar | `features/admin/schemas.py` | Siempre |
 | 9 | Cabeceras de seguridad (nosniff, DENY, Referrer, Permissions, HSTS) | `main.py` | HSTS solo HTTPS |
-| 10 | CORS estricto (`allow_credentials=False`, sin comodines) | `main.py` | Siempre |
+| 10 | CORS estricto (allowlist + regex por variable, sin comodines; `allow_credentials=True` solo por la cookie del proxy SSO de Apps) | `main.py` | Siempre |
 | 11 | TrustedHost (host allowlist) | `main.py` | `ALLOWED_HOSTS` |
 | 12 | `/docs`, `/redoc`, `/openapi.json` ocultos en producción | `main.py` | `REQUIRE_AUTH` |
 | 13 | RBAC: `require_permission` + `write_guard` (gateo por método) | `features/auth/deps.py` | Siempre |
@@ -612,72 +661,89 @@ Los siguientes puntos están identificados pero **no** implementados todavía:
 | Pendiente | Severidad | Descripción |
 |---|---|---|
 | **Revocación de JWT** | Alta | El TTL de 12 h sin denylist implica que deshabilitar un usuario no corta su sesión hasta 12 h en endpoints que solo dependen de `current_principal` (los que usan `resolve_session_user`, como Admin y `write_guard`, sí lo cortan de inmediato). Opciones: bajar el TTL a 15-30 min con refresh revocable, agregar `tokenVersion` por usuario, o revalidar `status != disabled` contra la DB en cada request. |
-| **Rate limiting con Redis** | Media | El estado del limiter es en memoria por proceso. Para multi-réplica (Databricks Apps con varias instancias) migrar a un backend Redis (`Limiter(storage_uri="redis://…")` o `fastapi-limiter`); si no, cada réplica cuenta por separado y el límite efectivo se multiplica por el número de réplicas. |
+| **Rate limiting con Redis** | Media | El estado del limiter es en memoria por proceso. Para multi-réplica (Databricks Apps con varias instancias) migrar a un backend Redis (`Limiter(storage_uri="redis://…")` o `fastapi-limiter`); si no, cada réplica cuenta por separado y el límite efectivo se multiplica por el número de réplicas. La key por IP real (1ª de `X-Forwarded-For`, 2026-07-31) ya quedó resuelta. |
+| **Retiro del rol `databricks_superuser` al SP del front en Lakebase** | Media | El server del front jamás toca la base de datos (solo proxya `/api` al backend); su service principal no necesita ningún rol de Postgres. Revocárselo (mínimo privilegio). El SP del backend sí lo requiere — o, mejor, GRANTs granulares sobre el schema `dmh` (doc 35). |
 | **Contraseñas filtradas** | Media | Sumar verificación contra brechas conocidas (HIBP con k-anonymity) o fuerza (zxcvbn) además del mínimo de longitud. |
 | **Claims `iss` / `aud` en el JWT** | Baja | Agregar emisor y audiencia acota el uso del token a este servicio. |
 | **Migrar bcrypt → argon2id** | Baja | Elimina el clip a 72 bytes y moderniza el algoritmo de derivación. |
-| **Auth explícita en lecturas de reporting** | Media | `/query`, `/facets`, `/export` e `/insights` son abiertas; gatearlas con `current_principal` reduce la superficie de DoS sobre las colecciones de gran volumen (hoy quedan protegidas solo por el login global cuando `REQUIRE_AUTH=true`). |
+| **Auth explícita en lecturas de reporting** | Media | `/query`, `/facets`, `/export` e `/insights` siguen sin `current_principal`; gatearlas reduce la superficie de DoS sobre las colecciones de gran volumen (hoy quedan protegidas solo por el muro SSO del proxy de Databricks Apps en producción). |
 
 ---
 
-## 14. Despliegue: dónde corre, variables y base de datos
+## 14. Despliegue: dónde corre, variables, base de datos y cadena de suministro
 
 ### 14.1 Dónde corre
 
-El backend es una app FastAPI (ASGI) pensada para correr detrás de un proxy TLS, en dos entornos objetivo:
+El backend es una app FastAPI (ASGI) desplegada como **Databricks App** (`bknd-data-model-hub`) vía asset bundle (`databricks.yml` + GitHub Actions); el comando de la app es `uvicorn app.main:app` (host/puerto los inyecta el runtime de Apps). Corre detrás del proxy OAuth de la plataforma (capa 1 de la sección 1b), que termina TLS y reenvía `X-Forwarded-Proto` (el middleware lo usa para decidir HSTS) y `X-Forwarded-For` (key del rate limiting). El navegador no le habla directo: el tráfico de usuarios entra por el server del front, que proxya `/api` servidor-a-servidor.
 
-- **Azure App Service.** El proxy termina TLS y reenvía `X-Forwarded-Proto`, que el middleware usa para decidir si emitir HSTS.
-- **Databricks Apps.** El proxy SSO reenvía cabeceras de identidad; si en el futuro se reactivara el modo `databricks`, el seam de identidad las leería (`X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-User`). Hoy la autenticación real es la propia por token.
-
-En ambos casos, la postura de producción se activa con `REQUIRE_AUTH=true`, lo que además exige un `SECRET_KEY` propio (si no, la app no arranca). El proceso se sirve con Uvicorn/Gunicorn; el `if __name__ == "__main__"` de `main.py` es solo para desarrollo local.
+La postura de producción se activa con `REQUIRE_AUTH=true` en el env del bundle: login propio obligatorio, `/docs`, `/redoc` y `/openapi.json` ocultos, rate limiting activo, y **fail-closed de `assert_secure_config`** — si el `SECRET_KEY` sigue siendo el default de desarrollo, la app no arranca. El `if __name__ == "__main__"` de `main.py` es solo para desarrollo local.
 
 ### 14.2 Base de datos
 
-La persistencia es **Azure Cosmos DB con la API de MongoDB**, accedida vía Motor (async) con la cadena de conexión en `COSMOS_CONNECTION_STRING`. Consideraciones:
+La persistencia productiva es **Databricks Lakebase Postgres** (doc 28), accedida por el adaptador Motor-like de `app/core/db/lakebase/` (cada "colección" es una tabla `(id, doc jsonb)` en el schema `dmh`). Consideraciones de seguridad:
 
-- **Cadena de conexión como secreto.** Debe ir en un secreto gestionado (Azure Key Vault o el store de secretos de Databricks Apps), nunca en el repositorio ni en el `.env` versionado.
-- **Colecciones de la app:** `users`, `roles`, `audit_log`, más las de negocio (`projects`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `parent_domains`, `udp_definitions`, reportes guardados, etc.).
-- **Índices a escala.** El motor de reporting depende de índices sobre los campos de filtro y orden (por ejemplo `schema`, `physicalName`, `flgactive`) para la paginación keyset y las facetas; sin ellos, las consultas sobre colecciones de cientos de miles de documentos degradan. El circuit-breaker `maxTimeMS = 15000` corta consultas que se pasen de 15 s.
-- **Borrado lógico.** Los documentos usan `flgactive`; los filtros incluyen `{"flgactive": {"$ne": False}}` para excluir los borrados. La conexión se abre y cierra en el `lifespan` de FastAPI.
+- **Sin secretos de base de datos estáticos.** El bundle no lleva PAT ni cadena de conexión: el pool se autentica con un **token OAuth de ~1 h que la app acuña sola** con el service principal que Apps inyecta (`DATABRICKS_CLIENT_ID/SECRET`, OAuth M2M) y renueva con caché thread-safe de 50 minutos. El rol de Postgres es el client-id del SP (alta one-time por workspace, doc 35).
+- **Los usuarios finales jamás tocan la base** (capa 3 de la sección 1b): toda operación pasa por el RBAC de la app.
+- **Índices**: `ensure_indexes()` corre en el `lifespan` al arrancar (idempotente, ~35 índices sobre los campos de filtro y orden del reporting y la governance).
+- **Borrado lógico.** Los documentos usan `flgactive`; los filtros incluyen `{"flgactive": {"$ne": False}}` para excluir los borrados. La conexión se abre y cierra en el `lifespan` de FastAPI (con reintento en background si la BD no estaba disponible al arrancar).
+- **Cosmos = legacy/rollback.** El seam `DB_BACKEND=cosmos` conserva el camino a Azure Cosmos DB (API de Mongo, `COSMOS_CONNECTION_STRING` como secreto) solo como fallback; en el bundle corporativo Cosmos no existe (ni variables, ni secretos, ni env).
 
-### 14.3 Variables de entorno
+### 14.3 Variables de entorno (estado corporativo 2026-07-31)
 
-| Variable | Propósito | Producción |
+| Variable | Propósito | Producción (bundle) |
 |---|---|---|
-| `COSMOS_CONNECTION_STRING` | Cadena de conexión a Cosmos (secreto). | Obligatoria |
-| `COSMOS_DATABASE` | Nombre de la base (default `db_modeler`). | Recomendada |
-| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Obligatoria |
+| `DB_BACKEND` | `lakebase` (default) o `cosmos` (legacy/rollback). | `lakebase` |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria con lakebase. El host físico se resuelve solo vía SDK. | Variable del bundle (default `projects/dmh-proj/branches/production/endpoints/primary`) |
+| `LAKEBASE_PGSCHEMA` | Schema PG de las colecciones. | `dmh` |
+| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Secreto `session-secret-key` del scope `kv-scope-datacraft`, inyectado con `value_from` (nunca en texto plano en el bundle ni en GitHub) |
 | `REQUIRE_AUTH` | `true` activa la postura de producción (login obligatorio, docs ocultos, rate limit, falla-cerrado). | `true` |
+| `CORS_ORIGIN_REGEX` | Regex de orígenes del front. | Variable del bundle (default `https://frnt-data-model-hub-.*\.databricksapps\.com`) |
+| `CORS_ORIGINS` | Orígenes exactos adicionales (el default localhost SOLO aplica sin regex). | No se define |
+| `ALLOWED_HOSTS` | Lista de hosts para `TrustedHostMiddleware` (vacío = deshabilitado). | Opcional |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token en minutos (default 720). Bajarlo mitiga la falta de revocación. | Opcional |
-| `CORS_ORIGINS` | Lista de orígenes permitidos, separada por comas. | Obligatoria |
-| `ALLOWED_HOSTS` | Lista de hosts permitidos para `TrustedHostMiddleware`. | Recomendada |
 | `RATE_LIMIT_ENABLED` | Fuerza el rate limiting aun sin `REQUIRE_AUTH`. | Redundante si `REQUIRE_AUTH=true` |
-| `AUTH_MODE` | `local` o `databricks` (solo afecta el fallback del seam; la auth real es por token). | `local` |
-| `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Usuario fake del seam en desarrollo. | No usar en prod |
+| `AUTH_MODE` / `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Seam de identidad de desarrollo (fallback sin token). | No usar en prod |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Solo dev local (PAT u OAuth U2M del SDK). En Apps el runtime inyecta `DATABRICKS_HOST` y `DATABRICKS_CLIENT_ID/SECRET`; **no hay PAT en el bundle**. | No se setean |
 
-Ejemplo de configuración de producción:
+Extracto real del `databricks.yml` (la clave de firma nunca viaja en claro):
 
-```bash
-REQUIRE_AUTH=true
-SECRET_KEY=<valor-aleatorio-largo-desde-el-secret-store>
-COSMOS_CONNECTION_STRING=<secreto>
-COSMOS_DATABASE=db_modeler
-CORS_ORIGINS=https://data-model-hub.example
-ALLOWED_HOSTS=data-model-hub-api.example
-ACCESS_TOKEN_TTL_MIN=30
+```yaml
+config:
+  command: ['uvicorn', 'app.main:app']
+  env:
+    - name: REQUIRE_AUTH
+      value: 'true'
+    - name: SECRET_KEY
+      value_from: session_secret
+resources:
+  - name: session_secret
+    secret:
+      scope: ${var.secret_scope}        # kv-scope-datacraft
+      key: ${var.session_secret_key}    # session-secret-key
+      permission: READ
 ```
+
+### 14.4 Cadena de suministro: dependencias pineadas
+
+Política 2026-07-31 (decisión del owner, aplica a **ambos repos**): TODAS las dependencias van pineadas — `==` en `requirements.txt` del backend y versiones exactas (sin `^` ni `>=`) en el `package.json` del front. Motivo doble:
+
+1. **La imagen base de Databricks Apps trae paquetes viejos pre-instalados** (fastapi/starlette/uvicorn); con rangos abiertos, pip los daría por satisfechos y la app correría combinaciones jamás testeadas.
+2. **Reproducibilidad**: local, CI y Apps ejecutan exactamente las mismas versiones.
+
+Las versiones pineadas son las del entorno validado (pytest verde + suite viva Lakebase + `pip check` limpio). Para subir una librería: cambiar el pin, correr pytest y `pip check`, y recién entonces commitear. `requirements-dev.txt` (pytest, httpx) mantiene rangos porque no va al runtime. Inventario exacto de versiones en el propio `requirements.txt` (por ejemplo `fastapi 0.136.1`, `bcrypt 5.0.0`, `pyjwt 2.12.1`, `slowapi 0.1.10`, `sqlglot 30.12.0`).
 
 ---
 
 ## 15. Checklist de verificación antes de desplegar
 
-- [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default). Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
+- [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default), vía el secreto `session-secret-key` del scope `kv-scope-datacraft` con `value_from` en el bundle. Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
 - [ ] `REQUIRE_AUTH=true` para activar login obligatorio, docs ocultos y rate limiting.
-- [ ] `CORS_ORIGINS` apuntando solo al frontend real (sin comodines).
-- [ ] `ALLOWED_HOSTS` con los hosts públicos del servicio.
-- [ ] `COSMOS_CONNECTION_STRING` desde un secret store, nunca en el repositorio.
-- [ ] TLS terminado en el proxy y `X-Forwarded-Proto` reenviado (para HSTS).
-- [ ] Índices de Cosmos creados sobre los campos de filtro y orden del reporting.
-- [ ] Al menos un usuario con rol que incluya `admin.manage` (el invariante impide quedarse sin administrador, pero hay que crear el primero).
+- [ ] `CORS_ORIGIN_REGEX` (y/o `CORS_ORIGINS`) apuntando solo al frontend real (sin comodines).
+- [ ] `ALLOWED_HOSTS` con los hosts públicos del servicio, si se usa TrustedHost.
+- [ ] `LAKEBASE_ENDPOINT` apuntando al endpoint del workspace; sin PAT ni cadenas de conexión en el bundle (el token de BD lo acuña la app con su service principal).
+- [ ] TLS terminado en el proxy y `X-Forwarded-Proto` / `X-Forwarded-For` reenviados (HSTS y key del rate limiting).
+- [ ] `GET /api/health` responde `db_connected: true` tras el deploy (los índices los crea `ensure_indexes()` solo, en el arranque).
+- [ ] El workflow re-aplicó el grant `CAN_USE` del SP del front sobre la app backend (paso automático de CI, doc 36 §6.3 — un grant manual no sobrevive al siguiente deploy).
+- [ ] Al menos un usuario con rol que incluya `admin.manage` (el invariante impide quedarse sin administrador, pero hay que crear el primero — `scripts/create_admin.py`).
 
-Verificado en vivo durante el hardening: las cabeceras de seguridad aparecen en toda respuesta; el sexto intento de login dentro del minuto devuelve 429; un regex malicioso en `/facets` responde escapado en 0.36 s sin ReDoS; y la suite de tests (209 casos) cubre el lockout de login y la inyección del cursor keyset.
+Verificado en vivo durante el hardening del 2026-07-06: las cabeceras de seguridad aparecen en toda respuesta; el sexto intento de login dentro del minuto devuelve 429; un regex malicioso en `/facets` responde escapado en 0.36 s sin ReDoS. La suite de tests (543 casos al 2026-07-31) cubre, entre otros, el lockout de login, la inyección del cursor keyset y la key por IP real del limiter.
