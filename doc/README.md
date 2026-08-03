@@ -2,7 +2,7 @@
 
 Actualizado: 2026-07-31.
 
-`backend-data-model-hub` es el servicio de plataforma del **Data Model Hub (DMH)**: una API REST en **FastAPI (Python)** que administra el modelo de datos canónico (tablas, columnas, relaciones, vistas), su estructura tipo Erwin (proyectos → folders → canvases), el versionado con flujo de aprobación (changesets), los Data Standards (glosario, dominios, UDP, reglas del DDL Export), el motor de consulta del reporting, y la identidad/RBAC/auditoría. La base de datos productiva es **Databricks Lakebase Postgres** (workspace corporativo), accedida a través de un adaptador propio con superficie tipo Motor/Mongo sobre documentos JSONB; Cosmos DB queda como fallback legacy (`DB_BACKEND=cosmos`).
+`backend-data-model-hub` es el servicio de plataforma del **Data Model Hub (DMH)**: una API REST en **FastAPI (Python)** que administra el modelo de datos canónico (tablas, columnas, relaciones, vistas), su estructura tipo Erwin (proyectos → folders → canvases), el versionado con flujo de aprobación (changesets), los Data Standards (glosario, dominios, UDP, reglas del DDL Export), el motor de consulta del reporting, y la identidad/RBAC/auditoría. La base de datos productiva es **Databricks Lakebase Postgres** (workspace corporativo), accedida a través de un adaptador propio con superficie estilo Mongo sobre documentos JSONB.
 
 ## Orden de lectura
 
@@ -21,7 +21,7 @@ Actualizado: 2026-07-31.
 
 - **Lenguaje/runtime**: Python 3 + Uvicorn (ASGI).
 - **Framework**: FastAPI `0.136.1` (+ Starlette `1.0.0`), Pydantic `2.13.4`.
-- **Base de datos**: Databricks Lakebase Postgres vía `asyncpg 0.31.0` + `databricks-sdk 0.121.0` (token OAuth rotativo); adaptador propio en `app/core/db/lakebase/`. Cosmos (Motor `3.7.1` / PyMongo `4.17.0`) como fallback legacy.
+- **Base de datos**: Databricks Lakebase Postgres vía `asyncpg 0.31.0` + `databricks-sdk 0.121.0` (token OAuth rotativo); adaptador propio en `app/core/db/lakebase/`. Usa `pymongo 4.17.0` solo por su vocabulario de tipos/operaciones (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) que el adaptador emula — no conecta a Mongo.
 - **Auth propia**: `bcrypt 5.0.0` + `pyjwt 2.12.1` (JWT HS256 en `X-Session-Token`).
 - **SQL**: `sqlglot 30.12.0` — parser SQL → QuerySpec del reporting y motor de reglas del DDL Export.
 - **Rate limiting**: `slowapi 0.1.10` (login, key por primera IP de `X-Forwarded-For`).

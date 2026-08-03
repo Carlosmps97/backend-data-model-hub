@@ -1,16 +1,16 @@
 # Despliegue y Base de Datos — `backend-data-model-hub`
 
-> **Actualización 2026-07-31.** El despliegue quedó homologado al workspace **CORPORATIVO** de Databricks (docs 35 y 36 de `plan-implementacion/`), **parametrizado 100% por GitHub Variables**: el mismo repo despliega en cualquier workspace sin editar un solo archivo. Novedades de esta actualización: topología de dos apps con proxy del front (§2), deploy por GitHub Variables (§2.3), bind de apps pre-creadas por cupo (§2.4), grant automatizado del SP del front (§2.5), one-time del workspace destino (§2.6), identidad local y private link (§4.1–§4.2), secuencia de carga de data con `mark_base_version` (§4.3) y checklist de cierre (§10). Historial: homologación previa 2026-07-19 (doc 28: Lakebase + `databricks.yml` sin `app.yaml`).
+> **Actualización 2026-07-31.** El despliegue quedó homologado al workspace **CORPORATIVO** de Databricks (docs 35 y 36 de `plan-implementacion/`), **parametrizado 100% por GitHub Variables**: el mismo repo despliega en cualquier workspace sin editar un solo archivo. Novedades de esta actualización: topología de dos apps con proxy del front (§2), deploy por GitHub Variables (§2.3), bind de apps pre-creadas por cupo (§2.4), grant automatizado del SP del front (§2.5), one-time del workspace destino (§2.6), identidad local y private link (§4.1–§4.2), secuencia de carga de data con `mark_base_version` (§4.3) y checklist de cierre (§10). Historial: homologación previa 2026-07-19 (doc 28: migración a Lakebase).
 
-Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **cómo se despliega** (Databricks Apps vía bundle + GitHub Actions parametrizado por GitHub Variables), **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres; Cosmos DB queda como fallback legacy conmutable — doc 28) y **cómo levantarlo en local**.
+Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **cómo se despliega** (Databricks Apps vía bundle + GitHub Actions parametrizado por GitHub Variables), **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres — doc 28) y **cómo levantarlo en local**.
 
-Toda la información sale del código real: `app/core/config.py` (ÚNICA superficie de settings), `app/core/db/client.py`, `app/core/db/lakebase/`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más el manifiesto `databricks.yml` (bundle: `variables:` por entorno + `config:` de runtime — el viejo `app.yaml` ya no existe) y el workflow `.github/workflows/deploy-databricks.yml`.
+Toda la información sale del código real: `app/core/config.py` (ÚNICA superficie de settings), `app/core/db/client.py`, `app/core/db/lakebase/`, `app/core/db/indexes.py`, `app/main.py`, `app/core/ratelimit.py`, `app/core/logging.py`, más el manifiesto `databricks.yml` (bundle: `variables:` + recurso secreto + permisos), el `app.yaml` (command + env de runtime) y el workflow `.github/workflows/deploy-databricks.yml`.
 
 ---
 
 ## 1. Qué es este servicio
 
-El backend es un **servicio HTTP FastAPI** servido por **Uvicorn** (ASGI). Es un proceso único, sin estado en disco: toda la persistencia vive en la base (Lakebase Postgres, o Cosmos con `DB_BACKEND=cosmos`). El punto de entrada es el objeto `app` de `app/main.py`:
+El backend es un **servicio HTTP FastAPI** servido por **Uvicorn** (ASGI). Es un proceso único, sin estado en disco: toda la persistencia vive en la base (Databricks Lakebase Postgres). El punto de entrada es el objeto `app` de `app/main.py`:
 
 ```python
 # app/main.py
@@ -21,13 +21,13 @@ if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 ```
 
-`create_app()` arma la app y, en el **lifespan** de FastAPI, abre la conexión a la base según `DB_BACKEND` y asegura los índices al arrancar; los cierra al apagar. El objeto ASGI que se expone a cualquier servidor es siempre `app.main:app`.
+`create_app()` arma la app y, en el **lifespan** de FastAPI, abre la conexión a Lakebase y asegura los índices al arrancar; los cierra al apagar. El objeto ASGI que se expone a cualquier servidor es siempre `app.main:app`.
 
 Características del proceso que importan para el despliegue:
 
 - **Sin estado local.** No escribe archivos; todo va a la base. Se puede reiniciar sin pérdida.
 - **Rate limiting en memoria (por proceso).** El estado del limitador de `slowapi` no se comparte entre réplicas (ver sección 6.2).
-- **Un solo pool de conexiones** compartido por todos los repositorios (singleton en `app/core/db/client.py`: asyncpg hacia Lakebase, o Motor hacia Cosmos).
+- **Un solo pool de conexiones** compartido por todos los repositorios (singleton en `app/core/db/client.py`: asyncpg hacia Lakebase).
 - **Logs a `stdout`** (formato `pretty` o `json`), pensados para que el runtime los capture.
 
 ---
@@ -48,11 +48,10 @@ flowchart TD
     end
 
     BK -->|"asyncpg + token OAuth<br/>adaptador jsonb"| LB[("Databricks Lakebase<br/>Postgres 17 · schema dmh")]
-    BK -.->|"fallback legacy DB_BACKEND=cosmos"| COSMOS[("Azure Cosmos DB<br/>API de MongoDB<br/>db_modeler")]
 
     subgraph OPCIONES["Destinos de ejecucion"]
       A["Azure App Service<br/>startup: uvicorn"]
-      D["Databricks Apps<br/>bundle config command uvicorn"]
+      D["Databricks Apps<br/>app.yaml command uvicorn"]
     end
 
     A -.->|hospeda| RUNTIME
@@ -78,24 +77,20 @@ Consideraciones específicas de App Service:
 
 ### 2.2 Databricks Apps (destino actual)
 
-Es el destino que ya está configurado en el repo. Desde la homologación
-2026-07-19 **todo vive en `databricks.yml`** (el viejo `app.yaml` no existe):
-la sección `variables:` concentra los parámetros por entorno y el bloque
-`config:` del recurso app define comando y env de runtime (requiere CLI
-≥ 0.283; el workflow usa `setup-cli@main` = último). Desde 2026-07-27 el
+Es el destino que ya está configurado en el repo. El deploy vive en
+`databricks.yml` (bundle: `variables:` + recurso secreto + permisos) y en el
+`app.yaml` de la raíz del repo (comando + env de runtime, que Databricks lee en
+cada arranque; el workflow instala el CLI con `setup-cli@main`). Desde 2026-07-27 el
 manifiesto está pensado para desplegar en **cualquier workspace sin editar
 el repo**: cada variable puede venir de una GitHub Variable (§2.3) y el
 workspace destino sale de `DATABRICKS_HOST`.
 
 ```yaml
-# databricks.yml (extracto real, 2026-07-31)
+# databricks.yml (extracto real) — solo lo que el bundle SÍ aplica.
 bundle:
   name: bknd-data-model-hub
 
 variables:                        # cada una alimentable por GitHub Variables (BUNDLE_VAR_*)
-  lakebase_endpoint:  { default: projects/dmh-proj/branches/production/endpoints/primary }
-  lakebase_pgschema:  { default: dmh }
-  cors_origin_regex:  { default: https://frnt-data-model-hub-.*\.databricksapps\.com }
   secret_scope:       { default: kv-scope-datacraft }
   session_secret_key: { default: session-secret-key }
   app_admin_user:     { default: ${workspace.current_user.userName} }   # ver §2.4
@@ -105,16 +100,9 @@ resources:
     backend:                      # resource key (lo usa `databricks bundle run backend`)
       name: bknd-data-model-hub   # nombre real de la app en el workspace
       source_code_path: .
-      config:
-        command: ['uvicorn', 'app.main:app']
-        env:
-          - { name: LOG_FORMAT,        value: 'json' }
-          - { name: DB_BACKEND,        value: 'lakebase' }
-          - { name: LAKEBASE_ENDPOINT, value: ${var.lakebase_endpoint} }
-          - { name: LAKEBASE_PGSCHEMA, value: ${var.lakebase_pgschema} }
-          - { name: CORS_ORIGIN_REGEX, value: ${var.cors_origin_regex} }
-          - { name: REQUIRE_AUTH,      value: 'true' }
-          - { name: SECRET_KEY,        value_from: session_secret }
+      # command + env de runtime → app.yaml (abajo), NO acá. El bloque `config:`
+      # del bundle se retiró: el CLI lo ignora (bug databricks/cli #4901) y la
+      # app moría al apagar/prender ("Failed to load app spec").
       resources:
         - name: session_secret
           secret: { scope: ${var.secret_scope}, key: ${var.session_secret_key}, permission: READ }
@@ -131,12 +119,29 @@ targets:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 ```
 
+El `command` y el `env` de runtime viven en el `app.yaml` de la raíz del repo,
+que Databricks lee en **cada** arranque (deploy y apagar/prender). Los valores
+son portables por diseño (endpoint por convención, CORS por regex); el secreto
+llega por `valueFrom` desde el recurso `session_secret` del `databricks.yml`:
+
+```yaml
+# app.yaml (raíz del repo)
+command: ["uvicorn", "app.main:app"]
+env:
+  - { name: LOG_FORMAT,        value: "json" }
+  - { name: LAKEBASE_ENDPOINT, value: projects/dmh-proj/branches/production/endpoints/primary }
+  - { name: LAKEBASE_PGSCHEMA, value: "dmh" }
+  - { name: CORS_ORIGIN_REGEX, value: https://frnt-data-model-hub-.*\.databricksapps\.com }
+  - { name: REQUIRE_AUTH,      value: "true" }
+  - { name: SECRET_KEY,        valueFrom: session_secret }
+```
+
 Puntos clave:
 
 - **Host y puerto los pone Databricks.** El runtime inyecta `UVICORN_HOST=0.0.0.0` y `UVICORN_PORT=$DATABRICKS_APP_PORT`, por eso `command` no pasa `--host`/`--port`.
 - **SIN `workspace.host` en el bundle — a propósito.** El workspace destino sale de la variable de entorno `DATABRICKS_HOST` (la GitHub Variable que ya usa el CLI). Un `host:` escrito en el bundle **GANA sobre esa variable** (verificado): hardcodearlo obligaba a editar el repo por cada ambiente y, peor, podía desplegar **callado al workspace equivocado** si alguien olvidaba cambiarlo.
 - **La BD no necesita secretos.** El backend acuña tokens OAuth de Lakebase con el **service principal de la app** (OAuth M2M inyectado); `PGUSER` cae al `DATABRICKS_CLIENT_ID` y `PGHOST` se resuelve solo desde `LAKEBASE_ENDPOINT`. ONE-TIME por workspace: rol PG del SP (§2.6).
-- **Un solo secreto, por `value_from`.** `SECRET_KEY` no va en texto plano: se resuelve desde el recurso secreto `session_secret` (scope `kv-scope-datacraft`, respaldado por Azure Key Vault) con permiso `READ` para el service principal. Cosmos quedó **FUERA del bundle** (2026-07-19, 3ª pasada): el seam `DB_BACKEND=cosmos` vive solo en el código como rollback dormido.
+- **Un solo secreto, por `value_from`.** `SECRET_KEY` no va en texto plano: se resuelve desde el recurso secreto `session_secret` (scope `kv-scope-datacraft`, respaldado por Azure Key Vault) con permiso `READ` para el service principal.
 - **`permissions:` es declarativo y AUTORITATIVO.** Se re-aplica en cada deploy; los grants hechos a mano en la UI se pierden (§2.4 y §2.5).
 - **Multi-réplica:** si la app escala a más de una instancia, el rate limiting en memoria deja de ser global (sección 6.2).
 
@@ -245,7 +250,6 @@ alimentadas a su vez por GitHub Variables (§2.3).
 
 | Variable | Default | Para qué sirve |
 |---|---|---|
-| `DB_BACKEND` | `lakebase` | `lakebase` (BD actual) o `cosmos` (fallback legacy/rollback). |
 | `DATABRICKS_HOST` | `""` | URL del workspace. Dev: `.env`. Apps: **la inyecta el runtime** (no se setea). |
 | `DATABRICKS_TOKEN` | `""` | PAT para acuñar tokens de BD en dev. Apps: **no va** (el SP de la app autentica solo). Dev sin PAT: OAuth U2M (§4.1). |
 | `LAKEBASE_ENDPOINT` | `""` | Ruta lógica `projects/<p>/branches/<b>/endpoints/<e>`. **Obligatoria con lakebase.** Igual en todo workspace que respete la convención de nombres. |
@@ -257,8 +261,6 @@ alimentadas a su vez por GitHub Variables (§2.3).
 | `PGSSLMODE` | `require` | TLS obligatorio. |
 | `PGDIRECTTLS` | `""` (auto) | `true` fuerza TLS **directo** (ALPN `postgresql`, para front-ends "service direct"); `false` fuerza el handshake clásico; vacío = auto. |
 | `LAKEBASE_PGSCHEMA` | `dmh` | Schema PG de las "colecciones" (tablas id + doc jsonb). |
-| `COSMOS_CONNECTION_STRING` | `""` | Solo con `DB_BACKEND=cosmos` (legacy). Ya **no viaja en el bundle**: rollback = seam en código + configurarla a mano. |
-| `COSMOS_DATABASE` | `db_modeler` | Base Mongo del fallback legacy. |
 | `SECRET_KEY` | default inseguro de dev | Clave HMAC del token de sesión (JWT HS256). **En prod obligatoria** (secreto `session_secret`). |
 | `REQUIRE_AUTH` | `false` | `true` = postura de producción (401 sin token, docs ocultas, rate limit on). |
 | `ACCESS_TOKEN_TTL_MIN` | `720` (12 h) | Vida del token de acceso, en minutos. |
@@ -278,14 +280,12 @@ alimentadas a su vez por GitHub Variables (§2.3).
 
 ### 3.2 Perfiles por entorno (referencia)
 
-| Variable | Local (dev, `.env`) | Databricks Apps (`databricks.yml`) |
+| Variable | Local (dev, `.env`) | Databricks Apps (`app.yaml`) |
 |---|---|---|
-| `DB_BACKEND` | `lakebase` | `lakebase` (rollback: `cosmos` + redeploy) |
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | del workspace + PAT (u OAuth U2M sin token, §4.1) | — (SP de la app, inyectado) |
 | `LAKEBASE_ENDPOINT` | ruta lógica | `${var.lakebase_endpoint}` |
 | `PGHOST` | opcional (seteado = arranque más rápido) | — (auto-resuelto) |
 | `PGUSER` | tu correo del workspace | — (client ID del SP) |
-| `COSMOS_CONNECTION_STRING` | comentada (fallback legacy) | — (fuera del bundle; rollback = seam en código) |
 | `SECRET_KEY` | (default, con warning) | secreto `session_secret` (KV, `openssl rand -base64 48`) |
 | `REQUIRE_AUTH` | `false` | `true` |
 | `CORS_ORIGINS` / `CORS_ORIGIN_REGEX` | default localhost / — | — / `${var.cors_origin_regex}` |
@@ -316,7 +316,6 @@ Contenido mínimo de `.env` para desarrollo (plantilla completa en `.env.example
 
 ```bash
 # .env (local)
-DB_BACKEND=lakebase
 DATABRICKS_HOST=https://adb-<workspace-id>.<n>.azuredatabricks.net
 DATABRICKS_TOKEN=dapi<...>
 LAKEBASE_ENDPOINT=projects/dmh-proj/branches/production/endpoints/primary
@@ -401,12 +400,12 @@ Al iniciar el proceso, el lifespan abre la conexión y **asegura los índices** 
 sequenceDiagram
     participant U as Uvicorn
     participant A as FastAPI app
-    participant P as Pool (asyncpg | Motor)
-    participant B as Lakebase PG (o Cosmos)
+    participant P as Pool (asyncpg)
+    participant B as Lakebase PG
 
     U->>A: startup (lifespan)
     A->>A: assert_secure_config()
-    A->>P: connect()  # según DB_BACKEND
+    A->>P: connect()
     P->>B: abrir pool (Lakebase: token OAuth + ensure_base batcheado)
     P->>B: ensure_indexes(db)
     B-->>P: indices creados o ya existentes
@@ -422,33 +421,19 @@ sequenceDiagram
 
 ## 6. Consideraciones de la base de datos
 
-**La base ACTUAL es Databricks Lakebase Postgres** (`DB_BACKEND=lakebase`,
-doc 28): tablas `(id text PK, doc jsonb)` por colección en el schema `dmh`,
-adaptador motor-like en `app/core/db/lakebase/` (los repositorios no
+La base es **Databricks Lakebase Postgres** (doc 28): tablas `(id text PK,
+doc jsonb)` por colección en el schema `dmh`, adaptador estilo Mongo en
+`app/core/db/lakebase/` (los repositorios no
 cambiaron), password = token OAuth de ~1 h acuñado por conexión nueva del
 pool (asyncpg), compute con scale-to-zero (el pool tolera el wake con
 timeout + retry). Detalle completo: `plan-implementacion/28-MIGRACION-LAKEBASE.md`
 y `doc/esquema-datos.md`.
 
-**Todo lo que sigue en esta sección aplica al FALLBACK Cosmos**
-(`DB_BACKEND=cosmos`): Azure Cosmos DB usando la API de MongoDB, vía **Motor**
-(driver async). Un único cliente singleton se comparte entre todos los
-repositorios.
+### 6.1 Pool de conexiones (asyncpg + token OAuth)
 
-### 6.1 Cliente Motor y timeouts
+El singleton `app/core/db/client.py` abre un pool `asyncpg` contra el endpoint de Lakebase (`app/core/db/lakebase/pool.py`). El password de cada conexión nueva es un token OAuth de BD (~1 h) que el SDK de Databricks acuña por conexión (`credentials.py`); el host físico se resuelve solo desde `LAKEBASE_ENDPOINT` (`get_endpoint`, cacheado por proceso). El pool tolera el wake del compute scale-to-zero con timeout + retry.
 
-```python
-# app/core/db/client.py
-_client = AsyncIOMotorClient(
-    settings.COSMOS_CONNECTION_STRING,
-    serverSelectionTimeoutMS=15_000,   # cuánto esperar por un servidor disponible
-    connectTimeoutMS=10_000,           # apertura del socket TCP
-    socketTimeoutMS=60_000,            # operación individual
-    maxPoolSize=50,                    # tope de conexiones concurrentes
-)
-```
-
-Estos timeouts son deliberados: sin ellos, un socket colgado bloquearía el request por el default del sistema operativo (minutos) y, con varios usuarios, se agotaría el pool. `connect()` es idempotente (una segunda llamada es no-op) y levanta `RuntimeError` si falta `COSMOS_CONNECTION_STRING`.
+`connect()` es idempotente (una segunda llamada es no-op) y, en el arranque, asegura las tablas-colección y sus índices; si ese DDL falla, cierra el pool a medio abrir antes de re-lanzar (sin eso, cada reintento del lifespan filtraba un pool — visto en Apps).
 
 ### 6.2 Rate limiting y escalado horizontal
 
@@ -456,38 +441,30 @@ El limitador de `slowapi` guarda estado **en memoria, por proceso**. Con una sol
 
 Desde 2026-07-31 la **key** del limitador es la **PRIMERA IP de `X-Forwarded-For`** (fallback: la IP del peer). Sin eso, detrás de la cadena de proxies de la topología corporativa (§2) todas las requests llegaban con la IP del proxy y el límite de login de `5/minute` era de hecho **global para todos los usuarios**; con la key por XFF vuelve a ser por usuario final.
 
-### 6.3 Anatomía de la cadena de conexión
+### 6.3 Parámetros de conexión a Lakebase
 
-La cadena de ejemplo (`.env.example`) apunta a un cluster de **Cosmos DB for MongoDB (vCore)**:
-
-```
-mongodb+srv://<user>:<password>@<cluster>.global.mongocluster.cosmos.azure.com/
-    ?tls=true
-    &authMechanism=SCRAM-SHA-256
-    &retrywrites=false
-    &maxIdleTimeMS=120000
-```
+La conexión `asyncpg` se arma desde el env de `config.py` (§3):
 
 | Parámetro | Por qué |
 |---|---|
-| `tls=true` | Cosmos exige TLS siempre. |
-| `authMechanism=SCRAM-SHA-256` | Mecanismo de autenticación soportado por Cosmos. |
-| `retrywrites=false` | Cosmos no soporta reintentos de escritura del driver; hay que apagarlos o el driver falla. |
-| `maxIdleTimeMS=120000` | Recicla conexiones ociosas antes de que el servidor las corte, evitando errores por sockets muertos. |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint; de ahí el SDK resuelve el host físico (`ep-…`) y acuña el token OAuth. |
+| `PGUSER` | Rol PG = identidad que acuña el token (en Apps, el client ID del SP). |
+| `PGPASSWORD` | Token OAuth de BD (~1 h). En la app lo acuña el pool por conexión; el env solo es escape hatch para scripts sin SDK. |
+| `PGSSLMODE=require` | TLS obligatorio. |
+| `PGDIRECTTLS` | Sabor del handshake TLS: vacío = auto (clásico y, si el server resetea, directo); `true` fuerza el directo (endpoints detrás de un router SNI/ALPN, p. ej. "service direct"). |
 
-> Nota sobre modelos de capacidad: el código está escrito de forma defensiva para la **API de MongoDB basada en RU** (por eso se traga los códigos de error `48`/`11000` al crear índices y por eso `.sort()` requiere índice — ver 6.5). La cadena de ejemplo corresponde a un cluster **vCore**. En cualquiera de los dos casos el protocolo es MongoDB y el código funciona igual; la diferencia práctica es cómo se dimensiona el throughput.
+El modelo de datos sigue siendo documental: el adaptador `app/core/db/lakebase/` traduce la superficie estilo Mongo a SQL/JSONB (tablas `(id text PK, doc jsonb)` + índice GIN). Los índices se declaran en `indexes.py` (§6.5).
 
-### 6.4 Throughput / RU
+### 6.4 Carga del reporting
 
-En el modelo RU (Request Units), cada operación consume RU y el throughput aprovisionado marca el techo antes de recibir `429 (throttling)`. Consideraciones prácticas para este backend:
+- **Las lecturas ordenadas y las agregaciones del reporting son las más caras.** El reporting hace `$group`/proyección y recorridos por keyset sobre `canonical_columns` (hasta cientos de miles de documentos) — el adaptador los compila a SQL/JSONB.
+- **La prueba de estrés interna** (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
 
-- **Las lecturas ordenadas y las agregaciones del reporting son las más caras.** El reporting hace `$group`/proyección y recorridos por keyset sobre `canonical_columns` (hasta cientos de miles de documentos). Sin los índices correctos, esas consultas o fallan (sin índice para `.sort()`) o consumen muchas RU.
-- **Aprovisionar pensando en el pico de reporting**, no en el promedio. La prueba de estrés interna (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
-- **`retrywrites=false`** implica que la app no reintenta escrituras automáticamente; si hay throttling en escrituras, se propaga el error. Dimensiona RU para absorber los picos de import/apply de changesets.
+> Nota histórica: varias de estas decisiones (sorts solo sobre campos indexados, documentos acotados, apply idempotente) nacieron del tier RU de Cosmos —que cobraba por operación y tiraba `429` bajo carga— y se conservan como **invariantes de escala** sobre Lakebase.
 
 ### 6.5 Índices que deben existir (y por qué)
 
-Los índices se crean automáticamente en el arranque con `ensure_indexes(db)` (`app/core/db/indexes.py`). La función es **idempotente**: si una colección ya existía, Cosmos puede levantar `NamespaceExists (48)` o `duplicate key (11000)` en índices únicos ya presentes; el código traga solo esos dos códigos y re-lanza cualquier otro.
+Los índices se crean automáticamente en el arranque con `ensure_indexes(db)` (`app/core/db/indexes.py`). La función es **idempotente**: si una colección/índice ya existía, se pueden levantar los códigos `48` (namespace ya existe) o `11000` (duplicate key en un único ya presente); el código traga solo esos dos y re-lanza cualquier otro (comportamiento nacido en Cosmos RU, inofensivo sobre Lakebase).
 
 Tabla completa de índices por colección (tal como están en el código):
 
@@ -497,11 +474,11 @@ Tabla completa de índices por colección (tal como están en el código):
 | `glossary_terms` | `flgactive` | Filtrado de activos. |
 | `udp_definitions` | `flgactive` | Filtrado de activos. |
 | `canonical_tables` | `flgactive` | Filtrado de activos. |
-| `canonical_tables` | `physicalName` | La búsqueda server-side del catálogo ordena por `physicalName`; sin índice, Cosmos RU rechaza el `.sort()`. |
+| `canonical_tables` | `physicalName` | La búsqueda server-side del catálogo ordena por `physicalName` (invariante: orden sobre campo indexado). |
 | `canonical_tables` | `udpValues.$**` (wildcard) | Filtrar por cualquier clave UDP presente o futura sin DDL por clave. |
 | `canonical_columns` | `tableId` | Traer columnas de una tabla. |
 | `canonical_columns` | `parentDomainId` | Cascada de dominio. |
-| `canonical_columns` | `physicalName` | Keyset/orden del reporting (Cosmos rechaza `.sort()` sin índice). |
+| `canonical_columns` | `physicalName` | Keyset/orden del reporting (invariante: orden sobre campo indexado). |
 | `canonical_columns` | `dataType` | Filtro/`$group` del reporting. |
 | `canonical_columns` | `udpValues.$**` (wildcard) | Filtro por cualquier UDP de columna. |
 | `changesets` | `updatedAt` (desc) | Listado por recientes. |
@@ -523,7 +500,7 @@ Tabla completa de índices por colección (tal como están en el código):
 
 ### 6.6 Por qué `.sort()` necesita índice
 
-En la API de MongoDB de Cosmos (tier RU), **el motor no ordena en memoria un conjunto no indexado**: si pides `.sort()` sobre un campo que no tiene índice, la operación se **rechaza con un error de servidor (500)** en lugar de ejecutarse lenta. Esto es distinto de un MongoDB clásico, que sí haría el ordenamiento en memoria (con un tope). Por eso, cada campo que el backend usa para ordenar tiene un índice explícito:
+Es un **invariante de escala**: cada campo que el backend usa para ordenar tiene un índice explícito. La regla nació con el tier RU de Cosmos —que **rechazaba con un 500** un `.sort()` sobre un campo sin índice, en vez de ejecutarlo lento— y se mantiene sobre Lakebase porque un orden sin índice sobre cientos de miles de filas es igual de inviable a escala. Los campos con índice explícito por este motivo:
 
 - `canonical_tables.physicalName` y `canonical_columns.physicalName` → orden/keyset del catálogo y del reporting.
 - `changesets.updatedAt` → listado por recientes.
@@ -532,8 +509,8 @@ En la API de MongoDB de Cosmos (tier RU), **el motor no ordena en memoria un con
 ```mermaid
 flowchart TD
     Q["Consulta con .sort en campo X"] --> IDX{"Existe indice en X?"}
-    IDX -->|Si| OK["Cosmos hace seek ordenado<br/>respuesta rapida y economica en RU"]
-    IDX -->|No| ERR["Cosmos RU rechaza el sort<br/>error 500 en toda la busqueda"]
+    IDX -->|Si| OK["seek ordenado<br/>respuesta rapida"]
+    IDX -->|No| ERR["orden sin indice<br/>inviable a escala"]
 ```
 
 Regla operativa: **antes de agregar cualquier `.sort()` nuevo en el código, agrega su índice en `indexes.py`**, o esa ruta empezará a devolver 500 en producción.
@@ -544,7 +521,7 @@ El índice **wildcard** `udpValues.$**` es un caso especial: los UDP son etiquet
 
 ## 7. Modelo lógico de datos (colecciones)
 
-Las colecciones del backend viven todas en la misma base — en Lakebase (la BD actual): una tabla `(id, doc jsonb)` por colección en el schema `dmh` de `databricks_postgres`; en el fallback legacy Cosmos: la base `db_modeler`, en la misma cuenta que el servicio de agentes (que administra `column_catalog`). No hay joins a nivel de motor: las relaciones son por identificadores y las resuelve la aplicación.
+Las colecciones del backend viven todas en la misma base Lakebase: una tabla `(id, doc jsonb)` por colección en el schema `dmh` de `databricks_postgres`. No hay joins a nivel de motor: las relaciones son por identificadores y las resuelve la aplicación.
 
 ```mermaid
 flowchart TD
@@ -617,7 +594,7 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 ## 9. Salud y observabilidad
 
-- **Health endpoint:** `GET /api/health` hace un `ping` vivo a la base (Lakebase o Cosmos según `DB_BACKEND`). Devuelve `status: ok` si la DB responde, o `degraded` si no (con Lakebase, un `degraded` transitorio tras idle suele ser el wake del compute). Úsalo como readiness/liveness probe.
+- **Health endpoint:** `GET /api/health` hace un `ping` vivo a la base (Lakebase). Devuelve `status: ok` si la DB responde, o `degraded` si no (con Lakebase, un `degraded` transitorio tras idle suele ser el wake del compute). Úsalo como readiness/liveness probe.
 
   ```bash
   curl -s http://localhost:8000/api/health | jq
@@ -638,7 +615,7 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 **Configuración, antes de exponer el backend** (en Databricks Apps los puntos 2–5 ya los trae el bundle; verificarlos aplica sobre todo al destino Azure App Service o a un deploy manual):
 
-1. **Lakebase:** `LAKEBASE_ENDPOINT` correcto, el one-time del workspace hecho (§2.6: proyecto `dmh-proj`, scope `kv-scope-datacraft` + key `session-secret-key`, rol PG del service principal del backend). Con fallback legacy Cosmos: `COSMOS_CONNECTION_STRING` como secreto, `retrywrites=false`, `tls=true`.
+1. **Lakebase:** `LAKEBASE_ENDPOINT` correcto, el one-time del workspace hecho (§2.6: proyecto `dmh-proj`, scope `kv-scope-datacraft` + key `session-secret-key`, rol PG del service principal del backend).
 2. `SECRET_KEY` = valor fuerte y secreto (no el default). Si no, con `REQUIRE_AUTH=true` la app no arranca.
 3. `REQUIRE_AUTH=true` (activa 401, oculta docs, enciende rate limiting).
 4. `CORS_ORIGIN_REGEX` (o `CORS_ORIGINS` exacta) apuntando al frontend. `ALLOWED_HOSTS` = dominio público del backend.

@@ -9,7 +9,7 @@
 > validación a escala (resultados en `plan-implementacion/04-STRESS-TEST.md`);
 > las menciones a Cosmos describen la BD de aquella época.
 
-Este documento describe la estrategia y la implementación completa de pruebas del backend `backend-data-model-hub` (FastAPI + Databricks Lakebase Postgres vía un adaptador con superficie Motor; Cosmos DB queda como fallback legacy, ver [arquitectura.md](arquitectura.md)). Cubre las capas de verificación que sostienen el proyecto: pruebas unitarias puras por feature, pruebas de arquitectura que fuerzan invariantes de capas, una suite viva de integración del adaptador Lakebase contra el Postgres real, un harness E2E que ejercita el backend real por rol vía HTTP, y — como evidencia histórica — la prueba de estrés a escala real (10.000 tablas / 400.000 columnas). Todo el contenido está basado en el código real de `tests/`, `scripts/e2e/` y `scripts/arrange_all.py`.
+Este documento describe la estrategia y la implementación completa de pruebas del backend `backend-data-model-hub` (FastAPI + Databricks Lakebase Postgres como **única** BD, vía un adaptador que emula la superficie de `pymongo` —`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`— sin conectar a Mongo; Cosmos DB fue la base productiva hasta la migración del 2026-07-19, ver [arquitectura.md](arquitectura.md)). Cubre las capas de verificación que sostienen el proyecto: pruebas unitarias puras por feature, pruebas de arquitectura que fuerzan invariantes de capas, una suite viva de integración del adaptador Lakebase contra el Postgres real, un harness E2E que ejercita el backend real por rol vía HTTP, y — como evidencia histórica — la prueba de estrés a escala real (10.000 tablas / 400.000 columnas). Todo el contenido está basado en el código real de `tests/`, `scripts/e2e/` y `scripts/arrange_all.py`.
 
 ---
 
@@ -168,7 +168,7 @@ def client() -> TestClient:
 
 Son dos archivos que no prueban comportamiento sino **estructura del código fuente**, para que la persistencia se mantenga intercambiable (swappable) y no reaparezca el backend viejo.
 
-`tests/architecture/test_store_boundary.py` — el store (Motor/pymongo/`get_db`) solo puede tocarse desde `repository.py`; `service.py` y `schemas.py` deben permanecer agnósticos al store:
+`tests/architecture/test_store_boundary.py` — el store (importar `motor`/`pymongo`, o usar `get_db`) solo puede tocarse desde `repository.py`; `service.py` y `schemas.py` deben permanecer agnósticos al store. El guard sigue vetando `motor`/`pymongo` para que ni siquiera reaparezca el import del driver:
 
 ```python
 FORBIDDEN = ("import motor", "from motor", "import pymongo", "from pymongo", "get_db")
@@ -188,7 +188,7 @@ def test_services_and_schemas_do_not_touch_the_store():
 flowchart LR
     R["router.py<br/>HTTP + RBAC"] --> S["service.py<br/>logica pura / orquestacion"]
     S --> Repo["repository.py<br/>UNICA capa que toca el store"]
-    Repo --> DB[("Databricks Lakebase Postgres<br/>adaptador con superficie Motor<br/>(Cosmos = fallback legacy)")]
+    Repo --> DB[("Databricks Lakebase Postgres<br/>adaptador con superficie estilo pymongo<br/>(unica BD; Cosmos hasta 2026-07-19)")]
     S -. "PROHIBIDO<br/>(test de arquitectura)" .-> DB
     Sch["schemas.py / models.py"] -. "PROHIBIDO" .-> DB
     style Repo fill:#e8f5e9,stroke:#2e7d32
@@ -206,7 +206,7 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie Motor/PyMongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 543 passed + 43 skipped.
+`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 543 passed + 43 skipped.
 
 ```bash
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 43 tests contra el Postgres real
@@ -224,7 +224,7 @@ Ver la sección 7. `seed_stress.py` generaba data sintética a escala real (scri
 
 ## 4. Cómo correr las pruebas
 
-Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, `httpx>=0.27`, además del runtime pineado con `==` — política 2026-07-31 —: `fastapi 0.136.1`, `pydantic 2.13.4`, `asyncpg 0.31.0`, `databricks-sdk 0.121.0`, `bcrypt 5.0.0`, `pyjwt 2.12.1`, `sqlglot 30.12.0`; `motor 3.7.1` queda por el camino legacy de Cosmos). El intérprete del proyecto es `.venv/bin/python`.
+Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, `httpx>=0.27`, además del runtime pineado con `==` — política 2026-07-31 —: `fastapi 0.136.1`, `pydantic 2.13.4`, `asyncpg 0.31.0`, `databricks-sdk 0.121.0`, `bcrypt 5.0.0`, `pyjwt 2.12.1`, `sqlglot 30.12.0`; `pymongo 4.17.0` aporta **solo** el vocabulario de operaciones/errores que el adaptador Lakebase emula, sin conectar a Mongo). El intérprete del proyecto es `.venv/bin/python`.
 
 ### 4.1 Unit + arquitectura (pytest)
 
@@ -431,7 +431,7 @@ El harness ejercita el stack completo por HTTP: `login real → JWT → header A
 | lector | `diego.torres` | `123456789` |
 
 - **Helpers de fixtures** (`create_project`, `create_canvas`, `create_table`, `add_column`, `create_relationship`, `create_view`, `create_domain`, `snapshot`) hacen las mutaciones **vía API** y registran cada id creado.
-- **`cleanup()`** borra por id directo contra la BD vía la superficie Motor del adaptador (hay entidades sin endpoint DELETE, como `canonical_tables`/`canonical_columns`), además de las columnas y `changeset_changes` derivados. Todo lo creado lleva un `TAG` único por proceso para poder barrer restos.
+- **`cleanup()`** borra por id directo contra la BD vía la superficie (estilo pymongo) del adaptador Lakebase (hay entidades sin endpoint DELETE, como `canonical_tables`/`canonical_columns`), además de las columnas y `changeset_changes` derivados. Todo lo creado lleva un `TAG` único por proceso para poder barrer restos.
 - **`Suite`** colecciona checks `(name, ok, detail)` y los vuelca como JSON (`===E2E_RESULT===`).
 
 Ejemplo de login real (equivalente al que hace el harness) con curl:
@@ -476,7 +476,7 @@ sequenceDiagram
         API->>Aud: audit(accion)
         API-->>H: 2xx {data}
     end
-    Note over H,DB: al final: cleanup() borra por id directo (superficie Motor del adaptador)
+    Note over H,DB: al final: cleanup() borra por id directo (superficie del adaptador Lakebase)
 ```
 
 ### 6.2 Escenarios (`scripts/e2e/scenarios.py`)
@@ -597,8 +597,7 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 
 | Variable | Default | Rol |
 |----------|---------|-----|
-| `DB_BACKEND` | `lakebase` | Seam de backend de datos: `lakebase` (productivo) o `cosmos` (fallback legacy). |
-| `LAKEBASE_ENDPOINT` | `""` | Ruta lógica `projects/…/branches/…/endpoints/…`; obligatoria con lakebase. |
+| `LAKEBASE_ENDPOINT` | `""` | Ruta lógica `projects/…/branches/…/endpoints/…`; obligatoria (Lakebase es la única BD). |
 | `LAKEBASE_PGSCHEMA` | `dmh` | Schema Postgres donde viven las colecciones. |
 | `PGHOST` / `PGPORT` / `PGDATABASE` | `""` / `5432` / `databricks_postgres` | `PGHOST` vacío se auto-resuelve vía SDK desde `LAKEBASE_ENDPOINT`. |
 | `PGUSER` / `PGPASSWORD` | `""` | `PGUSER` cae a `DATABRICKS_CLIENT_ID`; `PGPASSWORD` fijo es el escape hatch sin SDK (scripts). |
@@ -611,17 +610,16 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 | `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | `dev@local` / `""` / `""` | Solo para `AUTH_MODE=local`. |
 | `LAKEBASE_TESTS` | — | `=1` habilita la suite viva del adaptador (`tests/lakebase`, 43 tests). |
 | `E2E_BASE` | `http://localhost:8000` | Base URL que apunta el runner E2E (útil para correr los escenarios contra un entorno desplegado). |
-| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | `""` / `db_modeler` | **Solo legacy**: camino `DB_BACKEND=cosmos` (rollback dormido). |
 
 ### 8.2 Base de datos (Databricks Lakebase Postgres)
 
-- La persistencia productiva es **Databricks Lakebase Postgres** a través del adaptador `app/core/db/lakebase/` que expone la misma superficie async de Motor: cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`. El acceso está confinado a los `repository.py` (invariante forzado por `tests/architecture/test_store_boundary.py`), lo que mantiene el store intercambiable — así fue posible la migración Cosmos → Lakebase sin tocar services.
+- La persistencia productiva es **Databricks Lakebase Postgres** a través del adaptador `app/core/db/lakebase/` que expone una superficie async estilo Mongo (el vocabulario que emula `pymongo`): cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`. El acceso está confinado a los `repository.py` (invariante forzado por `tests/architecture/test_store_boundary.py`), lo que mantiene el store intercambiable — así fue posible la migración Cosmos → Lakebase sin tocar services.
 - **El adaptador tiene su propia suite viva** (`tests/lakebase/test_adapter_live.py`, 43 tests con `LAKEBASE_TESTS=1`) que valida esa superficie contra el Postgres real en un schema efímero (sección 3.4).
 - **Credenciales rotativas:** el password de Postgres es un token OAuth de ~60 minutos que la app acuña sola vía `databricks-sdk` (caché de 50 min); el pool asyncpg pide token fresco por conexión y tolera el wake del compute (scale-to-zero).
 - **Índices:** se recrean con `ensure_indexes(db)` al arrancar el lifespan; el planner del reporting rechaza (422) ordenar por campos sin índice, así que los índices esperados deben existir para las consultas a escala.
 - **Colección protegida:** `column_catalog` (usada por el agente de modelado) nunca debe ser borrada por los scripts de carga/reset; lo garantizan con `assert`/guardrail.
 - **Sin lifespan no hay DB:** el `TestClient` de los unit tests se construye sin lifespan a propósito, y el `/api/health` reporta `degraded` con `db_connected: false` cuando no hay conexión — comportamiento verificado en `tests/test_smoke.py`.
-- **Cosmos DB (legacy):** el camino `DB_BACKEND=cosmos` (Motor contra Azure Cosmos DB con API de Mongo) se conserva en código como rollback dormido; el throttling por RU/s (429 / código 16500) que condicionó a los seeds de estrés era de esa época.
+- **Cosmos DB (histórico):** Azure Cosmos DB (API de Mongo, vía el driver `motor`) fue la base productiva hasta la migración del 2026-07-19; ese camino se **eliminó por completo** — ya no existen el setting `DB_BACKEND`, las variables `COSMOS_*` ni el driver `motor`. El throttling por RU/s (429 / código 16500) que condicionó a los seeds de estrés era de esa época.
 
 ---
 

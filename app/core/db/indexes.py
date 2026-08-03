@@ -1,22 +1,21 @@
 """Índices de colecciones (idempotentes).
 
-Cosmos DB for MongoDB (tier RU) levanta NamespaceExists (code 48) si una
-colección fue creada implícitamente antes de la llamada al índice. El índice
-igual se crea correctamente; tragamos ese código puntual. Duplicate-key
-(11000) también es seguro de ignorar en índices únicos ya existentes.
+`ensure_indexes` declara los índices de cada colección; el adaptador Lakebase
+los traduce a DDL de Postgres (GIN sobre jsonb + btrees). Es idempotente: los
+códigos 48 (namespace ya existe) y 11000 (duplicate-key en un único ya
+existente) se tragan; cualquier otro error se propaga.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 
-async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
+async def ensure_indexes(db: Any) -> None:
     """Crea los índices de las colecciones del backend de plataforma."""
 
     # Cosmos (tier RU) tumba con TooManyLogicalSessions (261) si se crean ~30
@@ -115,4 +114,4 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         # la colisión). Sirve para ambos sentidos de orden (el app ordena en Python).
         _try("standards_versions", [("seq", 1)], unique=True),
     )
-    log.info("motor indexes ensured")
+    log.info("lakebase indexes ensured")

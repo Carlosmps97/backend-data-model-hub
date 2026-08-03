@@ -1,8 +1,7 @@
 # Scripts del backend — kit XML → Lakebase
 
 **Actualizado:** 2026-07-24 (doc 32b: kit multi-archivo) · **Todo corre contra
-Lakebase** (`DB_BACKEND=lakebase`, conexión del `.env`), **desde la raíz del
-backend** con su `.venv`.
+Lakebase** (conexión del `.env`), **desde la raíz del backend** con su `.venv`.
 
 Guía detallada de la migración (flags, políticas, qué migra y qué no):
 `doc/migracion-erwin.md`. Un modelo Erwin llega partido en ~15 archivos: el

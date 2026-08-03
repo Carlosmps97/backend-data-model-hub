@@ -6,7 +6,7 @@ Actualizado: 2026-07-31. Referencia completa de los 128 endpoints de la API REST
 
 # Contrato de API — Parte 1
 
-Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva es **Databricks Lakebase Postgres**, consumida vía el adaptador Motor-like de `app/core/db/lakebase/` (`DB_BACKEND=lakebase`); Azure Cosmos DB (API de Mongo) queda como seam legacy/rollback (`DB_BACKEND=cosmos`). Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia según el backend.
+Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva y ÚNICA es **Databricks Lakebase Postgres**, consumida vía el adaptador de `app/core/db/lakebase/`, que expone una superficie de consulta async emulando el vocabulario de tipos/operaciones de pymongo (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre Postgres — no conecta a Mongo. (Azure Cosmos DB fue la base hasta la migración del 2026-07-19, doc 28; el camino Cosmos ya no existe.) Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia.
 
 Este documento describe, para cada endpoint del alcance de la Parte 1: propósito, método y ruta, parámetros/body con tipos, un ejemplo de invocación con `curl` y la respuesta esperada. Todo lo aquí documentado sale del código real de los routers, schemas, services y repositories de cada feature.
 
@@ -165,15 +165,13 @@ No requiere infraestructura propia más allá de la base de datos y las variable
 
 | Variable | Propósito | Default |
 |---|---|---|
-| `DB_BACKEND` | Seam de base de datos: `lakebase` (productivo) o `cosmos` (legacy/rollback) | `lakebase` |
-| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase (`projects/…/branches/…/endpoints/…`); obligatoria con lakebase | `""` |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase (`projects/…/branches/…/endpoints/…`); obligatoria | `""` |
 | `LAKEBASE_PGSCHEMA` | Schema Postgres donde viven las colecciones | `dmh` |
 | `PGHOST` / `PGPORT` / `PGDATABASE` / `PGSSLMODE` | Conexión Postgres; `PGHOST` vacío se auto-resuelve vía SDK | `""` / `5432` / `databricks_postgres` / `require` |
 | `PGUSER` | Rol PG (fallback: `DATABRICKS_CLIENT_ID` del service principal) | `""` |
 | `PGPASSWORD` | Password fijo para scripts (escape hatch sin SDK; en runtime el password es un token OAuth rotativo) | `""` |
 | `PGDIRECTTLS` | `true` fuerza TLS directo (ALPN `postgresql`), `false` clásico; vacío = auto | `""` |
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Workspace del SDK / PAT en dev local (en Apps la identidad es el SP vía `DATABRICKS_CLIENT_ID/SECRET` inyectados) | `""` |
-| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | Solo con `DB_BACKEND=cosmos` (legacy) | `""` / `db_modeler` |
 | `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión (HS256). Obligatoria en producción | default inseguro de dev |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token en minutos | `720` |
 | `REQUIRE_AUTH` | `true` = login obligatorio (401 sin token); oculta `/docs`, `/redoc`, `/openapi.json` | `false` |
@@ -189,7 +187,7 @@ Falla-cerrado importante: con `REQUIRE_AUTH=true` y `SECRET_KEY` en el default d
 
 ### 2.3 Consideraciones de base de datos
 
-- Producción = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone la misma superficie async de Motor (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. Con `DB_BACKEND=cosmos` el mismo contrato corre sobre Motor/Cosmos (legacy). La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff.
+- Base ÚNICA = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone una superficie de consulta async que emula la de pymongo (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff. (Cosmos fue la base hasta la migración del 2026-07-19, doc 28; el driver y el conmutador de backend se eliminaron por completo — `pymongo` permanece solo como vocabulario que el adaptador emula, sin conexión a Mongo.)
 - Colecciones tocadas por esta parte del contrato: `users`, `roles`, `audit_log`, `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `ddl_rules`, `ddl_ruleset_config`.
 - El `_id` es la clave natural en varias colecciones (`users._id == username`, `roles._id == role key`, `naming_config._id == scope`). Al serializar, el backend renombra `_id -> id` y descarta campos internos (`flgactive`, `deletedAt`, `updatedAt`, `createdAt`).
 - Borrado lógico (soft-delete): las eliminaciones marcan `flgactive=false` en vez de borrar el documento; los listados filtran por `flgactive != false`.
@@ -3197,7 +3195,7 @@ flowchart TD
   CAT --> COMP[compiler]
   SPEC --> COMP
   COMP -->|match/group/project/sort| EXE[executor keyset + hidratacion]
-  EXE --> MONGO[(BD documental: Lakebase JSONB / Cosmos legacy)]
+  EXE --> MONGO[(BD documental: Lakebase JSONB)]
   EXE --> GRID[Grilla virtualizada]
   EXE --> CSV[/export streaming CSV/]
 ```
@@ -3269,8 +3267,7 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 | Variable | Propósito |
 |---|---|
 | `AUTH_MODE` | `local` (usuario fake + `X-Dev-User`) o `databricks` (headers del proxy SSO), como fallback sin token. |
-| `DB_BACKEND` + `LAKEBASE_ENDPOINT`/`LAKEBASE_PGSCHEMA` | Base productiva (Lakebase Postgres); la app expone `db_connected` en `/health`. |
-| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | Solo con el seam legacy `DB_BACKEND=cosmos`. |
+| `LAKEBASE_ENDPOINT` / `LAKEBASE_PGSCHEMA` | Base productiva y única (Lakebase Postgres); la app expone `db_connected` en `/health`. |
 | `REQUIRE_AUTH` / `SECRET_KEY` | Login obligatorio + firma del JWT de sesión. |
 | Identidad local (email/username/display) | Usuario fake del `LocalIdentityProvider` en desarrollo. |
 

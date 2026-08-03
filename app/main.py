@@ -3,7 +3,7 @@
 Construye la app FastAPI y monta los routers de cada feature. Responsabilidades
 acotadas:
 - Configurar logging.
-- Lifespan: abrir/cerrar la conexión a la base de datos (seam Lakebase/Cosmos).
+- Lifespan: abrir/cerrar la conexión a la base de datos (Databricks Lakebase).
 - Middleware: logueo estructurado de cada request.
 - CORS para el frontend Next.js (origen distinto en desarrollo local).
 - Montar los routers de cada feature: `health`, `identity`, `domains`,
@@ -189,7 +189,7 @@ def create_app() -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # ─── Excepciones no controladas → envelope de error consistente ──────
-    # Sin esto, un crash (Cosmos caído, doc inválido) devolvía el 500 crudo de
+    # Sin esto, un crash (BD caída, doc inválido) devolvía el 500 crudo de
     # Starlette (texto plano) y el frontend mostraba errores ilegibles. El
     # traceback ya lo loguea el middleware de requests.
     #

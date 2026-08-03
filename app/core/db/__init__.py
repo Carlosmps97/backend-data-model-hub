@@ -1,1 +1,1 @@
-"""Conexión a Cosmos DB (Motor async) + índices."""
+"""Conexión a Databricks Lakebase Postgres (adaptador JSONB estilo Mongo) + índices."""

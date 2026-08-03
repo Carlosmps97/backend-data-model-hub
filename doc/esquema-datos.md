@@ -14,9 +14,9 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 > `standards_versions.seq`, el ÚNICO unique de todo el sistema). La forma
 > lógica de los documentos — TODO lo que sigue — no cambió, tampoco con la
 > migración al workspace Databricks CORPORATIVO (2026-07-27→31, docs 35–36 de
-> plan-implementacion/). Azure Cosmos DB (Mongo, base `db_modeler`) queda como
-> legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc en
-> la migración (2026-07-19; los scripts one-shot de esa copia se retiraron).
+> plan-implementacion/). Azure Cosmos DB (Mongo, base `db_modeler`) fue la base
+> hasta la migración (2026-07-19), verificada doc-por-doc; su camino de rollback
+> ya se retiró del código (los scripts one-shot de esa copia también).
 
 ---
 

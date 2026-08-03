@@ -1,8 +1,8 @@
 # Consideraciones y límites del backend — Data Model Hub
 
-Actualizado: 2026-07-31.
+Actualizado: 2026-08-01.
 
-Este documento describe las **consideraciones de diseño, los límites duros y las decisiones de escala** del backend de plataforma (`backend-data-model-hub`: FastAPI con superficie Motor-like sobre **Databricks Lakebase Postgres** — adaptador `app/core/db/lakebase/` —, con Azure Cosmos DB API de Mongo como fallback legacy vía `DB_BACKEND=cosmos`). Está escrito para desarrolladores y stakeholders técnicos que necesitan entender hasta dónde aguanta la plataforma, por qué se tomaron ciertas decisiones y qué queda pendiente de endurecer.
+Este documento describe las **consideraciones de diseño, los límites duros y las decisiones de escala** del backend de plataforma (`backend-data-model-hub`: FastAPI cuyo adaptador `app/core/db/lakebase/` corre sobre **Databricks Lakebase Postgres**, la única base de datos). El adaptador emula la superficie de tipos y operaciones de pymongo (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) traduciéndola a SQL/JSONB — no conecta a Mongo. Azure Cosmos DB con API de Mongo fue la base productiva hasta la migración del 2026-07-19 (doc 28); ya no es un backend conmutable (se retiraron el driver `motor`, el setting `DB_BACKEND` y las variables `COSMOS_*`). Está escrito para desarrolladores y stakeholders técnicos que necesitan entender hasta dónde aguanta la plataforma, por qué se tomaron ciertas decisiones y qué queda pendiente de endurecer.
 
 Se basa en el código real (`app/features/reporting/query/`, `app/core/`, `app/core/db/lakebase/`, `app/features/auth/`, `app/features/changesets/`) y en los documentos de plan de implementación `04-STRESS-TEST`, `07-REPORTING-ENGINE`, `08-SECURITY-HARDENING` y, para el backend de datos vigente, los docs `28` (migración a Lakebase) y `32b`–`36`.
 
@@ -22,8 +22,7 @@ Se basa en el código real (`app/features/reporting/query/`, `app/core/`, `app/c
 | Lockout de cuenta | **8 fallos consecutivos → bloqueo 15 min** | `features/auth/service.py` |
 | Política de contraseña | min 10 / max 128 (al crear/cambiar, no en login) | `features/admin/schemas.py`, doc `08` |
 | Clip de contraseña bcrypt | 72 bytes (determinista, documentado) | `core/security.py` |
-| Límite por documento en Cosmos | 2 MB/doc — **resuelto** con un doc por cambio | `features/changesets/repository.py` |
-| Pool de conexiones Motor | `maxPoolSize = 50`, `socketTimeoutMS = 60000` | `core/db/client.py` |
+| Un doc por cambio en `changeset_changes` | regla nacida del tope de 2 MB/doc de Cosmos, hoy invariante de escala | `features/changesets/repository.py` |
 | Estado del rate limit | **En memoria por proceso** (no compartido entre réplicas) | `core/ratelimit.py` |
 
 ---
@@ -67,7 +66,7 @@ El fix aplicó tres capas:
 
 Resultado: la pantalla inicial (`limit=50`) pasó de **24 s a ~1 s (24x)**.
 
-> Lección transversal: **nunca materializar la colección completa por request**. Contar y agregar en Mongo, proyectar lo mínimo, y acotar por slice.
+> Lección transversal: **nunca materializar la colección completa por request**. Contar y agregar server-side, proyectar lo mínimo, y acotar por slice.
 
 ### 2.4 Escala real en producción (foto 2026-07-26)
 
@@ -99,7 +98,7 @@ El `op` es un **enum cerrado** (`eq, ne, in, nin, contains, startsWith, gt, gte,
 
 ### 3.1 Paginación keyset/seek — nunca skip profundo
 
-A escala, `skip/limit` profundo es letal en Cosmos RU: `skip 100000` cuesta aproximadamente 1000 veces el RU (Cosmos igual barre y descarta los documentos saltados). El executor pagina por **keyset (seek)** sobre el primer campo de orden más el `_id` como desempate.
+A escala, el `skip/limit` profundo es una regla a evitar que nació en Cosmos RU (`skip 100000` costaba aproximadamente 1000 veces el RU, porque el motor igual barría y descartaba los documentos saltados) y sigue vigente como invariante sobre Lakebase (un `OFFSET` profundo también barre y descarta). El executor pagina por **keyset (seek)** sobre el primer campo de orden más el `_id` como desempate.
 
 Del `executor.py`, la condición de continuación se inyecta directo al `$match`:
 
@@ -134,7 +133,7 @@ Solo se soporta `= / in` para el filtro cross-entity por `schema`; otros operado
 
 ### 3.3 El planner rechaza `.sort()` sin índice
 
-Cosmos con API de Mongo (tier RU) **tira 500** ante un `.sort()` sobre un campo sin índice. El compilador (puro y testeado) clasifica cada orden y **rechaza** el que caería en full-scan:
+La regla nació en Cosmos RU —que **tiraba 500** ante un `.sort()` sobre un campo sin índice— y sigue vigente como invariante de escala sobre Lakebase, donde un orden sin índice caería en full-scan. El compilador (puro y testeado) clasifica cada orden y **rechaza** el que no se apoya en un índice:
 
 ```python
 # Planner de orden: un row-sort exige índice (sortable) o se rechaza.
@@ -163,7 +162,7 @@ El value siempre se castea al tipo del campo (`_coerce`); los valores de UDP se 
 
 ### 3.5 Circuit-breaker `maxTimeMS` y tope de página
 
-Toda operación lleva `maxTimeMS = 15000` (15 s) como corta-fuego: si una consulta se pasa, Cosmos la aborta en vez de colgar el proceso. El `QuerySpec.limit` está capeado por Pydantic entre 1 y **5000**, así que ningún cliente puede pedir una página arbitrariamente grande.
+Toda operación lleva `maxTimeMS = 15000` (15 s) como corta-fuego: si una consulta se pasa, se aborta en vez de colgar el proceso. El `QuerySpec.limit` está capeado por Pydantic entre 1 y **5000**, así que ningún cliente puede pedir una página arbitrariamente grande.
 
 ```python
 MAX_TIME_MS = 15000   # executor.py
@@ -214,9 +213,9 @@ flowchart TD
 
 ## 4. Límites del backend de datos
 
-El backend de datos vigente es **Databricks Lakebase Postgres** (`DB_BACKEND=lakebase`, migración 2026-07-19, doc 28): cada colección vive como una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `dmh` y el adaptador motor-like de `app/core/db/lakebase/` traduce la superficie Motor a SQL/JSONB. **Azure Cosmos DB con API de Mongo queda como fallback legacy de rollback** (`DB_BACKEND=cosmos`); sus restricciones se conservan documentadas en 4.2 porque el seam de rollback las reactivaría tal cual.
+El backend de datos es **Databricks Lakebase Postgres** (única BD desde la migración del 2026-07-19, doc 28): cada colección vive como una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `dmh` y el adaptador de `app/core/db/lakebase/` traduce la superficie de colección tipo pymongo a SQL/JSONB. Azure Cosmos DB con API de Mongo fue la base productiva hasta esa migración; ya no es un backend conmutable (se retiraron el driver `motor` y el setting `DB_BACKEND`), pero varias reglas de escala nacieron bajo su tier RU y hoy siguen vigentes como invariantes sobre Lakebase — se documentan en 4.2 por ese motivo.
 
-### 4.1 Lakebase Postgres (vigente)
+### 4.1 Lakebase Postgres (única BD)
 
 El adaptador implementa un **alcance cerrado y fail-fast**: todo operador, stage o expresión fuera del alcance levanta `NotImplementedError` en vez de degradar en silencio (traducción incorrecta o scan accidental). El alcance se amplía solo cuando un caller real lo necesita.
 
@@ -230,22 +229,22 @@ El adaptador implementa un **alcance cerrado y fail-fast**: todo operador, stage
 - **TLS**: `PGDIRECTTLS` elige entre TLS clásico y **TLS directo** (ALPN `postgresql`, requerido por front-ends "service direct"); vacío = auto.
 - **Alcanzabilidad**: con **Service Direct private link** (workspace corporativo) el endpoint puede ser inalcanzable desde fuera del workspace — el front-end acepta el TCP pero resetea el handshake de Postgres (verificado 2026-07-28). Las cargas masivas del kit Erwin corren entonces DESDE el workspace con el notebook `scripts/databricks/carga_erwin_notebook.py` (cluster con access mode Dedicated), que invoca los mismos scripts.
 
-### 4.2 Cosmos DB con API de Mongo (legacy / rollback)
+### 4.2 Reglas de escala nacidas en Cosmos RU (hoy invariantes sobre Lakebase)
 
-Con `DB_BACKEND=cosmos` el backend vuelve a correr sobre **Azure Cosmos DB con API de Mongo**. El código sigue escrito defensivamente para las restricciones del **tier basado en RU (Request Units)**, que dictaron la mayoría de las decisiones de escala originales.
+Azure Cosmos DB con API de Mongo fue la base productiva hasta la migración del 2026-07-19 (doc 28). Su **tier basado en RU (Request Units)** dictó la mayoría de las decisiones de escala originales; el código sigue escrito defensivamente porque esas reglas siguen siendo invariantes de escala válidos sobre Lakebase. Esta sección conserva el porqué.
 
 #### 4.2.1 RU y throttling (429 / code 16500)
 
-Cuando el consumo de RU supera el throughput provisionado, Cosmos responde **429** (en Mongo API suele aparecer como `code 16500`). El generador de estrés lo maneja con backoff exponencial:
+Cuando el consumo de RU superaba el throughput provisionado, Cosmos respondía **429** (en Mongo API solía aparecer como `code 16500`). El cargador quedó escrito para tolerarlo con backoff exponencial —inofensivo sobre Lakebase, que no cobra RU—:
 
-- Las latencias observadas varían con el throughput provisionado (RU compartido). Con más RU, todo baja proporcionalmente.
+- Las latencias observadas variaban con el throughput provisionado (RU compartido): con más RU, todo bajaba proporcionalmente.
 - La carga de estrés (146 s, ~2.600 columnas/s) corrió **sin ningún throttle**, insertando por lotes en streaming.
 
-Consideración operativa: en producción, dimensionar el RU (o autoscale) según la carga esperada del reporting y del canvas. Los picos de `POST /query` sobre `canonical_columns` (400k docs) son los más caros.
+Consideración operativa transversal: los picos de `POST /query` sobre `canonical_columns` (400k docs) son las operaciones más caras del reporting. Bajo Cosmos obligaban a dimensionar el RU (o autoscale); ese ajuste ya no aplica sobre Lakebase.
 
 #### 4.2.2 `.sort()` requiere índice
 
-En el tier RU, ordenar por un campo **sin índice** devuelve un error del servidor. Esto obliga a:
+En el tier RU, ordenar por un campo **sin índice** devolvía un error del servidor. La defensa quedó como invariante de escala (un sort sin índice cae en full-scan sobre cualquier backend) y se refleja en tres puntos:
 
 - El planner del reporting rechaza el `orderBy` no indexado (sección 3.3).
 - La búsqueda de catálogo ordena por `physicalName`, que tiene índice dedicado.
@@ -271,30 +270,16 @@ Cubre todas las keys UDP presentes **y futuras**: `eq`, `$in` e `$exists` hacen 
 
 #### 4.2.4 Otros comportamientos tolerados
 
-Cosmos con API de Mongo puede levantar `NamespaceExists` (code 48) si la colección se creó implícitamente antes de la llamada al índice, y duplicate-key (11000) en índices únicos ya existentes. `ensure_indexes` traga puntualmente esos dos códigos (el índice igual queda bien creado):
+Al crear índices, la creación implícita previa de una colección podía levantar `NamespaceExists` (code 48), y un índice único ya existente, duplicate-key (11000) — códigos heredados del comportamiento de Cosmos con API de Mongo. `ensure_indexes` traga puntualmente esos dos (el índice igual queda bien creado):
 
 ```python
 if code not in (48, 11000):
     raise
 ```
 
-#### 4.2.5 Timeouts de conexión (cliente Motor)
+### 4.3 Índices declarados
 
-El cliente Motor se configura para que un socket colgado no bloquee el request por el default del SO (minutos) ni agote el pool:
-
-```python
-AsyncIOMotorClient(
-    settings.COSMOS_CONNECTION_STRING,
-    serverSelectionTimeoutMS=15_000,
-    connectTimeoutMS=10_000,
-    socketTimeoutMS=60_000,
-    maxPoolSize=50,
-)
-```
-
-### 4.3 Índices declarados (comunes a ambos backends)
-
-Los índices se declaran una sola vez a través de la superficie Motor (`core/db/indexes.py`, `ensure_indexes()` idempotente al arrancar). En Cosmos son índices Mongo reales (incluido el wildcard `udpValues.$**`); en Lakebase las igualdades jsonpath se apoyan en el GIN `jsonb_path_ops` de cada tabla y el único constraint UNIQUE es `standards_versions.seq`.
+Los índices se declaran una sola vez a través de la superficie de colección (`core/db/indexes.py`, `ensure_indexes()` idempotente al arrancar). Sobre Lakebase las igualdades jsonpath se apoyan en el GIN `jsonb_path_ops` de cada tabla y el único constraint UNIQUE es `standards_versions.seq`; la tabla siguiente es la declaración lógica (bajo Cosmos cada fila era un índice Mongo real, incluido el wildcard `udpValues.$**`).
 
 | Colección | Índices |
 |---|---|
@@ -372,7 +357,7 @@ sequenceDiagram
     participant C as Cliente
     participant RL as Rate limiter 5 por minuto IP
     participant S as service.login
-    participant DB as Cosmos users
+    participant DB as Lakebase users
     C->>RL: POST /api/auth/login
     alt supera 5 por minuto
         RL-->>C: 429 Retry-After
@@ -488,7 +473,7 @@ El backend es una app FastAPI (`entry: app.main:app`, servida con uvicorn) y pue
 - **Databricks Apps** (destino primario según el README; runtime Python 3.11). Todo en el bundle `databricks.yml` (`variables:` por entorno + `config:` de runtime; el viejo `app.yaml` ya no existe — homologación 2026-07-19).
 - **Azure App Service** como alternativa de hosting equivalente (mismo entrypoint uvicorn/ASGI).
 
-En ambos casos la app es un **monolito modular** (`app/core/` para infra compartida + `app/features/<x>/` como vertical slices), stateless salvo por el rate limit en memoria (ver 7.1). La conexión a la base (Lakebase Postgres, o Cosmos como fallback según `DB_BACKEND` — doc 28) se abre/cierra en el lifespan de FastAPI y asegura los índices al arrancar.
+En ambos casos la app es un **monolito modular** (`app/core/` para infra compartida + `app/features/<x>/` como vertical slices), stateless salvo por el rate limit en memoria (ver 7.1). La conexión a la base (Databricks Lakebase Postgres — doc 28) se abre/cierra en el lifespan de FastAPI y asegura los índices al arrancar.
 
 Desde 2026-07-27 el despliegue productivo apunta al workspace **corporativo** de Databricks y está parametrizado por **GitHub Variables** (el workflow exporta cada variable como `BUNDLE_VAR_*` solo si trae valor): el mismo bundle sirve para cualquier workspace sin editar archivos. Tres decisiones definen el modelo: (1) `targets.prod.workspace.host` se **eliminó** del `databricks.yml` — el workspace sale de `DATABRICKS_HOST`, porque un `host:` hardcodeado gana sobre la variable y podía desplegar callado al workspace equivocado; (2) las apps están **pre-creadas a mano** (reserva de cupo) y el workflow las adopta con `databricks bundle deployment bind` antes del deploy, evitando el 409 `ALREADY_EXISTS`; (3) **un solo origen para el navegador** — el server del front sirve la SPA y proxya `/api/*` al backend con token OAuth M2M de su service principal, porque el muro SSO por-app de Databricks Apps impide el login cross-origin front→back (fix definitivo 2026-07-31). El paso a paso (variables, bind, grant del SP del front, checklist) está en [despliegue.md](despliegue.md).
 
@@ -498,13 +483,10 @@ Desde 2026-07-27 el despliegue productivo apunta al workspace **corporativo** de
 
 | Variable | Propósito | Default / nota |
 |---|---|---|
-| `DB_BACKEND` | `lakebase` (BD actual) o `cosmos` (fallback/rollback) | `cosmos` |
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Workspace + PAT para acuñar tokens de BD (solo dev; en Apps el SP autentica solo) | vacías |
 | `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase. **Requerida con lakebase** | vacía |
 | `PGHOST` / `PGUSER` | Host físico (opcional: se auto-resuelve) / rol PG (en Apps cae al client ID del SP) | vacías |
 | `PGPORT` / `PGDATABASE` / `PGSSLMODE` / `LAKEBASE_PGSCHEMA` | Constantes de producto | `5432` / `databricks_postgres` / `require` / `dmh` |
-| `COSMOS_CONNECTION_STRING` | Cadena de conexión a Cosmos (API de Mongo). Requerida solo con `DB_BACKEND=cosmos` | vacía |
-| `COSMOS_DATABASE` | Nombre de la base del fallback | `db_modeler` |
 | `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **Obligatoria en producción** | default inseguro solo dev; falla-cerrado con `REQUIRE_AUTH` |
 | `REQUIRE_AUTH` | Postura de producción: request sin token válido → 401; oculta `/docs`; activa rate limit | `false` |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token de sesión en minutos | `720` (12 h) |
@@ -519,13 +501,12 @@ Checklist mínimo de producción: rol PG del SP con GRANTs (Lakebase, doc 28 §1
 
 ### 8.3 Consideraciones de base de datos
 
-**BD actual: Databricks Lakebase Postgres** (`DB_BACKEND=lakebase`, doc 28) — las 19 colecciones viven como tablas `(id, doc jsonb)` en el schema `dmh`, con el adaptador motor-like de `app/core/db/lakebase/`; password = token OAuth acuñado por el SP/PAT y compute con scale-to-zero (el pool tolera el wake). Lo que sigue aplica al **fallback Cosmos** (`DB_BACKEND=cosmos`):
+**BD: Databricks Lakebase Postgres** (única, doc 28) — las 19 colecciones viven como tablas `(id, doc jsonb)` en el schema `dmh`, con el adaptador de `app/core/db/lakebase/`; password = token OAuth acuñado por el SP/PAT y compute con scale-to-zero (el pool tolera el wake). Consideraciones:
 
-- Un único cluster Cosmos y una única database (`db_modeler`), compartidos con el servicio de agentes (`app-agents-modeler`), sobre **colecciones disjuntas**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports` (**19 colecciones** — referencia campo por campo en `esquema-datos.md`); el agente administra `column_catalog`. El seed de estrés **nunca toca** `column_catalog`.
-- **Dimensionar el RU** (o habilitar autoscale) según la carga del reporting y del canvas. Los `POST /query` sobre `canonical_columns` (400k documentos) son las operaciones más caras; sin RU suficiente aparecen 429 (`code 16500`).
+- La BD se comparte con el servicio de agentes (`app-agents-modeler`) sobre **colecciones disjuntas**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports` (**19 colecciones** — referencia campo por campo en `esquema-datos.md`); el agente administra `column_catalog`. El seed de estrés **nunca toca** `column_catalog`.
+- Los `POST /query` sobre `canonical_columns` (400k documentos) son las operaciones más caras del reporting; bajo Cosmos exigían dimensionar el RU o autoscale (sin RU suficiente aparecían 429 / `code 16500`), un ajuste que ya no aplica sobre Lakebase.
 - Los **índices se aseguran al arrancar** (`ensure_indexes`, idempotente). El índice wildcard `udpValues.$**` es crítico para filtrar por UDP creados en runtime y debe existir después del bulk load inicial (por ejemplo el import one-shot de Erwin).
 - La app tolera `NamespaceExists` (48) y duplicate-key (11000) al crear índices; cualquier otro error de índice sí propaga.
-- Los timeouts del cliente (`serverSelectionTimeoutMS=15s`, `connectTimeoutMS=10s`, `socketTimeoutMS=60s`, `maxPoolSize=50`) evitan que un socket colgado agote el pool.
 
 ### 8.4 Topología de referencia
 
@@ -533,15 +514,14 @@ Checklist mínimo de producción: rol PG del SP con GRANTs (Lakebase, doc 28 §1
 flowchart TD
     FE["Frontend Vite SPA"] -->|Bearer token /api| BE["backend-data-model-hub FastAPI uvicorn"]
     BE -->|asyncpg jsonb| LB["Databricks Lakebase Postgres schema dmh"]
-    BE -.->|fallback DB_BACKEND=cosmos| COS["Azure Cosmos DB API de Mongo db_modeler"]
-    AG["app-agents-modeler"] -->|column_catalog| COS
+    AG["app-agents-modeler"] -->|column_catalog| LB
     subgraph Hosting
         BE
     end
     subgraph Notas
         N1["REQUIRE_AUTH true SECRET_KEY fuerte"]
         N2["rate limit en memoria por proceso migrar a Redis si multi replica"]
-        N3["RU dimensionado indices wildcard udpValues asegurados al boot"]
+        N3["indices wildcard udpValues asegurados al boot token OAuth Lakebase rotativo"]
     end
 ```
 
@@ -560,7 +540,6 @@ flowchart TD
 | Changesets 2 MB/doc | Un doc por cambio | Resuelto | — |
 | Adaptador Lakebase | Alcance cerrado de operadores/stages (fail-fast `NotImplementedError`); `$project` de exclusión no soportado | Por diseño | Ampliar bajo demanda, como `$add`/`$strLenCP` (2026-07-25) |
 | Canvas denso (392 nodos) | ~99k filas por diagrama; el cuello era el DOM del navegador, no el backend | Mitigado en el front (LOD 2026-07-25) | Dieta del payload del diagrama, solo si la apertura sigue lenta |
-| Cosmos RU (legacy) | 429 bajo carga alta, solo con `DB_BACKEND=cosmos` | Rollback dormido | Dimensionar RU / autoscale si se reactiva |
 | Contraseñas | min 10 / max 128 | Aceptable | HIBP/zxcvbn, argon2id |
 
 La postura general es sólida: el motor de reporting es defensivo por diseño (allowlist de campos, enum cerrado de operadores, `re.escape`, planner que rechaza scans y sorts sin índice, cursor validado a escalares), la escala está probada a 10k tablas / 400k columnas sintéticas y sostiene en producción el modelo DDV real (2.108 tablas / 96.184 columnas sobre Lakebase), y el login es criptográficamente correcto con rate limit + lockout. Los pendientes de mayor impacto son la **revocación de JWT** y el **rate limit con Redis** para operación multi-réplica.
