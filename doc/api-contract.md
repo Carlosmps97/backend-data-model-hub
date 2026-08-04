@@ -6,7 +6,7 @@ Actualizado: 2026-07-31. Referencia completa de los 128 endpoints de la API REST
 
 # Contrato de API — Parte 1
 
-Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva y ÚNICA es **Databricks Lakebase Postgres**, consumida vía el adaptador de `app/core/db/lakebase/`, que expone una superficie de consulta async emulando el vocabulario de tipos/operaciones de pymongo (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre Postgres — no conecta a Mongo. (Azure Cosmos DB fue la base hasta la migración del 2026-07-19, doc 28; el camino Cosmos ya no existe.) Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia.
+Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva y ÚNICA es **Databricks Lakebase Postgres**, consumida vía el adaptador de `app/core/db/lakebase/`, que expone una superficie de consulta async emulando el vocabulario de tipos/operaciones de pymongo (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre Postgres — no conecta a Mongo. Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia.
 
 Este documento describe, para cada endpoint del alcance de la Parte 1: propósito, método y ruta, parámetros/body con tipos, un ejemplo de invocación con `curl` y la respuesta esperada. Todo lo aquí documentado sale del código real de los routers, schemas, services y repositories de cada feature.
 
@@ -187,12 +187,12 @@ Falla-cerrado importante: con `REQUIRE_AUTH=true` y `SECRET_KEY` en el default d
 
 ### 2.3 Consideraciones de base de datos
 
-- Base ÚNICA = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone una superficie de consulta async que emula la de pymongo (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff. (Cosmos fue la base hasta la migración del 2026-07-19, doc 28; el driver y el conmutador de backend se eliminaron por completo — `pymongo` permanece solo como vocabulario que el adaptador emula, sin conexión a Mongo.)
+- Base ÚNICA = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone una superficie de consulta async que emula la de pymongo (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff. (No hay driver ni conmutador de backend; `pymongo` permanece solo como vocabulario que el adaptador emula, sin conexión a Mongo.)
 - Colecciones tocadas por esta parte del contrato: `users`, `roles`, `audit_log`, `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `ddl_rules`, `ddl_ruleset_config`.
 - El `_id` es la clave natural en varias colecciones (`users._id == username`, `roles._id == role key`, `naming_config._id == scope`). Al serializar, el backend renombra `_id -> id` y descarta campos internos (`flgactive`, `deletedAt`, `updatedAt`, `createdAt`).
 - Borrado lógico (soft-delete): las eliminaciones marcan `flgactive=false` en vez de borrar el documento; los listados filtran por `flgactive != false`.
 - Los modelos se validan con `extra="ignore"`, por lo que campos no declarados en el modelo del documento se descartan al leer/escribir (invariante de persistencia: un campo nuevo necesita declararse en el modelo Pydantic o desaparece en el round-trip).
-- `.sort()` requiere índice sobre el campo ordenado (regla heredada de Cosmos y mantenida como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` crea ~35 índices idempotentes al conectar.
+- `.sort()` requiere índice sobre el campo ordenado (invariante de escala mantenido como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` crea ~35 índices idempotentes al conectar.
 - `standards_versions` es append-only con `seq` monotónico e índice único en `seq` (reintento ante colisión concurrente) — el único índice unique del sistema.
 
 ```mermaid
@@ -2443,7 +2443,7 @@ stateDiagram-v2
 Reglas clave:
 - **Owner-only** para editar/enviar/retirar/reabrir.
 - **Unanimidad**: se aplica a producción sólo cuando **todos** los revisores asignados aprobaron. Un rechazo → `rejected`.
-- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; evita el límite de 2MB por documento heredado de Cosmos). Los cambios se agregan **sólo** vía `PUT .../changes` (los endpoints de esquema de 8.17 también registran cambios, server-side).
+- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` (los endpoints de esquema de 8.17 también registran cambios, server-side).
 - Colecciones versionadas (`VERSIONED`, whitelist dura — la ESTRUCTURA también es versionada desde los docs 16 y 18): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`.
 - `appliedAt` se estampa recién con el apply completo: es el marcador de "esta versión está en producción". Al aplicar, cada cambio estampa además su imagen `before` (la usa el rollback y el diff de detalles).
 - **Rollback** (doc 27): `POST /{cs_id}/rollback` (permiso `rollback`) crea un DRAFT inverso que restaura el modelo al estado de esa versión publicada; el draft pasa por el flujo normal submit → review → approve.
@@ -2917,7 +2917,7 @@ class OrderBy:
 
 Notas de diseño relevantes para el consumidor:
 - **`op` es un enum cerrado** → cero inyección; el `value` se castea al tipo del campo. `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
-- **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — regla heredada de Cosmos (que tira 500 en `.sort()` sin índice) y mantenida como contrato. El orden debe ir por un campo indexado (p. ej. `physicalName`).
+- **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — invariante de escala mantenido como contrato (a escala, un orden sin índice sería full-scan). El orden debe ir por un campo indexado (p. ej. `physicalName`).
 - **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`).
 - **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`.
 - **UDP dinámicos**: cada UDP def agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
@@ -3274,9 +3274,9 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 ### 13.4 Consideraciones de base de datos
 
 - **Persistencia y soft-delete**: las colecciones usan `flgactive != False` como filtro de "activo"; los delete son lógicos (`flgactive: false` + `deletedAt`). Casi todas las lecturas ya aplican `ACTIVE = {"flgactive": {"$ne": False}}`.
-- **Un doc por cambio**: los cambios de un changeset viven en la colección `changeset_changes` (un doc por cambio, `_id` determinista `{csId}::{collection}::{entityId}`), no embebidos — regla nacida del límite de 2MB por documento de Cosmos y conservada en Lakebase (docs chicos = updates baratos y diffs por slice).
-- **Índices y escala del reporting**: el planner **rechaza** ordenar por campos sin índice (contrato heredado de Cosmos, donde `.sort()` sin índice tira 500). La paginación es por keyset (no skip profundo), con `maxTimeMS` como circuit-breaker (15s en el motor de filas, 30s en insights). Los UDP se cubren con un índice wildcard `udpValues.$**` (equality/`$in`/`$exists` = seek).
-- **Adaptador Lakebase**: cada colección es una tabla `(id, doc jsonb)` con índice GIN; el adaptador traduce filtros/updates/aggregations de Mongo a SQL (alcance cerrado, fail-fast con `NotImplementedError` fuera del subset). Detalle en [arquitectura.md](arquitectura.md) y [esquema-datos.md](esquema-datos.md).
+- **Un doc por cambio**: los cambios de un changeset viven en la colección `changeset_changes` (un doc por cambio, `_id` determinista `{csId}::{collection}::{entityId}`), no embebidos — regla del versionado por changesets: docs chicos = updates baratos y diffs por slice.
+- **Índices y escala del reporting**: el planner **rechaza** ordenar por campos sin índice (invariante de escala: a ese volumen sería full-scan). La paginación es por keyset (no skip profundo), con `maxTimeMS` como circuit-breaker (15s en el motor de filas, 30s en insights). Los UDP se cubren con un índice wildcard `udpValues.$**` (equality/`$in`/`$exists` = seek).
+- **Adaptador Lakebase**: cada colección es una tabla `(id, doc jsonb)` con índice GIN; el adaptador traduce filtros/updates/aggregations de pymongo a SQL (alcance cerrado, fail-fast con `NotImplementedError` fuera del subset). Detalle en [arquitectura.md](arquitectura.md) y [esquema-datos.md](esquema-datos.md).
 - **Colecciones tocadas por este contrato**: `projects`, `folders`, `subject_areas`, `schemas`, `relationships`, `views`, `changesets`, `changeset_changes`, `saved_reports`, y las colecciones publicadas `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`.
 
 ---

@@ -1,6 +1,6 @@
 """`ensure_indexes` declara el índice F3a `views.sourceTableIds` (lo usan la
 query del diagrama y `list_all`). DB fake que registra las llamadas — no toca
-Mongo ni Cosmos."""
+el store real."""
 from __future__ import annotations
 
 import asyncio

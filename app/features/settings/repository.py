@@ -22,7 +22,7 @@ def _now() -> str:
 
 
 def _to_doc(scope: str, doc: dict | None) -> dict:
-    """Normaliza un doc Cosmos (o None) a la forma pública, sembrando defaults."""
+    """Normaliza un doc persistido (o None) a la forma pública, sembrando defaults."""
     base = {"scope": scope, **DEFAULTS.get(scope, {})}
     if doc:
         for k in ("separator", "case", "maxLength"):

@@ -1,6 +1,6 @@
 """Adaptador Lakebase Postgres (doc 28).
 
-Emula la superficie Motor/PyMongo que usa este backend sobre tablas
+Emula la superficie pymongo que usa este backend sobre tablas
 `(id text PRIMARY KEY, doc jsonb)` en Databricks Lakebase Postgres, con
 credenciales OAuth rotativas. El seam sigue siendo `app/core/db/client.py`;
 los repositorios no cambian.

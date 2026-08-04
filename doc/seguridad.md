@@ -1,6 +1,6 @@
 # Políticas de seguridad del backend — Data Model Hub
 
-Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador estilo Mongo en `app/core/db/lakebase/`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
+Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador estilo pymongo en `app/core/db/lakebase/`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
 
 La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders técnicos que necesitan entender la postura de riesgo. Todo lo que sigue está verificado contra el código real; cuando el texto afirma "falla-cerrado" o "tiempo constante" es porque el código lo hace, no porque suene bien.
 
@@ -680,13 +680,13 @@ La postura de producción se activa con `REQUIRE_AUTH=true` en el env del bundle
 
 ### 14.2 Base de datos
 
-La persistencia productiva es **Databricks Lakebase Postgres** (doc 28), accedida por el adaptador estilo Mongo de `app/core/db/lakebase/` (cada "colección" es una tabla `(id, doc jsonb)` en el schema `dmh`). Consideraciones de seguridad:
+La persistencia productiva y única es **Databricks Lakebase Postgres**, accedida por el adaptador estilo `pymongo` de `app/core/db/lakebase/` (cada "colección" es una tabla `(id, doc jsonb)` en el schema `dmh`). Consideraciones de seguridad:
 
 - **Sin secretos de base de datos estáticos.** El bundle no lleva PAT ni cadena de conexión: el pool se autentica con un **token OAuth de ~1 h que la app acuña sola** con el service principal que Apps inyecta (`DATABRICKS_CLIENT_ID/SECRET`, OAuth M2M) y renueva con caché thread-safe de 50 minutos. El rol de Postgres es el client-id del SP (alta one-time por workspace, doc 35).
 - **Los usuarios finales jamás tocan la base** (capa 3 de la sección 1b): toda operación pasa por el RBAC de la app.
 - **Índices**: `ensure_indexes()` corre en el `lifespan` al arrancar (idempotente, ~35 índices sobre los campos de filtro y orden del reporting y la governance).
 - **Borrado lógico.** Los documentos usan `flgactive`; los filtros incluyen `{"flgactive": {"$ne": False}}` para excluir los borrados. La conexión se abre y cierra en el `lifespan` de FastAPI (con reintento en background si la BD no estaba disponible al arrancar).
-- **Sin rollback a Cosmos.** El camino a Azure Cosmos DB (driver `motor`, el switch `DB_BACKEND` y las variables `COSMOS_*`) se retiró por completo del código y del deploy; Lakebase es la única BD.
+- **Única BD, sin conmutador de backend.** El acceso a datos vive solo en el adaptador `app/core/db/lakebase/` (el guard `test_store_boundary.py` prohíbe importar `motor`/`pymongo` fuera de él); no existe un switch de backend ni un driver alternativo. Lakebase es la única base de datos.
 
 ### 14.3 Variables de entorno (estado corporativo 2026-07-31)
 

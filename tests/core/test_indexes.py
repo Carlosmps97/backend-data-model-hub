@@ -1,4 +1,4 @@
-"""Índices F1 (spec 10 §8/§9) declarados en `ensure_indexes` — db fake, sin Cosmos."""
+"""Índices F1 (spec 10 §8/§9) declarados en `ensure_indexes` — db fake, sin BD real."""
 from __future__ import annotations
 
 import asyncio
@@ -38,10 +38,10 @@ def test_f1_indexes_declarados():
 
 
 # ── F5 — índices de `subject_areas` para reporting a nivel Modelo de Datos:
-# wildcard de udpValues (seek en filtros UDP) + name (sort/keyset; Cosmos RU
-# rechaza .sort() sin índice). Fake db que captura create_index (con kwargs) —
-# sin Mongo. Fakes propios para no chocar con los _Fake* de arriba (que
-# capturan 2-tuplas sin kwargs).
+# wildcard de udpValues (seek en filtros UDP) + name (sort/keyset; a escala, un
+# orden sin índice sería full-scan). Fake db que captura create_index (con
+# kwargs) — sin BD real. Fakes propios para no chocar con los _Fake* de arriba
+# (que capturan 2-tuplas sin kwargs).
 class _FakeCollF5:
     def __init__(self, name: str, calls: list):
         self._name, self._calls = name, calls

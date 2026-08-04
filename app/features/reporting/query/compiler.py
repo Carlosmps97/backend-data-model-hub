@@ -1,8 +1,8 @@
 """Compiler: `QuerySpec` → pipeline de Mongo. PURO (sin DB) y testeable.
 
 Valida cada campo/op contra el Field Catalog, castea el value al tipo, y aplica
-el PLANNER de escala: un orden por un campo sin índice se RECHAZA (Cosmos tira
-500 en `.sort()` sin índice); `contains/startsWith` usan `re.escape` (nunca
+el PLANNER de escala: un orden por un campo sin índice se RECHAZA (a escala
+sería full-scan); `contains/startsWith` usan `re.escape` (nunca
 regex arbitrario). El cliente manda keys públicas, jamás paths de Mongo.
 """
 from __future__ import annotations

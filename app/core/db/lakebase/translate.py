@@ -55,7 +55,7 @@ def _json_default(value: Any) -> Any:
 
 
 def dumps_canonical(value: Any) -> str:
-    """JSON canónico compartido con la migración de datos (claves ordenadas)."""
+    """JSON canónico compartido con la carga inicial de datos (claves ordenadas)."""
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default
     )

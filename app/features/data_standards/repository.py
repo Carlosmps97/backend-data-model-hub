@@ -115,7 +115,7 @@ async def restore_dict(entries: list[dict], preserve_ids: set[str] | None = None
         {"$set": {"flgactive": False, "deletedAt": _now()}},
     )
     # bulk_write: un solo round-trip en vez de N update_one secuenciales (a 49
-    # términos eran ~seg de latencia por-op en Cosmos).
+    # términos eran ~seg de latencia por-op sobre la BD remota).
     ops = [UpdateOne(
         {"_id": e["id"]},
         {"$set": {**{k: v for k, v in e.items() if k != "id"}, "flgactive": True, "updatedAt": _now()},

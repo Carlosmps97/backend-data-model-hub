@@ -1,4 +1,4 @@
-"""El store (Lakebase, superficie estilo Mongo) sólo puede tocarse desde los `repository.py`.
+"""El store (Lakebase, superficie estilo pymongo) sólo puede tocarse desde los `repository.py`.
 
 Mantiene la persistencia swappable: services y schemas permanecen agnósticos al
 store, así cambiar el destino sólo reescribe los repositories. El guard incluye

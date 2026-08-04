@@ -1,6 +1,6 @@
 # Despliegue y Base de Datos — `backend-data-model-hub`
 
-> **Actualización 2026-07-31.** El despliegue quedó homologado al workspace **CORPORATIVO** de Databricks (docs 35 y 36 de `plan-implementacion/`), **parametrizado 100% por GitHub Variables**: el mismo repo despliega en cualquier workspace sin editar un solo archivo. Novedades de esta actualización: topología de dos apps con proxy del front (§2), deploy por GitHub Variables (§2.3), bind de apps pre-creadas por cupo (§2.4), grant automatizado del SP del front (§2.5), one-time del workspace destino (§2.6), identidad local y private link (§4.1–§4.2), secuencia de carga de data con `mark_base_version` (§4.3) y checklist de cierre (§10). Historial: homologación previa 2026-07-19 (doc 28: migración a Lakebase).
+> **Actualización 2026-07-31.** El despliegue quedó homologado al workspace **CORPORATIVO** de Databricks (docs 35 y 36 de `plan-implementacion/`), **parametrizado 100% por GitHub Variables**: el mismo repo despliega en cualquier workspace sin editar un solo archivo. Novedades de esta actualización: topología de dos apps con proxy del front (§2), deploy por GitHub Variables (§2.3), bind de apps pre-creadas por cupo (§2.4), grant automatizado del SP del front (§2.5), one-time del workspace destino (§2.6), identidad local y private link (§4.1–§4.2), secuencia de carga de data con `mark_base_version` (§4.3) y checklist de cierre (§10). Historial: homologación previa 2026-07-19 (doc 28: infraestructura Lakebase).
 
 Este documento describe **dónde corre** el backend de plataforma del Data Model Hub, **cómo se despliega** (Databricks Apps vía bundle + GitHub Actions parametrizado por GitHub Variables), **qué variables de entorno** necesita, **cómo se conecta a la base de datos** (Databricks Lakebase Postgres — doc 28) y **cómo levantarlo en local**.
 
@@ -421,13 +421,12 @@ sequenceDiagram
 
 ## 6. Consideraciones de la base de datos
 
-La base es **Databricks Lakebase Postgres** (doc 28): tablas `(id text PK,
-doc jsonb)` por colección en el schema `dmh`, adaptador estilo Mongo en
-`app/core/db/lakebase/` (los repositorios no
-cambiaron), password = token OAuth de ~1 h acuñado por conexión nueva del
+La base es **Databricks Lakebase Postgres**: tablas `(id text PK,
+doc jsonb)` por colección en el schema `dmh`, adaptador estilo pymongo en
+`app/core/db/lakebase/` (los repositorios trabajan contra esa superficie),
+password = token OAuth de ~1 h acuñado por conexión nueva del
 pool (asyncpg), compute con scale-to-zero (el pool tolera el wake con
-timeout + retry). Detalle completo: `plan-implementacion/28-MIGRACION-LAKEBASE.md`
-y `doc/esquema-datos.md`.
+timeout + retry). Detalle completo: `doc/esquema-datos.md`.
 
 ### 6.1 Pool de conexiones (asyncpg + token OAuth)
 
@@ -453,18 +452,18 @@ La conexión `asyncpg` se arma desde el env de `config.py` (§3):
 | `PGSSLMODE=require` | TLS obligatorio. |
 | `PGDIRECTTLS` | Sabor del handshake TLS: vacío = auto (clásico y, si el server resetea, directo); `true` fuerza el directo (endpoints detrás de un router SNI/ALPN, p. ej. "service direct"). |
 
-El modelo de datos sigue siendo documental: el adaptador `app/core/db/lakebase/` traduce la superficie estilo Mongo a SQL/JSONB (tablas `(id text PK, doc jsonb)` + índice GIN). Los índices se declaran en `indexes.py` (§6.5).
+El modelo de datos es documental: el adaptador `app/core/db/lakebase/` traduce la superficie estilo `pymongo` a SQL/JSONB (tablas `(id text PK, doc jsonb)` + índice GIN). Los índices se declaran en `indexes.py` (§6.5).
 
 ### 6.4 Carga del reporting
 
 - **Las lecturas ordenadas y las agregaciones del reporting son las más caras.** El reporting hace `$group`/proyección y recorridos por keyset sobre `canonical_columns` (hasta cientos de miles de documentos) — el adaptador los compila a SQL/JSONB.
 - **La prueba de estrés interna** (10k tablas / 400k columnas / 9k vistas) mostró que el cuello está en las agregaciones de reporting; los índices de 6.5 son los que lo bajan de decenas de segundos a ~1 s.
 
-> Nota histórica: varias de estas decisiones (sorts solo sobre campos indexados, documentos acotados, apply idempotente) nacieron del tier RU de Cosmos —que cobraba por operación y tiraba `429` bajo carga— y se conservan como **invariantes de escala** sobre Lakebase.
+> Estas decisiones (sorts solo sobre campos indexados, documentos acotados, apply idempotente) son **invariantes de escala**: nacen de la ingesta por upserts masivos de los modelos XML de Erwin, del versionado por changesets y del volumen (cientos de miles de columnas), no de un almacén en particular.
 
 ### 6.5 Índices que deben existir (y por qué)
 
-Los índices se crean automáticamente en el arranque con `ensure_indexes(db)` (`app/core/db/indexes.py`). La función es **idempotente**: si una colección/índice ya existía, se pueden levantar los códigos `48` (namespace ya existe) o `11000` (duplicate key en un único ya presente); el código traga solo esos dos y re-lanza cualquier otro (comportamiento nacido en Cosmos RU, inofensivo sobre Lakebase).
+Los índices se crean automáticamente en el arranque con `ensure_indexes(db)` (`app/core/db/indexes.py`). La función es **idempotente**: si una colección o índice ya existía, la creación no falla el arranque (los reintentos concurrentes se toleran).
 
 Tabla completa de índices por colección (tal como están en el código):
 
@@ -483,7 +482,7 @@ Tabla completa de índices por colección (tal como están en el código):
 | `canonical_columns` | `udpValues.$**` (wildcard) | Filtro por cualquier UDP de columna. |
 | `changesets` | `updatedAt` (desc) | Listado por recientes. |
 | `changesets` | `status` | Filtro por estado. |
-| `changeset_changes` | `csId + collection` (compuesto) | Overlay/diff/apply leen por changeset (y opcionalmente por colección); un doc por cambio evita el tope de 2 MB por documento. |
+| `changeset_changes` | `csId + collection` (compuesto) | Overlay/diff/apply leen por changeset (y opcionalmente por colección); un doc por cambio (versionado por changesets) mantiene los updates chicos y los diffs por slice. |
 | `projects` | `flgactive` | Filtrado de activos. |
 | `subject_areas` | `projectId` | Áreas por proyecto. |
 | `relationships` | `flgactive` | Filtrado de activos. |
@@ -500,7 +499,7 @@ Tabla completa de índices por colección (tal como están en el código):
 
 ### 6.6 Por qué `.sort()` necesita índice
 
-Es un **invariante de escala**: cada campo que el backend usa para ordenar tiene un índice explícito. La regla nació con el tier RU de Cosmos —que **rechazaba con un 500** un `.sort()` sobre un campo sin índice, en vez de ejecutarlo lento— y se mantiene sobre Lakebase porque un orden sin índice sobre cientos de miles de filas es igual de inviable a escala. Los campos con índice explícito por este motivo:
+Es un **invariante de escala**: cada campo que el backend usa para ordenar tiene un índice explícito. A escala (cientos de miles de columnas de la ingesta XML de Erwin) un orden sin índice sería un full-scan inviable; por eso todo `.sort()` se apoya en un índice. Los campos con índice explícito por este motivo:
 
 - `canonical_tables.physicalName` y `canonical_columns.physicalName` → orden/keyset del catálogo y del reporting.
 - `changesets.updatedAt` → listado por recientes.

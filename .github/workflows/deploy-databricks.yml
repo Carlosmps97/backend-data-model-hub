@@ -41,6 +41,7 @@ jobs:
       # OJO: endpoint/schema/CORS del Lakebase ya NO son variables del bundle
       # (se movieron a app.yaml como env de runtime). Solo quedan las que
       # alimentan el binding del secreto y los permisos, que el bundle SÍ aplica.
+      # Los env de runtime del app.yaml se parametrizan en el paso siguiente.
       - name: Parámetros del bundle desde GitHub Variables
         env:
           SECRET_SCOPE: ${{ vars.SECRET_SCOPE }}
@@ -56,6 +57,43 @@ jobs:
           set_var secret_scope        "$SECRET_SCOPE"
           set_var session_secret_key  "$SESSION_SECRET_KEY"
           set_var app_admin_user      "$APP_ADMIN_USER"
+
+      # Env de runtime del app.yaml desde GitHub Variables (mismo criterio que
+      # el paso de arriba, pero para el app.yaml en vez del bundle). Cada env
+      # `value:` se sobrescribe con una GitHub Variable HOMÓNIMA; si NO está
+      # definida (vacía), se conserva el valor commiteado del app.yaml (default)
+      # → el deploy de prod actual queda IDÉNTICO. En otro workspace basta
+      # definir la Variable, sin editar el repo.
+      #   · LOG_FORMAT · LAKEBASE_ENDPOINT · LAKEBASE_PGSCHEMA
+      #   · CORS_ORIGIN_REGEX · REQUIRE_AUTH
+      # app.yaml SIGUE siendo la fuente (no se borra, NO vuelve a `config:`):
+      # solo se le inyectan los valores por entorno justo antes del deploy, que
+      # `bundle deploy` sube con el resto del código (source_code_path: .).
+      # `yq` (mikefarah) viene preinstalado en ubuntu-latest; `strenv` mete el
+      # valor como string literal (respeta backslashes del regex CORS) y
+      # `style="double"` preserva el tipo string (p.ej. REQUIRE_AUTH "true").
+      - name: Env del app.yaml desde GitHub Variables (override opcional)
+        env:
+          LOG_FORMAT: ${{ vars.LOG_FORMAT }}
+          LAKEBASE_ENDPOINT: ${{ vars.LAKEBASE_ENDPOINT }}
+          LAKEBASE_PGSCHEMA: ${{ vars.LAKEBASE_PGSCHEMA }}
+          CORS_ORIGIN_REGEX: ${{ vars.CORS_ORIGIN_REGEX }}
+          REQUIRE_AUTH: ${{ vars.REQUIRE_AUTH }}
+        run: |
+          set_env() {   # $1 = name del env en app.yaml · $2 = valor de la GitHub Variable
+            if [ -z "$2" ]; then echo "· $1 → default de app.yaml (committed)"; return; fi
+            NAME="$1" VAL="$2" yq -i \
+              '(.env[] | select(.name == strenv(NAME)) | .value) = strenv(VAL)
+               | (.env[] | select(.name == strenv(NAME)) | .value) style="double"' app.yaml
+            echo "· $1 = $2   (GitHub Variables)"
+          }
+          set_env LOG_FORMAT         "$LOG_FORMAT"
+          set_env LAKEBASE_ENDPOINT  "$LAKEBASE_ENDPOINT"
+          set_env LAKEBASE_PGSCHEMA  "$LAKEBASE_PGSCHEMA"
+          set_env CORS_ORIGIN_REGEX  "$CORS_ORIGIN_REGEX"
+          set_env REQUIRE_AUTH       "$REQUIRE_AUTH"
+          echo "── app.yaml env efectivo ──"
+          yq '.env' app.yaml
 
       # `bundle deploy` instala el provider Terraform de Databricks. El CLI usa
       # OpenTofu por debajo y fija el provider a registry.opentofu.org; en el

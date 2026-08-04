@@ -1,7 +1,7 @@
 """Modelos de la auth propia: `users` y `roles` (RBAC data-driven).
 
-Decisión 2026-07-04: el app gestiona identidad, roles y permisos en Cosmos
-(login usuario/contraseña en todos los entornos). Los permisos son data-driven
+Decisión 2026-07-04: el app gestiona identidad, roles y permisos en la BD
+Lakebase (login usuario/contraseña en todos los entornos). Los permisos son data-driven
 (colección `roles` con una matriz editable desde el módulo Admin), no
 hardcodeados — el mock de Admin trae "Nuevo rol" y toggles por celda.
 """

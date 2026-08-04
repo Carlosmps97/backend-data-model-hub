@@ -10,9 +10,9 @@ sus subcarpetas descendientes (transitivo). Los canvases (colección
 se borran: se "desadjuntan" poniendo `folderId=None` para que caigan a la raíz
 del proyecto en el Model Explorer y sigan siendo accesibles. El conjunto de
 descendientes se calcula en Python (BFS sobre los docs vivos del proyecto):
-Cosmos no soporta consultas recursivas y así evitamos N round-trips por nivel.
-El ordenamiento (`order`, luego `name`) también se hace en Python porque Cosmos
-rechaza `.sort()` sobre campos sin índice.
+el store no soporta consultas recursivas y así evitamos N round-trips por nivel.
+El ordenamiento (`order`, luego `name`) también se hace en Python porque a
+escala un orden sin índice sería full-scan.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ async def list_folders(project_id: str) -> list[dict]:
     docs = await db[FOLDERS].find(
         {"projectId": project_id, "flgactive": {"$ne": False}}
     ).to_list(None)
-    docs.sort(key=_order_key)  # Cosmos: ordenar en Python (campo sin índice)
+    docs.sort(key=_order_key)  # ordenar en Python (a escala, campo sin índice)
     return [FolderDoc.model_validate(_to(d)).model_dump() for d in docs]
 
 

@@ -1,4 +1,4 @@
-"""`list_for_column` / `canvases_containing` (spec 10 §8) — db fake, sin Cosmos."""
+"""`list_for_column` / `canvases_containing` (spec 10 §8) — db fake, sin BD real."""
 from __future__ import annotations
 
 import asyncio

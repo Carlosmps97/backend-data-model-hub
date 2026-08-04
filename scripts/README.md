@@ -142,6 +142,6 @@ aborta sin tocar nada). Preserva usuarios/roles, naming_config,
 `backfill_udp_allowed_values` · `backfill_view_col_defs` (su lógica ya vive en
 `migrate`) · `migrate_changes_to_collection` · `migrate_view_sources` ·
 `migrate_view_source_tables` · `fix_udp_canvas_data` ·
-`lakebase/` (migración Cosmos→Lakebase, ejecutada el 2026-07-19).
+`lakebase/` (utilería de carga inicial de datos a Lakebase, retirada).
 (`reset_to_base_version` se retiró y se RESTAURÓ el mismo día como herramienta
 permanente, sin la dependencia del seed.)

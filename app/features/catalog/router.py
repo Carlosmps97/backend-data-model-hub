@@ -18,10 +18,12 @@ router = APIRouter(prefix="/api/catalog", tags=["catalog"],
 async def list_tables(
     q: str | None = Query(default=None, description="búsqueda por nombre (contains, case-insensitive)"),
     limit: int | None = Query(default=None, ge=1, le=500),
+    schema: str | None = Query(default=None, description="acota a UN esquema (filtro del modal Import existing)"),
 ):
     """Pool canónico. `q`+`limit` = búsqueda server-side (modales de catálogo);
-    sin parámetros, la lista completa (compat)."""
-    return ok(await service.list_tables(q, limit))
+    `schema` acota a un esquema (server-side, combinable con `q`); sin parámetros,
+    la lista completa (compat)."""
+    return ok(await service.list_tables(q, limit, schema))
 
 
 @router.post("/tables", status_code=status.HTTP_201_CREATED)

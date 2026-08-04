@@ -6,10 +6,9 @@
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
 > **retiraron** — el flujo vigente es únicamente XML → Lakebase
 > (`scripts/README.md`). Esas secciones quedan como evidencia histórica de la
-> validación a escala (resultados en `plan-implementacion/04-STRESS-TEST.md`);
-> las menciones a Cosmos describen la BD de aquella época.
+> validación a escala (resultados en `plan-implementacion/04-STRESS-TEST.md`).
 
-Este documento describe la estrategia y la implementación completa de pruebas del backend `backend-data-model-hub` (FastAPI + Databricks Lakebase Postgres como **única** BD, vía un adaptador que emula la superficie de `pymongo` —`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`— sin conectar a Mongo; Cosmos DB fue la base productiva hasta la migración del 2026-07-19, ver [arquitectura.md](arquitectura.md)). Cubre las capas de verificación que sostienen el proyecto: pruebas unitarias puras por feature, pruebas de arquitectura que fuerzan invariantes de capas, una suite viva de integración del adaptador Lakebase contra el Postgres real, un harness E2E que ejercita el backend real por rol vía HTTP, y — como evidencia histórica — la prueba de estrés a escala real (10.000 tablas / 400.000 columnas). Todo el contenido está basado en el código real de `tests/`, `scripts/e2e/` y `scripts/arrange_all.py`.
+Este documento describe la estrategia y la implementación completa de pruebas del backend `backend-data-model-hub` (FastAPI + Databricks Lakebase Postgres como **única** BD, vía un adaptador que emula la superficie de `pymongo` —`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`— sin conectar a Mongo). Cubre las capas de verificación que sostienen el proyecto: pruebas unitarias puras por feature, pruebas de arquitectura que fuerzan invariantes de capas, una suite viva de integración del adaptador Lakebase contra el Postgres real, un harness E2E que ejercita el backend real por rol vía HTTP, y — como evidencia histórica — la prueba de estrés a escala real (10.000 tablas / 400.000 columnas). Todo el contenido está basado en el código real de `tests/`, `scripts/e2e/` y `scripts/arrange_all.py`.
 
 ---
 
@@ -188,7 +187,7 @@ def test_services_and_schemas_do_not_touch_the_store():
 flowchart LR
     R["router.py<br/>HTTP + RBAC"] --> S["service.py<br/>logica pura / orquestacion"]
     S --> Repo["repository.py<br/>UNICA capa que toca el store"]
-    Repo --> DB[("Databricks Lakebase Postgres<br/>adaptador con superficie estilo pymongo<br/>(unica BD; Cosmos hasta 2026-07-19)")]
+    Repo --> DB[("Databricks Lakebase Postgres<br/>adaptador con superficie estilo pymongo<br/>(unica BD)")]
     S -. "PROHIBIDO<br/>(test de arquitectura)" .-> DB
     Sch["schemas.py / models.py"] -. "PROHIBIDO" .-> DB
     style Repo fill:#e8f5e9,stroke:#2e7d32
@@ -532,7 +531,7 @@ Además del runner hay **5 suites standalone** en `scripts/e2e/`, escritas como 
 
 ## 7. Prueba de estrés a escala (histórico)
 
-Los seeds de estrés se **retiraron el 2026-07-20** (ver la nota de cabecera); esta sección queda como evidencia histórica de la validación a escala sobre la BD Cosmos de aquella época (resultados en `plan-implementacion/04-STRESS-TEST.md`). `arrange_all.py` es la excepción: sigue vigente como herramienta permanente (sección 7.2).
+Los seeds de estrés se **retiraron el 2026-07-20** (ver la nota de cabecera); esta sección queda como evidencia histórica de la validación a escala (resultados en `plan-implementacion/04-STRESS-TEST.md`). `arrange_all.py` es la excepción: sigue vigente como herramienta permanente (sección 7.2).
 
 ### 7.1 `seed_stress.py` — generación a escala (retirado)
 
@@ -551,7 +550,7 @@ Generaba data sintética configurable por variables de entorno para estresar el 
 Características de robustez del seed:
 
 - **Streaming por lotes** (`Batcher` + `insert_many(ordered=False)`) con bajo consumo de memoria y progreso.
-- **Tolerancia a throttling de Cosmos**: detecta 429 / código 16500 / `RequestRateTooLarge` y reintenta el lote con backoff exponencial (0.5 s → hasta 20 s, 10 intentos).
+- **Tolerancia a throttling**: detectaba errores transitorios de rate-limit y reintentaba el lote con backoff exponencial (0.5 s → hasta 20 s, 10 intentos).
 - **Regenera** (drop) `projects`, `folders`, `subject_areas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`; **limpia** `changesets` y `changeset_changes`; **preserva** usuarios, roles, estándares, dominios, glosario y naming; y **nunca toca** `column_catalog` (colección del agente), con un `assert` guardián.
 - Inserta una **versión de producción baseline** (`approved` + `appliedAt`) para que el canvas pueda abrir el modelo y snapshotear desde producción.
 - Recrea los índices correctos al final con `ensure_indexes`.
@@ -613,13 +612,12 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 
 ### 8.2 Base de datos (Databricks Lakebase Postgres)
 
-- La persistencia productiva es **Databricks Lakebase Postgres** a través del adaptador `app/core/db/lakebase/` que expone una superficie async estilo Mongo (el vocabulario que emula `pymongo`): cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`. El acceso está confinado a los `repository.py` (invariante forzado por `tests/architecture/test_store_boundary.py`), lo que mantiene el store intercambiable — así fue posible la migración Cosmos → Lakebase sin tocar services.
+- La persistencia productiva es **Databricks Lakebase Postgres** a través del adaptador `app/core/db/lakebase/` que expone una superficie async estilo `pymongo`: cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`. El acceso está confinado a los `repository.py` (invariante forzado por `tests/architecture/test_store_boundary.py`), lo que mantiene el store intercambiable detrás de una superficie única (`get_db()`).
 - **El adaptador tiene su propia suite viva** (`tests/lakebase/test_adapter_live.py`, 43 tests con `LAKEBASE_TESTS=1`) que valida esa superficie contra el Postgres real en un schema efímero (sección 3.4).
 - **Credenciales rotativas:** el password de Postgres es un token OAuth de ~60 minutos que la app acuña sola vía `databricks-sdk` (caché de 50 min); el pool asyncpg pide token fresco por conexión y tolera el wake del compute (scale-to-zero).
 - **Índices:** se recrean con `ensure_indexes(db)` al arrancar el lifespan; el planner del reporting rechaza (422) ordenar por campos sin índice, así que los índices esperados deben existir para las consultas a escala.
 - **Colección protegida:** `column_catalog` (usada por el agente de modelado) nunca debe ser borrada por los scripts de carga/reset; lo garantizan con `assert`/guardrail.
 - **Sin lifespan no hay DB:** el `TestClient` de los unit tests se construye sin lifespan a propósito, y el `/api/health` reporta `degraded` con `db_connected: false` cuando no hay conexión — comportamiento verificado en `tests/test_smoke.py`.
-- **Cosmos DB (histórico):** Azure Cosmos DB (API de Mongo, vía el driver `motor`) fue la base productiva hasta la migración del 2026-07-19; ese camino se **eliminó por completo** — ya no existen el setting `DB_BACKEND`, las variables `COSMOS_*` ni el driver `motor`. El throttling por RU/s (429 / código 16500) que condicionó a los seeds de estrés era de esa época.
 
 ---
 

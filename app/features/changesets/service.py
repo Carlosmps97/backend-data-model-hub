@@ -464,20 +464,31 @@ async def effective(cs_id: str, collection: str,
         # que YA están en el slice o cuyo payload cae en este esquema (una tabla
         # nueva/movida al esquema). El POST-filtro por `schema` sobre el overlay
         # descarta lo que el draft SACÓ del esquema (rename de `schema`).
-        pub = await repository.published(collection, {"schema": schema}, limit=limit)
+        #
+        # `q` opcional COMBINADO (modal "New table · Import existing" pasa
+        # schema+q+limit juntos): el filtro por nombre se aplica ADEMÁS del
+        # esquema — en Mongo sobre el publicado y por-doc sobre cambios y overlay.
+        # Sin `q` (Database Explorer) el comportamiento por-esquema queda intacto.
+        flt = {"schema": schema, **(_q_filter(q) if q else {})}
+        sort_field = "physicalName" if collection == "canonical_tables" else None
+        pub = await repository.published(collection, flt, limit=limit, sort_field=sort_field)
+
+        def _keep(doc: dict) -> bool:
+            return doc.get("schema") == schema and (not q or _q_match(doc, q))
+
         in_slice = {d["id"] for d in pub}
         changes = {
             eid: ch for eid, ch in changes.items()
-            if eid in in_slice or (ch.get("payload") or {}).get("schema") == schema
+            if eid in in_slice or _keep(ch.get("payload") or {})
         }
-        out = [d for d in overlay(pub, changes) if d.get("schema") == schema]
+        out = [d for d in overlay(pub, changes) if _keep(d)]
         out.sort(key=lambda d: str(d.get("physicalName") or d.get("name") or "").lower())
         return out[:limit] if limit else out
 
     if q is not None or limit is not None:
         # `limit` sin `q` = página inicial del modal (primeras N por nombre).
-        # sort en Mongo SOLO donde hay índice (canonical_tables.physicalName):
-        # Cosmos RU rechaza .sort() sobre campos sin índice.
+        # sort en la BD SOLO donde hay índice (canonical_tables.physicalName):
+        # a escala, un orden sin índice sería full-scan.
         q = q or ""
         sort_field = "physicalName" if collection == "canonical_tables" else None
         pub = await repository.published(collection, _q_filter(q) if q else None,
@@ -781,7 +792,7 @@ async def _apply_and_finalize(cs_id: str, fields: dict, submitted_at: str | None
     3. Gate de validación autoritativo: si algún payload no valida contra su
        modelo (datos legacy pre-validación), REVIERTE el claim (limpiando
        decisiones, como withdraw) y levanta `InvalidPayloadError` (422).
-    4. Si el apply/cascada FALLA (throttling de Cosmos, timeout), devuelve el
+    4. Si el apply/cascada FALLA (throttling o timeout), devuelve el
        request a `submitted` y re-lanza: el apply es idempotente (upserts por
        _id), re-aprobar reintenta y converge. Si el PROCESO muere a mitad, el
        doc queda `approved` sin `appliedAt` — detectable, y recuperable con

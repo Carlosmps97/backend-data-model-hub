@@ -18,10 +18,11 @@ log = logging.getLogger(__name__)
 async def ensure_indexes(db: Any) -> None:
     """Crea los índices de las colecciones del backend de plataforma."""
 
-    # Cosmos (tier RU) tumba con TooManyLogicalSessions (261) si se crean ~30
-    # índices en paralelo sobre una BD recién vaciada (cada create_index abre su
-    # sesión lógica). Acotamos la concurrencia con un semáforo: sigue siendo
-    # concurrente/rápido, sin reventar el límite de sesiones del worker.
+    # Los índices se crean en lotes acotados para no abrir demasiadas sesiones
+    # lógicas a la vez: lanzar ~30 create_index en paralelo sobre una BD recién
+    # vaciada (cada uno abre su sesión lógica) podría reventar el límite de
+    # sesiones del worker. Acotamos la concurrencia con un semáforo: sigue siendo
+    # concurrente/rápido.
     sem = asyncio.Semaphore(5)
 
     async def _try(col_name: str, keys: list[tuple], **kwargs: object) -> None:
@@ -43,20 +44,20 @@ async def ensure_indexes(db: Any) -> None:
         _try("ddl_rules", [("flgactive", 1)]),
         _try("canonical_tables", [("flgactive", 1)]),
         # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
-        # top-N se ordena en Mongo por physicalName, y Cosmos RU rechaza
-        # `.sort()` sobre campos sin índice (500 en todas las búsquedas).
+        # top-N se ordena por physicalName, y a escala un orden sobre campos sin
+        # índice sería full-scan (invariante de escala).
         _try("canonical_tables", [("physicalName", 1)]),
         # §9 control de duplicados (F1): chequeo de (schema, physicalName) en
         # add_change/publish por regex anclado case-insensitive. NO-unique a
-        # propósito: Cosmos no permite índices únicos sobre colecciones
+        # propósito: el adaptador no soporta índices únicos sobre colecciones
         # pobladas — la garantía vive en el router. El campo persistido es
         # `schema` (alias del Pydantic `sql_schema`).
         _try("canonical_tables", [("schema", 1), ("physicalName", 1)]),
         _try("canonical_columns", [("tableId", 1)]),
         _try("canonical_columns", [("parentDomainId", 1)]),
         # ── Motor de consulta del reporting (07) ────────────────
-        # keyset/orden por physicalName (Cosmos rechaza .sort() sin índice) +
-        # filtro/group por dataType.
+        # keyset/orden por physicalName (a escala, un orden sin índice sería
+        # full-scan) + filtro/group por dataType.
         _try("canonical_columns", [("physicalName", 1)]),
         _try("canonical_columns", [("dataType", 1)]),
         # WILDCARD sobre el mapa embebido de UDP: cubre TODAS las keys UDP
@@ -67,8 +68,10 @@ async def ensure_indexes(db: Any) -> None:
         # ── Changesets (M2a) ────────────────────────────────────
         _try("changesets", [("updatedAt", -1)]),
         _try("changesets", [("status", 1)]),
-        # Un doc POR CAMBIO (sin límite de 2MB/doc): overlay/diff/apply leen
-        # por csId (+collection) — el prefijo del compuesto cubre ambos.
+        # Un doc POR CAMBIO (un dict embebido con miles de cambios crecería sin
+        # techo; por eso un doc por cambio, versionado por changesets):
+        # overlay/diff/apply leen por csId (+collection) — el prefijo del
+        # compuesto cubre ambos.
         _try("changeset_changes", [("csId", 1), ("collection", 1)]),
         # ── M3a: Projects + Subject Areas + Relationships + Views ──
         _try("projects", [("flgactive", 1)]),
@@ -76,7 +79,8 @@ async def ensure_indexes(db: Any) -> None:
         # F5 — UDP del Modelo de Datos: wildcard sobre el mapa embebido (mismo
         # patrón que canonical_columns/tables, líneas de arriba) → filtrar por
         # cualquier UDP de canvas hace seek. `name` soporta el sort/keyset de
-        # la entidad `models` del reporting (Cosmos rechaza sort sin índice).
+        # la entidad `models` del reporting (a escala, un orden sin índice sería
+        # full-scan).
         _try("subject_areas", [("udpValues.$**", 1)]),
         _try("subject_areas", [("name", 1)]),
         _try("relationships", [("flgactive", 1)]),
@@ -99,7 +103,7 @@ async def ensure_indexes(db: Any) -> None:
         _try("folders", [("projectId", 1)]),
         # ── Esquemas como entidad versionada (doc 18) ────────────
         # `name` soporta el chequeo de unicidad por regex anclado (NO-unique:
-        # Cosmos no permite índices únicos sobre colecciones pobladas — la
+        # el adaptador no soporta índices únicos sobre colecciones pobladas — la
         # garantía vive en service/changesets, como canonical_tables).
         _try("schemas", [("flgactive", 1)]),
         _try("schemas", [("name", 1)]),

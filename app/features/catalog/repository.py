@@ -25,20 +25,26 @@ def _to_doc(doc: dict) -> dict:
     return doc
 
 
-async def list_tables(q: str | None = None, limit: int | None = None) -> list[dict]:
+async def list_tables(q: str | None = None, limit: int | None = None,
+                      schema: str | None = None) -> list[dict]:
     """Lista del pool canónico. `q` busca por nombre físico/lógico (contains,
     case-insensitive, server-side) y `limit` capea el resultado: los modales de
     catálogo a 15k tablas NO deben bajar la colección completa para filtrar en
-    el cliente. Sin parámetros conserva el contrato original (lista completa)."""
+    el cliente. `schema` acota a UN esquema (server-side, junto a `q`): el filtro
+    por esquema del modal Import existing NO puede resolverse en el cliente sobre
+    la página de `limit` — se perdían las tablas del esquema fuera de esa página.
+    Sin parámetros conserva el contrato original (lista completa)."""
     db = await get_db()
     flt: dict = {"flgactive": {"$ne": False}}
+    if schema:
+        flt["schema"] = schema
     if q:
         rx = {"$regex": re.escape(q), "$options": "i"}
         flt["$or"] = [{"physicalName": rx}, {"logicalName": rx}]
     cursor = db[TABLES].find(flt)
     if limit is not None and limit > 0:
-        # sort en Mongo requiere el índice canonical_tables.physicalName
-        # (core/db/indexes.py): Cosmos RU rechaza .sort() sobre campos sin índice.
+        # el sort por physicalName requiere el índice canonical_tables.physicalName
+        # (core/db/indexes.py): a escala, un orden sin índice sería full-scan.
         cursor = cursor.sort("physicalName", 1).limit(limit)
     docs = await cursor.to_list(None)
     docs.sort(key=lambda d: (d.get("physicalName") or "").lower())

@@ -2,9 +2,9 @@
 esta feature; guardrail `tests/architecture/test_store_boundary.py`).
 
 Sólo lee documentos ACTIVOS (`flgactive != False`). Devuelve dicts crudos
-normalizados (`_id` -> `id`, sin campos internos de Mongo) con EXACTAMENTE los
+normalizados (`_id` -> `id`, sin campos internos del store) con EXACTAMENTE los
 campos que la agregación pura de `service` consume — incluido `schema`, que en
-Cosmos se guarda con esa clave (el modelo de `catalog` lo aliasa a `sql_schema`,
+la BD se guarda con esa clave (el modelo de `catalog` lo aliasa a `sql_schema`,
 pero aquí lo dejamos como `schema` para la salida del reporte).
 """
 from __future__ import annotations

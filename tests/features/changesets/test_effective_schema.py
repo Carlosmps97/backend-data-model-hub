@@ -68,3 +68,43 @@ def test_schema_en_vistas_ordena_por_name(monkeypatch):
                changes={"v9": {"op": "upsert", "payload": {"name": "VW_NUEVA", "schema": "CORE"}}})
     out = asyncio.run(service.effective("c1", "views", schema="CORE"))
     assert [d["name"] for d in out] == ["VW_CLIENTE", "VW_NUEVA"]
+
+
+# ── schema + q combinados (modal "New table · Import existing") ──────────────
+# El modal pasa schema + q + limit JUNTOS: buscar por nombre DENTRO del esquema
+# elegido. Antes la rama `schema` ignoraba `q` (todo el esquema salía y el filtro
+# por nombre no aplicaba en el path draft-aware — el usado al importar tablas).
+
+
+def test_schema_y_q_filtran_juntos(monkeypatch):
+    """Dentro del esquema, sólo las tablas cuyo nombre matchea `q`."""
+    _mock_repo(monkeypatch, "canonical_tables",
+               published=[{"id": "t1", "physicalName": "CLIENTE", "schema": "CORE"},
+                          {"id": "t2", "physicalName": "CUENTA", "schema": "CORE"}],
+               changes={})
+    out = asyncio.run(service.effective("c1", "canonical_tables", schema="CORE", q="clie", limit=50))
+    assert {d["id"] for d in out} == {"t1"}
+
+
+def test_schema_y_q_incluye_nueva_del_draft_y_excluye_no_match(monkeypatch):
+    """Tabla NUEVA del draft en el esquema que matchea `q` aparece; otra del
+    mismo esquema que NO matchea `q`, no."""
+    _mock_repo(monkeypatch, "canonical_tables",
+               published=[{"id": "t1", "physicalName": "CLIENTE", "schema": "CORE"}],
+               changes={
+                   "t9": {"op": "upsert", "payload": {"physicalName": "CLIENTEVIP", "schema": "CORE"}},
+                   "t8": {"op": "upsert", "payload": {"physicalName": "PRODUCTO", "schema": "CORE"}},
+               })
+    out = asyncio.run(service.effective("c1", "canonical_tables", schema="CORE", q="clie", limit=50))
+    assert {d["id"] for d in out} == {"t1", "t9"}
+
+
+def test_schema_sin_q_conserva_todo_el_esquema(monkeypatch):
+    """Sin `q` (Database Explorer) el filtro por esquema devuelve el esquema
+    completo — el `q` opcional no rompe el contrato existente."""
+    _mock_repo(monkeypatch, "canonical_tables",
+               published=[{"id": "t1", "physicalName": "CLIENTE", "schema": "CORE"},
+                          {"id": "t2", "physicalName": "CUENTA", "schema": "CORE"}],
+               changes={})
+    out = asyncio.run(service.effective("c1", "canonical_tables", schema="CORE"))
+    assert {d["id"] for d in out} == {"t1", "t2"}

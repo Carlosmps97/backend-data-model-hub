@@ -125,7 +125,8 @@ def impact_pipeline(domain_id: str) -> list[dict]:
 
 async def impact_groups(domain_id: str) -> list[dict]:
     """`$match` + `$group` por tableId sobre canonical_columns (patrón probado
-    a 400k columnas en el motor de reporting; NO $lookup: Cosmos)."""
+    a 400k columnas en el motor de reporting; NO $lookup, joins en Python a
+    propósito)."""
     db = await get_db()
     return await db[COLUMNS].aggregate(impact_pipeline(domain_id)).to_list(None)
 

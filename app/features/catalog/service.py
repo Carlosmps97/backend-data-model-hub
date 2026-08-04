@@ -18,8 +18,9 @@ def derive_column(logical: str, physical: str, domain_default: str | None,
     }
 
 
-async def list_tables(q: str | None = None, limit: int | None = None) -> list[dict]:
-    return await repository.list_tables(q, limit)
+async def list_tables(q: str | None = None, limit: int | None = None,
+                      schema: str | None = None) -> list[dict]:
+    return await repository.list_tables(q, limit, schema)
 
 
 async def search_columns(q: str, limit: int = 50) -> list[dict]:

@@ -2,7 +2,7 @@
 
 El backend corre sobre Databricks Lakebase Postgres vía el adaptador JSONB
 (`app/core/db/lakebase/`) con credenciales OAuth rotativas. El adaptador expone
-una superficie estilo Mongo, así que repositorios y scripts no ven Postgres
+una superficie estilo pymongo, así que repositorios y scripts no ven Postgres
 directamente.
 
 Contrato intacto: `connect()` una vez en el lifespan, `get_db()` en
@@ -59,7 +59,7 @@ async def disconnect() -> None:
 
 
 async def get_db() -> Any:
-    """Devuelve el handle de base de datos compartido (superficie estilo Mongo).
+    """Devuelve el handle de base de datos compartido (superficie estilo pymongo).
 
     Levanta `RuntimeError` si `connect()` no fue llamado todavía.
     """

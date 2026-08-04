@@ -13,10 +13,13 @@
 # la app arrancaba SIN variables y al prenderla decía "Failed to load app spec
 # / No command to run". Por eso el command+env viven ACÁ y no en `config:`.
 #
-# Los valores son portables entre workspaces por diseño (endpoint por
-# convención de nombres, CORS por regex). El binding del secreto
-# `session_secret` (referenciado abajo con valueFrom) y los permisos siguen
-# en databricks.yml: esos SÍ los aplica bien el bundle.
+# Los valores de abajo son los DEFAULTS (los de este workspace). Cada env con
+# `value:` se puede sobrescribir por-entorno SIN editar este archivo: el deploy
+# workflow (paso "Env del app.yaml desde GitHub Variables") reemplaza el value
+# con la GitHub Variable HOMÓNIMA cuando está definida; si no, queda el valor de
+# acá. Así otro workspace solo define las Variables que le cambian.
+# El binding del secreto `session_secret` (referenciado abajo con valueFrom) y
+# los permisos siguen en databricks.yml: esos SÍ los aplica bien el bundle.
 #
 # uvicorn recibe UVICORN_HOST=0.0.0.0 y UVICORN_PORT=$DATABRICKS_APP_PORT del
 # runtime de Apps — no hace falta pasar host/puerto.

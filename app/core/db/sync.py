@@ -1,10 +1,9 @@
 """Puente SYNC a la BD (Lakebase) para scripts (audit, migrate --apply, backfills, fixes).
 
-Los ~10 scripts sync del repo se conectaban con `MongoClient(...)` inline; con
-la migración a Lakebase (doc 28) pasan a `get_sync_db()`, un wrapper sync
-PEREZOSO sobre el adaptador async (event loop dedicado en un thread de fondo).
-Perezoso porque varios scripts construyen el handle a nivel de módulo (import) y
-recién deben conectar al primer uso — igual que hacía MongoClient.
+Los ~10 scripts sync del repo se conectan a la BD vía `get_sync_db()`, un
+wrapper sync PEREZOSO sobre el adaptador async (event loop dedicado en un thread
+de fondo). Perezoso porque varios scripts construyen el handle a nivel de módulo
+(import) y recién deben conectar al primer uso.
 
 Superficie soportada (la que usan los scripts): acceso por índice Y por
 atributo (`db["views"]` / `db.views`), find (iterable, con sort/limit/skip),

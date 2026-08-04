@@ -28,7 +28,7 @@ class HealthResponse(BaseModel):
 )
 async def health_check(request: Request) -> HealthResponse:
     # Ping VIVO con timeout corto: el booleano del arranque quedaba congelado
-    # (una caída de Cosmos posterior seguía reportando healthy).
+    # (una caída de la BD posterior seguía reportando healthy).
     db_connected = bool(getattr(request.app.state, "db_connected", False))
     if db_connected:
         try:
