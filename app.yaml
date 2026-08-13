@@ -53,9 +53,9 @@ env:
     valueFrom: session_secret
   # Secreto compartido con el server del front (doc 38): autentica el relay de
   # identidad SSO (`x-dmh-sso-*`) en POST /api/auth/sso/login. AMBAS apps leen
-  # el MISMO secret del scope (recurso `proxy_secret` en databricks.yml). Si el
-  # secreto no existe en el scope, el workflow lo crea o aborta ANTES del
-  # deploy (paso "Asegurar el secreto del proxy"). Sin él, el login SSO
-  # responde 503 y el carril admin sigue vivo.
+  # el MISMO secret del scope (recurso `proxy_secret` en databricks.yml). El
+  # secreto se administra A MANO (igual que session-secret-key); el workflow
+  # solo VERIFICA que exista antes del deploy (paso "Verificar el secreto del
+  # proxy"). Sin él, el login SSO responde 503 y el carril admin sigue vivo.
   - name: PROXY_SHARED_SECRET
     valueFrom: proxy_secret
