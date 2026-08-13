@@ -342,16 +342,20 @@ Config del ruleset: lookups (mapeo valor-de-UDP → valor emitido, con default) 
 ## 8. Identidad y RBAC
 
 ### `users` — UserDoc  *(`_id = username`)*
+
+Doc 38: la colección funciona como **WHITELIST de acceso** — las entradas normales son correos asignados a un rol (`_id` = correo lowercase, sin `passwordHash`) que entran por el SSO de Databricks; las cuentas locales con contraseña (`admin`) conviven en la misma colección. `name`/`initials`/`email` de una entrada SSO los completa el primer login (SCIM / derivado del correo) si están vacíos.
+
 | Campo | Tipo | Default | Notas |
 |---|---|---|---|
-| id | str | — | PK = **username** |
-| email | str | "" | |
-| name | str | "" | |
+| id | str | — | PK = **username** (correo lowercase en entradas SSO) |
+| email | str | "" | en entradas SSO se autocompleta con el propio correo |
+| name | str | "" | vacío hasta el primer login SSO (o lo fija el admin) |
 | role | str | "" | ref `roles.id` (key del rol) |
 | projectIds | list[str] | [] | scope por proyecto; `[]`/ausente = todos (admin) |
 | status | str | "active" | `active` \| `invited` \| `disabled` |
 | initials | str? | null | |
-| passwordHash | str? | null | bcrypt; **NUNCA se expone** (el service hace `exclude`) |
+| hasPassword | bool | false | **DERIVADO en lectura** (`_to_user`), no se persiste: true solo en cuentas locales |
+| passwordHash | str? | null | bcrypt; solo cuentas locales; **NUNCA se expone** (el service hace `exclude`) |
 
 ### `roles` — RoleDoc  *(`_id = key`)*
 | Campo | Tipo | Default | Notas |

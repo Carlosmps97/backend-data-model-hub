@@ -40,6 +40,43 @@ def test_create_user_hashea_password_y_audita(monkeypatch):
     assert aud.await_args.args[1] == "admin.user.create"
 
 
+def test_create_whitelist_entry_sin_password_normaliza_email(monkeypatch):
+    """Doc 38: el alta normal es correo + rol, SIN contraseña — la entrada
+    habilita el login SSO. El username se normaliza a lowercase y el campo
+    `email` se completa con el propio correo si no vino."""
+    captured = {}
+    async def _upsert(username, fields):
+        captured["username"] = username; captured["fields"] = fields
+        return {"id": username, **fields}
+    monkeypatch.setattr(service.repository, "upsert_user", AsyncMock(side_effect=_upsert))
+    aud = AsyncMock(); monkeypatch.setattr(service, "audit", aud)
+
+    body = UserCreate(username="  Ana.Lopez@Corp.COM ", role="modelador")
+    user = asyncio.run(service.create_user("admin", body))
+    assert captured["username"] == "ana.lopez@corp.com"
+    assert captured["fields"]["email"] == "ana.lopez@corp.com"
+    assert "passwordHash" not in captured["fields"]
+    assert captured["fields"]["initials"] is None      # sin nombre aún (lo trae el 1er login)
+    assert user["id"] == "ana.lopez@corp.com"
+    assert aud.await_args.kwargs["meta"]["sso"] is True
+
+
+def test_create_user_email_invalido_es_guard_error(monkeypatch):
+    import pytest
+    monkeypatch.setattr(service, "audit", AsyncMock())
+    body = UserCreate(username="ana@corp", role="modelador")   # sin TLD
+    with pytest.raises(service.AdminGuardError):
+        asyncio.run(service.create_user("admin", body))
+
+
+def test_create_cuenta_local_sin_password_es_guard_error(monkeypatch):
+    import pytest
+    monkeypatch.setattr(service, "audit", AsyncMock())
+    body = UserCreate(username="operador", role="modelador")   # sin @ y sin password
+    with pytest.raises(service.AdminGuardError):
+        asyncio.run(service.create_user("admin", body))
+
+
 def test_update_user_inexistente_es_none(monkeypatch):
     monkeypatch.setattr(service.repository, "get_user", AsyncMock(return_value=None))
     body = UserUpdate(name="Nuevo")

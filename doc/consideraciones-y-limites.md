@@ -294,7 +294,7 @@ Los índices se declaran una sola vez a través de la superficie de colección (
 
 ## 5. Límites de autenticación y sesión
 
-La auth es propia (usuario/contraseña) en todos los entornos. La identidad sale de un token de sesión firmado (Bearer, sin cookies), no de headers.
+La sesión es propia (JWT firmado, sin cookies) en todos los entornos y nace por dos carriles (doc 38): SSO heredado de Databricks (relay `x-dmh-sso-*` + secreto compartido, whitelist de correos por rol) o contraseña (cuenta local `admin`). La identidad POR REQUEST sale siempre del token, no de headers.
 
 ### 5.1 JWT de 12 h sin revocación
 

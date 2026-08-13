@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from app.core.audit import audit
 from app.core.security import create_access_token, hash_password, verify_password
 
-from . import repository
+from . import repository, sso
 from .models import PERMISSIONS
 
 # Hash real (bcrypt) para verificar SIEMPRE aunque el usuario no exista: evita el
@@ -98,6 +98,46 @@ async def login(username: str, password: str) -> dict | None:
     )
     await audit(username, "login")
     return {"token": token, "user": user}
+
+
+async def login_sso(identity: sso.SsoIdentity) -> dict | None:
+    """Login por identidad SSO ya atestada (doc 38). El correo ES el username:
+    entra solo si está en la whitelist (colección `users`) con estado activo —
+    es decir, si un admin le asignó una matriz de rol. Devuelve `{token, user}`
+    (misma shape que `login`) o None si no tiene acceso.
+
+    El nombre se resuelve best-effort (SCIM → hint → local-part del correo) y
+    se persiste SOLO si el doc no traía uno (el admin puede pisarlo después).
+    Audita `login_sso` / `login_sso_denied` (nunca `login_failed`: acá no hay
+    credenciales que fallen, hay correos sin asignación)."""
+    email = identity.email
+    user = await repository.get_user(email)
+    if not user or user.get("status") == "disabled":
+        await audit(email, "login_sso_denied",
+                    meta={"reason": "disabled" if user else "not_whitelisted"})
+        return None
+    fixes: dict = {}
+    if not (user.get("email") or "").strip():
+        fixes["email"] = email
+    if not (user.get("name") or "").strip():
+        name = await sso.resolve_display_name(email, identity.username_hint)
+        # Misma derivación de iniciales que usa el módulo Admin.
+        from app.features.admin.service import initials
+        fixes["name"] = name
+        fixes["initials"] = initials(name)
+    if fixes:
+        await repository.upsert_user(email, fixes)
+    su = await resolve_session_user(email)
+    if su is None:
+        await audit(email, "login_sso_denied", meta={"reason": "disabled"})
+        return None
+    token = create_access_token(
+        email, extra={"email": su.get("email") or email, "name": su.get("name"),
+                      "role": su.get("role")}
+    )
+    await audit(email, "login_sso",
+                meta={"userId": identity.user_id} if identity.user_id else None)
+    return {"token": token, "user": su}
 
 
 async def logout(username: str) -> None:

@@ -107,6 +107,14 @@ class Settings:
     LOCAL_DEV_USER: str = os.getenv("LOCAL_DEV_USER", "dev@local")
     LOCAL_DEV_USERNAME: str = os.getenv("LOCAL_DEV_USERNAME", "")
     LOCAL_DEV_DISPLAY_NAME: str = os.getenv("LOCAL_DEV_DISPLAY_NAME", "")
+    # Secreto compartido con el server del front (doc 38): autentica el RELAY
+    # de identidad SSO (headers `x-dmh-sso-*`) en `POST /api/auth/sso/login`.
+    # En Databricks Apps AMBAS apps lo leen del mismo secret del scope
+    # (`valueFrom: proxy_secret`). Vacío + REQUIRE_AUTH=true → el endpoint SSO
+    # responde 503 (fail-closed; el login admin por contraseña sigue vivo).
+    # Vacío sin REQUIRE_AUTH (dev/tests) → se aceptan los headers de relay o la
+    # simulación LOCAL_DEV_USER sin secreto.
+    PROXY_SHARED_SECRET: str = os.getenv("PROXY_SHARED_SECRET", "")
 
     # ─── Sesión / firma del token ──────────────────────────────
     # Clave HMAC para firmar el token de sesión (JWT HS256). En producción

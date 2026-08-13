@@ -29,7 +29,7 @@ Responsabilidades concretas, tomadas del docstring de `main.py` y de las feature
 - **Data Standards versionados**: glosario de abreviaturas, Parent Domains, definiciones UDP y configuración de naming, con historial append-only y rollback determinista.
 - **Motor de reglas del DDL Export** (`ddl_rules`): reglas versionadas (sqlglot) que transforman el texto SQL del Export DDL según los valores UDP del modelo, con render puro vía `POST /api/ddl-rules/render` (ver §6.4).
 - **Motor de consulta del reporting**: un IR (`QuerySpec`) que produce el query-builder visual o un parser SQL (sqlglot), compilable a un pipeline de agregación estilo `pymongo`, con paginación keyset a escala de cientos de miles de columnas.
-- **Identidad, RBAC y auditoría**: login propio usuario/contraseña (bcrypt + JWT), matriz de permisos data-driven por rol y log de auditoría de acciones.
+- **Identidad, RBAC y auditoría**: sesión propia por JWT con dos carriles de login (doc 38): SSO heredado de Databricks contra la whitelist de correos asignados a un rol, y contraseña (bcrypt) para la cuenta local `admin`; matriz de permisos data-driven por rol y log de auditoría de acciones.
 
 Lo que **NO** vive acá: el agente conversacional de modelado (vive en `app-agents-modeler`, fuera de este MVP) y la colección `column_catalog` que ese servicio administra. Las variables de Azure AI Foundry / OpenAI / embeddings tampoco son de este servicio.
 

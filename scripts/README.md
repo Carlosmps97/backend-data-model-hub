@@ -79,7 +79,8 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 .venv/bin/python -m scripts.e2e.run_e2e s02_version_lifecycle
 .venv/bin/python scripts/e2e/e2e_schemas.py                 # suites específicas: e2e_relationships,
                                                             # e2e_rollback, e2e_views_versionadas,
-                                                            # e2e_estructura_versionada
+                                                            # e2e_estructura_versionada, e2e_sso
+                                                            # (login SSO + whitelist, doc 38)
 
 # Recuperar un publish que murió a la mitad
 .venv/bin/python scripts/reapply_changeset.py [changeset_id]

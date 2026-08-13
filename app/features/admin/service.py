@@ -9,6 +9,7 @@ from app.core.audit import audit
 from app.core.security import hash_password
 from app.features.auth import repository
 from app.features.auth.models import PERMISSIONS
+from app.features.auth.sso import is_email
 
 
 def initials(name: str) -> str:
@@ -55,14 +56,31 @@ async def list_users() -> list[dict]:
 
 
 async def create_user(actor: str, body) -> dict:
+    """Alta en la whitelist (doc 38). Dos formas válidas:
+    - `username` con `@` → entrada SSO: correo válido, normalizado a lowercase,
+      SIN contraseña (el acceso nace del SSO de Databricks + esta asignación).
+    - `username` sin `@` → cuenta LOCAL (p.ej. `admin`): exige contraseña."""
     username = body.username.strip()
+    if "@" in username:
+        username = username.lower()
+        if not is_email(username):
+            raise AdminGuardError("Enter a valid email address.")
+    elif not body.password:
+        raise AdminGuardError(
+            "Local accounts (username without @) require a password; "
+            "whitelist entries must be an email address."
+        )
+    email = (body.email or "").strip().lower() or (username if "@" in username else "")
     fields = {
-        "email": body.email, "name": body.name, "role": body.role,
+        "email": email, "name": body.name, "role": body.role,
         "projectIds": body.projectIds, "status": body.status,
-        "initials": initials(body.name), "passwordHash": hash_password(body.password),
+        "initials": initials(body.name) if body.name else None,
     }
+    if body.password:
+        fields["passwordHash"] = hash_password(body.password)
     user = await repository.upsert_user(username, fields)
-    await audit(actor, "admin.user.create", target=username, target_type="user")
+    await audit(actor, "admin.user.create", target=username, target_type="user",
+                meta={"sso": "passwordHash" not in fields, "role": body.role})
     return user
 
 
@@ -78,10 +96,10 @@ async def update_user(actor: str, username: str, body) -> dict | None:
             return (body.role if body.role is not None else u.get("role"),
                     body.status if body.status is not None else u.get("status"), None)
         if not await _survives_admin(hypo):
-            raise AdminGuardError("Ese cambio dejaría el sistema sin ningún administrador.")
+            raise AdminGuardError("That change would leave the system without any administrator.")
     fields: dict = {}
     if body.email is not None:
-        fields["email"] = body.email
+        fields["email"] = body.email.strip().lower()
     if body.name is not None:
         fields["name"] = body.name
         fields["initials"] = initials(body.name)
@@ -111,7 +129,7 @@ async def delete_user(actor: str, username: str) -> bool:
     # Guard: no eliminar al último administrador.
     if not await _survives_admin(lambda u, roles: (
         u.get("role"), ("disabled" if u["id"] == username else u.get("status")), None)):
-        raise AdminGuardError("No podés eliminar al último administrador del sistema.")
+        raise AdminGuardError("You cannot remove the last administrator of the system.")
     ok = await repository.delete_user(username)
     if ok:
         await audit(actor, "admin.user.delete", target=username, target_type="user")
@@ -133,7 +151,7 @@ async def upsert_role(actor: str, key: str, body) -> dict:
         override_for_key = perms  # los usuarios de `key` usan estos permisos nuevos
         if not await _survives_admin(lambda u, roles: (
             u.get("role"), u.get("status"), override_for_key if u.get("role") == key else None)):
-            raise AdminGuardError("Ese cambio en la matriz dejaría el sistema sin administrador.")
+            raise AdminGuardError("That matrix change would leave the system without any administrator.")
     fields = {"name": body.name, "description": body.description, "permissions": perms}
     role = await repository.upsert_role(key, fields)
     await audit(actor, "admin.role.update", target=key, target_type="role")
@@ -147,7 +165,7 @@ async def delete_role(actor: str, key: str) -> bool:
     assigned = [u["id"] for u in users if u.get("role") == key]
     if assigned:
         raise AdminGuardError(
-            f"El rol tiene {len(assigned)} usuario(s) asignado(s). Reasignalos antes de eliminarlo."
+            f"This role has {len(assigned)} user(s) assigned. Reassign them before deleting it."
         )
     ok = await repository.delete_role(key)
     if ok:

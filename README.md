@@ -116,7 +116,7 @@ Son **19 features** (directorios en `app/features/`). Algunas exponen más de un
 | Feature | Prefijo | Qué hace |
 |---|---|---|
 | `health` | `/api/health` | Estado de la API + ping vivo a Lakebase (`db_connected`). |
-| `auth` | `/api/auth` | Login usuario/contraseña, logout y `me` (sesión + permisos). |
+| `auth` | `/api/auth` | Login SSO heredado de Databricks (whitelist de correos, doc 38) + login por contraseña (admin), logout y `me` (sesión + permisos). |
 | `admin` | `/api/admin` | RBAC: usuarios, roles, matriz de permisos y auditoría. |
 | `identity` | `/api` | Seam de identidad (`/me`, `/users`) conmutable local/Databricks. |
 | `projects` | `/api` | Proyectos + subject areas (canvas): tablas, layout, drawings, diagrama. |
@@ -163,7 +163,7 @@ Dos capas de reporting sobre el catálogo canónico:
 
 ## Autenticación y RBAC
 
-Autenticación propia con **login usuario/contraseña** (bcrypt) que emite un **token de sesión JWT firmado con HS256** (PyJWT). La identidad de cada request sale del token, no de headers. Existe además un *seam* de identidad conmutable (`AUTH_MODE=local|databricks`): en local usa un usuario fijo (con override `X-Dev-User` para probar aprobaciones); en Databricks el token de sesión propio viaja en el header `X-Session-Token`.
+La sesión es un **token JWT firmado con HS256** (PyJWT) y nace por dos carriles (doc 38): **SSO heredado de Databricks Apps** — el server del front releva la identidad ya autenticada por el proxy (`x-dmh-sso-*` + secreto compartido `PROXY_SHARED_SECRET`) y el correo debe estar en la **whitelist** (colección `users`, correos asignados a un rol desde Admin) — y **login por contraseña** (bcrypt, carril del administrador). La identidad de cada request sale del token, no de headers. Existe además un *seam* de identidad conmutable (`AUTH_MODE=local|databricks`): en local usa un usuario fijo (con override `X-Dev-User` para probar aprobaciones); en Databricks el token de sesión propio viaja en el header `X-Session-Token`.
 
 ```mermaid
 sequenceDiagram
@@ -223,7 +223,8 @@ Cada respuesta trae un header `X-Request-ID` correlacionable con los logs. Endpo
 | Método | Ruta | Descripción |
 |---|---|---|
 | `GET` | `/api/health` | Estado + `db_connected`. |
-| `POST` | `/api/auth/login` | Login → `{token, user}` (`401` si falla). |
+| `POST` | `/api/auth/sso/login` | Login SSO (identidad de Databricks; whitelist) → `{token, user}` (`403` sin asignación). |
+| `POST` | `/api/auth/login` | Login por contraseña (admin) → `{token, user}` (`401` si falla). |
 | `POST` | `/api/auth/logout` | Cierra sesión. |
 | `GET` | `/api/auth/me` | Usuario en sesión + permisos efectivos. |
 | `GET/POST/PUT/DELETE` | `/api/admin/users[/{username}]` | CRUD de usuarios. |
@@ -332,6 +333,7 @@ Todas se leen en `app/core/config.py`; lo específico del entorno entra por `.en
 | `CORS_ORIGIN_REGEX` | — | Regex de orígenes (prod: matchea el front en cualquier workspace). |
 | `SECRET_KEY` | default inseguro de dev | Clave HMAC para firmar el JWT. Obligatoria en prod (desde el Key Vault vía `value_from`). |
 | `REQUIRE_AUTH` | `false` | `true` en prod: exige token, oculta la doc y activa el fail-closed. |
+| `PROXY_SHARED_SECRET` | `""` | Secreto compartido con el server del front: autentica el relay de identidad SSO (doc 38). En Apps llega por `valueFrom proxy_secret`; vacío + `REQUIRE_AUTH=true` → login SSO 503 (fail-closed). |
 | `ACCESS_TOKEN_TTL_MIN` | `720` (12 h) | Vida del token de acceso. |
 | `AUTH_MODE` | `local` | Seam de identidad: `local` o `databricks`. |
 | `ALLOWED_HOSTS` | — | Allowlist de hosts (activa `TrustedHostMiddleware` si se define). |
@@ -386,7 +388,7 @@ Los tests de identidad/permisos aprovechan `REQUIRE_AUTH=false` y el override `X
 
 El backend está pensado para correr como servicio ASGI (entrypoint `app.main:app`) detrás de un proxy con TLS. Dos destinos soportados:
 
-- **Databricks Apps** (destino primario). El `command` (`uvicorn app.main:app`) y las `env` de runtime viven en el **`app.yaml`** de la raíz del repo, que Databricks lee en cada arranque (Databricks inyecta host/puerto vía `UVICORN_HOST`/`UVICORN_PORT`). El bundle `databricks.yml` aporta las `variables:` por entorno, el binding del secreto `session_secret` y los permisos; el bloque `config:` **no** se usa (el CLI lo ignora, bug `databricks/cli` #4901). La BD (Lakebase) NO usa secretos: la app acuña tokens OAuth con su service principal (rol PG one-time, doc 28 §11.3). El único secreto es `SECRET_KEY`, resuelto desde un scope respaldado por Azure Key Vault con `value_from`. En prod se fija `REQUIRE_AUTH=true`, `LOG_FORMAT=json` y `CORS_ORIGIN_REGEX` que matchea el front en cualquier workspace.
+- **Databricks Apps** (destino primario). El `command` (`uvicorn app.main:app`) y las `env` de runtime viven en el **`app.yaml`** de la raíz del repo, que Databricks lee en cada arranque (Databricks inyecta host/puerto vía `UVICORN_HOST`/`UVICORN_PORT`). El bundle `databricks.yml` aporta las `variables:` por entorno, el binding del secreto `session_secret` y los permisos; el bloque `config:` **no** se usa (el CLI lo ignora, bug `databricks/cli` #4901). La BD (Lakebase) NO usa secretos: la app acuña tokens OAuth con su service principal (rol PG one-time, doc 28 §11.3). Los secretos son `SECRET_KEY` (firma de sesión) y `PROXY_SHARED_SECRET` (relay de identidad SSO, doc 38; el MISMO secret lo lee el front), resueltos desde el scope de secretos con `valueFrom`; el workflow asegura la existencia del segundo antes del deploy. En prod se fija `REQUIRE_AUTH=true`, `LOG_FORMAT=json` y `CORS_ORIGIN_REGEX` que matchea el front en cualquier workspace.
 - **Azure App Service** (alternativa). Correr `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y configurar las mismas variables de entorno como *App Settings*.
 
 Checklist mínimo de producción, independientemente del destino:

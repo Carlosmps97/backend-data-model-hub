@@ -64,7 +64,7 @@ X-Session-Token: <token>          # producción en Databricks Apps
 
 En producción el header `Authorization` NO llega al backend: el proxy SSO de Databricks Apps lo CONSUME como su propio carril de auth programática (verificado 2026-07-20 — FastAPI veía el Bearer ausente con el token válido en vuelo), y desde 2026-07-31 lo pone el server del front (`server.mjs`, token OAuth M2M del service principal), no el navegador. Por eso el token de sesión propio viaja en el header `X-Session-Token` (incluido en el allowlist de CORS).
 
-El token se obtiene en `POST /api/auth/login`. Sus claims son `sub` (el username), `iat`, `exp`, más `email`, `name` y `role`. La vida por defecto es de 720 minutos (12 horas), configurable con `ACCESS_TOKEN_TTL_MIN`.
+El token se obtiene en `POST /api/auth/sso/login` (identidad heredada del SSO de Databricks — carril principal, doc 38) o en `POST /api/auth/login` (contraseña — carril del administrador). Ambos emiten el MISMO token. Sus claims son `sub` (el username; en sesiones SSO es el correo en lowercase), `iat`, `exp`, más `email`, `name` y `role`. La vida por defecto es de 720 minutos (12 horas), configurable con `ACCESS_TOKEN_TTL_MIN`.
 
 Resolución de la identidad por request (`app/core/identity/dependencies.py`):
 
@@ -177,7 +177,8 @@ No requiere infraestructura propia más allá de la base de datos y las variable
 | `REQUIRE_AUTH` | `true` = login obligatorio (401 sin token); oculta `/docs`, `/redoc`, `/openapi.json` | `false` |
 | `RATE_LIMIT_ENABLED` | Fuerza el rate limiting aunque `REQUIRE_AUTH` sea false | `false` |
 | `AUTH_MODE` | `local` o `databricks` (seam de identidad de fallback) | `local` |
-| `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Usuario fake del seam local | `dev@local` / `""` / `""` |
+| `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Usuario fake del seam local (también la identidad del login SSO en dev sin headers) | `dev@local` / `""` / `""` |
+| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (doc 38). Vacío + `REQUIRE_AUTH=true` → el login SSO responde 503 | `""` (en Apps: `valueFrom proxy_secret`) |
 | `CORS_ORIGIN_REGEX` | Regex de orígenes permitidos (producción: `https://frnt-data-model-hub-.*\.databricksapps\.com`) | `""` |
 | `CORS_ORIGINS` | Allowlist exacta de orígenes (solo se usa sin regex) | `http://localhost:3000,http://127.0.0.1:3000` |
 | `ALLOWED_HOSTS` | Allowlist de hosts (TrustedHost) en producción | vacío (desactivado) |
@@ -214,9 +215,29 @@ erDiagram
 
 Prefijo del router: `/api/auth`.
 
+### 3.0 POST /api/auth/sso/login
+
+Propósito: iniciar sesión con la identidad heredada del SSO de Databricks Apps (doc 38). Sin body: la identidad llega en los headers de relay `x-dmh-sso-email` / `x-dmh-sso-username` / `x-dmh-sso-user-id`, que el server del front adjunta autenticados con `x-dmh-proxy-secret` (secreto compartido `PROXY_SHARED_SECRET`). Público (sin token), limitado a 10/minuto por IP.
+
+Reglas:
+
+- Con `PROXY_SHARED_SECRET` configurado: secreto ausente/errado → **401** genérico; sin correo en el relay → **401**.
+- Sin secreto configurado y `REQUIRE_AUTH=true` → **503** (fail-closed; el carril de contraseña sigue vivo).
+- Dev (sin secreto, sin `REQUIRE_AUTH`): acepta `x-dmh-sso-*` directos, `X-Forwarded-Email`, o cae a la simulación `LOCAL_DEV_USER`.
+- Correo (trim + lowercase) **no asignado a un rol** en Admin, o con `status: disabled` → **403** `{"detail": "This account has no access. Ask an administrator to assign your email to a role."}` (audita `login_sso_denied`).
+- Correo asignado → **200** con `{token, user}` — misma shape que `POST /api/auth/login` (audita `login_sso`). El nombre se resuelve best-effort (SCIM → `preferred_username` → derivado del correo) y se persiste en el doc solo si estaba vacío (también `initials` y `email`).
+
+curl (como lo emite el server del front):
+
+```bash
+curl -s -X POST https://api.ejemplo.com/api/auth/sso/login \
+  -H "x-dmh-proxy-secret: $PROXY_SHARED_SECRET" \
+  -H "x-dmh-sso-email: ana.gomez@empresa.com"
+```
+
 ### 3.1 POST /api/auth/login
 
-Propósito: autenticar por usuario y contraseña; devuelve el token de sesión y el usuario enriquecido con rol y permisos. Público (sin token), pero limitado a 5/minuto por IP y con lockout de cuenta.
+Propósito: autenticar por usuario y contraseña (carril del administrador — la UI solo lo expone para la cuenta local `admin`; las entradas de whitelist no tienen contraseña y no pueden usar este carril). Devuelve el token de sesión y el usuario enriquecido con rol y permisos. Público (sin token), pero limitado a 5/minuto por IP y con lockout de cuenta.
 
 Body (`LoginBody`):
 
@@ -358,9 +379,9 @@ Estado 2026-07-31: el flujo de warm-up por redirect FRACASÓ en el workspace cor
 
 Prefijo del router: `/api/admin`. TODOS los endpoints requieren el permiso `admin.manage` (403 si falta).
 
-Modelo de datos:
+Modelo de datos (doc 38 — la colección `users` funciona como WHITELIST de acceso: correos asignados a un rol que entran por SSO; las cuentas locales con contraseña, p.ej. `admin`, conviven en la misma lista):
 
-- Usuario (respuesta, sin `passwordHash`): `{ id, email, name, role, projectIds, status, initials }`. `status` es uno de `active | invited | disabled`.
+- Usuario (respuesta, sin `passwordHash`): `{ id, email, name, role, projectIds, status, initials, hasPassword }`. `status` es uno de `active | invited | disabled`. `hasPassword` es DERIVADO en lectura (true solo en cuentas locales; el front lo usa para mostrar el reset de contraseña).
 - Rol: `{ id, name, description, permissions }`, donde `permissions` es un mapa `permiso -> bool` filtrado al catálogo conocido.
 
 Guards de negocio (todos devuelven 400 con mensaje legible):
@@ -385,35 +406,38 @@ Respuesta 200:
 {
   "success": true,
   "data": [
-    { "id": "ana", "email": "ana@empresa.com", "name": "Ana Gomez", "role": "modelador", "projectIds": [], "status": "active", "initials": "AG" },
-    { "id": "beto", "email": "beto@empresa.com", "name": "Beto Diaz", "role": "revisor", "projectIds": ["p1"], "status": "active", "initials": "BD" }
+    { "id": "admin", "email": "", "name": "Administrator", "role": "administrador", "projectIds": [], "status": "active", "initials": "AD", "hasPassword": true },
+    { "id": "ana.gomez@empresa.com", "email": "ana.gomez@empresa.com", "name": "Ana Gomez", "role": "modelador", "projectIds": [], "status": "active", "initials": "AG", "hasPassword": false }
   ]
 }
 ```
 
 ### 4.2 POST /api/admin/users
 
-Propósito: crear (o upsertear por username) un usuario. La contraseña se hashea con bcrypt; se computan las iniciales a partir del nombre.
+Propósito: alta en la whitelist (doc 38) — lo normal es correo + rol, SIN contraseña (la entrada habilita el login SSO de esa cuenta de Databricks). Dos formas válidas, con guard en el service (400 si no se cumple):
+
+- `username` con `@` → **entrada SSO**: debe ser un correo válido; se normaliza a lowercase; `email` se autocompleta con el propio correo si no vino; sin contraseña. El nombre/iniciales los resuelve el primer login SSO.
+- `username` sin `@` → **cuenta local** (p.ej. `admin`): exige `password` (se hashea con bcrypt).
 
 Body (`UserCreate`):
 
 | Campo | Tipo | Requerido | Notas |
 |---|---|---|---|
-| `username` | string | sí | clave (`_id`) |
-| `email` | string | sí | |
-| `name` | string | sí | |
+| `username` | string | sí | clave (`_id`); correo lowercase en entradas SSO |
 | `role` | string | sí | key de un rol existente |
-| `password` | string | sí | 10 a 128 caracteres |
+| `email` | string | no | default: el propio `username` si es un correo |
+| `name` | string | no | default vacío (lo llena el primer login SSO) |
+| `password` | string | no | 10 a 128 si se envía; OBLIGATORIA solo para cuentas locales |
 | `projectIds` | string[] | no | default `[]` (vacío = todos) |
 | `status` | string | no | default `active` |
 
-curl:
+curl (alta típica de whitelist):
 
 ```bash
 curl -s -X POST https://api.ejemplo.com/api/admin/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username":"carla","email":"carla@empresa.com","name":"Carla Ruiz","role":"lector","password":"clave-larga-1"}'
+  -d '{"username":"carla.ruiz@empresa.com","role":"lector"}'
 ```
 
 Respuesta 201:
@@ -421,7 +445,7 @@ Respuesta 201:
 ```json
 {
   "success": true,
-  "data": { "id": "carla", "email": "carla@empresa.com", "name": "Carla Ruiz", "role": "lector", "projectIds": [], "status": "active", "initials": "CR" }
+  "data": { "id": "carla.ruiz@empresa.com", "email": "carla.ruiz@empresa.com", "name": "", "role": "lector", "projectIds": [], "status": "active", "initials": null, "hasPassword": false }
 }
 ```
 
@@ -653,7 +677,7 @@ Respuesta 200 (`Principal`: `{ email, username, display_name, source }`; `source
 
 ### 5.2 GET /api/users
 
-Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Endpoint sin dependencia propia de auth; con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
+Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Requiere sesión (`current_principal`, doc 38: la whitelist es un directorio de correos y no debe ser enumerable de forma anónima); con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
 
 Query params:
 
