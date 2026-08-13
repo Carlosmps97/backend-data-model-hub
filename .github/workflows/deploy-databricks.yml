@@ -118,34 +118,32 @@ jobs:
         run: databricks bundle validate --target "$BUNDLE_TARGET"
 
       # Doc 38: el app.yaml referencia el secreto compartido del relay SSO
-      # (`proxy_secret`). Si NO existe en el scope, la app quedaría sin arrancar
-      # tras el deploy — por eso se asegura ANTES: si el scope es
-      # Databricks-backed se crea solo (valor aleatorio, una vez; el front lee
-      # el MISMO secret); si es Azure KeyVault-backed (solo-lectura vía API) y
-      # falta, se ABORTA con la instrucción, sin tocar la app que corre.
-      - name: Asegurar el secreto del proxy (relay SSO, doc 38)
+      # (`proxy_secret`). El secreto se administra A MANO, igual que
+      # session-secret-key — este paso SOLO VERIFICA que exista (con la key
+      # equivocada o el secreto ausente, la app quedaria sin arrancar tras el
+      # deploy). Nunca crea nada. Acepta ambas shapes del CLI (array u objeto
+      # {"secrets": []}); si ni siquiera puede listar el scope, asume que
+      # existe y sigue.
+      - name: Verificar el secreto del proxy (relay SSO, doc 38)
         env:
           SCOPE: ${{ vars.SECRET_SCOPE || 'kv-scope-datacraft' }}
           KEY: ${{ vars.PROXY_SECRET_KEY || 'dmh-proxy-secret' }}
         run: |
-          if databricks secrets list-secrets "$SCOPE" --output json 2>/dev/null \
-               | jq -e --arg k "$KEY" '.secrets[]? | select(.key == $k)' > /dev/null; then
-            echo "· Secreto $SCOPE/$KEY ya existe."
+          LIST=$(databricks secrets list-secrets "$SCOPE" --output json 2>/dev/null) || {
+            echo "· No se pudo listar el scope $SCOPE: se asume que $KEY existe y se sigue."
             exit 0
+          }
+          if echo "$LIST" | jq -e --arg k "$KEY" \
+               '(.secrets? // .) | .[]? | select(.key == $k)' > /dev/null; then
+            echo "· Secreto $SCOPE/$KEY existe."
+          else
+            echo "ERROR: el secreto $SCOPE/$KEY no existe en el scope. Crealo UNA vez" >&2
+            echo "(mismo procedimiento que session-secret-key) y re-corre el deploy:" >&2
+            echo "  · Scope Azure KeyVault-backed: crear el secret '$KEY' en el Key Vault." >&2
+            echo "  · Scope Databricks-backed: databricks secrets put-secret $SCOPE $KEY" >&2
+            echo "Se aborta ANTES del deploy: la app que corre no se toca." >&2
+            exit 1
           fi
-          echo "· Secreto $SCOPE/$KEY no existe: intento crearlo…"
-          if databricks secrets put-secret "$SCOPE" "$KEY" \
-               --string-value "$(openssl rand -hex 32)" 2>/dev/null; then
-            echo "· Creado (valor aleatorio). El front lee el MISMO secret."
-            exit 0
-          fi
-          echo "ERROR: no se pudo crear $SCOPE/$KEY (¿scope Azure KeyVault-backed," >&2
-          echo "solo-lectura vía API?). Créalo a mano ANTES de re-correr el deploy:" >&2
-          echo "  · KV-backed: crear el secret '$KEY' en el Key Vault del scope." >&2
-          echo "  · Databricks-backed: databricks secrets put-secret $SCOPE $KEY \\" >&2
-          echo "      --string-value \"\$(openssl rand -hex 32)\"" >&2
-          echo "Se aborta ANTES del deploy: la app que corre no se toca." >&2
-          exit 1
 
       # Adopción de una app PRE-CREADA a mano. En workspaces con cupo de
       # apps (corporativos: se llenan y ya no dejan crear más) conviene

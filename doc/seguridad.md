@@ -711,7 +711,7 @@ La persistencia productiva y única es **Databricks Lakebase Postgres**, accedid
 | `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria. El host físico se resuelve solo vía SDK. | `app.yaml` (default `projects/dmh-proj/branches/production/endpoints/primary`) |
 | `LAKEBASE_PGSCHEMA` | Schema PG de las colecciones. | `dmh` |
 | `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Secreto `session-secret-key` del scope `kv-scope-datacraft`, inyectado con `valueFrom` (nunca en texto plano en el bundle ni en GitHub) |
-| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (`x-dmh-sso-*`, doc 38). Sin él y con `REQUIRE_AUTH=true`, el login SSO responde 503 (fail-closed). | Secreto `dmh-proxy-secret` del MISMO scope, inyectado con `valueFrom` en ambas apps; el workflow lo crea/verifica antes del deploy |
+| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (`x-dmh-sso-*`, doc 38). Sin él y con `REQUIRE_AUTH=true`, el login SSO responde 503 (fail-closed). | Secreto `dmh-proxy-secret` del MISMO scope, inyectado con `valueFrom` en ambas apps; se crea a mano UNA vez (igual que `session-secret-key`) y el workflow verifica que exista antes del deploy |
 | `REQUIRE_AUTH` | `true` activa la postura de producción (login obligatorio, docs ocultos, rate limit, falla-cerrado). | `true` |
 | `CORS_ORIGIN_REGEX` | Regex de orígenes del front. | Variable del bundle (default `https://frnt-data-model-hub-.*\.databricksapps\.com`) |
 | `CORS_ORIGINS` | Orígenes exactos adicionales (el default localhost SOLO aplica sin regex). | No se define |
@@ -759,7 +759,7 @@ Las versiones pineadas son las del entorno validado (pytest verde + suite viva L
 
 - [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default), vía el secreto `session-secret-key` del scope `kv-scope-datacraft` con `value_from` en el bundle. Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
 - [ ] `REQUIRE_AUTH=true` para activar login obligatorio, docs ocultos y rate limiting.
-- [ ] Secreto `dmh-proxy-secret` presente en el scope (el paso "Asegurar el secreto del proxy" del workflow lo crea o aborta el deploy con la instrucción) y `PROXY_SHARED_SECRET` inyectado en AMBAS apps — sin él, el botón "Continue with Databricks" responde 503 (el carril admin sigue vivo). Si se rota, redeploy/restart de las dos apps.
+- [ ] Secreto `dmh-proxy-secret` presente en el scope — se crea a mano UNA vez, igual que `session-secret-key` (el paso "Verificar el secreto del proxy" del workflow solo comprueba que exista y aborta el deploy con la instrucción si falta) y `PROXY_SHARED_SECRET` inyectado en AMBAS apps — sin él, el botón "Continue with Databricks" responde 503 (el carril admin sigue vivo). Si se rota, redeploy/restart de las dos apps.
 - [ ] Al menos un correo whitelisteado en Admin (o la cuenta `admin` a mano) para poder entrar tras el deploy.
 - [ ] `CORS_ORIGIN_REGEX` (y/o `CORS_ORIGINS`) apuntando solo al frontend real (sin comodines).
 - [ ] `ALLOWED_HOSTS` con los hosts públicos del servicio, si se usa TrustedHost.
