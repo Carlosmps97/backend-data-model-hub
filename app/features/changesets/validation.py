@@ -90,7 +90,7 @@ def validate_changes(changes: dict) -> list[str]:
 # Tablas: (schema, physicalName) case-insensitive contra publicado activo +
 # upserts pendientes del mismo changeset. Columnas: physicalName dentro de su
 # tableId. La comparación es sobre el estado EFECTIVO del slice (los deletes
-# pendientes del changeset LIBERAN el nombre). Cosmos no permite índices
+# pendientes del changeset LIBERAN el nombre). El adaptador no soporta índices
 # únicos sobre colecciones pobladas → la garantía vive en el router.
 
 

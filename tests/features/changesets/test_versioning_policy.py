@@ -344,7 +344,7 @@ def test_apply_and_finalize_payload_invalido_revierte_y_no_aplica(monkeypatch):
 
 
 def test_apply_and_finalize_fallo_de_apply_devuelve_a_revision(monkeypatch):
-    """Si el bulk de apply FALLA (throttling/timeout de Cosmos), el request
+    """Si el bulk de apply FALLA (throttling o timeout), el request
     vuelve a `submitted` (el apply es idempotente: re-aprobar reintenta) y la
     excepción se propaga — nunca queda `approved` con producción a medias por
     un error recuperable."""

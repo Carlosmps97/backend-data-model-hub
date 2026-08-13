@@ -200,7 +200,6 @@ _TOKEN = _w.config.authenticate()["Authorization"].split(" ", 1)[1]
 
 ENV = {
     **os.environ,
-    "DB_BACKEND": "lakebase",
     "DATABRICKS_HOST": _HOST,
     "DATABRICKS_TOKEN": _TOKEN,
     "LAKEBASE_ENDPOINT": LAKEBASE_ENDPOINT,

@@ -10,7 +10,7 @@ eso lleva `projectIds[]` (chips de proyecto en el UI).
 
 Los cambios en sí NO viven en el documento del changeset: cada cambio es UN
 documento de la colección `changeset_changes` ({@link ChangeDoc}). El viejo dict
-embebido `changes` topaba el límite de 2MB/doc de Cosmos RU con ~2-4k entidades
+embebido `changes` crecía sin techo con ~2-4k entidades
 tocadas — un changeset grande dejaba de poder guardarse a mitad del trabajo.
 Docs legacy con `changes` embebido se ignoran al leer (`extra="ignore"`);
 `scripts/migrate_changes_to_collection.py` los migra one-shot.

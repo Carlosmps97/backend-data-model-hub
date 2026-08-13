@@ -1,8 +1,7 @@
 # Scripts del backend — kit XML → Lakebase
 
 **Actualizado:** 2026-07-24 (doc 32b: kit multi-archivo) · **Todo corre contra
-Lakebase** (`DB_BACKEND=lakebase`, conexión del `.env`), **desde la raíz del
-backend** con su `.venv`.
+Lakebase** (conexión del `.env`), **desde la raíz del backend** con su `.venv`.
 
 Guía detallada de la migración (flags, políticas, qué migra y qué no):
 `doc/migracion-erwin.md`. Un modelo Erwin llega partido en ~15 archivos: el
@@ -80,7 +79,8 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 .venv/bin/python -m scripts.e2e.run_e2e s02_version_lifecycle
 .venv/bin/python scripts/e2e/e2e_schemas.py                 # suites específicas: e2e_relationships,
                                                             # e2e_rollback, e2e_views_versionadas,
-                                                            # e2e_estructura_versionada
+                                                            # e2e_estructura_versionada, e2e_sso
+                                                            # (login SSO + whitelist, doc 38)
 
 # Recuperar un publish que murió a la mitad
 .venv/bin/python scripts/reapply_changeset.py [changeset_id]
@@ -143,6 +143,6 @@ aborta sin tocar nada). Preserva usuarios/roles, naming_config,
 `backfill_udp_allowed_values` · `backfill_view_col_defs` (su lógica ya vive en
 `migrate`) · `migrate_changes_to_collection` · `migrate_view_sources` ·
 `migrate_view_source_tables` · `fix_udp_canvas_data` ·
-`lakebase/` (migración Cosmos→Lakebase, ejecutada el 2026-07-19).
+`lakebase/` (utilería de carga inicial de datos a Lakebase, retirada).
 (`reset_to_base_version` se retiró y se RESTAURÓ el mismo día como herramienta
 permanente, sin la dependencia del seed.)

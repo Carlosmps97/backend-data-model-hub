@@ -1,6 +1,6 @@
 # Políticas de seguridad del backend — Data Model Hub
 
-Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador Motor-like en `app/core/db/lakebase/`; Azure Cosmos DB queda solo como fallback legacy vía `DB_BACKEND=cosmos`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
+Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador estilo pymongo en `app/core/db/lakebase/`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
 
 La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders técnicos que necesitan entender la postura de riesgo. Todo lo que sigue está verificado contra el código real; cuando el texto afirma "falla-cerrado" o "tiempo constante" es porque el código lo hace, no porque suene bien.
 
@@ -47,7 +47,22 @@ flowchart LR
 
 ## 2. Autenticación
 
-La autenticación es propia: usuario y contraseña contra la colección `users` de la base de datos (Lakebase en producción), con el hash guardado por bcrypt y una sesión emitida como JWT firmado. No hay dependencia de un IdP externo para autenticar dentro de la app (el modo Databricks solo derivaría identidad de cabeceras SSO si se reactivara, pero hoy no se usa para autenticar); el SSO de Databricks Apps es una capa previa e independiente (sección 1b).
+La sesión es propia (JWT firmado) y nace por **dos carriles** (doc 38):
+
+1. **SSO heredado de Databricks (carril principal).** El proxy de Databricks Apps ya autenticó al usuario ante el front (Entra ID detrás; transparente para la app); el `server.mjs` del front releva esa identidad al backend en headers propios `x-dmh-sso-*` autenticados con un **secreto compartido** (`x-dmh-proxy-secret`, sección 2.0). `POST /api/auth/sso/login` valida el secreto, normaliza el correo (trim + lowercase) y lo busca en la **whitelist** — la colección `users`, donde el módulo Admin asigna correos a una matriz de rol. Correo asignado y activo → se emite el MISMO JWT del carril clásico; correo ausente o deshabilitado → 403 (`login_sso_denied` en auditoría). Las entradas de whitelist **no tienen contraseña**.
+2. **Contraseña (carril del administrador).** Usuario y contraseña contra la misma colección `users` (hash bcrypt), como siempre. La UI solo lo expone para la cuenta local `admin`; a nivel API sigue siendo genérico para cualquier cuenta que conserve `passwordHash` (las entradas de whitelist no lo tienen, así que no pueden entrar por acá).
+
+El SSO de Databricks Apps sigue siendo además la capa previa e independiente de la sección 1b (nadie llega a las apps sin pasar por él).
+
+### 2.0 Relay de identidad SSO y secreto compartido (doc 38)
+
+Los headers de identidad del proxy de Databricks (`X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-User`) llegan **al front** (único origen que ve el navegador, doc 36). El `server.mjs` del front, en cada request proxeada a `/api/*`:
+
+1. **borra** cualquier header entrante `x-dmh-*` (un `fetch()` del navegador no puede suplantar el relay);
+2. copia la identidad atestada por el proxy a `x-dmh-sso-email` / `x-dmh-sso-username` / `x-dmh-sso-user-id`;
+3. adjunta `x-dmh-proxy-secret` (env `PROXY_SHARED_SECRET`, secreto del scope compartido con el backend).
+
+El backend (`app/features/auth/sso.py`) exige el secreto con comparación constant-time (`hmac.compare_digest`) y solo entonces lee los `x-dmh-sso-*`. El diseño **no depende de ningún comportamiento no documentado** del proxy de Databricks (pise o no los `X-Forwarded-*` entrantes): el grupo `users` tiene CAN_USE sobre la app backend y podría golpearla directo con curl y headers forjados — sin el secreto, esos headers se ignoran (401 genérico). Fail-closed: con `REQUIRE_AUTH=true` y sin `PROXY_SHARED_SECRET` configurado, el endpoint SSO responde 503 y el carril del administrador sigue vivo. El nombre para mostrar no viene en headers: se resuelve best-effort (SCIM del workspace con la misma cadena de credenciales de Lakebase → `preferred_username` si no es un correo → derivado del local-part) y se persiste solo si el doc no traía uno.
 
 ### 2.1 Hash de contraseñas: bcrypt en tiempo constante
 
@@ -187,7 +202,8 @@ Definidos en `app/features/auth/router.py`:
 
 | Método y ruta | Descripción | Respuesta |
 |---|---|---|
-| `POST /api/auth/login` | Login usuario/contraseña. Rate-limited `5/minute` por IP real. | `{token, user}` o 401 |
+| `POST /api/auth/sso/login` | Login SSO (identidad de Databricks vía relay + secreto; whitelist de correos). Rate-limited `10/minute` por IP real. | `{token, user}`, 401/403 o 503 |
+| `POST /api/auth/login` | Login usuario/contraseña (carril del administrador). Rate-limited `5/minute` por IP real. | `{token, user}` o 401 |
 | `POST /api/auth/logout` | Cierra sesión (audita `logout`). | `{ok: true}` |
 | `GET /api/auth/me` | Usuario en sesión enriquecido con rol y permisos efectivos. | usuario o Principal básico |
 | `GET /api/auth/warmup/{next_b64}` | Warm-up SSO para Databricks Apps (doc 36): `next` viaja en el path como base64url y se valida contra el mismo allowlist de CORS (lista + regex, anti open-redirect). Quedó **inerte** en producción tras el proxy del front (sección 1b); útil solo en dev apuntando a otro backend. | 302 a `next` o 400 |
@@ -680,22 +696,22 @@ La postura de producción se activa con `REQUIRE_AUTH=true` en el env del bundle
 
 ### 14.2 Base de datos
 
-La persistencia productiva es **Databricks Lakebase Postgres** (doc 28), accedida por el adaptador Motor-like de `app/core/db/lakebase/` (cada "colección" es una tabla `(id, doc jsonb)` en el schema `dmh`). Consideraciones de seguridad:
+La persistencia productiva y única es **Databricks Lakebase Postgres**, accedida por el adaptador estilo `pymongo` de `app/core/db/lakebase/` (cada "colección" es una tabla `(id, doc jsonb)` en el schema `dmh`). Consideraciones de seguridad:
 
 - **Sin secretos de base de datos estáticos.** El bundle no lleva PAT ni cadena de conexión: el pool se autentica con un **token OAuth de ~1 h que la app acuña sola** con el service principal que Apps inyecta (`DATABRICKS_CLIENT_ID/SECRET`, OAuth M2M) y renueva con caché thread-safe de 50 minutos. El rol de Postgres es el client-id del SP (alta one-time por workspace, doc 35).
 - **Los usuarios finales jamás tocan la base** (capa 3 de la sección 1b): toda operación pasa por el RBAC de la app.
 - **Índices**: `ensure_indexes()` corre en el `lifespan` al arrancar (idempotente, ~35 índices sobre los campos de filtro y orden del reporting y la governance).
 - **Borrado lógico.** Los documentos usan `flgactive`; los filtros incluyen `{"flgactive": {"$ne": False}}` para excluir los borrados. La conexión se abre y cierra en el `lifespan` de FastAPI (con reintento en background si la BD no estaba disponible al arrancar).
-- **Cosmos = legacy/rollback.** El seam `DB_BACKEND=cosmos` conserva el camino a Azure Cosmos DB (API de Mongo, `COSMOS_CONNECTION_STRING` como secreto) solo como fallback; en el bundle corporativo Cosmos no existe (ni variables, ni secretos, ni env).
+- **Única BD, sin conmutador de backend.** El acceso a datos vive solo en el adaptador `app/core/db/lakebase/` (el guard `test_store_boundary.py` prohíbe importar `motor`/`pymongo` fuera de él); no existe un switch de backend ni un driver alternativo. Lakebase es la única base de datos.
 
 ### 14.3 Variables de entorno (estado corporativo 2026-07-31)
 
-| Variable | Propósito | Producción (bundle) |
+| Variable | Propósito | Producción (`app.yaml`) |
 |---|---|---|
-| `DB_BACKEND` | `lakebase` (default) o `cosmos` (legacy/rollback). | `lakebase` |
-| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria con lakebase. El host físico se resuelve solo vía SDK. | Variable del bundle (default `projects/dmh-proj/branches/production/endpoints/primary`) |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria. El host físico se resuelve solo vía SDK. | `app.yaml` (default `projects/dmh-proj/branches/production/endpoints/primary`) |
 | `LAKEBASE_PGSCHEMA` | Schema PG de las colecciones. | `dmh` |
-| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Secreto `session-secret-key` del scope `kv-scope-datacraft`, inyectado con `value_from` (nunca en texto plano en el bundle ni en GitHub) |
+| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Secreto `session-secret-key` del scope `kv-scope-datacraft`, inyectado con `valueFrom` (nunca en texto plano en el bundle ni en GitHub) |
+| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (`x-dmh-sso-*`, doc 38). Sin él y con `REQUIRE_AUTH=true`, el login SSO responde 503 (fail-closed). | Secreto `dmh-proxy-secret` del MISMO scope, inyectado con `valueFrom` en ambas apps; el workflow lo crea/verifica antes del deploy |
 | `REQUIRE_AUTH` | `true` activa la postura de producción (login obligatorio, docs ocultos, rate limit, falla-cerrado). | `true` |
 | `CORS_ORIGIN_REGEX` | Regex de orígenes del front. | Variable del bundle (default `https://frnt-data-model-hub-.*\.databricksapps\.com`) |
 | `CORS_ORIGINS` | Orígenes exactos adicionales (el default localhost SOLO aplica sin regex). | No se define |
@@ -705,22 +721,27 @@ La persistencia productiva es **Databricks Lakebase Postgres** (doc 28), accedid
 | `AUTH_MODE` / `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Seam de identidad de desarrollo (fallback sin token). | No usar en prod |
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Solo dev local (PAT u OAuth U2M del SDK). En Apps el runtime inyecta `DATABRICKS_HOST` y `DATABRICKS_CLIENT_ID/SECRET`; **no hay PAT en el bundle**. | No se setean |
 
-Extracto real del `databricks.yml` (la clave de firma nunca viaja en claro):
+Extracto real (los secretos nunca viajan en claro): el `command`+`env` viven en
+`app.yaml` (bug CLI #4901 — el bloque `config:` del bundle se ignora) y los
+bindings de secretos en `databricks.yml`:
 
 ```yaml
-config:
-  command: ['uvicorn', 'app.main:app']
-  env:
-    - name: REQUIRE_AUTH
-      value: 'true'
-    - name: SECRET_KEY
-      value_from: session_secret
+# app.yaml (raíz del repo)
+command: ["uvicorn", "app.main:app"]
+env:
+  - name: REQUIRE_AUTH
+    value: "true"
+  - name: SECRET_KEY
+    valueFrom: session_secret
+  - name: PROXY_SHARED_SECRET      # relay de identidad SSO (doc 38)
+    valueFrom: proxy_secret
+
+# databricks.yml (resources del app)
 resources:
   - name: session_secret
-    secret:
-      scope: ${var.secret_scope}        # kv-scope-datacraft
-      key: ${var.session_secret_key}    # session-secret-key
-      permission: READ
+    secret: { scope: ${var.secret_scope}, key: ${var.session_secret_key}, permission: READ }
+  - name: proxy_secret
+    secret: { scope: ${var.secret_scope}, key: ${var.proxy_secret_key}, permission: READ }
 ```
 
 ### 14.4 Cadena de suministro: dependencias pineadas
@@ -738,6 +759,8 @@ Las versiones pineadas son las del entorno validado (pytest verde + suite viva L
 
 - [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default), vía el secreto `session-secret-key` del scope `kv-scope-datacraft` con `value_from` en el bundle. Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
 - [ ] `REQUIRE_AUTH=true` para activar login obligatorio, docs ocultos y rate limiting.
+- [ ] Secreto `dmh-proxy-secret` presente en el scope (el paso "Asegurar el secreto del proxy" del workflow lo crea o aborta el deploy con la instrucción) y `PROXY_SHARED_SECRET` inyectado en AMBAS apps — sin él, el botón "Continue with Databricks" responde 503 (el carril admin sigue vivo). Si se rota, redeploy/restart de las dos apps.
+- [ ] Al menos un correo whitelisteado en Admin (o la cuenta `admin` a mano) para poder entrar tras el deploy.
 - [ ] `CORS_ORIGIN_REGEX` (y/o `CORS_ORIGINS`) apuntando solo al frontend real (sin comodines).
 - [ ] `ALLOWED_HOSTS` con los hosts públicos del servicio, si se usa TrustedHost.
 - [ ] `LAKEBASE_ENDPOINT` apuntando al endpoint del workspace; sin PAT ni cadenas de conexión en el bundle (el token de BD lo acuña la app con su service principal).

@@ -111,7 +111,7 @@ async def corpus_conflicts(pattern: str) -> tuple[list[dict], int]:
         c_docs = await db[COLUMNS_COLL].find(
             flt, {"physicalName": 1, "logicalName": 1, "tableId": 1},
         ).limit(remaining).to_list(None)
-        # Nombres de tabla en batch (NO $lookup: Cosmos).
+        # Nombres de tabla en batch (NO $lookup, joins en Python a propósito).
         table_ids = list({c.get("tableId") for c in c_docs if c.get("tableId")})
         names: dict[str, str] = {}
         if table_ids:
@@ -159,7 +159,7 @@ async def entities_for_rephysicalize(scope: str) -> list[dict]:
 
 async def update_physical_names(scope: str, updates: list[tuple[str, str]]) -> int:
     """Aplica `(id, new_physical)` a la colección del scope. Update directo, uno
-    por entidad (Cosmos no garantiza bulk transaccional). Sólo escribe las que
+    por entidad (el store no garantiza bulk transaccional). Sólo escribe las que
     cambian (el caller ya filtró). Devuelve el nº de docs actualizados."""
     if not updates:
         return 0

@@ -41,7 +41,7 @@ async def get_schema(sid: str) -> dict | None:
 
 async def find_by_name(name: str) -> dict | None:
     """Esquema ACTIVO por nombre exacto case-insensitive (chequeo de unicidad:
-    Cosmos no permite índices únicos sobre colecciones pobladas — la garantía
+    el adaptador no soporta índices únicos sobre colecciones pobladas — la garantía
     vive en el service, mismo criterio que canonical_tables)."""
     db = await get_db()
     doc = await db[SCHEMAS].find_one({

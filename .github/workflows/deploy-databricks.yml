@@ -41,10 +41,12 @@ jobs:
       # OJO: endpoint/schema/CORS del Lakebase ya NO son variables del bundle
       # (se movieron a app.yaml como env de runtime). Solo quedan las que
       # alimentan el binding del secreto y los permisos, que el bundle SÍ aplica.
+      # Los env de runtime del app.yaml se parametrizan en el paso siguiente.
       - name: Parámetros del bundle desde GitHub Variables
         env:
           SECRET_SCOPE: ${{ vars.SECRET_SCOPE }}
           SESSION_SECRET_KEY: ${{ vars.SESSION_SECRET_KEY }}
+          PROXY_SECRET_KEY: ${{ vars.PROXY_SECRET_KEY }}
           APP_ADMIN_USER: ${{ vars.APP_ADMIN_USER }}
         run: |
           set_var() {   # $1 = variable del bundle · $2 = valor de GitHub
@@ -55,7 +57,45 @@ jobs:
           echo "Workspace (DATABRICKS_HOST): $DATABRICKS_HOST"
           set_var secret_scope        "$SECRET_SCOPE"
           set_var session_secret_key  "$SESSION_SECRET_KEY"
+          set_var proxy_secret_key    "$PROXY_SECRET_KEY"
           set_var app_admin_user      "$APP_ADMIN_USER"
+
+      # Env de runtime del app.yaml desde GitHub Variables (mismo criterio que
+      # el paso de arriba, pero para el app.yaml en vez del bundle). Cada env
+      # `value:` se sobrescribe con una GitHub Variable HOMÓNIMA; si NO está
+      # definida (vacía), se conserva el valor commiteado del app.yaml (default)
+      # → el deploy de prod actual queda IDÉNTICO. En otro workspace basta
+      # definir la Variable, sin editar el repo.
+      #   · LOG_FORMAT · LAKEBASE_ENDPOINT · LAKEBASE_PGSCHEMA
+      #   · CORS_ORIGIN_REGEX · REQUIRE_AUTH
+      # app.yaml SIGUE siendo la fuente (no se borra, NO vuelve a `config:`):
+      # solo se le inyectan los valores por entorno justo antes del deploy, que
+      # `bundle deploy` sube con el resto del código (source_code_path: .).
+      # `yq` (mikefarah) viene preinstalado en ubuntu-latest; `strenv` mete el
+      # valor como string literal (respeta backslashes del regex CORS) y
+      # `style="double"` preserva el tipo string (p.ej. REQUIRE_AUTH "true").
+      - name: Env del app.yaml desde GitHub Variables (override opcional)
+        env:
+          LOG_FORMAT: ${{ vars.LOG_FORMAT }}
+          LAKEBASE_ENDPOINT: ${{ vars.LAKEBASE_ENDPOINT }}
+          LAKEBASE_PGSCHEMA: ${{ vars.LAKEBASE_PGSCHEMA }}
+          CORS_ORIGIN_REGEX: ${{ vars.CORS_ORIGIN_REGEX }}
+          REQUIRE_AUTH: ${{ vars.REQUIRE_AUTH }}
+        run: |
+          set_env() {   # $1 = name del env en app.yaml · $2 = valor de la GitHub Variable
+            if [ -z "$2" ]; then echo "· $1 → default de app.yaml (committed)"; return; fi
+            NAME="$1" VAL="$2" yq -i \
+              '(.env[] | select(.name == strenv(NAME)) | .value) = strenv(VAL)
+               | (.env[] | select(.name == strenv(NAME)) | .value) style="double"' app.yaml
+            echo "· $1 = $2   (GitHub Variables)"
+          }
+          set_env LOG_FORMAT         "$LOG_FORMAT"
+          set_env LAKEBASE_ENDPOINT  "$LAKEBASE_ENDPOINT"
+          set_env LAKEBASE_PGSCHEMA  "$LAKEBASE_PGSCHEMA"
+          set_env CORS_ORIGIN_REGEX  "$CORS_ORIGIN_REGEX"
+          set_env REQUIRE_AUTH       "$REQUIRE_AUTH"
+          echo "── app.yaml env efectivo ──"
+          yq '.env' app.yaml
 
       # `bundle deploy` instala el provider Terraform de Databricks. El CLI usa
       # OpenTofu por debajo y fija el provider a registry.opentofu.org; en el
@@ -76,6 +116,36 @@ jobs:
 
       - name: Validate bundle
         run: databricks bundle validate --target "$BUNDLE_TARGET"
+
+      # Doc 38: el app.yaml referencia el secreto compartido del relay SSO
+      # (`proxy_secret`). Si NO existe en el scope, la app quedaría sin arrancar
+      # tras el deploy — por eso se asegura ANTES: si el scope es
+      # Databricks-backed se crea solo (valor aleatorio, una vez; el front lee
+      # el MISMO secret); si es Azure KeyVault-backed (solo-lectura vía API) y
+      # falta, se ABORTA con la instrucción, sin tocar la app que corre.
+      - name: Asegurar el secreto del proxy (relay SSO, doc 38)
+        env:
+          SCOPE: ${{ vars.SECRET_SCOPE || 'kv-scope-datacraft' }}
+          KEY: ${{ vars.PROXY_SECRET_KEY || 'dmh-proxy-secret' }}
+        run: |
+          if databricks secrets list-secrets "$SCOPE" --output json 2>/dev/null \
+               | jq -e --arg k "$KEY" '.secrets[]? | select(.key == $k)' > /dev/null; then
+            echo "· Secreto $SCOPE/$KEY ya existe."
+            exit 0
+          fi
+          echo "· Secreto $SCOPE/$KEY no existe: intento crearlo…"
+          if databricks secrets put-secret "$SCOPE" "$KEY" \
+               --string-value "$(openssl rand -hex 32)" 2>/dev/null; then
+            echo "· Creado (valor aleatorio). El front lee el MISMO secret."
+            exit 0
+          fi
+          echo "ERROR: no se pudo crear $SCOPE/$KEY (¿scope Azure KeyVault-backed," >&2
+          echo "solo-lectura vía API?). Créalo a mano ANTES de re-correr el deploy:" >&2
+          echo "  · KV-backed: crear el secret '$KEY' en el Key Vault del scope." >&2
+          echo "  · Databricks-backed: databricks secrets put-secret $SCOPE $KEY \\" >&2
+          echo "      --string-value \"\$(openssl rand -hex 32)\"" >&2
+          echo "Se aborta ANTES del deploy: la app que corre no se toca." >&2
+          exit 1
 
       # Adopción de una app PRE-CREADA a mano. En workspaces con cupo de
       # apps (corporativos: se llenan y ya no dejan crear más) conviene

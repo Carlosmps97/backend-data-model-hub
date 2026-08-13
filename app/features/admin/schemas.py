@@ -10,11 +10,15 @@ _PW_MIN, _PW_MAX = 10, 128
 
 
 class UserCreate(BaseModel):
+    """Alta en la whitelist (doc 38): lo normal es `username` = correo + `role`,
+    SIN contraseña (la entrada da acceso vía SSO de Databricks). `password`
+    queda para cuentas locales (username sin `@`, p.ej. `admin`) — el service
+    exige una u otra forma."""
     username: str
-    email: str
-    name: str
+    email: str = ""
+    name: str = ""
     role: str
-    password: str = Field(min_length=_PW_MIN, max_length=_PW_MAX)
+    password: str | None = Field(default=None, min_length=_PW_MIN, max_length=_PW_MAX)
     projectIds: list[str] = []
     status: str = "active"
 

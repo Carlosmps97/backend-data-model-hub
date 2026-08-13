@@ -31,6 +31,12 @@ variables:
     # GitHub Variable: SESSION_SECRET_KEY
     description: "Key del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
     default: session-secret-key
+  proxy_secret_key:
+    # GitHub Variable: PROXY_SECRET_KEY (opcional; su valor es la KEY del
+    # secreto en el scope — misma key en el front).
+    # Doc 38: autentica el relay de identidad SSO front→back (x-dmh-proxy-secret).
+    description: "Key del secreto compartido entre las apps front y backend (relay SSO)."
+    default: dmh-proxy-secret
   app_admin_user:
     # GitHub Variable: APP_ADMIN_USER (opcional).
     # Cuando el deploy lo hace un SERVICE PRINCIPAL (token de CI), `mode:
@@ -57,6 +63,12 @@ resources:
           secret:
             scope: ${var.secret_scope}
             key: ${var.session_secret_key}
+            permission: READ
+        - name: proxy_secret
+          description: "Secreto compartido front↔backend que autentica el relay de identidad SSO (doc 38)."
+          secret:
+            scope: ${var.secret_scope}
+            key: ${var.proxy_secret_key}
             permission: READ
       permissions:
         - level: CAN_MANAGE       # el humano dueño: stop/start/logs/permissions en la UI

@@ -83,8 +83,8 @@ No reimplementa nada: invoca estos mismos scripts vía subprocess (detalle en
 el doc 35 §4.1 de plan-implementacion/).
 
 **Requisitos:** el `.venv` del backend (el parseo usa solo stdlib; `migrate
---apply` y `arrange_all` usan la conexión del `.env` según `DB_BACKEND` —
-`lakebase` = Databricks Lakebase Postgres vía `app/core/db/sync.get_sync_db()`).
+--apply` y `arrange_all` usan la conexión Lakebase del `.env`
+(Databricks Lakebase Postgres vía `app/core/db/sync.get_sync_db()`).
 `arrange_all` necesita además **node** y el elkjs del front (o `ELKJS_PATH`).
 Todos se ejecutan **desde la raíz del backend**. Los comandos y flags de esta
 guía NO cambiaron con la migración de BD.

@@ -5,7 +5,7 @@ se dropea al final. Por eso NO corre en el pytest normal: activar con
 
     LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q
 
-Cubre la superficie Motor/PyMongo del inventario (doc 28 §5) y los 8 shapes
+Cubre la superficie pymongo del inventario (doc 28 §5) y los 8 shapes
 de pipeline reales del reporting con fixtures sintéticas.
 """
 

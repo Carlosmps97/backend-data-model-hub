@@ -146,6 +146,16 @@ def test_login_cuenta_bloqueada_no_entra_ni_con_pass_correcta(monkeypatch):
     assert aud.await_args.args[1] == "login_locked"
 
 
+def test_to_user_deriva_haspassword_sin_exponer_hash():
+    """`hasPassword` se deriva en lectura (doc 38: el front muestra el reset de
+    contraseña solo en cuentas locales) y el hash JAMÁS sale."""
+    from app.features.auth.repository import _to_user
+    local = _to_user({"_id": "admin", "passwordHash": "h", "role": "administrador"})
+    assert local["hasPassword"] is True and "passwordHash" not in local
+    sso_entry = _to_user({"_id": "a@b.co", "role": "lector"})
+    assert sso_entry["hasPassword"] is False
+
+
 def test_resolve_session_user_deshabilitado_es_none(monkeypatch):
     """Deshabilitar un usuario revoca su SESIÓN activa (no solo el login): las
     dependencias de permiso resuelven None → 403, aunque el token siga vigente."""

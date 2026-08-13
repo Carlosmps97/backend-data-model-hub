@@ -6,7 +6,7 @@ Actualizado: 2026-07-31. Referencia completa de los 128 endpoints de la API REST
 
 # Contrato de API — Parte 1
 
-Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva es **Databricks Lakebase Postgres**, consumida vía el adaptador Motor-like de `app/core/db/lakebase/` (`DB_BACKEND=lakebase`); Azure Cosmos DB (API de Mongo) queda como seam legacy/rollback (`DB_BACKEND=cosmos`). Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia según el backend.
+Auth, Admin, Identity, Catalog, Glossary, Domains, UDP, Data Standards, DDL Export Rules y Settings del backend de plataforma (`backend-data-model-hub`, FastAPI). La base de datos productiva y ÚNICA es **Databricks Lakebase Postgres**, consumida vía el adaptador de `app/core/db/lakebase/`, que expone una superficie de consulta async emulando el vocabulario de tipos/operaciones de pymongo (`ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre Postgres — no conecta a Mongo. Donde este contrato habla de "colecciones", en Lakebase cada colección es una tabla `(id text PRIMARY KEY, doc jsonb)` con la misma superficie de consulta — el contrato HTTP no cambia.
 
 Este documento describe, para cada endpoint del alcance de la Parte 1: propósito, método y ruta, parámetros/body con tipos, un ejemplo de invocación con `curl` y la respuesta esperada. Todo lo aquí documentado sale del código real de los routers, schemas, services y repositories de cada feature.
 
@@ -64,7 +64,7 @@ X-Session-Token: <token>          # producción en Databricks Apps
 
 En producción el header `Authorization` NO llega al backend: el proxy SSO de Databricks Apps lo CONSUME como su propio carril de auth programática (verificado 2026-07-20 — FastAPI veía el Bearer ausente con el token válido en vuelo), y desde 2026-07-31 lo pone el server del front (`server.mjs`, token OAuth M2M del service principal), no el navegador. Por eso el token de sesión propio viaja en el header `X-Session-Token` (incluido en el allowlist de CORS).
 
-El token se obtiene en `POST /api/auth/login`. Sus claims son `sub` (el username), `iat`, `exp`, más `email`, `name` y `role`. La vida por defecto es de 720 minutos (12 horas), configurable con `ACCESS_TOKEN_TTL_MIN`.
+El token se obtiene en `POST /api/auth/sso/login` (identidad heredada del SSO de Databricks — carril principal, doc 38) o en `POST /api/auth/login` (contraseña — carril del administrador). Ambos emiten el MISMO token. Sus claims son `sub` (el username; en sesiones SSO es el correo en lowercase), `iat`, `exp`, más `email`, `name` y `role`. La vida por defecto es de 720 minutos (12 horas), configurable con `ACCESS_TOKEN_TTL_MIN`.
 
 Resolución de la identidad por request (`app/core/identity/dependencies.py`):
 
@@ -165,21 +165,20 @@ No requiere infraestructura propia más allá de la base de datos y las variable
 
 | Variable | Propósito | Default |
 |---|---|---|
-| `DB_BACKEND` | Seam de base de datos: `lakebase` (productivo) o `cosmos` (legacy/rollback) | `lakebase` |
-| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase (`projects/…/branches/…/endpoints/…`); obligatoria con lakebase | `""` |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint Lakebase (`projects/…/branches/…/endpoints/…`); obligatoria | `""` |
 | `LAKEBASE_PGSCHEMA` | Schema Postgres donde viven las colecciones | `dmh` |
 | `PGHOST` / `PGPORT` / `PGDATABASE` / `PGSSLMODE` | Conexión Postgres; `PGHOST` vacío se auto-resuelve vía SDK | `""` / `5432` / `databricks_postgres` / `require` |
 | `PGUSER` | Rol PG (fallback: `DATABRICKS_CLIENT_ID` del service principal) | `""` |
 | `PGPASSWORD` | Password fijo para scripts (escape hatch sin SDK; en runtime el password es un token OAuth rotativo) | `""` |
 | `PGDIRECTTLS` | `true` fuerza TLS directo (ALPN `postgresql`), `false` clásico; vacío = auto | `""` |
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Workspace del SDK / PAT en dev local (en Apps la identidad es el SP vía `DATABRICKS_CLIENT_ID/SECRET` inyectados) | `""` |
-| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | Solo con `DB_BACKEND=cosmos` (legacy) | `""` / `db_modeler` |
 | `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión (HS256). Obligatoria en producción | default inseguro de dev |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token en minutos | `720` |
 | `REQUIRE_AUTH` | `true` = login obligatorio (401 sin token); oculta `/docs`, `/redoc`, `/openapi.json` | `false` |
 | `RATE_LIMIT_ENABLED` | Fuerza el rate limiting aunque `REQUIRE_AUTH` sea false | `false` |
 | `AUTH_MODE` | `local` o `databricks` (seam de identidad de fallback) | `local` |
-| `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Usuario fake del seam local | `dev@local` / `""` / `""` |
+| `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | Usuario fake del seam local (también la identidad del login SSO en dev sin headers) | `dev@local` / `""` / `""` |
+| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (doc 38). Vacío + `REQUIRE_AUTH=true` → el login SSO responde 503 | `""` (en Apps: `valueFrom proxy_secret`) |
 | `CORS_ORIGIN_REGEX` | Regex de orígenes permitidos (producción: `https://frnt-data-model-hub-.*\.databricksapps\.com`) | `""` |
 | `CORS_ORIGINS` | Allowlist exacta de orígenes (solo se usa sin regex) | `http://localhost:3000,http://127.0.0.1:3000` |
 | `ALLOWED_HOSTS` | Allowlist de hosts (TrustedHost) en producción | vacío (desactivado) |
@@ -189,12 +188,12 @@ Falla-cerrado importante: con `REQUIRE_AUTH=true` y `SECRET_KEY` en el default d
 
 ### 2.3 Consideraciones de base de datos
 
-- Producción = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone la misma superficie async de Motor (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. Con `DB_BACKEND=cosmos` el mismo contrato corre sobre Motor/Cosmos (legacy). La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff.
+- Base ÚNICA = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone una superficie de consulta async que emula la de pymongo (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff. (No hay driver ni conmutador de backend; `pymongo` permanece solo como vocabulario que el adaptador emula, sin conexión a Mongo.)
 - Colecciones tocadas por esta parte del contrato: `users`, `roles`, `audit_log`, `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `ddl_rules`, `ddl_ruleset_config`.
 - El `_id` es la clave natural en varias colecciones (`users._id == username`, `roles._id == role key`, `naming_config._id == scope`). Al serializar, el backend renombra `_id -> id` y descarta campos internos (`flgactive`, `deletedAt`, `updatedAt`, `createdAt`).
 - Borrado lógico (soft-delete): las eliminaciones marcan `flgactive=false` en vez de borrar el documento; los listados filtran por `flgactive != false`.
 - Los modelos se validan con `extra="ignore"`, por lo que campos no declarados en el modelo del documento se descartan al leer/escribir (invariante de persistencia: un campo nuevo necesita declararse en el modelo Pydantic o desaparece en el round-trip).
-- `.sort()` requiere índice sobre el campo ordenado (regla heredada de Cosmos y mantenida como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` crea ~35 índices idempotentes al conectar.
+- `.sort()` requiere índice sobre el campo ordenado (invariante de escala mantenido como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` crea ~35 índices idempotentes al conectar.
 - `standards_versions` es append-only con `seq` monotónico e índice único en `seq` (reintento ante colisión concurrente) — el único índice unique del sistema.
 
 ```mermaid
@@ -216,9 +215,29 @@ erDiagram
 
 Prefijo del router: `/api/auth`.
 
+### 3.0 POST /api/auth/sso/login
+
+Propósito: iniciar sesión con la identidad heredada del SSO de Databricks Apps (doc 38). Sin body: la identidad llega en los headers de relay `x-dmh-sso-email` / `x-dmh-sso-username` / `x-dmh-sso-user-id`, que el server del front adjunta autenticados con `x-dmh-proxy-secret` (secreto compartido `PROXY_SHARED_SECRET`). Público (sin token), limitado a 10/minuto por IP.
+
+Reglas:
+
+- Con `PROXY_SHARED_SECRET` configurado: secreto ausente/errado → **401** genérico; sin correo en el relay → **401**.
+- Sin secreto configurado y `REQUIRE_AUTH=true` → **503** (fail-closed; el carril de contraseña sigue vivo).
+- Dev (sin secreto, sin `REQUIRE_AUTH`): acepta `x-dmh-sso-*` directos, `X-Forwarded-Email`, o cae a la simulación `LOCAL_DEV_USER`.
+- Correo (trim + lowercase) **no asignado a un rol** en Admin, o con `status: disabled` → **403** `{"detail": "This account has no access. Ask an administrator to assign your email to a role."}` (audita `login_sso_denied`).
+- Correo asignado → **200** con `{token, user}` — misma shape que `POST /api/auth/login` (audita `login_sso`). El nombre se resuelve best-effort (SCIM → `preferred_username` → derivado del correo) y se persiste en el doc solo si estaba vacío (también `initials` y `email`).
+
+curl (como lo emite el server del front):
+
+```bash
+curl -s -X POST https://api.ejemplo.com/api/auth/sso/login \
+  -H "x-dmh-proxy-secret: $PROXY_SHARED_SECRET" \
+  -H "x-dmh-sso-email: ana.gomez@empresa.com"
+```
+
 ### 3.1 POST /api/auth/login
 
-Propósito: autenticar por usuario y contraseña; devuelve el token de sesión y el usuario enriquecido con rol y permisos. Público (sin token), pero limitado a 5/minuto por IP y con lockout de cuenta.
+Propósito: autenticar por usuario y contraseña (carril del administrador — la UI solo lo expone para la cuenta local `admin`; las entradas de whitelist no tienen contraseña y no pueden usar este carril). Devuelve el token de sesión y el usuario enriquecido con rol y permisos. Público (sin token), pero limitado a 5/minuto por IP y con lockout de cuenta.
 
 Body (`LoginBody`):
 
@@ -360,9 +379,9 @@ Estado 2026-07-31: el flujo de warm-up por redirect FRACASÓ en el workspace cor
 
 Prefijo del router: `/api/admin`. TODOS los endpoints requieren el permiso `admin.manage` (403 si falta).
 
-Modelo de datos:
+Modelo de datos (doc 38 — la colección `users` funciona como WHITELIST de acceso: correos asignados a un rol que entran por SSO; las cuentas locales con contraseña, p.ej. `admin`, conviven en la misma lista):
 
-- Usuario (respuesta, sin `passwordHash`): `{ id, email, name, role, projectIds, status, initials }`. `status` es uno de `active | invited | disabled`.
+- Usuario (respuesta, sin `passwordHash`): `{ id, email, name, role, projectIds, status, initials, hasPassword }`. `status` es uno de `active | invited | disabled`. `hasPassword` es DERIVADO en lectura (true solo en cuentas locales; el front lo usa para mostrar el reset de contraseña).
 - Rol: `{ id, name, description, permissions }`, donde `permissions` es un mapa `permiso -> bool` filtrado al catálogo conocido.
 
 Guards de negocio (todos devuelven 400 con mensaje legible):
@@ -387,35 +406,38 @@ Respuesta 200:
 {
   "success": true,
   "data": [
-    { "id": "ana", "email": "ana@empresa.com", "name": "Ana Gomez", "role": "modelador", "projectIds": [], "status": "active", "initials": "AG" },
-    { "id": "beto", "email": "beto@empresa.com", "name": "Beto Diaz", "role": "revisor", "projectIds": ["p1"], "status": "active", "initials": "BD" }
+    { "id": "admin", "email": "", "name": "Administrator", "role": "administrador", "projectIds": [], "status": "active", "initials": "AD", "hasPassword": true },
+    { "id": "ana.gomez@empresa.com", "email": "ana.gomez@empresa.com", "name": "Ana Gomez", "role": "modelador", "projectIds": [], "status": "active", "initials": "AG", "hasPassword": false }
   ]
 }
 ```
 
 ### 4.2 POST /api/admin/users
 
-Propósito: crear (o upsertear por username) un usuario. La contraseña se hashea con bcrypt; se computan las iniciales a partir del nombre.
+Propósito: alta en la whitelist (doc 38) — lo normal es correo + rol, SIN contraseña (la entrada habilita el login SSO de esa cuenta de Databricks). Dos formas válidas, con guard en el service (400 si no se cumple):
+
+- `username` con `@` → **entrada SSO**: debe ser un correo válido; se normaliza a lowercase; `email` se autocompleta con el propio correo si no vino; sin contraseña. El nombre/iniciales los resuelve el primer login SSO.
+- `username` sin `@` → **cuenta local** (p.ej. `admin`): exige `password` (se hashea con bcrypt).
 
 Body (`UserCreate`):
 
 | Campo | Tipo | Requerido | Notas |
 |---|---|---|---|
-| `username` | string | sí | clave (`_id`) |
-| `email` | string | sí | |
-| `name` | string | sí | |
+| `username` | string | sí | clave (`_id`); correo lowercase en entradas SSO |
 | `role` | string | sí | key de un rol existente |
-| `password` | string | sí | 10 a 128 caracteres |
+| `email` | string | no | default: el propio `username` si es un correo |
+| `name` | string | no | default vacío (lo llena el primer login SSO) |
+| `password` | string | no | 10 a 128 si se envía; OBLIGATORIA solo para cuentas locales |
 | `projectIds` | string[] | no | default `[]` (vacío = todos) |
 | `status` | string | no | default `active` |
 
-curl:
+curl (alta típica de whitelist):
 
 ```bash
 curl -s -X POST https://api.ejemplo.com/api/admin/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username":"carla","email":"carla@empresa.com","name":"Carla Ruiz","role":"lector","password":"clave-larga-1"}'
+  -d '{"username":"carla.ruiz@empresa.com","role":"lector"}'
 ```
 
 Respuesta 201:
@@ -423,7 +445,7 @@ Respuesta 201:
 ```json
 {
   "success": true,
-  "data": { "id": "carla", "email": "carla@empresa.com", "name": "Carla Ruiz", "role": "lector", "projectIds": [], "status": "active", "initials": "CR" }
+  "data": { "id": "carla.ruiz@empresa.com", "email": "carla.ruiz@empresa.com", "name": "", "role": "lector", "projectIds": [], "status": "active", "initials": null, "hasPassword": false }
 }
 ```
 
@@ -655,7 +677,7 @@ Respuesta 200 (`Principal`: `{ email, username, display_name, source }`; `source
 
 ### 5.2 GET /api/users
 
-Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Endpoint sin dependencia propia de auth; con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
+Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Requiere sesión (`current_principal`, doc 38: la whitelist es un directorio de correos y no debe ser enumerable de forma anónima); con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
 
 Query params:
 
@@ -2445,7 +2467,7 @@ stateDiagram-v2
 Reglas clave:
 - **Owner-only** para editar/enviar/retirar/reabrir.
 - **Unanimidad**: se aplica a producción sólo cuando **todos** los revisores asignados aprobaron. Un rechazo → `rejected`.
-- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; evita el límite de 2MB por documento heredado de Cosmos). Los cambios se agregan **sólo** vía `PUT .../changes` (los endpoints de esquema de 8.17 también registran cambios, server-side).
+- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` (los endpoints de esquema de 8.17 también registran cambios, server-side).
 - Colecciones versionadas (`VERSIONED`, whitelist dura — la ESTRUCTURA también es versionada desde los docs 16 y 18): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`.
 - `appliedAt` se estampa recién con el apply completo: es el marcador de "esta versión está en producción". Al aplicar, cada cambio estampa además su imagen `before` (la usa el rollback y el diff de detalles).
 - **Rollback** (doc 27): `POST /{cs_id}/rollback` (permiso `rollback`) crea un DRAFT inverso que restaura el modelo al estado de esa versión publicada; el draft pasa por el flujo normal submit → review → approve.
@@ -2919,7 +2941,7 @@ class OrderBy:
 
 Notas de diseño relevantes para el consumidor:
 - **`op` es un enum cerrado** → cero inyección; el `value` se castea al tipo del campo. `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
-- **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — regla heredada de Cosmos (que tira 500 en `.sort()` sin índice) y mantenida como contrato. El orden debe ir por un campo indexado (p. ej. `physicalName`).
+- **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — invariante de escala mantenido como contrato (a escala, un orden sin índice sería full-scan). El orden debe ir por un campo indexado (p. ej. `physicalName`).
 - **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`).
 - **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`.
 - **UDP dinámicos**: cada UDP def agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
@@ -3197,7 +3219,7 @@ flowchart TD
   CAT --> COMP[compiler]
   SPEC --> COMP
   COMP -->|match/group/project/sort| EXE[executor keyset + hidratacion]
-  EXE --> MONGO[(BD documental: Lakebase JSONB / Cosmos legacy)]
+  EXE --> MONGO[(BD documental: Lakebase JSONB)]
   EXE --> GRID[Grilla virtualizada]
   EXE --> CSV[/export streaming CSV/]
 ```
@@ -3269,17 +3291,16 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 | Variable | Propósito |
 |---|---|
 | `AUTH_MODE` | `local` (usuario fake + `X-Dev-User`) o `databricks` (headers del proxy SSO), como fallback sin token. |
-| `DB_BACKEND` + `LAKEBASE_ENDPOINT`/`LAKEBASE_PGSCHEMA` | Base productiva (Lakebase Postgres); la app expone `db_connected` en `/health`. |
-| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | Solo con el seam legacy `DB_BACKEND=cosmos`. |
+| `LAKEBASE_ENDPOINT` / `LAKEBASE_PGSCHEMA` | Base productiva y única (Lakebase Postgres); la app expone `db_connected` en `/health`. |
 | `REQUIRE_AUTH` / `SECRET_KEY` | Login obligatorio + firma del JWT de sesión. |
 | Identidad local (email/username/display) | Usuario fake del `LocalIdentityProvider` en desarrollo. |
 
 ### 13.4 Consideraciones de base de datos
 
 - **Persistencia y soft-delete**: las colecciones usan `flgactive != False` como filtro de "activo"; los delete son lógicos (`flgactive: false` + `deletedAt`). Casi todas las lecturas ya aplican `ACTIVE = {"flgactive": {"$ne": False}}`.
-- **Un doc por cambio**: los cambios de un changeset viven en la colección `changeset_changes` (un doc por cambio, `_id` determinista `{csId}::{collection}::{entityId}`), no embebidos — regla nacida del límite de 2MB por documento de Cosmos y conservada en Lakebase (docs chicos = updates baratos y diffs por slice).
-- **Índices y escala del reporting**: el planner **rechaza** ordenar por campos sin índice (contrato heredado de Cosmos, donde `.sort()` sin índice tira 500). La paginación es por keyset (no skip profundo), con `maxTimeMS` como circuit-breaker (15s en el motor de filas, 30s en insights). Los UDP se cubren con un índice wildcard `udpValues.$**` (equality/`$in`/`$exists` = seek).
-- **Adaptador Lakebase**: cada colección es una tabla `(id, doc jsonb)` con índice GIN; el adaptador traduce filtros/updates/aggregations de Mongo a SQL (alcance cerrado, fail-fast con `NotImplementedError` fuera del subset). Detalle en [arquitectura.md](arquitectura.md) y [esquema-datos.md](esquema-datos.md).
+- **Un doc por cambio**: los cambios de un changeset viven en la colección `changeset_changes` (un doc por cambio, `_id` determinista `{csId}::{collection}::{entityId}`), no embebidos — regla del versionado por changesets: docs chicos = updates baratos y diffs por slice.
+- **Índices y escala del reporting**: el planner **rechaza** ordenar por campos sin índice (invariante de escala: a ese volumen sería full-scan). La paginación es por keyset (no skip profundo), con `maxTimeMS` como circuit-breaker (15s en el motor de filas, 30s en insights). Los UDP se cubren con un índice wildcard `udpValues.$**` (equality/`$in`/`$exists` = seek).
+- **Adaptador Lakebase**: cada colección es una tabla `(id, doc jsonb)` con índice GIN; el adaptador traduce filtros/updates/aggregations de pymongo a SQL (alcance cerrado, fail-fast con `NotImplementedError` fuera del subset). Detalle en [arquitectura.md](arquitectura.md) y [esquema-datos.md](esquema-datos.md).
 - **Colecciones tocadas por este contrato**: `projects`, `folders`, `subject_areas`, `schemas`, `relationships`, `views`, `changesets`, `changeset_changes`, `saved_reports`, y las colecciones publicadas `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`.
 
 ---

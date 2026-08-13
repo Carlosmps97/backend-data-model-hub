@@ -36,19 +36,9 @@ def _csv(name: str) -> list[str]:
 class Settings:
     """Configuración global del backend de plataforma."""
 
-    # ─── Backend de base de datos ──────────────────────────────
-    # "lakebase" (Databricks Lakebase Postgres, doc 28) o "cosmos" (legacy /
-    # rollback). El seam es app/core/db/client.py: los repositorios no saben
-    # cuál hay debajo.
-    DB_BACKEND: str = os.getenv("DB_BACKEND", "lakebase").strip().lower()
-
-    # ─── Azure Cosmos DB for MongoDB (fallback / rollback) ─────
-    # Solo se usa con DB_BACKEND=cosmos. La data quedó restaurada a la base
-    # DDV como fallback limpio de la migración a Lakebase (doc 28).
-    COSMOS_CONNECTION_STRING: str = os.getenv("COSMOS_CONNECTION_STRING", "")
-    COSMOS_DATABASE: str = os.getenv("COSMOS_DATABASE", "db_modeler")
-
     # ─── Databricks Lakebase Postgres (doc 28) ─────────────────
+    # BD única del backend (adaptador JSONB en app/core/db/lakebase/). El seam
+    # es app/core/db/client.py: los repositorios no ven Postgres directamente.
     # Identidad ante el workspace (para acuñar el token OAuth de BD ~1h que
     # Postgres acepta como password — lakebase/credentials.py):
     #   · Dev local: DATABRICKS_HOST + DATABRICKS_TOKEN (PAT) del .env.
@@ -58,7 +48,8 @@ class Settings:
     DATABRICKS_TOKEN: str = os.getenv("DATABRICKS_TOKEN", "")
     # Ruta LÓGICA del endpoint (projects/<proyecto>/branches/<branch>/
     # endpoints/<endpoint>). Es la MISMA en cualquier workspace que respete la
-    # convención de nombres; obligatoria con DB_BACKEND=lakebase.
+    # convención de nombres; obligatoria en operación normal (salvo el atajo
+    # PGHOST+PGPASSWORD de más abajo para scripts sin SDK).
     LAKEBASE_ENDPOINT: str = os.getenv("LAKEBASE_ENDPOINT", "")
     # Host físico del endpoint (ep-…). OPCIONAL: si está vacío se resuelve
     # solo vía SDK a partir de LAKEBASE_ENDPOINT (credentials.pg_host) — así
@@ -116,6 +107,14 @@ class Settings:
     LOCAL_DEV_USER: str = os.getenv("LOCAL_DEV_USER", "dev@local")
     LOCAL_DEV_USERNAME: str = os.getenv("LOCAL_DEV_USERNAME", "")
     LOCAL_DEV_DISPLAY_NAME: str = os.getenv("LOCAL_DEV_DISPLAY_NAME", "")
+    # Secreto compartido con el server del front (doc 38): autentica el RELAY
+    # de identidad SSO (headers `x-dmh-sso-*`) en `POST /api/auth/sso/login`.
+    # En Databricks Apps AMBAS apps lo leen del mismo secret del scope
+    # (`valueFrom: proxy_secret`). Vacío + REQUIRE_AUTH=true → el endpoint SSO
+    # responde 503 (fail-closed; el login admin por contraseña sigue vivo).
+    # Vacío sin REQUIRE_AUTH (dev/tests) → se aceptan los headers de relay o la
+    # simulación LOCAL_DEV_USER sin secreto.
+    PROXY_SHARED_SECRET: str = os.getenv("PROXY_SHARED_SECRET", "")
 
     # ─── Sesión / firma del token ──────────────────────────────
     # Clave HMAC para firmar el token de sesión (JWT HS256). En producción

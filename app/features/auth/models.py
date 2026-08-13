@@ -1,7 +1,7 @@
 """Modelos de la auth propia: `users` y `roles` (RBAC data-driven).
 
-Decisión 2026-07-04: el app gestiona identidad, roles y permisos en Cosmos
-(login usuario/contraseña en todos los entornos). Los permisos son data-driven
+Decisión 2026-07-04: el app gestiona identidad, roles y permisos en la BD
+Lakebase (login usuario/contraseña en todos los entornos). Los permisos son data-driven
 (colección `roles` con una matriz editable desde el módulo Admin), no
 hardcodeados — el mock de Admin trae "Nuevo rol" y toggles por celda.
 """
@@ -45,6 +45,11 @@ class UserDoc(BaseModel):
     """Un usuario del app. `_id` == `username` (clave del actor, == `sub` del
     token, == lo que se compara contra `reviewers[]`).
 
+    Doc 38: la colección funciona como WHITELIST de acceso — las entradas
+    normales son correos asignados a un rol (`username == email`, lowercase,
+    SIN `passwordHash`) que entran por el SSO de Databricks; las cuentas
+    locales (username sin `@`, p.ej. `admin`) conservan contraseña bcrypt.
+
     `email`/`name`/`role` tienen default: la colección `users` puede contener
     documentos legacy (de backends previos) sin esos campos — el modelo los
     tolera (aparecen con valores vacíos, el admin puede limpiarlos) en vez de
@@ -52,7 +57,7 @@ class UserDoc(BaseModel):
 
     model_config = DOC_CONFIG
 
-    id: str                       # username
+    id: str                       # username (correo lowercase en entradas SSO)
     email: str = ""
     name: str = ""
     role: str = ""                # key de RoleDoc
@@ -61,5 +66,8 @@ class UserDoc(BaseModel):
     projectIds: list[str] = Field(default_factory=list)
     status: str = "active"        # active | invited | disabled
     initials: str | None = None
+    # Derivado en LECTURA (repository._to_user), no se persiste: le dice al
+    # front qué cuentas admiten reset de contraseña (solo las locales).
+    hasPassword: bool = False
     # NUNCA se expone al cliente (el service hace exclude en las respuestas).
     passwordHash: str | None = None

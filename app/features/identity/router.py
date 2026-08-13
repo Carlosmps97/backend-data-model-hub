@@ -25,13 +25,16 @@ async def me(principal: Principal = Depends(current_principal)):
 
 @router.get("/users", summary="Usuarios reales (id/name/initials) para asignar revisores.")
 async def users(can: str | None = Query(
-        default=None, description="filtra por permiso del ROL (p.ej. review.decide)")):
+        default=None, description="filtra por permiso del ROL (p.ej. review.decide)"),
+        principal: Principal = Depends(current_principal)):
     """Usuarios ACTIVOS de la plataforma (colección `users`), no la lista fija
     simulada — así el selector de revisores ve a todos los usuarios existentes.
     Con `can`, sólo usuarios cuyo rol otorga ese permiso — el selector de
     revisores usa `can=review.decide`: asignar a alguien que nunca podría
     votar dejaba el request trabado (la unanimidad jamás se cumplía).
-    Fallback a la lista simulada si aún no hay usuarios (dev sin seed)."""
+    Fallback a la lista simulada si aún no hay usuarios (dev sin seed).
+    Requiere sesión (doc 38): la whitelist es un directorio de correos y no
+    debe ser enumerable de forma anónima."""
     try:
         real = await auth_repo.list_users()
     except Exception:  # noqa: BLE001 — sin DB (p.ej. tests) → fallback simulados

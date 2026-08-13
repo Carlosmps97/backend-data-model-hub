@@ -2,7 +2,7 @@
 
 Los cambios viven en la colección `changeset_changes` (UN doc por cambio, con
 `_id` determinista `{csId}::{collection}::{entityId}`) — el viejo dict embebido
-en el doc del changeset topaba el límite de 2MB/doc de Cosmos RU con changesets
+en el doc del changeset crecía sin techo con changesets
 grandes. El doc de `changesets` queda como cabecera (estado/decisiones)."""
 from __future__ import annotations
 
@@ -259,8 +259,8 @@ async def latest_applied_id() -> str | None:
 
 async def applied_after(applied_at: str) -> list[dict]:
     """Changesets publicados DESPUÉS de `applied_at` — los que un rollback A esa
-    versión debe deshacer — del MÁS RECIENTE al más viejo. Cosmos RU no ordena
-    sin índice ⇒ se ordena en Python (son pocas versiones)."""
+    versión debe deshacer — del MÁS RECIENTE al más viejo. A escala un orden sin
+    índice sería full-scan ⇒ se ordena en Python (son pocas versiones)."""
     db = await get_db()
     docs = await db[COLL].find(
         {"status": "approved", "appliedAt": {"$gt": applied_at}},
@@ -278,9 +278,9 @@ async def published(collection: str, flt: dict | None = None, limit: int | None 
     no es viable — los llamadores calientes SIEMPRE deben pasar un slice.
     `limit` capea el resultado (búsqueda server-side de catálogo).
 
-    `sort_field` ordena en Mongo ANTES del corte — pasarlo SOLO si el campo
-    tiene índice en esa colección: Cosmos RU rechaza `.sort()` sobre campos sin
-    índice (mismo motivo por el que folders ordena en Python). Hoy el único
+    `sort_field` ordena en la BD ANTES del corte — pasarlo SOLO si el campo
+    tiene índice en esa colección: a escala un orden sin índice sería full-scan
+    (mismo motivo por el que folders ordena en Python). Hoy el único
     caso es canonical_tables.physicalName (índice en core/db/indexes.py). Sin
     sort_field el corte es en orden natural y el llamador re-ordena en Python."""
     db = await get_db()

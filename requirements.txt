@@ -19,11 +19,12 @@ fastapi==0.136.1
 starlette==1.0.0
 uvicorn[standard]==0.47.0
 
-# Cosmos DB (Motor async + pymongo for type compat) - legacy/rollback (doc 28)
+# pymongo: SOLO el vocabulario de operaciones/errores (ReturnDocument, UpdateOne,
+# InsertOne, DeleteMany, DuplicateKeyError) que el adaptador Lakebase emula y que
+# usan los repositories. NO conecta a Mongo: es dependencia del camino Lakebase.
 pymongo==4.17.0
-motor==3.7.1
 
-# Databricks Lakebase Postgres (backend actual, doc 28)
+# Databricks Lakebase Postgres
 asyncpg==0.31.0
 databricks-sdk==0.121.0
 

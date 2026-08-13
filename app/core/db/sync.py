@@ -1,13 +1,9 @@
-"""Puente SYNC a la BD para scripts (audit, migrate --apply, backfills, fixes).
+"""Puente SYNC a la BD (Lakebase) para scripts (audit, migrate --apply, backfills, fixes).
 
-Los ~10 scripts sync del repo se conectaban con `MongoClient(...)` inline. Con
-el switch de backend (doc 28) pasan a `get_sync_db()`:
-
-- `DB_BACKEND=cosmos`  → devuelve el handle pymongo de SIEMPRE (cero cambios).
-- `DB_BACKEND=lakebase`→ devuelve un wrapper sync PEREZOSO sobre el adaptador
-  async (event loop dedicado en un thread de fondo). Perezoso porque varios
-  scripts construyen el handle a nivel de módulo (import) y recién deben
-  conectar al primer uso — igual que MongoClient.
+Los ~10 scripts sync del repo se conectan a la BD vía `get_sync_db()`, un
+wrapper sync PEREZOSO sobre el adaptador async (event loop dedicado en un thread
+de fondo). Perezoso porque varios scripts construyen el handle a nivel de módulo
+(import) y recién deben conectar al primer uso.
 
 Superficie soportada (la que usan los scripts): acceso por índice Y por
 atributo (`db["views"]` / `db.views`), find (iterable, con sort/limit/skip),
@@ -20,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from typing import Any
-
-from app.core.config import settings
 
 _loop: asyncio.AbstractEventLoop | None = None
 _db: "SyncDatabase | None" = None
@@ -44,13 +38,7 @@ def _run(coro: Any) -> Any:
 
 
 def get_sync_db():
-    """Handle sync de la base según `DB_BACKEND` (ver docstring del módulo)."""
-    if settings.DB_BACKEND != "lakebase":
-        from pymongo import MongoClient
-
-        if not settings.COSMOS_CONNECTION_STRING:
-            raise RuntimeError("COSMOS_CONNECTION_STRING no está seteado")
-        return MongoClient(settings.COSMOS_CONNECTION_STRING)[settings.COSMOS_DATABASE]
+    """Handle sync de la base (Lakebase; ver docstring del módulo)."""
     global _db
     if _db is None:
         _db = SyncDatabase()

@@ -6,7 +6,7 @@ los estándares se aplican DIRECTO a las colecciones publicadas y cada apply
 genera una versión con el **snapshot completo** del estado de estándares tras
 aplicar — suficiente para hacer rollback (restaurar el snapshot objetivo y
 re-derivar). El snapshot es acotado (dominios ~decenas + términos ~cientos-miles
-+ naming_config 2 docs) → muy por debajo del límite de 2MB/doc de Cosmos RU.
++ naming_config 2 docs) → cabe holgado en un solo doc de versión.
 
 Ver `plan-implementacion/03-DATA-STANDARDS-ADMIN-AUTH.md` §4.2/§4.3.
 """

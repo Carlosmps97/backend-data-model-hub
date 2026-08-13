@@ -33,9 +33,12 @@ def _now() -> str:
 
 
 def _to_user(doc: dict, *, with_hash: bool = False) -> dict:
-    """Doc Mongo → dict de UserDoc. Sin `passwordHash` salvo `with_hash`."""
+    """Doc Mongo → dict de UserDoc. Sin `passwordHash` salvo `with_hash`.
+    `hasPassword` se DERIVA acá (no se persiste): el front lo usa para mostrar
+    el reset de contraseña solo en cuentas locales (doc 38)."""
     d = dict(doc)
     d["id"] = str(d.pop("_id"))
+    d["hasPassword"] = bool(d.get("passwordHash"))
     for k in ("flgactive", "deletedAt", "updatedAt", "createdAt"):
         d.pop(k, None)
     out = UserDoc.model_validate(d).model_dump()
@@ -74,7 +77,8 @@ async def upsert_user(username: str, fields: dict) -> dict:
     """Crea/actualiza por `_id`. `fields` ya viene saneado por el service
     (incluye passwordHash cuando corresponde). Devuelve el user SIN hash."""
     db = await get_db()
-    body = {k: v for k, v in fields.items() if k != "id"}
+    # `hasPassword` es derivado de lectura (_to_user): jamás se persiste.
+    body = {k: v for k, v in fields.items() if k not in ("id", "hasPassword")}
     doc = await db[USERS].find_one_and_update(
         {"_id": username},
         {"$set": {**body, "flgactive": True, "updatedAt": _now()},

@@ -1,6 +1,6 @@
 """Executor async del motor de reporting: carga el catálogo dinámico (UDP),
 pre-resuelve filtros cross-entity (schema→tableId), compila, pagina por KEYSET,
-ejecuta contra Cosmos e hidrata nombres (dominio, UDP, schema) en Python.
+ejecuta contra la BD e hidrata nombres (dominio, UDP, schema) en Python.
 
 Reglas de escala: pushdown de todos los filtros al $match, keyset (no skip/limit
 profundo), proyección mínima, `maxTimeMS` como circuit-breaker.
@@ -94,8 +94,8 @@ def _row(doc: dict, select: list[FieldDef], maps: dict) -> dict:
             out[fd.key] = maps.get("domain", {}).get(doc.get(fd.path))
         elif fd.hydrate == "derived":
             # Campo calculado post-fetch (F5: tableCount = len(tableIds)). No
-            # se computa en Mongo: $size en projection de find() no es portable
-            # a Cosmos RU; el path proyecta la fuente (array) y acá se cuenta.
+            # se computa en la BD: $size en projection de find() no lo soporta
+            # el adaptador; el path proyecta la fuente (array) y acá se cuenta.
             out[fd.key] = len(doc.get(fd.path) or [])
         elif fd.udpDefId:
             out[fd.key] = (doc.get("udpValues") or {}).get(fd.udpDefId)

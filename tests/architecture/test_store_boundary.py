@@ -1,8 +1,8 @@
-"""El store (Cosmos/Motor) sólo puede tocarse desde los `repository.py`.
+"""El store (Lakebase, superficie estilo pymongo) sólo puede tocarse desde los `repository.py`.
 
 Mantiene la persistencia swappable: services y schemas permanecen agnósticos al
-store, así cambiar Cosmos por un destino relacional (M6) sólo reescribe los
-repositories.
+store, así cambiar el destino sólo reescribe los repositories. El guard incluye
+`motor`/`pymongo` para que ninguna capa fuera de repository importe el driver.
 """
 from __future__ import annotations
 

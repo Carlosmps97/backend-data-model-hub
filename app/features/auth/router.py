@@ -1,9 +1,14 @@
-"""Endpoints de auth propia (login usuario/contraseña + sesión por token).
+"""Endpoints de auth propia (sesión por token; dos formas de nacer la sesión).
 
-  POST /api/auth/login   {username, password} → {token, user}   (401 si falla)
+  POST /api/auth/sso/login                     → {token, user}   (doc 38: SSO
+                                                 heredado de Databricks Apps;
+                                                 403 si el correo no está
+                                                 whitelisteado en un rol)
+  POST /api/auth/login   {username, password} → {token, user}   (401 si falla;
+                                                 carril del administrador)
   POST /api/auth/logout                        → {ok}            (audita)
   GET  /api/auth/me                            → usuario en sesión enriquecido
-  GET  /api/auth/warmup?next=<url>             → 302 a `next`    (doc 36)
+  GET  /api/auth/warmup/{next_b64}             → 302 a `next`    (doc 36)
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ from app.core.config import settings
 from app.core.identity import Principal, current_principal
 from app.core.ratelimit import limiter
 
-from . import service
+from . import service, sso
 from .schemas import LoginBody
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -39,6 +44,27 @@ async def login(request: Request, response: Response, body: LoginBody):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password.",
+        )
+    return ok(result)
+
+
+@router.post("/sso/login")
+@limiter.limit("10/minute")  # el secreto del relay no debe ser brute-forceable
+async def sso_login(request: Request, response: Response):
+    """Login con la identidad heredada del SSO de Databricks Apps (doc 38).
+
+    Sin body: la identidad viene en los headers de relay `x-dmh-sso-*` que el
+    server del front adjunta (autenticados con `x-dmh-proxy-secret`). El correo
+    debe estar asignado a una matriz de rol (whitelist del módulo Admin); si no
+    lo está, 403 con mensaje accionable. `response` es obligatoria por slowapi
+    (mismo motivo que /login)."""
+    identity = sso.resolve_sso_identity(request)  # 401/503 si no hay identidad
+    result = await service.login_sso(identity)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has no access. Ask an administrator to "
+                   "assign your email to a role.",
         )
     return ok(result)
 

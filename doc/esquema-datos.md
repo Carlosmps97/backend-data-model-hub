@@ -4,7 +4,7 @@
 
 Referencia **campo por campo** de todas las colecciones que administra este backend. Describe el **estado actual**, no cómo migrar. Complementa `arquitectura.md` (§7, visión) y `migracion-erwin.md` (carga desde XML de Erwin).
 
-> **Residencia física (doc 28, 2026-07-19):** la BD productiva es **Databricks
+> **Residencia física:** la BD productiva y única es **Databricks
 > Lakebase Postgres** (`databricks_postgres`, schema PG `dmh`): cada colección
 > de este documento vive como una tabla `(id text PRIMARY KEY, doc jsonb)` con
 > el documento COMPLETO (con `_id`) en `doc` + índice GIN `jsonb_path_ops` +
@@ -12,11 +12,10 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 > índices lógicos (entre ellos el wildcard `udpValues.$**` en tablas, columnas
 > y canvases; el compuesto `changeset_changes(csId, collection)`; y
 > `standards_versions.seq`, el ÚNICO unique de todo el sistema). La forma
-> lógica de los documentos — TODO lo que sigue — no cambió, tampoco con la
-> migración al workspace Databricks CORPORATIVO (2026-07-27→31, docs 35–36 de
-> plan-implementacion/). Azure Cosmos DB (Mongo, base `db_modeler`) queda como
-> legacy/rollback (`DB_BACKEND=cosmos`); la copia se verificó doc-por-doc en
-> la migración (2026-07-19; los scripts one-shot de esa copia se retiraron).
+> lógica de los documentos — TODO lo que sigue — es independiente del almacén
+> físico: el acceso está confinado tras el adaptador `app/core/db/lakebase/`,
+> que expone una superficie de consulta con el vocabulario de `pymongo` sobre
+> las tablas JSONB (no conecta a Mongo).
 
 ---
 
@@ -28,7 +27,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 - **`_id` vs `id`**: el repositorio guarda el `id` (o la clave natural) del modelo como `_id` del doc al insertar, y lo revierte a `id` al leer. Donde el `_id` es especial se anota en cada colección.
 - **Soft-delete**: la mayoría **no borra**; marca `flgactive: false` + `deletedAt` (ISO) y las lecturas filtran `flgactive != false`. Excepciones: `audit_log` es append-only; `changesets` / `changeset_changes` / `standards_versions` no usan `flgactive` (se gobiernan por estado/seq).
 - **Sin integridad referencial**: todas las referencias entre colecciones son **strings** (un `id`, o a veces un **nombre**). El almacén no las valida (el `doc` jsonb es opaco para Postgres) — la consistencia la garantiza la app. Ver §Referencias (final).
-- **Timestamps**: strings ISO-8601 (`datetime.now(timezone.utc).isoformat()`), nunca tipos fecha nativos del almacén (`Date` de Mongo / `timestamptz`).
+- **Timestamps**: strings ISO-8601 (`datetime.now(timezone.utc).isoformat()`), nunca tipos fecha nativos del almacén (`timestamptz`).
 - **Trazabilidad de migración Erwin**: los docs cargados desde XML llevan además `migratedFrom: "erwin"` + `erwinLongId` (no declarados en el modelo → se ignoran al leer, pero **persisten** en el doc).
 
 **Notación de las tablas de campos:** `str?` = opcional/nullable; `dict[str,str]` = mapa embebido; “ref X.y” = referencia por string a la colección X campo y.
@@ -343,16 +342,20 @@ Config del ruleset: lookups (mapeo valor-de-UDP → valor emitido, con default) 
 ## 8. Identidad y RBAC
 
 ### `users` — UserDoc  *(`_id = username`)*
+
+Doc 38: la colección funciona como **WHITELIST de acceso** — las entradas normales son correos asignados a un rol (`_id` = correo lowercase, sin `passwordHash`) que entran por el SSO de Databricks; las cuentas locales con contraseña (`admin`) conviven en la misma colección. `name`/`initials`/`email` de una entrada SSO los completa el primer login (SCIM / derivado del correo) si están vacíos.
+
 | Campo | Tipo | Default | Notas |
 |---|---|---|---|
-| id | str | — | PK = **username** |
-| email | str | "" | |
-| name | str | "" | |
+| id | str | — | PK = **username** (correo lowercase en entradas SSO) |
+| email | str | "" | en entradas SSO se autocompleta con el propio correo |
+| name | str | "" | vacío hasta el primer login SSO (o lo fija el admin) |
 | role | str | "" | ref `roles.id` (key del rol) |
 | projectIds | list[str] | [] | scope por proyecto; `[]`/ausente = todos (admin) |
 | status | str | "active" | `active` \| `invited` \| `disabled` |
 | initials | str? | null | |
-| passwordHash | str? | null | bcrypt; **NUNCA se expone** (el service hace `exclude`) |
+| hasPassword | bool | false | **DERIVADO en lectura** (`_to_user`), no se persiste: true solo en cuentas locales |
+| passwordHash | str? | null | bcrypt; solo cuentas locales; **NUNCA se expone** (el service hace `exclude`) |
 
 ### `roles` — RoleDoc  *(`_id = key`)*
 | Campo | Tipo | Default | Notas |

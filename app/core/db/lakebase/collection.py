@@ -1,9 +1,9 @@
-"""`LakebaseDatabase` / `PgCollection`: la superficie Motor sobre Postgres.
+"""`LakebaseDatabase` / `PgCollection`: la superficie pymongo sobre Postgres.
 
 Cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` con un índice
 GIN `jsonb_path_ops` (todas las igualdades/jsonpath del traductor). Los docs se
 guardan COMPLETOS, `_id` incluido, así el camino de lectura de los repositorios
-es idéntico al de Motor.
+es idéntico al de pymongo.
 
 Atomicidad: los `find_one_and_update`/`update_one`/`replace_one`/`delete_one`
 restringen a UNA fila con `WITH target … LIMIT 1 FOR UPDATE` (equivalente al
@@ -584,7 +584,7 @@ class LakebaseDatabase:
         costaban ~30 s por reload.
 
         Censar primero es CLAVE en Databricks Apps: el service principal de la
-        app no es owner de las tablas que creó la migración, y en Postgres
+        app no es owner de las tablas ya existentes, y en Postgres
         hasta un `CREATE INDEX IF NOT EXISTS` de un índice YA existente falla
         con "must be owner of table ..." (el chequeo de ownership corre antes
         del IF NOT EXISTS; visto en el primer arranque en Apps 2026-07-20).

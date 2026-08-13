@@ -1,7 +1,7 @@
 """Piezas de modelo Pydantic compartidas entre features.
 
-`DOC_CONFIG` es la config base de todo documento de Cosmos (`extra="ignore"`
-descarta campos internos de Mongo —`flgactive`, `deletedAt`— y campos legacy
+`DOC_CONFIG` es la config base de todo documento persistido (`extra="ignore"`
+descarta campos internos del store —`flgactive`, `deletedAt`— y campos legacy
 silenciosamente; `populate_by_name` permite alias como `schema`).
 
 `TagDoc` + `coerce_tags` son etiquetas key/value de gobierno usadas por varias
@@ -32,7 +32,7 @@ class TagDoc(BaseModel):
 
 def coerce_tags(raw: Any) -> Any:
     """Acepta la forma nueva `list[TagDoc]` o la legacy `list[str]` de
-    documentos Cosmos pre-migración."""
+    documentos persistidos heredados."""
     if raw is None:
         return None
     if not isinstance(raw, list):

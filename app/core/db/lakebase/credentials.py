@@ -81,6 +81,13 @@ def _workspace_client():
         ) from exc
 
 
+def workspace_client():
+    """Cliente del workspace con la MISMA cadena de credenciales que Lakebase
+    (PAT dev / OAuth M2M del SP en Apps / perfil del SDK). Lo usa también el
+    lookup SCIM del login SSO (app/features/auth/sso.py)."""
+    return _workspace_client()
+
+
 def fresh_token() -> str:
     """Token de BD vigente (cacheado). Thread-safe; llamada bloqueante (~1 s
     cuando acuña — el pool la invoca vía `asyncio.to_thread`)."""
