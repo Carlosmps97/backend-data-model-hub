@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from pymongo import ReturnDocument, UpdateOne
+from pymongo import DeleteOne, ReplaceOne, ReturnDocument, UpdateOne
 
 from app.core.db.client import get_db
 
@@ -139,6 +139,62 @@ async def set_change(cs_id: str, collection: str, entity_id: str, op: str, paylo
             await db[CHANGES_COLL].replace_one({"_id": key, "wtoken": token}, prev)
         else:
             await db[CHANGES_COLL].delete_one({"_id": key, "wtoken": token})
+        return None
+    return ChangesetDoc.model_validate(_to_doc(parent)).model_dump()
+
+
+# Tamaño de tanda del lote (mismo criterio que la carga Erwin): el fast-path
+# del adaptador manda arrays por unnest — tandas acotadas, statements sanos.
+_BULK_BATCH = 1000
+
+
+async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
+    """Graba VARIOS cambios de una vez, con el MISMO protocolo de 3 pasos de
+    `set_change` pagado UNA vez por lote: las cascadas (borrar tabla, crear
+    tabla desde fuentes) iban cambio-por-cambio y a 4k columnas eran minutos.
+
+    `items` = [{collection, entityId, op, payload?}]. Se dedup-ea por entidad
+    (último gana — semántica del loop secuencial); los ReplaceOne homogéneos
+    por `_id` activan el fast-path del adaptador (INSERT … ON CONFLICT vía
+    unnest, 1-2 round-trips por tanda). Un solo `wtoken` identifica TODO el
+    lote; si un submit gana la carrera entre el touch y el re-check, la
+    compensación restaura los cambios previos legítimos y borra los nuevos,
+    filtrando por ese token para no pisar re-ediciones ajenas posteriores."""
+    deduped: dict[str, dict] = {}
+    for it in items:
+        if it.get("collection") and it.get("entityId"):
+            deduped[change_key(cs_id, it["collection"], it["entityId"])] = it
+    if not deduped:
+        return None
+    db = await get_db()
+    parent = await db[COLL].find_one_and_update(
+        {"_id": cs_id, "status": "draft"},
+        {"$set": {"updatedAt": _now()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if parent is None:
+        return None
+
+    at = _now()
+    token = uuid.uuid4().hex
+    keys = list(deduped)
+    prevs = {d["_id"]: d for d in await db[CHANGES_COLL].find({"_id": {"$in": keys}}).to_list(None)}
+    ops = []
+    for key, it in deduped.items():
+        doc = {"_id": key, "csId": cs_id, "collection": it["collection"],
+               "entityId": it["entityId"], "op": it["op"], "at": at, "wtoken": token}
+        if it["op"] != "delete":
+            doc["payload"] = it.get("payload") or {}
+        ops.append(ReplaceOne({"_id": key}, doc, upsert=True))
+    for i in range(0, len(ops), _BULK_BATCH):
+        await db[CHANGES_COLL].bulk_write(ops[i:i + _BULK_BATCH])
+
+    still_draft = await db[COLL].find_one({"_id": cs_id, "status": "draft"}, {"_id": 1})
+    if still_draft is None:
+        comp = [ReplaceOne({"_id": k, "wtoken": token}, prevs[k]) if k in prevs
+                else DeleteOne({"_id": k, "wtoken": token}) for k in keys]
+        for i in range(0, len(comp), _BULK_BATCH):
+            await db[CHANGES_COLL].bulk_write(comp[i:i + _BULK_BATCH])
         return None
     return ChangesetDoc.model_validate(_to_doc(parent)).model_dump()
 

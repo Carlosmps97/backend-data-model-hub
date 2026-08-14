@@ -1,6 +1,6 @@
 # Testing del backend — Data Model Hub
 
-> **Actualizado: 2026-07-31.**
+> **Actualizado: 2026-08-13.**
 >
 > **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
@@ -21,10 +21,10 @@ La filosofía es una pirámide clásica:
 ```mermaid
 flowchart TD
     A["Estres (historico, seeds retirados 2026-07-20)<br/>10k tablas / 400k columnas / 9k vistas / 150 canvases"]
-    B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>18 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
+    B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>19 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>43 tests contra el Postgres real en schema efimero"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration<br/>543 tests (suite normal, verde 2026-07-31) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration<br/>592 tests (suite normal, verde 2026-08-13) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -43,18 +43,18 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-07-31):** la suite normal son **543 tests** (verde). `pytest tests/ --collect-only -q` recolecta **586** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-08-13):** la suite normal son **592 tests** (verde). `pytest tests/ --collect-only -q` recolecta **635** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning) | 10 | 40 |
 | `tests/architecture` (invariantes de capas) | 2 | 4 |
-| `tests/features` (todas las features) | 75 | 465 |
+| `tests/features` (todas las features) | 78 | 514 |
 | `tests/erwin_migration` (kit de migración multi-archivo) | 4 | 32 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
-| **Subtotal — suite normal** | **92** | **543** |
+| **Subtotal — suite normal** | **95** | **592** |
 | `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 43 |
-| **Total recolectado** | **93** | **586** |
+| **Total recolectado** | **96** | **635** |
 
 ---
 
@@ -80,12 +80,13 @@ tests/
 │   ├── test_policies_merge.py       # reglas R1-R8: adopcion por clave natural, score de uso
 │   ├── test_migrate_merge.py        # migrate contra BD fake (merge incremental end-to-end)
 │   └── test_udp_allowed_values.py   # allowedValues de UDP list completos (no truncados a lo usado)
-├── features/                        # 75 archivos · 465 tests
+├── features/                        # 78 archivos · 514 tests
 │   ├── admin/           (1)         # RBAC, guards anti-lockout, hash de password, auditoria
 │   ├── auth/            (2)         # permisos efectivos, login/lockout, token-first + warmup SSO
 │   ├── catalog/         (4)         # columnas aditivas, derivacion de tipo, search_columns, usage
-│   ├── changesets/      (11)        # politica de versionado, payloads, effective+search, duplicados,
-│   │                                # schemas versionados, diffdetail, rollback a cualquier version
+│   ├── changesets/      (12)        # politica de versionado, payloads, effective+search, duplicados,
+│   │                                # schemas versionados, diffdetail, rollback a cualquier version,
+│   │                                # lote de cambios (add_changes_bulk + set_changes_bulk, doc 39)
 │   ├── data_standards/  (3)         # diff/snapshot + apply/rollback versionado + guards de glossary/lock
 │   ├── ddl_rules/       (7)         # motor de reglas del DDL Export (incluye golden tests del render)
 │   ├── domains/         (4)         # cascada de ParentDomain (filter, impact, propagate, namingTerm)
@@ -111,7 +112,7 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 543 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
+Los 592 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
@@ -205,7 +206,7 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 543 passed + 43 skipped.
+`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 592 passed + 43 skipped.
 
 ```bash
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 43 tests contra el Postgres real
@@ -230,10 +231,10 @@ Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, 
 No requieren base de datos ni variables de entorno. Ejemplos:
 
 ```bash
-# Toda la suite normal (543 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
+# Toda la suite normal (592 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
 .venv/bin/python -m pytest -q
 
-# Solo recolectar (verificar el conteo: 586 = 543 + 43 vivos, ~0.2 s)
+# Solo recolectar (verificar el conteo: 635 = 592 + 43 vivos, ~0.2 s)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (43, requiere el Postgres real alcanzable)
@@ -265,7 +266,7 @@ Requiere el backend levantado (por defecto `http://localhost:8000`, configurable
 # Levantar el backend (en otra terminal)
 .venv/bin/uvicorn app.main:app --port 8000
 
-# Correr TODOS los escenarios (s01–s18) en serie (imprime ===E2E_TOTAL===)
+# Correr TODOS los escenarios (s01–s19) en serie (imprime ===E2E_TOTAL===)
 .venv/bin/python -m scripts.e2e.run_e2e all
 
 # Un escenario puntual (imprime ===E2E_RESULT=== con JSON)
@@ -480,7 +481,7 @@ sequenceDiagram
 
 ### 6.2 Escenarios (`scripts/e2e/scenarios.py`)
 
-Hay **18 escenarios** (`s01`–`s18`), cada uno aislado con tag único y auto-limpieza:
+Hay **19 escenarios** (`s01`–`s19`), cada uno aislado con tag único y auto-limpieza:
 
 | Escenario | Foco | Qué valida |
 |-----------|------|-----------|
@@ -502,6 +503,7 @@ Hay **18 escenarios** (`s01`–`s18`), cada uno aislado con tag único y auto-li
 | `s16_domain_impact` | Impacto de dominio | `GET /domains/{id}/impact`: cuenta modelos (canvases) afectados, lista tablas con nombre + columnas + `overridden`, y el filtro `q` acota a la tabla buscada. |
 | `s17_vistas_multifuente` | Vistas multifuente | Vista con varias fuentes (`sources[]` conserva `castType`/alias), aparece en el diagrama con `showOnCanvas`, desaparece al apagar el flag, y el payload legacy (`sourceTableIds`) se normaliza al grabarse. |
 | `s18_udp_canvas_models` | UDP a nivel canvas | Definición con `level=canvas`; el reporting filtra models por UDP de canvas, expone `models.tableCount` derivado en el catálogo y el insight udp-coverage lista la key de canvas. |
+| `s19_bulk_changes` | Lote de cambios (doc 39) | `PUT /changes/bulk`: tabla+columnas en un lote (effective las muestra); dup intra-lote → 409 sin grabar NADA; payload inválido y colección no versionada → 422; no-owner → 403; cascada de deletes en lote (effective deja de mostrar la tabla, producción intacta pre-publish). |
 
 Cada escenario imprime un JSON como este (formato `Suite.summary()`):
 
@@ -624,12 +626,12 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 ## 9. Resumen de comandos
 
 ```bash
-# Suite normal (543 tests, sin DB; los 43 vivos salen skipped)
+# Suite normal (592 tests, sin DB; los 43 vivos salen skipped)
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pytest tests/architecture -v
 .venv/bin/python -m pytest tests/features/changesets -k versioning
 
-# Verificar el conteo total (586 = 543 + 43 vivos)
+# Verificar el conteo total (635 = 592 + 43 vivos)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (43, contra el Postgres real)
@@ -637,7 +639,7 @@ LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q
 
 # E2E (requiere backend en vivo con usuarios canónicos y versión base aplicada)
 .venv/bin/uvicorn app.main:app --port 8000         # terminal 1
-.venv/bin/python -m scripts.e2e.run_e2e all        # terminal 2 (s01–s18)
+.venv/bin/python -m scripts.e2e.run_e2e all        # terminal 2 (s01–s19)
 .venv/bin/python -m scripts.e2e.run_e2e s02_version_lifecycle
 .venv/bin/python scripts/e2e/e2e_schemas.py        # suites standalone (ver seccion 6.3)
 

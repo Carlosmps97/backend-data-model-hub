@@ -2467,7 +2467,7 @@ stateDiagram-v2
 Reglas clave:
 - **Owner-only** para editar/enviar/retirar/reabrir.
 - **Unanimidad**: se aplica a producción sólo cuando **todos** los revisores asignados aprobaron. Un rechazo → `rejected`.
-- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` (los endpoints de esquema de 8.17 también registran cambios, server-side).
+- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` / `PUT .../changes/bulk` (los endpoints de esquema de 8.17 también registran cambios, server-side).
 - Colecciones versionadas (`VERSIONED`, whitelist dura — la ESTRUCTURA también es versionada desde los docs 16 y 18): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`.
 - `appliedAt` se estampa recién con el apply completo: es el marcador de "esta versión está en producción". Al aplicar, cada cambio estampa además su imagen `before` (la usa el rollback y el diff de detalles).
 - **Rollback** (doc 27): `POST /{cs_id}/rollback` (permiso `rollback`) crea un DRAFT inverso que restaura el modelo al estado de esa versión publicada; el draft pasa por el flujo normal submit → review → approve.
@@ -2555,6 +2555,28 @@ Respuestas de error específicas:
 | 403 | El actor no es el owner (la working copy es personal). |
 | 409 | El changeset ya no está en `draft` (fue enviado o cerrado): hay que abrir una versión nueva. También 409 por unicidad de nombres (crear/renombrar chocaría con una entidad existente — el Save queda bloqueado acá y el publish re-chequea). |
 | 400 | Nombre físico sobre el `maxLength` del naming config (`NameTooLongError`, doc 24; los nombres heredados quedan grandfathered). |
+
+### 8.5b PUT /api/changesets/{cs_id}/changes/bulk
+
+Propósito: registra un **lote** de cambios en una sola request — cascadas de borrar tabla (vistas + relaciones + columnas) y de crear tabla desde fuentes (tabla + columnas). El camino cambio-por-cambio de 8.5 sigue vigente para ediciones puntuales; a escala DDV (tablas de miles de columnas) el loop de N requests secuenciales tomaba minutos y este endpoint lo resuelve en segundos. Permiso `model.edit`. Body `ChangesBulkBody`:
+
+| Campo | Tipo | Nota |
+|---|---|---|
+| `changes` | `ChangeBody[]` (1–2000) | mismos campos que 8.5; el front trocea en tandas de 1000 |
+
+Semántica: equivale a repetir 8.5 en orden, con dos diferencias deliberadas. (1) La validación corre **completa antes de escribir** — un ítem inválido/duplicado devuelve el error y NO graba nada del lote (el loop viejo podía dejar la cascada a medias). (2) Los slices de unicidad se consultan una vez por lote; la unicidad se evalúa contra un *pending* que evoluciona ítem a ítem (un delete del lote libera su nombre para un upsert posterior, igual que en secuencia). Se dedup-ea por entidad (último gana) y la escritura usa el protocolo de 3 pasos con compensación de `set_change` pagado una vez por lote (`set_changes_bulk`, tandas de 1000 vía `bulk_write` — fast-path del adaptador). Mismos errores que 8.5 (422/403/409/400); 422 nombra la primera colección fuera de `VERSIONED` o junta los primeros 5 payloads inválidos.
+
+```bash
+curl -X PUT http://localhost:8000/api/changesets/cs-9/changes/bulk \
+  -H "Content-Type: application/json" \
+  -d '{
+        "changes":[
+          {"collection":"canonical_columns","entityId":"c-1","op":"delete"},
+          {"collection":"canonical_columns","entityId":"c-2","op":"delete"},
+          {"collection":"canonical_tables","entityId":"t-1","op":"delete"}
+        ]
+      }'
+```
 
 ### 8.6 GET /api/changesets/{cs_id}/effective/{collection}
 
@@ -3332,6 +3354,7 @@ Las 76 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | POST | `/api/changesets/snapshot` | 8.3 |
 | GET | `/api/changesets/{cs_id}` | 8.4 |
 | PUT | `/api/changesets/{cs_id}/changes` | 8.5 |
+| PUT | `/api/changesets/{cs_id}/changes/bulk` | 8.5b |
 | GET | `/api/changesets/{cs_id}/effective/{collection}` | 8.6 |
 | GET | `/api/changesets/{cs_id}/diff` | 8.7 |
 | POST | `/api/changesets/{cs_id}/diff/details` | 8.15 |

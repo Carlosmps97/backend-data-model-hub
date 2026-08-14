@@ -823,6 +823,84 @@ def s18_udp_canvas_models() -> Suite:
     return s
 
 
+# ══ S19 · Lote de cambios (doc 39): PUT /changes/bulk ════════════════════════
+def s19_bulk_changes() -> Suite:
+    """Cascadas en lote: crear tabla+columnas y borrar en UNA request, con la
+    misma semántica que /changes repetido (unicidad en orden, atomicidad de la
+    validación: un ítem inválido/duplicado no graba NADA del lote)."""
+    s = Suite("s19_bulk_changes")
+    mod, otro = Client("modelador"), Client("modelador2")
+
+    def bulk(cli, cs_id, changes):
+        return cli.put(f"/api/changesets/{cs_id}/changes/bulk", {"changes": changes})
+
+    pid = mod.create_project()
+    base_phys = f"{TAG}_BULK_BASE".upper()
+    tid = mod.create_table(logical=f"{TAG} bulk base", schema="e2e", physical=base_phys)
+    c1 = mod.add_column(tid, "id", "BIGINT", pk=True, ordinal=0)
+    c2 = mod.add_column(tid, "saldo", "STRING", ordinal=1)
+    cs = mod.snapshot([pid], title=f"{TAG} s19")
+
+    # 1) crear tabla nueva + 3 columnas en UN lote (forma de "New table from sources")
+    nid = _uid("tbulk")
+    cols = [f"{nid}.c{i}" for i in range(3)]
+    r = bulk(mod, cs, [
+        {"collection": "canonical_tables", "entityId": nid, "op": "upsert",
+         "payload": {"id": nid, "logicalName": f"{TAG} bulk nueva",
+                     "physicalName": f"{TAG}_BULK_NUEVA".upper(), "schema": "e2e"}},
+        *[{"collection": "canonical_columns", "entityId": cid, "op": "upsert",
+           "payload": {"id": cid, "tableId": nid, "logicalName": f"col {i}",
+                       "physicalName": f"{TAG}_C{i}".upper(), "dataType": "STRING", "ordinal": i}}
+          for i, cid in enumerate(cols)],
+    ])
+    s.eq("lote tabla+3 columnas → 200", r.status, 200)
+    eff = mod.get(f"/api/changesets/{cs}/effective/canonical_columns?tableId={nid}").data or []
+    s.eq("effective muestra las 3 columnas del lote", len(eff), 3)
+
+    # 2) dup INTRA-lote → 409 y NADA del lote queda grabado (validación previa)
+    nid2 = _uid("tbulk2")
+    r = bulk(mod, cs, [
+        {"collection": "canonical_tables", "entityId": nid2, "op": "upsert",
+         "payload": {"id": nid2, "logicalName": f"{TAG} bulk dup",
+                     "physicalName": f"{TAG}_BULK_DUP".upper(), "schema": "e2e"}},
+        {"collection": "canonical_columns", "entityId": f"{nid2}.a", "op": "upsert",
+         "payload": {"id": f"{nid2}.a", "tableId": nid2, "logicalName": "a",
+                     "physicalName": "REPETIDA", "dataType": "STRING", "ordinal": 0}},
+        {"collection": "canonical_columns", "entityId": f"{nid2}.b", "op": "upsert",
+         "payload": {"id": f"{nid2}.b", "tableId": nid2, "logicalName": "b",
+                     "physicalName": "repetida", "dataType": "STRING", "ordinal": 1}},
+    ])
+    s.eq("dup intra-lote → 409", r.status, 409)
+    eff = mod.get(f"/api/changesets/{cs}/effective/canonical_tables").data or []
+    s.check("el 409 no grabó NADA del lote (tabla dup ausente)",
+            not any(t["id"] == nid2 for t in eff))
+
+    # 3) ítem inválido → 422 sin escribir; colección fuera de whitelist → 422
+    r = bulk(mod, cs, [{"collection": "canonical_columns", "entityId": f"{nid}.bad",
+                        "op": "upsert", "payload": {"logicalName": "sin tableId"}}])
+    s.eq("payload inválido en el lote → 422", r.status, 422)
+    r = bulk(mod, cs, [{"collection": "users", "entityId": "x", "op": "delete"}])
+    s.eq("colección no versionada → 422", r.status, 422)
+
+    # 4) sólo el OWNER escribe su working copy → 403
+    r = bulk(otro, cs, [{"collection": "canonical_columns", "entityId": c1, "op": "delete"}])
+    s.eq("bulk de un no-owner → 403", r.status, 403)
+
+    # 5) cascada de borrado de la tabla PUBLICADA (columnas + tabla) en un lote:
+    #    effective deja de mostrarla; producción la sigue viendo (draft aislado)
+    r = bulk(mod, cs, [
+        {"collection": "canonical_columns", "entityId": c1, "op": "delete"},
+        {"collection": "canonical_columns", "entityId": c2, "op": "delete"},
+        {"collection": "canonical_tables", "entityId": tid, "op": "delete"},
+    ])
+    s.eq("lote de deletes (cascada) → 200", r.status, 200)
+    eff = mod.get(f"/api/changesets/{cs}/effective/canonical_tables").data or []
+    s.check("effective ya no muestra la tabla borrada", not any(t["id"] == tid for t in eff))
+    prod = mod.get("/api/catalog/tables").data or []
+    s.check("producción la sigue mostrando (pre-publish)", any(t["id"] == tid for t in prod))
+    return s
+
+
 ALL = {
     "s01_rbac": s01_rbac, "s02_version_lifecycle": s02_version_lifecycle,
     "s03_convergence": s03_convergence, "s04_domain_cascade": s04_domain_cascade,
@@ -837,4 +915,6 @@ ALL = {
     "s16_domain_impact": s16_domain_impact,
     "s17_vistas_multifuente": s17_vistas_multifuente,
     "s18_udp_canvas_models": s18_udp_canvas_models,
+    # Lote de cambios (doc 39)
+    "s19_bulk_changes": s19_bulk_changes,
 }

@@ -29,6 +29,7 @@ from .repository import VERSIONED
 from .validation import DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError
 from .schemas import (
     ChangeBody,
+    ChangesBulkBody,
     ChangesetCreate,
     CommentBody,
     DiffDetailsBody,
@@ -91,6 +92,35 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
     if res == "locked":
         # Editar una versión que ya salió de draft NO es silencioso: 409 explícito.
+        raise HTTPException(
+            status_code=409,
+            detail="The version is no longer in draft (it was sent to review or closed): "
+                   "it doesn't accept more changes. Open a new version to edit.",
+        )
+    return ok(res)
+
+
+@router.put("/{cs_id}/changes/bulk")
+async def add_changes_bulk(cs_id: str, body: ChangesBulkBody, user: dict = Depends(_can_edit)):
+    """Lote de cambios en UNA request — cascada de borrar tabla / crear tabla
+    desde fuentes (cambio-por-cambio era minutos a 4k columnas). Misma
+    semántica y mapeo de errores que `/changes`; la validación corre completa
+    ANTES de escribir, así un ítem inválido no deja la cascada a medias."""
+    bad = sorted({c.collection for c in body.changes if c.collection not in VERSIONED})
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Collection not under versioning: {', '.join(map(repr, bad))}.")
+    try:
+        res = await service.add_changes_bulk(
+            cs_id, user["username"], [c.model_dump() for c in body.changes])
+    except DuplicateEntityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except NameTooLongError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InvalidPayloadError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid change — {exc}") from exc
+    if res == "forbidden":
+        raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
+    if res == "locked":
         raise HTTPException(
             status_code=409,
             detail="The version is no longer in draft (it was sent to review or closed): "
