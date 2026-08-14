@@ -38,6 +38,13 @@ class ChangeBody(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class ChangesBulkBody(BaseModel):
+    """Body de `PUT /{cs_id}/changes/bulk` — lote de cambios en UNA request
+    (cascadas: borrar tabla / crear tabla desde fuentes). El front trocea en
+    tandas de 1000; el techo es defensivo, no un límite de producto."""
+    changes: list[ChangeBody] = Field(min_length=1, max_length=2000)
+
+
 class ReviewBody(BaseModel):
     """Compat M-series: nota suelta para approve/reject directos."""
     note: str | None = None

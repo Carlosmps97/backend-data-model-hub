@@ -372,6 +372,11 @@ async def _name_length_error(cs_id: str, collection: str, entity_id: str,
             current = str(pub[0].get("physicalName") or "").strip() or None
     if current == name:
         return None  # heredado sin cambios
+    return _too_long_msg(scope, name, max_len)
+
+
+def _too_long_msg(scope: str, name: str, max_len: int) -> str:
+    """Mensaje único del límite de longitud (single y lote). Puro."""
     return (f"Can't save this {scope}: the physical name «{name}» has {len(name)} "
             f"characters, over the {max_len}-character limit. Shorten the logical "
             f"name, or raise the limit in Data Standards · Glossary.")
@@ -413,6 +418,112 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     if too_long:
         raise NameTooLongError(too_long)
     updated = await repository.set_change(cs_id, collection, entity_id, op, payload)
+    if updated is not None:
+        return updated
+    return "locked" if await repository.get(cs_id) else None
+
+
+# Colecciones con chequeo de unicidad de nombres (spec 10 §9 + doc 18).
+_UNIQUE_COLLS = ("canonical_tables", "canonical_columns", "schemas")
+
+
+async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | str | None:
+    """Graba un LOTE de cambios de una vez — misma semántica que `add_change`
+    repetido en orden. Las cascadas (borrar tabla: vistas + relaciones +
+    columnas; crear tabla desde fuentes: tabla + columnas) iban cambio por
+    cambio: N requests secuenciales = minutos a 4k columnas.
+
+    Diferencias deliberadas con el loop: la validación corre COMPLETA antes de
+    escribir (un ítem inválido no deja la cascada a medias) y los slices de
+    unicidad se consultan UNA vez por lote — un lote de puros deletes no paga
+    ninguna query extra. La unicidad se evalúa contra un pending que EVOLUCIONA
+    ítem a ítem (un delete del lote libera su nombre para un upsert posterior,
+    igual que en secuencia). Devuelve "forbidden"/"locked"/None como add_change."""
+    cs = await repository.get(cs_id)
+    if not cs:
+        return None
+    if cs.get("owner") != actor:
+        return "forbidden"
+    # Dedupe por entidad (último gana): un cambio por (collection, entityId),
+    # como quedaría tras el loop secuencial (el doc de cambio es único por key).
+    deduped: dict[tuple[str, str], dict] = {}
+    for it in items:
+        deduped[(it["collection"], it["entityId"])] = dict(it)
+    ordered = list(deduped.values())
+    if not ordered:
+        return cs
+
+    errors = [e for it in ordered
+              if (e := validation.payload_error(it["collection"], it["entityId"], it["op"], it.get("payload")))]
+    if errors:
+        raise InvalidPayloadError(" | ".join(errors[:5]))
+    for it in ordered:
+        if it["collection"] == "relationships" and it["op"] == "upsert" and it.get("payload"):
+            # Igual que add_change: se persiste el dump v2 NORMALIZADO.
+            it["payload"] = RelationshipDoc.model_validate(
+                {**it["payload"], "id": it["entityId"]}).model_dump()
+
+    upserts = [it for it in ordered if it["op"] == "upsert" and it["collection"] in _UNIQUE_COLLS]
+    pending_all: dict[str, dict] = {}
+    pub_tables: dict[str, list[dict]] = {}
+    pub_cols: dict[str, list[dict]] = {}
+    pub_schemas: dict[str, list[dict]] = {}
+    max_len: dict[str, int] = {}
+    if upserts:
+        # Slices UNA vez por lote (el chequeo por ítem queda en memoria):
+        # pendientes de las colecciones con unicidad + publicado relevante.
+        pending_all = await repository.changes_map(cs_id, sorted({it["collection"] for it in upserts}))
+        for it in upserts:
+            p = it.get("payload") or {}
+            if it["collection"] == "canonical_tables" and str(p.get("physicalName") or "").strip():
+                pub_tables[it["entityId"]] = await repository.published(
+                    "canonical_tables", _table_dup_filter(p))
+            elif it["collection"] == "canonical_columns" and p.get("tableId") and p["tableId"] not in pub_cols:
+                pub_cols[p["tableId"]] = await repository.published(
+                    "canonical_columns", {"tableId": p["tableId"]})
+            elif it["collection"] == "schemas" and str(p.get("name") or "").strip():
+                name = str(p["name"]).strip()
+                if name.lower() not in pub_schemas:
+                    pub_schemas[name.lower()] = await repository.published(
+                        "schemas", {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
+        for coll, scope in (("canonical_tables", "table"), ("canonical_columns", "column")):
+            if any(it["collection"] == coll for it in upserts):
+                max_len[coll] = int((await settings_service.get_naming_for(scope)).get("maxLength") or 0)
+
+    for it in ordered:
+        coll, eid, op = it["collection"], it["entityId"], it["op"]
+        pending = pending_all.setdefault(coll, {})
+        if op == "upsert" and coll in _UNIQUE_COLLS:
+            p = it.get("payload") or {}
+            if coll == "canonical_tables":
+                pub = pub_tables.get(eid, [])
+            elif coll == "canonical_columns":
+                pub = pub_cols.get(p.get("tableId"), [])
+            else:
+                pub = pub_schemas.get(str(p.get("name") or "").strip().lower(), [])
+            dup = validation.duplicate_error(coll, eid, p, pub, pending)
+            if dup:
+                raise DuplicateEntityError(dup)
+            limit = max_len.get(coll, 0)
+            name = str(p.get("physicalName") or "").strip()
+            if limit and name and len(name) > limit:
+                # Grandfather: el nombre EFECTIVO actual (pendiente evolutivo o
+                # publicado por id — camino raro, sólo si excede) no se penaliza.
+                current: str | None = None
+                if eid in pending:
+                    current = str((pending[eid].get("payload") or {}).get("physicalName") or "").strip() or None
+                if current is None:
+                    pub_self = await repository.published(coll, {"_id": eid})
+                    if pub_self:
+                        current = str(pub_self[0].get("physicalName") or "").strip() or None
+                if current != name:
+                    raise NameTooLongError(
+                        _too_long_msg("table" if coll == "canonical_tables" else "column", name, limit))
+        # El pending evoluciona con CADA ítem (también deletes y colecciones
+        # sin unicidad no cuestan nada): semántica del loop secuencial.
+        pending[eid] = {"op": op} if op == "delete" else {"op": op, "payload": it.get("payload") or {}}
+
+    updated = await repository.set_changes_bulk(cs_id, ordered)
     if updated is not None:
         return updated
     return "locked" if await repository.get(cs_id) else None
