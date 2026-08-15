@@ -611,6 +611,7 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 | `LOCAL_DEV_USER` / `LOCAL_DEV_USERNAME` / `LOCAL_DEV_DISPLAY_NAME` | `dev@local` / `""` / `""` | Solo para `AUTH_MODE=local`. |
 | `LAKEBASE_TESTS` | — | `=1` habilita la suite viva del adaptador (`tests/lakebase`, 43 tests). |
 | `E2E_BASE` | `http://localhost:8000` | Base URL que apunta el runner E2E (útil para correr los escenarios contra un entorno desplegado). |
+| `COSMOS_CONNECTION_STRING` / `COSMOS_DATABASE` | `""` / `db_modeler` | **Solo legacy**: camino `DB_BACKEND=cosmos` (rollback dormido). |
 
 ### 8.2 Base de datos (Databricks Lakebase Postgres)
 
@@ -620,6 +621,7 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 - **Índices:** se recrean con `ensure_indexes(db)` al arrancar el lifespan; el planner del reporting rechaza (422) ordenar por campos sin índice, así que los índices esperados deben existir para las consultas a escala.
 - **Colección protegida:** `column_catalog` (usada por el agente de modelado) nunca debe ser borrada por los scripts de carga/reset; lo garantizan con `assert`/guardrail.
 - **Sin lifespan no hay DB:** el `TestClient` de los unit tests se construye sin lifespan a propósito, y el `/api/health` reporta `degraded` con `db_connected: false` cuando no hay conexión — comportamiento verificado en `tests/test_smoke.py`.
+- **Cosmos DB (legacy):** el camino `DB_BACKEND=cosmos` (Motor contra Azure Cosmos DB con API de Mongo) se conserva en código como rollback dormido; el throttling por RU/s (429 / código 16500) que condicionó a los seeds de estrés era de esa época.
 
 ---
 
