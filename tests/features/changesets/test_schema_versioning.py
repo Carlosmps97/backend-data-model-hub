@@ -276,3 +276,22 @@ def test_delete_schema_in_changeset_vacio_registra_delete(monkeypatch):
     out = asyncio.run(service.delete_schema_in_changeset("c1", "u1", "s1"))
     assert out == {"id": "c1"}
     add.assert_awaited_once_with("c1", "u1", "schemas", "s1", "delete", None)
+
+
+def test_rename_schema_conserva_kind(monkeypatch):
+    # el upsert del rename espeja el doc EFECTIVO completo: kind (doc 44) viaja
+    monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
+        {"id": "s1", "name": "core_vu", "description": None, "kind": "views"}]))
+    recorded: list[tuple] = []
+
+    async def fake_add_change(cs_id, actor, collection, entity_id, op, payload):
+        recorded.append((collection, entity_id, op, payload))
+        return {"id": cs_id}
+
+    monkeypatch.setattr(service, "add_change", fake_add_change)
+    monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value={}))
+    out = asyncio.run(service.rename_schema("c1", "u1", "s1", "core_v2_vu"))
+    assert out == {"tables": 0, "views": 0}
+    sch = next(r for r in recorded if r[0] == "schemas")
+    assert sch[3]["name"] == "core_v2_vu" and sch[3]["kind"] == "views"

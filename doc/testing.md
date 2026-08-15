@@ -24,7 +24,7 @@ flowchart TD
     B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>19 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>43 tests contra el Postgres real en schema efimero"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration<br/>592 tests (suite normal, verde 2026-08-13) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration<br/>598 tests (suite normal, verde 2026-08-14) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -43,18 +43,18 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-08-13):** la suite normal son **592 tests** (verde). `pytest tests/ --collect-only -q` recolecta **635** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-08-14):** la suite normal son **598 tests** (verde). `pytest tests/ --collect-only -q` recolecta **641** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning) | 10 | 40 |
 | `tests/architecture` (invariantes de capas) | 2 | 4 |
-| `tests/features` (todas las features) | 78 | 514 |
+| `tests/features` (todas las features) | 78 | 520 |
 | `tests/erwin_migration` (kit de migración multi-archivo) | 4 | 32 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
-| **Subtotal — suite normal** | **95** | **592** |
+| **Subtotal — suite normal** | **95** | **598** |
 | `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 43 |
-| **Total recolectado** | **96** | **635** |
+| **Total recolectado** | **96** | **641** |
 
 ---
 
@@ -112,7 +112,7 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 592 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
+Los 598 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
@@ -206,7 +206,7 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 592 passed + 43 skipped.
+`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 598 passed + 43 skipped.
 
 ```bash
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 43 tests contra el Postgres real
@@ -231,10 +231,10 @@ Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, 
 No requieren base de datos ni variables de entorno. Ejemplos:
 
 ```bash
-# Toda la suite normal (592 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
+# Toda la suite normal (598 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
 .venv/bin/python -m pytest -q
 
-# Solo recolectar (verificar el conteo: 635 = 592 + 43 vivos, ~0.2 s)
+# Solo recolectar (verificar el conteo: 641 = 598 + 43 vivos, ~0.2 s)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (43, requiere el Postgres real alcanzable)
@@ -327,7 +327,7 @@ Es el corazón del versionado (copy-on-write, requests, aprobaciones):
 - **`test_effective_search.py` (5):** búsqueda server-side sobre la vista efectiva (publicado + cambios del changeset): incluye entidades nuevas del changeset que matchean `q`, excluye las renombradas fuera del match (re-filtro post-overlay), aplica los deletes, ordena y capea por `limit`, y sin `q` conserva el contrato original.
 - **`test_apply_plan.py` (2):** `apply_plan` linealiza el mapa de cambios a tuplas `(collection, id, op, payload)` en orden por dependencia.
 - **Guards de duplicados (`test_duplicates.py` 10 + `test_add_change_duplicates.py` 7 + `test_publish_duplicates.py` 4):** unicidad de nombre físico por schema tanto al registrar el cambio (`add_change`) como al publicar.
-- **Schemas versionados (`test_schema_versioning.py` 18 + `test_effective_schema.py` 5):** rename de esquema propagado server-side dentro del draft, delete con guard de uso, y filtro `schema` sobre la vista efectiva.
+- **Schemas versionados (`test_schema_versioning.py` 19 + `test_effective_schema.py` 5):** rename de esquema propagado server-side dentro del draft (conservando el `kind` del doc 44), delete con guard de uso, y filtro `schema` sobre la vista efectiva.
 - **`test_diffdetail.py` (13):** el diff ANTES→DESPUÉS por campo del review (ver sección 3.3).
 - **`test_rollback_any_and_tree.py` (7):** rollback a CUALQUIER versión aplicada (draft inverso que deshace las posteriores) y árbol jerárquico Proyecto→…→Columnas del review con `projectsAffected` real.
 
@@ -626,12 +626,12 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 ## 9. Resumen de comandos
 
 ```bash
-# Suite normal (592 tests, sin DB; los 43 vivos salen skipped)
+# Suite normal (598 tests, sin DB; los 43 vivos salen skipped)
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pytest tests/architecture -v
 .venv/bin/python -m pytest tests/features/changesets -k versioning
 
-# Verificar el conteo total (635 = 592 + 43 vivos)
+# Verificar el conteo total (641 = 598 + 43 vivos)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (43, contra el Postgres real)

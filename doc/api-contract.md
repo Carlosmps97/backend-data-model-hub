@@ -2405,7 +2405,7 @@ Router: `app/features/schemas/router.py` — prefijo `/api/schemas`, guard `writ
 
 El GET es lectura para cualquier sesión válida: lo consumen los dropdowns de esquema y el Database Explorer, incluso con rol lector. Las escrituras exigen `model.edit` y son el camino directo SIN changeset — en sesión de edición el front escribe SIEMPRE vía changeset (cambio `collection: "schemas"` por `PUT .../changes`, o los endpoints de rename/delete del changeset, ver 8.17).
 
-Forma de un esquema: `{ id, name, description }`.
+Forma de un esquema: `{ id, name, description, kind }`. `kind` (doc 44) declara qué contiene el esquema — `"tables"` | `"views"` | `null` (sin clasificar): el XML de Erwin no trae ese dato, así que nace en la plataforma (la UI lo pide al crear; la migración lo deriva de los miembros; `scripts/backfill_schema_kind.py` clasifica el stock por uso real). Lo consumen los combobox de esquema de CTAS/New table para acotar a esquemas de tablas sin consultar el pool.
 
 ### 7.1 GET /api/schemas
 
@@ -2418,26 +2418,26 @@ curl http://localhost:8000/api/schemas
 Respuesta (`data`):
 ```json
 [
-  { "id": "sch-01", "name": "ventas", "description": "Dominio comercial" },
-  { "id": "sch-02", "name": "ventas_vu", "description": null }
+  { "id": "sch-01", "name": "ventas", "description": "Dominio comercial", "kind": "tables" },
+  { "id": "sch-02", "name": "ventas_vu", "description": null, "kind": "views" }
 ]
 ```
 
 ### 7.2 POST /api/schemas
 
-Propósito: crea un esquema. Body `SchemaBody` (`{ name, description? }`). Respuesta `201 Created`.
+Propósito: crea un esquema. Body `SchemaBody` (`{ name, description?, kind? }`; `kind` ∈ `tables|views`, opcional). Respuesta `201 Created`.
 
-Errores: **422** nombre inválido; **409** nombre duplicado.
+Errores: **422** nombre inválido o `kind` fuera del enum; **409** nombre duplicado.
 
 ```bash
 curl -X POST http://localhost:8000/api/schemas \
   -H "Content-Type: application/json" \
-  -d '{"name":"riesgos","description":"Dominio de riesgos"}'
+  -d '{"name":"riesgos","description":"Dominio de riesgos","kind":"tables"}'
 ```
 
 ### 7.3 PATCH /api/schemas/{sid}
 
-Propósito: actualiza (rename/descripción). Mismo body. Errores: **422** nombre inválido; **409** duplicado; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá.
+Propósito: actualiza (rename/descripción). Mismo body; `kind` AUSENTE significa "no tocar el vigente" (un PATCH de solo nombre no borra la clasificación). Errores: **422** nombre inválido; **409** duplicado; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá — ese camino espeja el doc efectivo completo, así que conserva `kind`.
 
 ### 7.4 DELETE /api/schemas/{sid}
 

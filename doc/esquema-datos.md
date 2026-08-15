@@ -124,6 +124,7 @@ Esquema físico de BD como **entidad** (doc 18). Tablas y vistas lo referencian 
 | id | str | uuid4 | PK (migración: `sch-<name>`, reusa por nombre case-insensitive) |
 | name | str | — | único (case-insensitive) |
 | description | str? | null | |
+| kind | `"tables"` \| `"views"`? | null | doc 44: qué contiene el esquema. Erwin NO lo trae (los `Hive_Database` del XML no llevan atributo/UDP que lo marque) — la UI lo pide al crear, la migración lo deriva de los MIEMBROS (mixto → tables) y `scripts/backfill_schema_kind.py` clasificó el stock por uso real (2026-08-14: 199 tables · 189 views · 0 sin clasificar). |
 
 ---
 

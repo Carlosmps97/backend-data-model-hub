@@ -102,6 +102,11 @@ class Migrator:
         self.col_pid: dict[str, str] = {}
         self.view_pid: dict[str, str] = {}
         self.schemas_used: set[str] = set()    # nombres de schema de objetos migrados
+        # doc 44: de qué MIEMBROS viene cada schema (el XML no trae este dato:
+        # los Hive_Database no llevan atributo/UDP que marque vistas) — deriva
+        # el `kind` del doc de schema. Mixto → tables gana.
+        self.schemas_tables: set[str] = set()
+        self.schemas_views: set[str] = set()
         self.collapsed = pol.collapse_udp_defs(model.udp_defs)
         self.udp_vals = pol.resolve_udp_values(model.udp_values, self.collapsed)
         # veredicto por tabla EXISTENTE en conflicto ("xml"|"db") — las vistas
@@ -383,6 +388,7 @@ class Migrator:
                     # se engancha a ella (relaciones/vistas/canvases suman).
                     self.table_pid[e.id] = existing_id
                     self.schemas_used.add(schema)
+                    self.schemas_tables.add(schema)
                     owner_cols: dict[str, str] = {}
                     unmapped = 0
                     for a in e.attributes:
@@ -404,6 +410,7 @@ class Migrator:
 
             self.table_pid[e.id] = pid
             self.schemas_used.add(schema)
+            self.schemas_tables.add(schema)
             self._upsert("canonical_tables", pid, {
                 "physicalName": e.physical, "logicalName": e.name,
                 "schema": schema,
@@ -607,6 +614,7 @@ class Migrator:
                 pid = existing_id or own_pid
             self.view_pid[v.id] = pid
             self.schemas_used.add(schema)
+            self.schemas_views.add(schema)
 
             cols, dropped = pol.dedupe_columns(
                 v.attributes, scorer=lambda a: (int(bool(a.parent_attr_ref)),
@@ -659,13 +667,22 @@ class Migrator:
 
     def schema_docs(self) -> None:
         """Entidad `schemas` (doc 18): un doc por nombre de schema usado.
-        Reusa por nombre case-insensitive (cache); ids `sch-<name>`."""
+        Reusa por nombre case-insensitive (cache); ids `sch-<name>`. El `kind`
+        (doc 44) se deriva de los MIEMBROS (tablas/vistas) porque el XML no lo
+        trae; mixto → tables. Un schema YA existente no se re-clasifica acá —
+        eso es del backfill (`scripts/backfill_schema_kind.py`)."""
         for name in sorted(self.schemas_used):
             if name.upper() in self.ex_schemas:
                 self.stats["schemas reusados"] += 1
                 continue
             self.ex_schemas[name.upper()] = f"sch-{name}"
-            self._upsert("schemas", f"sch-{name}", {"name": name, "description": None})
+            kind = ("tables" if name in self.schemas_tables
+                    else "views" if name in self.schemas_views else None)
+            doc: dict = {"name": name, "description": None}
+            if kind:
+                doc["kind"] = kind
+                self.stats[f"schemas creados como {kind}"] += 1
+            self._upsert("schemas", f"sch-{name}", doc)
             self.stats["schemas creados"] += 1
 
     def canvases(self) -> None:

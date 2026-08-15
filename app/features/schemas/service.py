@@ -43,7 +43,8 @@ async def create_schema(body: SchemaBody) -> dict:
     name = body.name.strip()
     if await repository.find_by_name(name):
         raise DuplicateSchemaError(f"Ya existe el esquema {name}")
-    return await repository.create_schema({"name": name, "description": body.description})
+    return await repository.create_schema(
+        {"name": name, "description": body.description, "kind": body.kind})
 
 
 async def update_schema(sid: str, body: SchemaBody) -> dict | None:
@@ -56,7 +57,12 @@ async def update_schema(sid: str, body: SchemaBody) -> dict | None:
     dup = await repository.find_by_name(name)
     if dup and dup["id"] != sid:
         raise DuplicateSchemaError(f"Ya existe el esquema {name}")
-    return await repository.update_schema(sid, {"name": name, "description": body.description})
+    data: dict = {"name": name, "description": body.description}
+    # kind ausente = "no tocar el vigente" (un PATCH de solo nombre/descripción
+    # no debe borrar la clasificación ya asignada).
+    if body.kind is not None:
+        data["kind"] = body.kind
+    return await repository.update_schema(sid, data)
 
 
 async def delete_schema(sid: str) -> bool | str:
