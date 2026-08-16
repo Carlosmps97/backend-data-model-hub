@@ -179,7 +179,10 @@ def test_bulk_nombre_muy_largo_bloquea(monkeypatch):
 def test_bulk_relationship_se_persiste_normalizada_v2(monkeypatch):
     # Paridad con add_change: el payload de relationships se graba con el dump
     # v2 normalizado (parent/child + pairs), nunca el shape crudo del cliente.
-    bulk, _, _ = _mock_repo(monkeypatch)
+    # Doc 47: el guard N=N exige que pA sea la llave COMPLETA del padre tA.
+    bulk, _, _ = _mock_repo(monkeypatch, published=[
+        {"id": "pA", "tableId": "tA", "physicalName": "PA", "logicalName": "pa",
+         "dataType": "BIGINT", "ordinal": 0, "isPrimaryKey": True}])
     items = [{"collection": "relationships", "entityId": "r1", "op": "upsert",
               "payload": {"parentTableId": "tA", "childTableId": "tB",
                           "pairs": [{"parentColumnId": "pA", "childColumnId": "cB"}]}}]

@@ -20,7 +20,8 @@ from app.features.views.models import normalize_source_tables
 from . import diffdetail, repository, validation
 from .repository import VERSIONED
 from .validation import (
-    DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError)
+    DuplicateEntityError, InvalidPayloadError, NameTooLongError,
+    RelationshipKeyMismatchError, SchemaInUseError, relationship_key_error)
 
 log = get_logger("app.changesets")
 
@@ -382,6 +383,31 @@ def _too_long_msg(scope: str, name: str, max_len: int) -> str:
             f"name, or raise the limit in Data Standards · Glossary.")
 
 
+async def _relationship_key_error(cs_id: str, payload: dict,
+                                  bulk_cols: dict[str, dict] | None = None) -> str | None:
+    """Guard N=N (doc 47): el set efectivo de PKs del padre = columnas
+    publicadas + overlay pendiente del changeset (+ los ítems de columnas del
+    MISMO lote, si vienen). Sólo se dispara al ESCRIBIR relaciones — editar la
+    llave del padre después no bloquea (el drift lo resuelve el Sync del front)."""
+    parent_tid = payload.get("parentTableId")
+    if not parent_tid:
+        return None  # payload_error ya lo exigió antes
+    pub = await repository.published("canonical_columns", {"tableId": parent_tid})
+    pending = (await repository.changes_map(cs_id, ["canonical_columns"])).get("canonical_columns", {})
+    if bulk_cols:
+        pending = {**pending, **bulk_cols}
+    ids_pub = {c["id"] for c in pub}
+
+    def _touches(ch: dict) -> bool:
+        return (ch.get("payload") or {}).get("tableId") == parent_tid
+
+    cols = overlay(pub, {eid: ch for eid, ch in pending.items()
+                         if eid in ids_pub or _touches(ch)})
+    pk_ids = {c["id"] for c in cols
+              if c.get("tableId") == parent_tid and c.get("isPrimaryKey")}
+    return relationship_key_error(payload, pk_ids)
+
+
 async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op: str, payload: dict | None) -> dict | str | None:
     """Graba un cambio como documento propio (`changeset_changes`), sólo si el
     changeset sigue en `draft` (protocolo con compensación en el repository).
@@ -408,6 +434,10 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
         # y el apply sirven/escriben el payload tal cual se grabó, así que un
         # shape legacy (source/target) no debe quedar grabado en el draft.
         payload = RelationshipDoc.model_validate({**payload, "id": entity_id}).model_dump()
+        # N=N (doc 47): la relación migra la llave COMPLETA del padre.
+        key_err = await _relationship_key_error(cs_id, payload)
+        if key_err:
+            raise RelationshipKeyMismatchError(key_err)
     # Unicidad de nombres (spec 10 §9): tablas por (schema, physicalName) y
     # columnas por physicalName dentro de su tableId — contra publicado activo
     # + pendientes de ESTE changeset. El router lo convierte en 409.
@@ -462,6 +492,17 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
             # Igual que add_change: se persiste el dump v2 NORMALIZADO.
             it["payload"] = RelationshipDoc.model_validate(
                 {**it["payload"], "id": it["entityId"]}).model_dump()
+
+    # N=N (doc 47): las relaciones del lote validan contra la llave efectiva
+    # del padre INCLUYENDO las columnas del propio lote (p.ej. la migración de
+    # llave crea las columnas hijas en el mismo request).
+    bulk_cols = {it["entityId"]: {"op": it["op"], "payload": it.get("payload") or {}}
+                 for it in ordered if it["collection"] == "canonical_columns"}
+    for it in ordered:
+        if it["collection"] == "relationships" and it["op"] == "upsert" and it.get("payload"):
+            key_err = await _relationship_key_error(cs_id, it["payload"], bulk_cols)
+            if key_err:
+                raise RelationshipKeyMismatchError(key_err)
 
     upserts = [it for it in ordered if it["op"] == "upsert" and it["collection"] in _UNIQUE_COLLS]
     pending_all: dict[str, dict] = {}

@@ -104,6 +104,30 @@ class SchemaInUseError(ValueError):
     El router la convierte en 409 (el mensaje ya es legible)."""
 
 
+class RelationshipKeyMismatchError(ValueError):
+    """Upsert de relación que NO migra la llave completa del padre (N=N,
+    doc 47). El router la convierte en 409 (el mensaje ya es legible)."""
+
+
+def relationship_key_error(payload: dict, parent_pk_ids: set[str]) -> str | None:
+    """Regla N=N (doc 47): los `parentColumnId` de los pares deben ser EXACTA-
+    mente el set de PKs efectivas del padre; sin hijos repetidos; sin auto-
+    mapeo (recursivas). None si pasa. Puro — el caller resuelve el set efectivo."""
+    pairs = payload.get("pairs") or []
+    parents = [p.get("parentColumnId") for p in pairs]
+    children = [p.get("childColumnId") for p in pairs]
+    if len(set(parents)) != len(parents):
+        return "Relationship repeats a parent key column across pairs."
+    if len(set(children)) != len(children):
+        return "Relationship maps two parent key columns to the same child column."
+    if any(a == b for a, b in zip(parents, children)):
+        return "A key column can't migrate to itself."
+    if set(parents) != parent_pk_ids:
+        return (f"Relationship must migrate the parent's full primary key "
+                f"(parent has {len(parent_pk_ids)} PK column(s), got {len(pairs)} pair(s)).")
+    return None
+
+
 def _norm(value) -> str:
     return str(value or "").strip().lower()
 

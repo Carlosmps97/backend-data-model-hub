@@ -26,7 +26,9 @@ _can_decide = require_permission("review.decide")
 # Rollback a una versión publicada = permiso propio (afecta producción, como publish).
 _can_rollback = require_permission("rollback")
 from .repository import VERSIONED
-from .validation import DuplicateEntityError, InvalidPayloadError, NameTooLongError, SchemaInUseError
+from .validation import (
+    DuplicateEntityError, InvalidPayloadError, NameTooLongError,
+    RelationshipKeyMismatchError, SchemaInUseError)
 from .schemas import (
     ChangeBody,
     ChangesBulkBody,
@@ -80,6 +82,9 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         # Unicidad de nombres (spec 10 §9): el Save queda bloqueado ACÁ, en el
         # router — el publish queda protegido transitivamente (y re-chequeado).
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RelationshipKeyMismatchError as exc:
+        # N=N (doc 47): la relación debe migrar la llave completa del padre.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except NameTooLongError as exc:
         # Nombre físico sobre el límite del naming config (Data Standards): 400
         # con el mensaje legible; el create popup lo muestra inline.
@@ -113,6 +118,9 @@ async def add_changes_bulk(cs_id: str, body: ChangesBulkBody, user: dict = Depen
         res = await service.add_changes_bulk(
             cs_id, user["username"], [c.model_dump() for c in body.changes])
     except DuplicateEntityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RelationshipKeyMismatchError as exc:
+        # N=N (doc 47): la relación debe migrar la llave completa del padre.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except NameTooLongError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

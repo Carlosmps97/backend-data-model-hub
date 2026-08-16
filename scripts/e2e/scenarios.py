@@ -901,6 +901,61 @@ def s19_bulk_changes() -> Suite:
     return s
 
 
+# ══ S20 · Relaciones con llave compuesta (doc 47) ════════════════════════════
+
+
+def s20_composite_key_relationships() -> Suite:
+    """N=N (doc 47): un upsert de relación migra la llave COMPLETA del padre —
+    parcial → 409; completo (con columnas del mismo lote) → 200."""
+    s = Suite("s20_composite_key_relationships")
+    mod = Client("modelador")
+
+    def bulk(cli, cs_id, changes):
+        return cli.put(f"/api/changesets/{cs_id}/changes/bulk", {"changes": changes})
+
+    pid = mod.create_project()
+    ptid = mod.create_table(logical=f"{TAG} rel padre", schema="e2e",
+                            physical=f"{TAG}_REL_PADRE".upper())
+    pk1 = mod.add_column(ptid, "id", "BIGINT", pk=True, ordinal=0)
+    pk2 = mod.add_column(ptid, "region", "STRING", pk=True, ordinal=1)
+    htid = mod.create_table(logical=f"{TAG} rel hijo", schema="e2e",
+                            physical=f"{TAG}_REL_HIJO".upper())
+    cs = mod.snapshot([pid], title=f"{TAG} s20")
+
+    rid, na, nb = _uid("rel"), _uid("colA"), _uid("colB")
+    parcial = bulk(mod, cs, [
+        {"collection": "relationships", "entityId": rid, "op": "upsert",
+         "payload": {"id": rid, "parentTableId": ptid, "childTableId": htid,
+                     "pairs": [{"parentColumnId": pk1, "childColumnId": na}],
+                     "parentCardinality": "one", "childCardinality": "zero-many",
+                     "identifying": True}},
+    ])
+    s.eq("relación con 1 par sobre llave de 2 → 409", parcial.status, 409)
+
+    completo = bulk(mod, cs, [
+        {"collection": "canonical_columns", "entityId": na, "op": "upsert",
+         "payload": {"id": na, "tableId": htid, "logicalName": "id",
+                     "physicalName": f"{TAG}_FK_ID".upper(), "dataType": "BIGINT",
+                     "ordinal": 0, "isForeignKey": True, "isPrimaryKey": True,
+                     "isNullable": False}},
+        {"collection": "canonical_columns", "entityId": nb, "op": "upsert",
+         "payload": {"id": nb, "tableId": htid, "logicalName": "region",
+                     "physicalName": f"{TAG}_FK_REGION".upper(), "dataType": "STRING",
+                     "ordinal": 1, "isForeignKey": True, "isPrimaryKey": True,
+                     "isNullable": False}},
+        {"collection": "relationships", "entityId": rid, "op": "upsert",
+         "payload": {"id": rid, "parentTableId": ptid, "childTableId": htid,
+                     "pairs": [{"parentColumnId": pk1, "childColumnId": na},
+                               {"parentColumnId": pk2, "childColumnId": nb}],
+                     "parentCardinality": "one", "childCardinality": "zero-many",
+                     "identifying": True}},
+    ])
+    s.eq("llave completa + columnas del lote → 200", completo.status, 200)
+    eff = mod.get(f"/api/changesets/{cs}/effective/relationships?tableId={ptid}").data or []
+    s.eq("effective trae la relación con 2 pares", len((eff[0] or {}).get("pairs", [])) if eff else 0, 2)
+    return s
+
+
 ALL = {
     "s01_rbac": s01_rbac, "s02_version_lifecycle": s02_version_lifecycle,
     "s03_convergence": s03_convergence, "s04_domain_cascade": s04_domain_cascade,
@@ -917,4 +972,6 @@ ALL = {
     "s18_udp_canvas_models": s18_udp_canvas_models,
     # Lote de cambios (doc 39)
     "s19_bulk_changes": s19_bulk_changes,
+    # Relaciones con llave compuesta (doc 47)
+    "s20_composite_key_relationships": s20_composite_key_relationships,
 }
