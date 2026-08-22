@@ -25,7 +25,34 @@ def test_publish_duplicates_detecta_conflicto_con_publicado(monkeypatch):
     changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {
         "physicalName": "cliente", "logicalName": "n", "schema": "CORE"}}}}
     errors = asyncio.run(service._publish_duplicates(changes))
-    assert errors == ["Table CORE.cliente already exists"]
+    assert errors == ["Table cliente already exists (schema core)"]
+
+
+def test_publish_duplicates_cross_schema_conflicta(monkeypatch):
+    # Doc 50: la unicidad del físico es GLOBAL — otro esquema no libera el nombre.
+    _pub_by_collection(monkeypatch, {
+        "canonical_tables": [{"id": "tx", "physicalName": "M_CLIENTE", "logicalName": "c", "schema": "A"}],
+    })
+    changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {
+        "physicalName": "m_cliente", "logicalName": "n", "schema": "B"}}}}
+    errors = asyncio.run(service._publish_duplicates(changes))
+    assert errors == ["Table m_cliente already exists (schema A)"]
+
+
+def test_publish_duplicates_homonimo_legacy_sin_rename_pasa(monkeypatch):
+    # Grandfather (doc 50): t2 ya está publicada con ese nombre (homónimo
+    # legacy cross-schema) y el upsert NO lo cambia → no bloquea el publish.
+    docs = [
+        {"id": "t1", "physicalName": "M_CLIENTE", "logicalName": "c", "schema": "A"},
+        {"id": "t2", "physicalName": "M_CLIENTE", "logicalName": "c b", "schema": "B"},
+    ]
+
+    async def _pub(collection, flt=None, **kwargs):
+        return docs if collection == "canonical_tables" else []
+    monkeypatch.setattr(service.repository, "published", _pub)
+    changes = {"canonical_tables": {"t2": {"op": "upsert", "payload": {
+        "physicalName": "M_CLIENTE", "logicalName": "c b editada", "schema": "B"}}}}
+    assert asyncio.run(service._publish_duplicates(changes)) == []
 
 
 def test_publish_duplicates_sin_conflictos(monkeypatch):

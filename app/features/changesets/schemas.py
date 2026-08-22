@@ -36,6 +36,10 @@ class ChangeBody(BaseModel):
     entityId: str
     op: Literal["upsert", "delete"]
     payload: dict[str, Any] | None = None
+    # Procedencia del alta (doc 51, opcional): {kind: 'paste-table'|
+    # 'paste-columns'|'ctas', sourceTable?, sourceColumn?} — solo la consume el
+    # historial de auditoría ("Created from …").
+    origin: dict[str, Any] | None = None
 
 
 class ChangesBulkBody(BaseModel):

@@ -40,6 +40,11 @@ class ChangeDoc(BaseModel):
     op: str  # upsert | delete
     payload: dict | None = None
     at: str | None = None  # ISO-8601: baseline de conflicto vs producción
+    # Procedencia del alta (doc 51, aditivo): {kind: 'paste-table'|'paste-columns'
+    # |'ctas', sourceTable?, sourceColumn?}. Solo la muestra el historial de
+    # auditoría ("Created from …"); overlay/diff/apply lo ignoran. Un upsert
+    # posterior del MISMO draft sin origin lo arrastra (ver set_change).
+    origin: dict | None = None
     # Imagen PREVIA de la entidad publicada, capturada en el publish (doc 16
     # §5d): alimenta el rollback (draft inverso). `before=None` con `beforeAt`
     # estampado = la entidad NO existía (el inverso es un delete).

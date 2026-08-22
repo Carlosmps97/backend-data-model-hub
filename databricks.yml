@@ -1,62 +1,37 @@
 # Databricks Asset Bundle — backend (FastAPI) como Databricks App.
-# Docs: https://learn.microsoft.com/en-us/azure/databricks/dev-tools/bundles/apps-tutorial
-# Deploy:  databricks bundle deploy --target prod
-# Arranca: databricks bundle run backend --target prod
 #
-# PARÁMETROS POR ENTORNO = sección `variables:`.
-# La config de RUNTIME de la app (command + env) vive en `app.yaml` (raíz del
-# repo), NO acá. Databricks lo lee en cada arranque, así que sobrevive a un
-# stop/start. Antes vivía en un bloque `config:` de este archivo, pero el CLI
-# lo IGNORA en silencio (bug databricks/cli #4901) → al prender la app decía
-# "Failed to load app spec". Ver app.yaml para el detalle.
-# Este archivo solo declara lo que el bundle SÍ aplica bien: el binding del
-# secreto de sesión, los permisos y el destino del deploy.
-# Para desplegar en OTRO Databricks (doc 35): el workspace sale de la GitHub
-# Variable DATABRICKS_HOST; los valores de runtime portables van en app.yaml.
+# Declara lo que el bundle aplica en cada deploy: la app, sus permisos y los
+# bindings de secretos. La config de RUNTIME (command + env) vive en app.yaml;
+# el bloque `config:` de este archivo no se usa porque el CLI lo ignora en
+# silencio (bug databricks/cli #4901).
+#
+# Ninguna variable lleva `default:`: el workflow de deploy exporta cada una
+# como BUNDLE_VAR_<variable> desde la GitHub Variable homónima en MAYÚSCULAS.
+# Para un deploy manual, exportar esos BUNDLE_VAR_* y DATABRICKS_HOST antes de
+# `databricks bundle deploy --target <target>`.
 bundle:
   name: bknd-data-model-hub
 
-# NINGUNA variable hay que editar por ambiente: el workflow las exporta como
-# `BUNDLE_VAR_<nombre>` desde las GitHub Variables del repo cuando existen, y si
-# no existen mandan estos defaults.
 variables:
-  # NOTA: endpoint/schema/CORS del Lakebase se movieron a app.yaml (env de
-  # runtime). Acá solo quedan las variables que alimentan cosas que el bundle
-  # SÍ aplica: el binding del secreto y los permisos.
   secret_scope:
-    # GitHub Variable: SECRET_SCOPE
-    description: "Scope de secretos (Key Vault-backed) que guarda la SECRET_KEY de firma de sesión."
-    default: kv-scope-datacraft
+    # GitHub Variable SECRET_SCOPE — ej. kv-scope-datacraft
+    description: "Scope de secretos del workspace que guarda las claves usadas por la app."
   session_secret_key:
-    # GitHub Variable: SESSION_SECRET_KEY
-    description: "Key del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
-    default: session-secret-key
+    # GitHub Variable SESSION_SECRET_KEY — ej. session-secret-key
+    description: "Key (dentro del scope) del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
   proxy_secret_key:
-    # GitHub Variable: PROXY_SECRET_KEY (opcional; su valor es la KEY del
-    # secreto en el scope — misma key en el front).
-    # Doc 38: autentica el relay de identidad SSO front→back (x-dmh-proxy-secret).
-    description: "Key del secreto compartido entre las apps front y backend (relay SSO)."
-    default: dmh-proxy-secret
+    # GitHub Variable PROXY_SECRET_KEY — ej. dmh-proxy-secret (la misma key que usa el front)
+    description: "Key (dentro del scope) del secreto compartido front↔backend que autentica el relay SSO."
   app_admin_user:
-    # GitHub Variable: APP_ADMIN_USER (opcional).
-    # Cuando el deploy lo hace un SERVICE PRINCIPAL (token de CI), `mode:
-    # production` le da CAN_MANAGE SOLO a ese SP y el humano que creó la app
-    # pierde hasta el botón de Stop. Con esta variable el humano recupera el
-    # control en cada deploy.
-    # El default es la identidad que despliega: repite el grant que production
-    # mode ya hace (el CLI lo deduplica) → sin la variable NO se agrega a nadie
-    # extra y el deploy no falla.
-    description: "Usuario humano que queda con CAN_MANAGE sobre la app (stop/start/logs desde la UI)."
-    default: ${workspace.current_user.userName}
+    # GitHub Variable APP_ADMIN_USER — ej. usuario@dominio.com (usuario del workspace)
+    description: "Usuario que conserva CAN_MANAGE sobre la app (stop/start/logs desde la UI)."
 
 resources:
   apps:
-    backend:                      # resource key (lo usa `databricks bundle run backend`)
+    backend:                      # resource key: el workflow lo detecta para bind/run
       name: bknd-data-model-hub   # nombre real de la app en el workspace
-      source_code_path: .         # el código de la app está en la raíz del repo
+      source_code_path: .
       description: "Data Model Hub — backend de plataforma (FastAPI · Databricks Lakebase Postgres)."
-      # command + env → app.yaml (raíz del repo). Ver el comentario de cabecera
-      # de este archivo y app.yaml: el bloque `config:` no funciona (bug #4901).
       resources:
         - name: session_secret
           description: "SECRET_KEY para firmar tokens de sesión."
@@ -65,13 +40,13 @@ resources:
             key: ${var.session_secret_key}
             permission: READ
         - name: proxy_secret
-          description: "Secreto compartido front↔backend que autentica el relay de identidad SSO (doc 38)."
+          description: "Secreto compartido front↔backend que autentica el relay de identidad SSO."
           secret:
             scope: ${var.secret_scope}
             key: ${var.proxy_secret_key}
             permission: READ
       permissions:
-        - level: CAN_MANAGE       # el humano dueño: stop/start/logs/permissions en la UI
+        - level: CAN_MANAGE       # el usuario administrador definido en app_admin_user
           user_name: ${var.app_admin_user}
         - level: CAN_USE
           group_name: users       # todos los usuarios del workspace pueden abrir la app
@@ -81,10 +56,7 @@ targets:
     mode: production
     default: true
     workspace:
-      # SIN `host:` a propósito (2026-07-27): el workspace destino sale de la
-      # variable de entorno DATABRICKS_HOST — o sea de la GitHub Variable del
-      # repo, que ya es la que usa el CLI. Un `host:` acá GANA sobre esa
-      # variable (verificado), así que hardcodearlo obligaba a editar el repo
-      # por cada ambiente y podía desplegar callado al workspace equivocado.
-      # En local: exporta DATABRICKS_HOST o usa `databricks -p <perfil> ...`.
+      # Sin `host:` a propósito: el workspace destino sale de la variable de
+      # entorno DATABRICKS_HOST (un host acá ganaría sobre esa variable y
+      # obligaría a editar el repositorio por cada ambiente).
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

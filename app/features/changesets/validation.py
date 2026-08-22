@@ -86,12 +86,16 @@ def validate_changes(changes: dict) -> list[str]:
     return errors
 
 
-# ── Unicidad de nombres (spec 10 §9) ───────────────────────────────────────
-# Tablas: (schema, physicalName) case-insensitive contra publicado activo +
-# upserts pendientes del mismo changeset. Columnas: physicalName dentro de su
-# tableId. La comparación es sobre el estado EFECTIVO del slice (los deletes
-# pendientes del changeset LIBERAN el nombre). El adaptador no soporta índices
-# únicos sobre colecciones pobladas → la garantía vive en el router.
+# ── Unicidad de nombres (spec 10 §9 + doc 50) ──────────────────────────────
+# Tablas: physicalName case-insensitive GLOBAL (doc 50 — el esquema ya no
+# participa: A.M_CLIENTE y B.M_CLIENTE no pueden coexistir; el lógico sigue
+# sin unicidad) contra publicado activo + upserts pendientes del mismo
+# changeset. Columnas: physicalName dentro de su tableId. La comparación es
+# sobre el estado EFECTIVO del slice (los deletes pendientes del changeset
+# LIBERAN el nombre). El adaptador no soporta índices únicos sobre colecciones
+# pobladas → la garantía vive en el router. La data legacy con homónimos entre
+# esquemas (migración bajo la regla vieja) se protege con un grandfather a
+# nivel service: nombre SIN CAMBIOS respecto del publicado no bloquea.
 
 
 class DuplicateEntityError(ValueError):
@@ -132,10 +136,10 @@ def _norm(value) -> str:
     return str(value or "").strip().lower()
 
 
-def _table_key(doc: dict) -> tuple[str, str]:
-    """Clave de unicidad de tabla. El campo persistido en Mongo es `schema`
-    (alias del atributo Pydantic `sql_schema`)."""
-    return (_norm(doc.get("schema") or doc.get("sql_schema")), _norm(doc.get("physicalName")))
+def _table_key(doc: dict) -> str:
+    """Clave de unicidad de tabla (doc 50): SOLO el nombre físico, global —
+    el esquema dejó de participar en la clave."""
+    return _norm(doc.get("physicalName"))
 
 
 def _column_key(doc: dict) -> tuple[str, str]:
@@ -167,12 +171,16 @@ def duplicate_error(collection: str, entity_id: str, payload: dict | None,
     p = payload or {}
     if collection == "canonical_tables":
         key = _table_key(p)
-        if not key[1]:
+        if not key:
             return None
-        if any(_table_key(d) == key for d in _effective_docs(published, pending, entity_id)):
-            schema = str(p.get("schema") or p.get("sql_schema") or "").strip()
+        hit = next((d for d in _effective_docs(published, pending, entity_id) if _table_key(d) == key), None)
+        if hit is not None:
             name = str(p.get("physicalName") or "").strip()
-            return f"Table {f'{schema}.{name}' if schema else name} already exists"
+            # El homónimo puede vivir en OTRO esquema (la clave es global):
+            # nombrarlo hace obvio el conflicto cross-schema.
+            hit_schema = str(hit.get("schema") or hit.get("sql_schema") or "").strip()
+            return (f"Table {name} already exists"
+                    + (f" (schema {hit_schema})" if hit_schema else ""))
     elif collection == "canonical_columns":
         key = _column_key(p)
         if not (key[0] and key[1]):

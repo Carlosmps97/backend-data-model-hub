@@ -1,223 +1,29 @@
+# Deploy del backend a Databricks Apps.
+#
+# Mapeo rama → GitHub Environment (Variables y Secrets salen del environment,
+# con fallback a los del repositorio):
+#   · deploy-dev → dev   · develop → qa   · main → prod
+# SOLO esas tres ramas despliegan: el push únicamente dispara en ellas y el
+# disparo manual desde cualquier otra rama se omite (guard del job).
+# Toda la mecánica vive en reusable-databricks-deploy.yml; acá solo se declara
+# la topología de la solución: la app del front consume esta app vía su proxy
+# /api, así que su service principal recibe CAN_USE sobre esta.
+
 name: Deploy to Databricks Apps (backend)
 
-# Auto-deploy en cada push a `main`; también disparable a mano (workflow_dispatch).
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [deploy-dev, develop, main]
 
 permissions:
   contents: read
 
 jobs:
   deploy:
-    name: Deploy backend
-    runs-on: ubuntu-latest
-    # Config por repositorio (Settings → Secrets and variables → Actions):
-    #   · variable DATABRICKS_HOST  = URL del workspace destino
-    #   · secret   DATABRICKS_TOKEN = PAT de ese workspace (solo lo usa el CLI)
-    #   · variable BUNDLE_TARGET    = target del bundle (opcional; default prod)
-    # El runtime de la app NO usa nada de esto: sus parámetros por entorno
-    # viven en databricks.yml (`variables:` + `config:`) y la BD se autentica
-    # con el service principal de la app (doc 28 §11).
-    env:
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      BUNDLE_TARGET: ${{ vars.BUNDLE_TARGET || 'prod' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # setup-cli@main instala el CLI más reciente (se requiere ≥ 0.283 por el
-      # bloque `config:` del recurso app en databricks.yml).
-      - name: Install Databricks CLI
-        uses: databricks/setup-cli@main
-
-      # Parámetros por ambiente SIN tocar el repo: cada GitHub Variable se
-      # exporta como BUNDLE_VAR_<variable del bundle>. Se exportan SOLO si
-      # traen valor — una variable vacía PISARÍA el default del databricks.yml
-      # (verificado), así que "no definida en GitHub" = "usa el default".
-      # El workspace destino NO va acá: sale de la variable DATABRICKS_HOST que
-      # ya usa el CLI (el bundle dejó de hardcodear `workspace.host`).
-      # OJO: endpoint/schema/CORS del Lakebase ya NO son variables del bundle
-      # (se movieron a app.yaml como env de runtime). Solo quedan las que
-      # alimentan el binding del secreto y los permisos, que el bundle SÍ aplica.
-      # Los env de runtime del app.yaml se parametrizan en el paso siguiente.
-      - name: Parámetros del bundle desde GitHub Variables
-        env:
-          SECRET_SCOPE: ${{ vars.SECRET_SCOPE }}
-          SESSION_SECRET_KEY: ${{ vars.SESSION_SECRET_KEY }}
-          PROXY_SECRET_KEY: ${{ vars.PROXY_SECRET_KEY }}
-          APP_ADMIN_USER: ${{ vars.APP_ADMIN_USER }}
-        run: |
-          set_var() {   # $1 = variable del bundle · $2 = valor de GitHub
-            if [ -z "$2" ]; then echo "· $1 → default del databricks.yml"; return; fi
-            echo "BUNDLE_VAR_$1=$2" >> "$GITHUB_ENV"
-            echo "· $1 = $2   (GitHub Variables)"
-          }
-          echo "Workspace (DATABRICKS_HOST): $DATABRICKS_HOST"
-          set_var secret_scope        "$SECRET_SCOPE"
-          set_var session_secret_key  "$SESSION_SECRET_KEY"
-          set_var proxy_secret_key    "$PROXY_SECRET_KEY"
-          set_var app_admin_user      "$APP_ADMIN_USER"
-
-      # Env de runtime del app.yaml desde GitHub Variables (mismo criterio que
-      # el paso de arriba, pero para el app.yaml en vez del bundle). Cada env
-      # `value:` se sobrescribe con una GitHub Variable HOMÓNIMA; si NO está
-      # definida (vacía), se conserva el valor commiteado del app.yaml (default)
-      # → el deploy de prod actual queda IDÉNTICO. En otro workspace basta
-      # definir la Variable, sin editar el repo.
-      #   · LOG_FORMAT · LAKEBASE_ENDPOINT · LAKEBASE_PGSCHEMA
-      #   · CORS_ORIGIN_REGEX · REQUIRE_AUTH
-      # app.yaml SIGUE siendo la fuente (no se borra, NO vuelve a `config:`):
-      # solo se le inyectan los valores por entorno justo antes del deploy, que
-      # `bundle deploy` sube con el resto del código (source_code_path: .).
-      # `yq` (mikefarah) viene preinstalado en ubuntu-latest; `strenv` mete el
-      # valor como string literal (respeta backslashes del regex CORS) y
-      # `style="double"` preserva el tipo string (p.ej. REQUIRE_AUTH "true").
-      - name: Env del app.yaml desde GitHub Variables (override opcional)
-        env:
-          LOG_FORMAT: ${{ vars.LOG_FORMAT }}
-          LAKEBASE_ENDPOINT: ${{ vars.LAKEBASE_ENDPOINT }}
-          LAKEBASE_PGSCHEMA: ${{ vars.LAKEBASE_PGSCHEMA }}
-          CORS_ORIGIN_REGEX: ${{ vars.CORS_ORIGIN_REGEX }}
-          REQUIRE_AUTH: ${{ vars.REQUIRE_AUTH }}
-        run: |
-          set_env() {   # $1 = name del env en app.yaml · $2 = valor de la GitHub Variable
-            if [ -z "$2" ]; then echo "· $1 → default de app.yaml (committed)"; return; fi
-            NAME="$1" VAL="$2" yq -i \
-              '(.env[] | select(.name == strenv(NAME)) | .value) = strenv(VAL)
-               | (.env[] | select(.name == strenv(NAME)) | .value) style="double"' app.yaml
-            echo "· $1 = $2   (GitHub Variables)"
-          }
-          set_env LOG_FORMAT         "$LOG_FORMAT"
-          set_env LAKEBASE_ENDPOINT  "$LAKEBASE_ENDPOINT"
-          set_env LAKEBASE_PGSCHEMA  "$LAKEBASE_PGSCHEMA"
-          set_env CORS_ORIGIN_REGEX  "$CORS_ORIGIN_REGEX"
-          set_env REQUIRE_AUTH       "$REQUIRE_AUTH"
-          echo "── app.yaml env efectivo ──"
-          yq '.env' app.yaml
-
-      # `bundle deploy` instala el provider Terraform de Databricks. El CLI usa
-      # OpenTofu por debajo y fija el provider a registry.opentofu.org; en el
-      # runner `tofu init` falla al verificar su firma ("authentication
-      # signature from unknown issuer" — provider experimental en OpenTofu).
-      # Solución: pre-armar un mirror LOCAL con `tofu providers mirror` (que
-      # OMITE la firma) e instalar desde ahí (un filesystem_mirror tampoco la
-      # verifica). Este OpenTofu es SOLO para armar el mirror; el bundle lo
-      # sigue desplegando el CLI con su propio OpenTofu embebido.
-      - name: Install OpenTofu (solo para armar el mirror del provider)
-        uses: opentofu/setup-opentofu@v1
-        with:
-          tofu_version: "1.12.3"
-          tofu_wrapper: false
-
-      - name: Preparar mirror local del provider databricks
-        run: bash scripts/ci/tf-provider-mirror.sh
-
-      - name: Validate bundle
-        run: databricks bundle validate --target "$BUNDLE_TARGET"
-
-      # Doc 38: el app.yaml referencia el secreto compartido del relay SSO
-      # (`proxy_secret`). El secreto se administra A MANO, igual que
-      # session-secret-key — este paso SOLO VERIFICA que exista (con la key
-      # equivocada o el secreto ausente, la app quedaria sin arrancar tras el
-      # deploy). Nunca crea nada. Acepta ambas shapes del CLI (array u objeto
-      # {"secrets": []}); si ni siquiera puede listar el scope, asume que
-      # existe y sigue.
-      - name: Verificar el secreto del proxy (relay SSO, doc 38)
-        env:
-          SCOPE: ${{ vars.SECRET_SCOPE || 'kv-scope-datacraft' }}
-          KEY: ${{ vars.PROXY_SECRET_KEY || 'dmh-proxy-secret' }}
-        run: |
-          LIST=$(databricks secrets list-secrets "$SCOPE" --output json 2>/dev/null) || {
-            echo "· No se pudo listar el scope $SCOPE: se asume que $KEY existe y se sigue."
-            exit 0
-          }
-          if echo "$LIST" | jq -e --arg k "$KEY" \
-               '(.secrets? // .) | .[]? | select(.key == $k)' > /dev/null; then
-            echo "· Secreto $SCOPE/$KEY existe."
-          else
-            echo "ERROR: el secreto $SCOPE/$KEY no existe en el scope. Crealo UNA vez" >&2
-            echo "(mismo procedimiento que session-secret-key) y re-corre el deploy:" >&2
-            echo "  · Scope Azure KeyVault-backed: crear el secret '$KEY' en el Key Vault." >&2
-            echo "  · Scope Databricks-backed: databricks secrets put-secret $SCOPE $KEY" >&2
-            echo "Se aborta ANTES del deploy: la app que corre no se toca." >&2
-            exit 1
-          fi
-
-      # Adopción de una app PRE-CREADA a mano. En workspaces con cupo de
-      # apps (corporativos: se llenan y ya no dejan crear más) conviene
-      # reservar el slot creando la app en la UI ANTES del primer deploy.
-      # Terraform no la tiene en su estado → `bundle deploy` intenta CREARLA y
-      # la API responde 409 ALREADY_EXISTS. `bind` la importa al estado del
-      # bundle y desde ahí el deploy la ACTUALIZA en su sitio.
-      # Idempotente: si la app no existe no hace nada; si ya estaba bindeada,
-      # avisa y sigue. Requisitos: (a) el nombre creado a mano debe ser
-      # IDÉNTICO al del bundle (si difiere, Terraform destruiría y recrearía);
-      # (b) la identidad del DATABRICKS_TOKEN necesita CAN_MANAGE sobre esa
-      # app — si la creó otra persona, dárselo en la app → Permissions.
-      - name: Bind app pre-existente (evita 409 ALREADY_EXISTS)
-        run: |
-          APP_NAME=$(databricks bundle validate --target "$BUNDLE_TARGET" --output json \
-            | jq -r '.resources.apps.backend.name')
-          if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
-            echo "No pude resolver el nombre de la app desde el bundle." >&2; exit 1
-          fi
-          echo "App del bundle: $APP_NAME"
-          if databricks apps get "$APP_NAME" >/dev/null 2>&1; then
-            echo "→ La app YA existe en el workspace: la bindeo al bundle."
-            if ! databricks bundle deployment bind backend "$APP_NAME" \
-                   --target "$BUNDLE_TARGET" --auto-approve; then
-              echo "OJO: bind no aplicó."
-              echo "   · Si el error dice que el recurso ya está en el estado → es normal, el deploy sigue."
-              echo "   · Si dice 403 / PERMISSION_DENIED → al dueño del DATABRICKS_TOKEN le falta CAN_MANAGE sobre '$APP_NAME'."
-            fi
-          else
-            echo "→ La app no existe todavía: el deploy la creará."
-          fi
-
-      - name: Deploy bundle (sube el código + crea/actualiza la app)
-        run: databricks bundle deploy --target "$BUNDLE_TARGET"
-
-      # El bloque `permissions:` del bundle es AUTORITATIVO: el deploy de
-      # arriba deja la ACL exactamente como la declara databricks.yml, o sea
-      # que el CAN_USE del SP del FRONT (necesario para el proxy /api del
-      # server del front, doc 36 §6.3) se acaba de BORRAR si existía. Este
-      # paso lo re-aplica en cada deploy, resolviendo el SP real de la app
-      # del front en ESTE workspace (PATCH = agrega sin pisar el resto).
-      # Si la app del front aún no existe (primer deploy del backend), se
-      # salta: el workflow del front hace el mismo grant al final del suyo.
-      - name: Autorizar al SP del front sobre esta app (proxy /api)
-        env:
-          FRONTEND_APP_NAME: ${{ vars.FRONTEND_APP_NAME || 'frnt-data-model-hub' }}
-        run: |
-          BACKEND_APP=$(databricks bundle validate --target "$BUNDLE_TARGET" --output json \
-            | jq -r '.resources.apps.backend.name')
-          FRONT_SP=$(databricks apps get "$FRONTEND_APP_NAME" --output json 2>/dev/null \
-            | jq -r '.service_principal_client_id // empty')
-          if [ -z "$FRONT_SP" ]; then
-            echo "La app del front '$FRONTEND_APP_NAME' no existe todavia: se salta"
-            echo "(el workflow del front aplica este grant al final del suyo)."
-            exit 0
-          fi
-          databricks api patch "/api/2.0/permissions/apps/$BACKEND_APP" --json "{
-            \"access_control_list\": [
-              {\"service_principal_name\": \"$FRONT_SP\", \"permission_level\": \"CAN_USE\"}
-            ]}" > /dev/null
-          echo "CAN_USE re-aplicado: SP del front ($FRONT_SP) -> $BACKEND_APP"
-
-      - name: Deploy & (re)start app
-        run: databricks bundle run backend --target "$BUNDLE_TARGET"
-
-      - name: Wait for app RUNNING
-        run: |
-          # Nombre real de la app desde el bundle (una sola fuente de verdad).
-          APP_NAME=$(databricks bundle summary --target "$BUNDLE_TARGET" --output json \
-            | jq -r '.resources.apps.backend.name')
-          for i in $(seq 1 20); do
-            STATE=$(databricks apps get "$APP_NAME" --output json | jq -r '.app_status.state')
-            echo "Attempt $i/20: state=$STATE"
-            [ "$STATE" = "RUNNING" ] && exit 0
-            sleep 15
-          done
-          echo "App no llegó a RUNNING en ~5 min" >&2; exit 1
+    if: contains(fromJSON('["deploy-dev", "develop", "main"]'), github.ref_name)
+    uses: ./.github/workflows/reusable-databricks-deploy.yml
+    with:
+      environment: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'develop' && 'qa' || 'dev' }}
+      consumer_app: frnt-data-model-hub
+    secrets: inherit

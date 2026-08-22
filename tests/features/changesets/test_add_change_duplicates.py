@@ -87,6 +87,63 @@ def test_upsert_columna_duplicada_en_tabla(monkeypatch):
     set_change.assert_not_called()
 
 
+def test_upsert_cross_schema_conflicta(monkeypatch):
+    # Doc 50: la unicidad del físico de tabla es GLOBAL — cambiar el esquema
+    # del payload ya no libera el nombre.
+    set_change = _mock_repo(
+        monkeypatch,
+        published=[{"id": "t1", "physicalName": "M_CLIENTE", "logicalName": "cliente", "schema": "A"}],
+        changes_map={},
+    )
+    with pytest.raises(DuplicateEntityError, match=r"already exists \(schema A\)"):
+        asyncio.run(service.add_change(
+            "c1", "ana", "canonical_tables", "t9", "upsert",
+            {"physicalName": "m_cliente", "logicalName": "otro", "schema": "B"}))
+    set_change.assert_not_called()
+
+
+def test_upsert_homonimo_legacy_sin_rename_pasa(monkeypatch):
+    # Grandfather (doc 50): dos homónimos cross-schema YA publicados (data
+    # migrada bajo la regla vieja). Editar uno SIN tocar el físico no bloquea;
+    # el mock respeta el filtro por _id de la query del grandfather.
+    docs = [
+        {"id": "t1", "physicalName": "M_CLIENTE", "logicalName": "cliente", "schema": "A"},
+        {"id": "t2", "physicalName": "M_CLIENTE", "logicalName": "cliente b", "schema": "B"},
+    ]
+    set_change = _mock_repo(monkeypatch, published=docs, changes_map={})
+
+    async def _pub(collection, flt=None, **kwargs):
+        if isinstance(flt, dict) and "_id" in flt:
+            return [d for d in docs if d["id"] == flt["_id"]]
+        return docs
+    monkeypatch.setattr(service.repository, "published", _pub)
+    res = asyncio.run(service.add_change(
+        "c1", "ana", "canonical_tables", "t2", "upsert",
+        {"physicalName": "M_CLIENTE", "logicalName": "cliente b editada", "schema": "B"}))
+    assert isinstance(res, dict)
+    set_change.assert_awaited_once()
+
+
+def test_upsert_rename_hacia_nombre_tomado_bloquea(monkeypatch):
+    # El grandfather NO cubre renames: mover t2 hacia el nombre de t1 bloquea.
+    docs = [
+        {"id": "t1", "physicalName": "M_CLIENTE", "logicalName": "cliente", "schema": "A"},
+        {"id": "t2", "physicalName": "M_PERSONA", "logicalName": "persona", "schema": "B"},
+    ]
+    set_change = _mock_repo(monkeypatch, published=docs, changes_map={})
+
+    async def _pub(collection, flt=None, **kwargs):
+        if isinstance(flt, dict) and "_id" in flt:
+            return [d for d in docs if d["id"] == flt["_id"]]
+        return docs
+    monkeypatch.setattr(service.repository, "published", _pub)
+    with pytest.raises(DuplicateEntityError, match="already exists"):
+        asyncio.run(service.add_change(
+            "c1", "ana", "canonical_tables", "t2", "upsert",
+            {"physicalName": "m_cliente", "logicalName": "persona", "schema": "B"}))
+    set_change.assert_not_called()
+
+
 def test_conflicto_contra_pendiente_del_mismo_changeset(monkeypatch):
     pending = {"canonical_tables": {"t8": {"op": "upsert", "payload": {
         "physicalName": "NUEVA", "logicalName": "nueva", "schema": "core"}}}}

@@ -1,0 +1,241 @@
+# Workflow reutilizable: despliegue de una Databricks App vía Asset Bundle.
+# Es agnóstico a la app — el mismo archivo sirve para cualquier repositorio que
+# cumpla el contrato de abajo. Lo específico de cada solución vive en el caller.
+#
+# Contrato (nada de valores por defecto en el código):
+#   · databricks.yml declara UNA app, sus variables (sin `default:`), permisos
+#     y bindings de secretos.
+#   · app.yaml declara el runtime (command + env). Cada env con clave `value`
+#     se llena en el deploy con la GitHub Variable HOMÓNIMA.
+#   · Cada variable del bundle se llena con la GitHub Variable homónima en
+#     MAYÚSCULAS (ej. secret_scope ← SECRET_SCOPE) y se pasa como BUNDLE_VAR_*.
+#   · Variables y Secrets se leen del GitHub Environment recibido como input
+#     (con fallback a los del repositorio). Si falta alguno, el run se corta
+#     ANTES de tocar la app y se listan los nombres faltantes.
+#
+# Requisitos del repositorio que llama:
+#   · Secret   DATABRICKS_TOKEN — token del workspace destino (lo usa solo el CLI).
+#   · Variable DATABRICKS_HOST  — URL del workspace (ej. https://adb-123.4.azuredatabricks.net).
+#   · Variable BUNDLE_TARGET    — target del bundle (ej. prod).
+#   · Una GitHub Variable por cada variable del bundle y por cada env de app.yaml.
+#   · scripts/ci/tf-provider-mirror.sh — workaround del provider Terraform (ver script).
+
+name: Deploy Databricks App (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment del que se leen Variables y Secrets (ej. dev, qa, prod)."
+        type: string
+        required: true
+      consumer_app:
+        description: "Opcional: app cuyo service principal recibe CAN_USE sobre la app desplegada (una app que la consume)."
+        type: string
+        required: false
+        default: ""
+      provider_app:
+        description: "Opcional: app sobre la que el service principal de la app desplegada recibe CAN_USE (una app que esta consume)."
+        type: string
+        required: false
+        default: ""
+    secrets:
+      DATABRICKS_TOKEN:
+        description: "Token del workspace destino."
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Despliegue (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Un deploy a la vez por repositorio y environment; los demás quedan en cola.
+    concurrency:
+      group: databricks-deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.wait.outputs.app_url }}
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      BUNDLE_TARGET: ${{ vars.BUNDLE_TARGET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Instala la última versión del CLI; si un cambio del CLI rompe el deploy,
+      # fijar acá una versión con `with: version:`.
+      - name: Instalar Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Verificar configuración mínima y credenciales
+        run: |
+          MISSING=""
+          [ -z "$DATABRICKS_HOST" ]  && MISSING="$MISSING DATABRICKS_HOST(Variable)"
+          [ -z "$BUNDLE_TARGET" ]    && MISSING="$MISSING BUNDLE_TARGET(Variable)"
+          [ -z "$DATABRICKS_TOKEN" ] && MISSING="$MISSING DATABRICKS_TOKEN(Secret)"
+          if [ -n "$MISSING" ]; then
+            echo "Configuración incompleta en el environment '${{ inputs.environment }}':$MISSING" >&2
+            exit 1
+          fi
+          if ! databricks current-user me > /dev/null; then
+            echo "Falló la autenticación contra $DATABRICKS_HOST: verificar que el" >&2
+            echo "DATABRICKS_TOKEN esté vigente y corresponda a ese workspace." >&2
+            exit 1
+          fi
+
+      # Toda variable declarada en databricks.yml debe existir como GitHub
+      # Variable homónima en MAYÚSCULAS; se exporta como BUNDLE_VAR_<variable>.
+      - name: Resolver variables del bundle desde GitHub Variables
+        env:
+          GH_VARS: ${{ toJSON(vars) }}
+        run: |
+          MISSING=""
+          for KEY in $(yq '(.variables // {}) | keys | .[]' databricks.yml); do
+            GH_NAME=$(printf '%s' "$KEY" | tr '[:lower:]' '[:upper:]')
+            VALUE=$(printf '%s' "$GH_VARS" | jq -r --arg k "$GH_NAME" '.[$k] // empty')
+            if [ -z "$VALUE" ]; then MISSING="$MISSING $GH_NAME"; continue; fi
+            echo "BUNDLE_VAR_$KEY=$VALUE" >> "$GITHUB_ENV"
+            echo "· $KEY ← GitHub Variable $GH_NAME"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "Faltan GitHub Variables (environment '${{ inputs.environment }}' o repositorio):$MISSING" >&2
+            exit 1
+          fi
+
+      # Todo env de app.yaml con clave `value` debe existir como GitHub Variable
+      # homónima; el valor se escribe antes de subir el código. Los `valueFrom`
+      # no se tocan (los resuelve la app al arrancar contra los recursos del bundle).
+      - name: Inyectar env de app.yaml desde GitHub Variables
+        env:
+          GH_VARS: ${{ toJSON(vars) }}
+        run: |
+          if [ ! -f app.yaml ]; then echo "No hay app.yaml: nada que inyectar."; exit 0; fi
+          MISSING=""
+          for NAME in $(yq '(.env // []) | .[] | select(has("value")) | .name' app.yaml); do
+            VALUE=$(printf '%s' "$GH_VARS" | jq -r --arg k "$NAME" '.[$k] // empty')
+            if [ -z "$VALUE" ]; then MISSING="$MISSING $NAME"; continue; fi
+            NAME="$NAME" VAL="$VALUE" yq -i \
+              '(.env[] | select(.name == strenv(NAME)) | .value) = strenv(VAL)
+               | (.env[] | select(.name == strenv(NAME)) | .value) style="double"' app.yaml
+          done
+          if [ -n "$MISSING" ]; then
+            echo "Faltan GitHub Variables para app.yaml (environment '${{ inputs.environment }}' o repositorio):$MISSING" >&2
+            exit 1
+          fi
+          echo "── env efectivo de app.yaml ──"
+          yq '.env' app.yaml
+
+      # El CLI aplica el bundle con un OpenTofu embebido y la verificación de
+      # firma del provider databricks falla en el runner; se instala desde un
+      # mirror local pre-armado. Este OpenTofu solo arma el mirror (ver script).
+      - name: Instalar OpenTofu (solo para el mirror del provider)
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.12.3"
+          tofu_wrapper: false
+
+      - name: Preparar mirror local del provider databricks
+        run: bash scripts/ci/tf-provider-mirror.sh
+
+      - name: Validar bundle
+        run: databricks bundle validate --target "$BUNDLE_TARGET"
+
+      # Detecta el único recurso app del bundle; los pasos siguientes operan sobre él.
+      - name: Identificar la app del bundle
+        run: |
+          COUNT=$(yq '(.resources.apps // {}) | length' databricks.yml)
+          if [ "$COUNT" != "1" ]; then
+            echo "Se esperaba exactamente 1 app en resources.apps y hay $COUNT." >&2
+            exit 1
+          fi
+          KEY=$(yq '.resources.apps | keys | .[0]' databricks.yml)
+          NAME=$(databricks bundle validate --target "$BUNDLE_TARGET" --output json \
+            | jq -r --arg k "$KEY" '.resources.apps[$k].name // empty')
+          if [ -z "$NAME" ]; then
+            echo "No se pudo resolver el nombre de la app desde el bundle." >&2
+            exit 1
+          fi
+          { echo "APP_RESOURCE_KEY=$KEY"; echo "APP_NAME=$NAME"; } >> "$GITHUB_ENV"
+          echo "App del bundle: $NAME (resource key: $KEY)"
+
+      # Workspaces con cupo de apps: si la app ya fue creada a mano (mismo
+      # nombre), se importa al estado del bundle para que el deploy la actualice
+      # en su sitio en lugar de fallar con 409 ALREADY_EXISTS. Si el bind
+      # responde 403, a la identidad del token le falta CAN_MANAGE sobre la app.
+      - name: Adoptar app pre-existente (evita 409 ALREADY_EXISTS)
+        run: |
+          if databricks apps get "$APP_NAME" > /dev/null 2>&1; then
+            echo "La app '$APP_NAME' ya existe: se importa al estado del bundle."
+            databricks bundle deployment bind "$APP_RESOURCE_KEY" "$APP_NAME" \
+              --target "$BUNDLE_TARGET" --auto-approve \
+              || echo "Aviso: el bind no aplicó (si el recurso ya estaba en el estado, el deploy continúa igual)."
+          else
+            echo "La app '$APP_NAME' no existe todavía: el deploy la creará."
+          fi
+
+      # Sube el código (source_code_path) y crea/actualiza la app, sus permisos
+      # y bindings. Si falla resolviendo un recurso `secret`, verificar que el
+      # scope y la key existan en el workspace destino.
+      - name: Desplegar bundle
+        run: databricks bundle deploy --target "$BUNDLE_TARGET"
+
+      # El bloque `permissions:` del bundle deja la ACL exactamente como la
+      # declara databricks.yml; los permisos app-a-app se re-aplican acá en cada
+      # deploy. PATCH agrega sin pisar el resto de la ACL; ambos pasos son
+      # idempotentes y no dependen del orden en que se desplieguen las apps.
+      - name: Autorizar a la app consumidora sobre esta app (CAN_USE)
+        if: inputs.consumer_app != ''
+        run: |
+          SP=$(databricks apps get "${{ inputs.consumer_app }}" --output json 2>/dev/null \
+            | jq -r '.service_principal_client_id // empty')
+          if [ -z "$SP" ]; then
+            echo "La app consumidora '${{ inputs.consumer_app }}' no existe todavía: se omite (su propio deploy aplicará el permiso)."
+            exit 0
+          fi
+          databricks api patch "/api/2.0/permissions/apps/$APP_NAME" --json "{
+            \"access_control_list\": [
+              {\"service_principal_name\": \"$SP\", \"permission_level\": \"CAN_USE\"}
+            ]}" > /dev/null
+          echo "CAN_USE: SP de ${{ inputs.consumer_app }} ($SP) → $APP_NAME"
+
+      - name: Autorizar a esta app sobre la app proveedora (CAN_USE)
+        if: inputs.provider_app != ''
+        run: |
+          SP=$(databricks apps get "$APP_NAME" --output json | jq -r '.service_principal_client_id // empty')
+          if [ -z "$SP" ]; then
+            echo "No se pudo resolver el service principal de '$APP_NAME'." >&2
+            exit 1
+          fi
+          if ! databricks apps get "${{ inputs.provider_app }}" > /dev/null 2>&1; then
+            echo "La app proveedora '${{ inputs.provider_app }}' no existe todavía: se omite (su propio deploy aplicará el permiso)."
+            exit 0
+          fi
+          databricks api patch "/api/2.0/permissions/apps/${{ inputs.provider_app }}" --json "{
+            \"access_control_list\": [
+              {\"service_principal_name\": \"$SP\", \"permission_level\": \"CAN_USE\"}
+            ]}" > /dev/null
+          echo "CAN_USE: SP de $APP_NAME ($SP) → ${{ inputs.provider_app }}"
+
+      - name: Iniciar la app
+        run: databricks bundle run "$APP_RESOURCE_KEY" --target "$BUNDLE_TARGET"
+
+      - name: Esperar estado RUNNING
+        id: wait
+        run: |
+          for i in $(seq 1 20); do
+            STATE=$(databricks apps get "$APP_NAME" --output json | jq -r '.app_status.state')
+            echo "Intento $i/20: state=$STATE"
+            if [ "$STATE" = "RUNNING" ]; then
+              URL=$(databricks apps get "$APP_NAME" --output json | jq -r '.url // empty')
+              echo "app_url=$URL" >> "$GITHUB_OUTPUT"
+              echo "App disponible: $URL"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "La app no llegó a RUNNING en ~5 minutos: revisar los logs de la app en el workspace." >&2
+          exit 1

@@ -65,6 +65,19 @@ async def snapshot(body: SnapshotBody, user: dict = Depends(_can_edit)):
     )
 
 
+@router.get("/history/{collection}/{entity_id}")
+async def entity_history(collection: str, entity_id: str,
+                         limit: int = Query(default=50, ge=1, le=200)):
+    """Historial de auditoría PUBLICADO de una entidad (doc 51): quién / cuándo /
+    qué acción / qué versión / qué cambió, derivado en LECTURA del ledger de
+    changesets aplicados (before-images del doc 16). Ruta estática — declarada
+    antes de `/{cs_id}`. Solo tablas y columnas (alcance del pedido)."""
+    if collection not in service.HISTORY_COLLECTIONS:
+        raise HTTPException(status_code=422,
+                            detail=f"History not available for collection: {collection!r}.")
+    return ok(await service.entity_history(collection, entity_id, limit))
+
+
 @router.get("/{cs_id}")
 async def get(cs_id: str):
     return ok(await service.get(cs_id))
@@ -77,7 +90,8 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         # (apply_changes escribe en db[collection] literal): whitelist dura.
         raise HTTPException(status_code=422, detail=f"Collection not under versioning: {body.collection!r}.")
     try:
-        res = await service.add_change(cs_id, user["username"], body.collection, body.entityId, body.op, body.payload)
+        res = await service.add_change(cs_id, user["username"], body.collection, body.entityId, body.op, body.payload,
+                                       body.origin)
     except DuplicateEntityError as exc:
         # Unicidad de nombres (spec 10 §9): el Save queda bloqueado ACÁ, en el
         # router — el publish queda protegido transitivamente (y re-chequeado).

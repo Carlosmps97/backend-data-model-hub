@@ -90,7 +90,22 @@ def change_key(cs_id: str, collection: str, entity_id: str) -> str:
     return f"{cs_id}::{collection}::{entity_id}"
 
 
-async def set_change(cs_id: str, collection: str, entity_id: str, op: str, payload: dict | None) -> dict | None:
+def _with_origin(doc: dict, origin: dict | None, prev: dict | None) -> dict:
+    """Adjunta la procedencia (doc 51) al doc del cambio. El upsert por `_id`
+    REEMPLAZA el doc: sin este carry-forward, editar la entidad en el mismo
+    draft borraría el origin del alta (paste/CTAS). Un delete lo corta (la
+    procedencia es del alta; un re-create posterior arranca limpio)."""
+    if doc.get("op") == "delete":
+        return doc
+    if origin:
+        doc["origin"] = origin
+    elif prev and prev.get("origin"):
+        doc["origin"] = prev["origin"]
+    return doc
+
+
+async def set_change(cs_id: str, collection: str, entity_id: str, op: str, payload: dict | None,
+                     origin: dict | None = None) -> dict | None:
     """Graba UN cambio como documento propio en `changeset_changes`, sólo si el
     changeset sigue en `draft`.
 
@@ -131,6 +146,7 @@ async def set_change(cs_id: str, collection: str, entity_id: str, op: str, paylo
     if op != "delete":
         doc["payload"] = payload or {}
     prev = await db[CHANGES_COLL].find_one({"_id": key})
+    doc = _with_origin(doc, origin, prev)
     await db[CHANGES_COLL].replace_one({"_id": key}, doc, upsert=True)
 
     still_draft = await db[COLL].find_one({"_id": cs_id, "status": "draft"}, {"_id": 1})
@@ -185,6 +201,7 @@ async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
                "entityId": it["entityId"], "op": it["op"], "at": at, "wtoken": token}
         if it["op"] != "delete":
             doc["payload"] = it.get("payload") or {}
+        doc = _with_origin(doc, it.get("origin"), prevs.get(key))
         ops.append(ReplaceOne({"_id": key}, doc, upsert=True))
     for i in range(0, len(ops), _BULK_BATCH):
         await db[CHANGES_COLL].bulk_write(ops[i:i + _BULK_BATCH])
@@ -324,6 +341,53 @@ async def applied_after(applied_at: str) -> list[dict]:
     docs.sort(key=lambda d: d.get("appliedAt") or "", reverse=True)
     return [{"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
              "versionLabel": d.get("versionLabel")} for d in docs]
+
+
+async def entity_changes(collection: str, entity_id: str) -> list[dict]:
+    """Cambios de UNA entidad con imagen previa ESTAMPADA (`beforeAt`) — el
+    marcador de que el cambio entró a un apply (doc 51). Cruza TODOS los
+    changesets (índice compuesto collection+entityId); el llamador filtra
+    además por cabecera aplicada — `beforeAt` solo no alcanza: un apply
+    fallido lo deja estampado con el request devuelto a revisión."""
+    db = await get_db()
+    docs = await db[CHANGES_COLL].find(
+        {"collection": collection, "entityId": entity_id,
+         "beforeAt": {"$exists": True}}).to_list(None)
+    return [ChangeDoc.model_validate({**d, "id": str(d.get("_id"))}).model_dump()
+            for d in docs]
+
+
+async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
+    """Cabeceras proyectadas de changesets puntuales, por id (doc 51 — el
+    historial junta cambios de VARIAS versiones; bajar docs completos con
+    `comments` por cabecera no hace falta)."""
+    if not cs_ids:
+        return {}
+    db = await get_db()
+    docs = await db[COLL].find(
+        {"_id": {"$in": sorted(set(cs_ids))}},
+        {"versionLabel": 1, "title": 1, "owner": 1, "status": 1,
+         "appliedAt": 1, "reviewedBy": 1, "approvals": 1}).to_list(None)
+    out: dict[str, dict] = {}
+    for d in docs:
+        d = dict(d)
+        d["id"] = str(d.pop("_id"))
+        out[d["id"]] = d
+    return out
+
+
+async def earliest_applied() -> dict | None:
+    """Cabecera de la versión APLICADA más VIEJA (mínimo `appliedAt`) — el
+    marcador v1 de la carga inicial en una BD migrada (doc 51: la entrada
+    sintética "Initial load" toma de acá label y fecha de fallback)."""
+    db = await get_db()
+    docs = await db[COLL].find({"status": "approved", "appliedAt": {"$ne": None}},
+                               {"appliedAt": 1, "versionLabel": 1, "title": 1}).to_list(None)
+    if not docs:
+        return None
+    d = min(docs, key=lambda d: d.get("appliedAt") or "")
+    return {"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
+            "versionLabel": d.get("versionLabel"), "title": d.get("title")}
 
 
 async def published(collection: str, flt: dict | None = None, limit: int | None = None,

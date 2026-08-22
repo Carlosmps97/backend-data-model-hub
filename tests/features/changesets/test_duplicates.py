@@ -1,8 +1,10 @@
-"""Unicidad de nombres (spec 10 §9) — funciones puras de `validation.py`.
+"""Unicidad de nombres (spec 10 §9 + doc 50) — funciones puras de `validation.py`.
 
-Tablas: (schema, physicalName) case-insensitive. Columnas: physicalName
-case-insensitive dentro de su tableId. El estado comparado es el EFECTIVO:
-publicado + upserts pendientes del mismo changeset, menos sus deletes.
+Tablas: physicalName case-insensitive GLOBAL (doc 50 — el esquema ya no
+participa en la clave). Columnas: physicalName case-insensitive dentro de su
+tableId. El estado comparado es el EFECTIVO: publicado + upserts pendientes
+del mismo changeset, menos sus deletes. El grandfather de homónimos legacy es
+del SERVICE (necesita el publicado por _id) — ver test_add_change_duplicates.
 """
 from __future__ import annotations
 
@@ -13,10 +15,11 @@ PUB_C = [{"id": "c1", "tableId": "t1", "physicalName": "ID_CTA", "logicalName": 
 
 
 def test_tabla_duplicada_contra_publicado_case_insensitive():
+    # El mensaje nombra el esquema del HOMÓNIMO existente (clave global, doc 50).
     err = duplicate_error("canonical_tables", "t9",
                           {"physicalName": "cliente", "logicalName": "x", "schema": "CORE"},
                           PUB_T, {})
-    assert err == "Table CORE.cliente already exists"
+    assert err == "Table cliente already exists (schema core)"
 
 
 def test_tabla_misma_entidad_no_conflicta():
@@ -26,10 +29,12 @@ def test_tabla_misma_entidad_no_conflicta():
                            PUB_T, {}) is None
 
 
-def test_tabla_otro_schema_no_conflicta():
-    assert duplicate_error("canonical_tables", "t9",
-                           {"physicalName": "CLIENTE", "logicalName": "x", "schema": "stage"},
-                           PUB_T, {}) is None
+def test_tabla_otro_schema_tambien_conflicta():
+    # Doc 50: la clave es GLOBAL — el mismo físico en OTRO esquema bloquea.
+    err = duplicate_error("canonical_tables", "t9",
+                          {"physicalName": "CLIENTE", "logicalName": "x", "schema": "stage"},
+                          PUB_T, {})
+    assert err == "Table CLIENTE already exists (schema core)"
 
 
 def test_tabla_duplicada_contra_pendiente_del_changeset():

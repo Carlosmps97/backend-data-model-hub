@@ -73,6 +73,10 @@ async def ensure_indexes(db: Any) -> None:
         # overlay/diff/apply leen por csId (+collection) — el prefijo del
         # compuesto cubre ambos.
         _try("changeset_changes", [("csId", 1), ("collection", 1)]),
+        # Historial de auditoría por entidad (doc 51): GET /history cruza los
+        # cambios de UNA entidad a través de TODOS los changesets — sin este
+        # compuesto sería full-scan del ledger completo por apertura de panel.
+        _try("changeset_changes", [("collection", 1), ("entityId", 1)]),
         # ── M3a: Projects + Subject Areas + Relationships + Views ──
         _try("projects", [("flgactive", 1)]),
         _try("subject_areas", [("projectId", 1)]),

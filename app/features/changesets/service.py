@@ -228,6 +228,44 @@ def version_row(cs: dict) -> dict:
     }
 
 
+def history_events(changes: list[dict], headers: dict[str, dict]) -> list[dict]:
+    """Eventos de auditoría de UNA entidad (doc 51) a partir de sus cambios con
+    imagen estampada + cabeceras de changeset. Solo cuentan changesets
+    APLICADOS (`approved` con `appliedAt` — mismo criterio que
+    current_production): un draft/snapshot que nunca publicó no genera
+    historial. Clasificación por cambio: delete → deleted; upsert sin `before`
+    (no existía publicada) → created; upsert con `before` → edited. `origin`
+    solo aflora en un created (el carry-forward del draft lo deja también en
+    ediciones colapsadas, donde mostrarlo mentiría). Más reciente primero. Puro."""
+    events: list[dict] = []
+    for ch in changes:
+        hdr = headers.get(str(ch.get("csId") or ""))
+        if not hdr or hdr.get("status") != "approved" or not hdr.get("appliedAt"):
+            continue
+        op = ch.get("op")
+        action = "deleted" if op == "delete" else (
+            "created" if ch.get("before") is None else "edited")
+        approved = sorted(uid for uid, e in (hdr.get("approvals") or {}).items()
+                          if (e or {}).get("status") == "approved")
+        events.append({
+            "action": action,
+            "at": hdr.get("appliedAt"),
+            "editedAt": ch.get("at"),
+            "csId": hdr.get("id"),
+            "version": hdr.get("versionLabel"),
+            "versionTitle": hdr.get("title"),
+            "userId": hdr.get("owner"),
+            "publishedById": hdr.get("reviewedBy"),
+            "approvedByIds": approved,
+            "origin": ch.get("origin") if action == "created" else None,
+            # Insumo del detalle de campos (entity_detail): before estampado.
+            "change": {"op": op, "payload": ch.get("payload"), "at": ch.get("at"),
+                       "before": ch.get("before"), "beforeAt": ch.get("beforeAt")},
+        })
+    events.sort(key=lambda e: e.get("at") or "", reverse=True)
+    return events
+
+
 # ── Orquestación async (repository + puras) ───────────────────────────────
 
 
@@ -306,16 +344,28 @@ async def snapshot(actor: str, title: str | None, description: str | None,
 
 
 def _table_dup_filter(payload: dict) -> dict:
-    """Filtro Mongo del chequeo de unicidad de tabla: (schema, physicalName)
-    por regex anclado case-insensitive — usa el índice compuesto
-    schema+physicalName de canonical_tables. Sin schema matchea null/''. Puro."""
+    """Filtro Mongo del chequeo de unicidad de tabla (doc 50): physicalName
+    GLOBAL por regex anclado case-insensitive — el esquema dejó de participar
+    en la clave (A.M_CLIENTE y B.M_CLIENTE ya no pueden coexistir). Puro."""
     name = str(payload.get("physicalName") or "").strip()
-    schema = str(payload.get("schema") or payload.get("sql_schema") or "").strip()
-    return {
-        "schema": ({"$regex": f"^{re.escape(schema)}$", "$options": "i"}
-                   if schema else {"$in": [None, ""]}),
-        "physicalName": {"$regex": f"^{re.escape(name)}$", "$options": "i"},
-    }
+    return {"physicalName": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+
+
+async def _table_name_grandfathered(entity_id: str, payload: dict | None) -> bool:
+    """Grandfather de la unicidad GLOBAL de tablas (doc 50, mismo patrón que el
+    de maxLength): si el upsert NO cambia el físico respecto del PUBLICADO de
+    la MISMA entidad (CI), el duplicado no bloquea — la data legacy con
+    homónimos entre esquemas (migrada bajo la regla vieja schema+nombre) sigue
+    siendo editable. Crear una tabla nueva o RENOMBRAR hacia un nombre tomado
+    sí bloquea. Se invoca SOLO cuando ya se detectó conflicto (el camino feliz
+    no paga la query por _id)."""
+    name = str((payload or {}).get("physicalName") or "").strip().lower()
+    if not name:
+        return False
+    pub = await repository.published("canonical_tables", {"_id": entity_id})
+    # Guard por id además del filtro: el doc comparado debe ser LA MISMA entidad.
+    doc = next((d for d in pub if str(d.get("id") or "") == entity_id), None)
+    return doc is not None and str(doc.get("physicalName") or "").strip().lower() == name
 
 
 async def _duplicate_error(cs_id: str, collection: str, entity_id: str,
@@ -342,7 +392,10 @@ async def _duplicate_error(cs_id: str, collection: str, entity_id: str,
             return None
         pub = await repository.published(collection, {"tableId": p["tableId"]})
     pending = (await repository.changes_map(cs_id, [collection])).get(collection, {})
-    return validation.duplicate_error(collection, entity_id, p, pub, pending)
+    dup = validation.duplicate_error(collection, entity_id, p, pub, pending)
+    if dup and collection == "canonical_tables" and await _table_name_grandfathered(entity_id, p):
+        return None
+    return dup
 
 
 async def _name_length_error(cs_id: str, collection: str, entity_id: str,
@@ -408,7 +461,8 @@ async def _relationship_key_error(cs_id: str, payload: dict,
     return relationship_key_error(payload, pk_ids)
 
 
-async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op: str, payload: dict | None) -> dict | str | None:
+async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op: str, payload: dict | None,
+                     origin: dict | None = None) -> dict | str | None:
     """Graba un cambio como documento propio (`changeset_changes`), sólo si el
     changeset sigue en `draft` (protocolo con compensación en el repository).
 
@@ -447,7 +501,7 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     too_long = await _name_length_error(cs_id, collection, entity_id, op, payload)
     if too_long:
         raise NameTooLongError(too_long)
-    updated = await repository.set_change(cs_id, collection, entity_id, op, payload)
+    updated = await repository.set_change(cs_id, collection, entity_id, op, payload, origin)
     if updated is not None:
         return updated
     return "locked" if await repository.get(cs_id) else None
@@ -543,6 +597,8 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
             else:
                 pub = pub_schemas.get(str(p.get("name") or "").strip().lower(), [])
             dup = validation.duplicate_error(coll, eid, p, pub, pending)
+            if dup and coll == "canonical_tables" and await _table_name_grandfathered(eid, p):
+                dup = None  # nombre legacy sin cambios (doc 50)
             if dup:
                 raise DuplicateEntityError(dup)
             limit = max_len.get(coll, 0)
@@ -737,6 +793,8 @@ async def _publish_duplicates(changes: dict) -> list[str]:
         pub = await repository.published("canonical_tables", flt)
         for eid, ch in tbl_upserts.items():
             err = validation.duplicate_error("canonical_tables", eid, ch.get("payload") or {}, pub, tbl_changes)
+            if err and await _table_name_grandfathered(eid, ch.get("payload") or {}):
+                err = None  # nombre legacy sin cambios (doc 50)
             if err and err not in errors:
                 errors.append(err)
 
@@ -1461,6 +1519,90 @@ async def diff_details(cs_id: str, items: list[tuple[str, str]]) -> dict | None:
     res = await _detail_resolvers(wanted, changes, before_by)
     return {"items": [diffdetail.entity_detail(c, e, changes[c][e], before_by[(c, e)], res)
                       for c, e in wanted]}
+
+
+# ── Historial de auditoría por entidad (doc 51) ────────────────────────────
+
+
+# Alcance del historial (pedido: tablas y columnas). Extender = agregar acá.
+HISTORY_COLLECTIONS = ("canonical_tables", "canonical_columns")
+
+
+async def _history_resolvers(collection: str) -> dict:
+    """Mapas id→nombre para el detalle de campos del historial: UDP siempre
+    (ambas colecciones los llevan) y Parent Domain para columnas. Catálogos
+    chicos de Data Standards — nunca colecciones de datos."""
+    from app.features.domains import repository as dom_repo
+    from app.features.udp import repository as udp_repo
+
+    res: dict = {"udp": {}, "domains": {}, "tables": {}, "columns": {},
+                 "projects": {}, "folders": {}}
+    res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp()}
+    if collection == "canonical_columns":
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+    return res
+
+
+def _user_ref(uid: str | None, users: dict[str, dict]) -> dict | None:
+    """Proyección {id, name, email} de un userId; un usuario borrado del Admin
+    sale con el id crudo (el historial no pierde la fila)."""
+    if not uid:
+        return None
+    u = users.get(uid)
+    return {"id": uid, "name": (u or {}).get("name"), "email": (u or {}).get("email")}
+
+
+async def entity_history(collection: str, entity_id: str, limit: int = 50) -> dict:
+    """Historial PUBLICADO de una entidad (doc 51): deriva —en lectura— del
+    ledger que el publish ya persiste (cambios con `before` estampado +
+    cabeceras aplicadas). No escribe nada: no puede alterar versionamiento,
+    merge ni publicaciones concurrentes.
+
+    Si la entidad no nació por changeset (migración Erwin: escribe directo y
+    el marcador v1 es su versión) o su primer evento es una edición, se
+    agrega al final una entrada SINTÉTICA "Initial load": fecha = `createdAt`
+    del doc publicado (el loader la estampa) o `appliedAt` del marcador."""
+    changes = await repository.entity_changes(collection, entity_id)
+    headers = await repository.changesets_by_ids(
+        [str(c.get("csId") or "") for c in changes])
+    events = history_events(changes, headers)[: max(1, limit)]
+
+    res = await _history_resolvers(collection) if events else {}
+    users: dict[str, dict] = {}
+    ids = {e["userId"] for e in events} | {e["publishedById"] for e in events} \
+        | {uid for e in events for uid in e["approvedByIds"]}
+    if ids - {None}:
+        from app.features.auth import repository as auth_repo
+        users = {u["id"]: u for u in await auth_repo.list_users()}
+
+    items: list[dict] = []
+    for e in events:
+        detail = diffdetail.entity_detail(collection, entity_id, e["change"], None, res)
+        items.append({
+            "action": e["action"], "at": e["at"], "editedAt": e["editedAt"],
+            "csId": e["csId"], "version": e["version"], "versionTitle": e["versionTitle"],
+            "user": _user_ref(e["userId"], users),
+            "publishedBy": _user_ref(e["publishedById"], users),
+            "approvedBy": [u for uid in e["approvedByIds"] if (u := _user_ref(uid, users))],
+            "origin": e["origin"], "name": detail.get("name"),
+            "fields": detail.get("fields") or [], "synthetic": False,
+        })
+
+    if not any(i["action"] == "created" for i in items):
+        pub = await repository.published(collection, {"_id": entity_id})
+        doc = next((d for d in pub if str(d.get("id") or "") == entity_id), None)
+        if items or doc:
+            first = await repository.earliest_applied()
+            if first:
+                items.append({
+                    "action": "created", "at": (doc or {}).get("createdAt") or first.get("appliedAt"),
+                    "editedAt": None, "csId": first.get("id"),
+                    "version": first.get("versionLabel"), "versionTitle": first.get("title"),
+                    "user": None, "publishedBy": None, "approvedBy": [],
+                    "origin": {"kind": "migration"},
+                    "name": None, "fields": [], "synthetic": True,
+                })
+    return {"items": items}
 
 
 # Los compat M-series /approve y /reject ya NO tienen funciones propias: el
