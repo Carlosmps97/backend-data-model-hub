@@ -1,0 +1,47 @@
+# App spec de Databricks Apps — backend (FastAPI).
+#
+# NO BORRAR este archivo: Databricks lo lee en CADA arranque de la app (deploy,
+# stop/start desde la UI o reinicio del runtime) y es la única fuente del
+# `command` y las `env`. El bloque `config:` de databricks.yml no lo reemplaza:
+# el CLI lo ignora en silencio (bug databricks/cli #4901).
+#
+# Los `value` van vacíos a propósito: el workflow de deploy los llena con la
+# GitHub Variable HOMÓNIMA del environment elegido antes de subir el código
+# (si falta alguna, el deploy se corta). Los `valueFrom` referencian recursos
+# `secret` de databricks.yml y los resuelve la propia app al arrancar.
+#
+# uvicorn toma host y puerto de UVICORN_HOST/UVICORN_PORT, que el runtime de
+# Apps inyecta solo — no hace falta pasarlos.
+command: ["uvicorn", "app.main:app"]
+
+env:
+  # Formato de los logs de la app — ej. json
+  - name: LOG_FORMAT
+    value: ""
+
+  # Endpoint lógico de Lakebase Postgres — ej. projects/<proj>/branches/<branch>/endpoints/<endpoint>
+  # La app se autentica con su service principal (OAuth M2M): sin host físico,
+  # sin usuario y sin token.
+  - name: LAKEBASE_ENDPOINT
+    value: ""
+
+  # Schema Postgres de la aplicación — ej. dmh
+  - name: LAKEBASE_PGSCHEMA
+    value: ""
+
+  # Regex de orígenes permitidos por CORS — ej. https://frnt-data-model-hub-.*\.databricksapps\.com
+  - name: CORS_ORIGIN_REGEX
+    value: ""
+
+  # Exige login en todos los endpoints — ej. true
+  - name: REQUIRE_AUTH
+    value: ""
+
+  # Clave de firma de sesión: sale del recurso `session_secret` (databricks.yml).
+  - name: SECRET_KEY
+    valueFrom: session_secret
+
+  # Secreto compartido con el front que autentica el relay de identidad SSO:
+  # sale del recurso `proxy_secret` (databricks.yml).
+  - name: PROXY_SHARED_SECRET
+    valueFrom: proxy_secret

@@ -1,0 +1,35 @@
+# ASCII PURO a proposito: pip lo decodifica con la codificacion local del SO
+# (cp1252 en Windows en espanol) y un caracter UTF-8 aqui revienta el
+# `pip install -r requirements.txt`. No agregar tildes ni flechas.
+#
+# TODO PINEADO CON == (politica 2026-07-31): las versiones son EXACTAMENTE las
+# del venv validado (pytest verde + suite viva Lakebase + `pip check` limpio).
+# Motivo doble: (a) la imagen base de Databricks Apps trae pre-instalados
+# fastapi/starlette/uvicorn viejos que con rangos abiertos pip daria por
+# satisfechos -> combinaciones jamas testeadas; (b) orden: local, CI y Apps
+# corren identico. Para subir una libreria: cambiar el pin, correr pytest +
+# pip check, y recien commitear.
+
+# Pydantic + env
+pydantic==2.13.4
+python-dotenv==1.2.2
+
+# API Server
+fastapi==0.136.1
+starlette==1.0.0
+uvicorn[standard]==0.47.0
+
+# pymongo: SOLO el vocabulario de operaciones/errores (ReturnDocument, UpdateOne,
+# InsertOne, DeleteMany, DuplicateKeyError) que el adaptador Lakebase emula y que
+# usan los repositories. NO conecta a Mongo: es dependencia del camino Lakebase.
+pymongo==4.17.0
+
+# Databricks Lakebase Postgres
+asyncpg==0.31.0
+databricks-sdk==0.121.0
+
+# Auth propia (login usuario/password + token de sesion)
+bcrypt==5.0.0      # hash de passwords
+pyjwt==2.12.1      # token de sesion firmado (HS256)
+sqlglot==30.12.0   # parser SQL -> QuerySpec del reporting (F2)
+slowapi==0.1.10    # rate limiting (login) - 07 hardening

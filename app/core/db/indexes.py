@@ -1,0 +1,125 @@
+"""Índices de colecciones (idempotentes).
+
+`ensure_indexes` declara los índices de cada colección; el adaptador Lakebase
+los traduce a DDL de Postgres (GIN sobre jsonb + btrees). Es idempotente: los
+códigos 48 (namespace ya existe) y 11000 (duplicate-key en un único ya
+existente) se tragan; cualquier otro error se propaga.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+
+async def ensure_indexes(db: Any) -> None:
+    """Crea los índices de las colecciones del backend de plataforma."""
+
+    # Los índices se crean en lotes acotados para no abrir demasiadas sesiones
+    # lógicas a la vez: lanzar ~30 create_index en paralelo sobre una BD recién
+    # vaciada (cada uno abre su sesión lógica) podría reventar el límite de
+    # sesiones del worker. Acotamos la concurrencia con un semáforo: sigue siendo
+    # concurrente/rápido.
+    sem = asyncio.Semaphore(5)
+
+    async def _try(col_name: str, keys: list[tuple], **kwargs: object) -> None:
+        async with sem:
+            try:
+                await db[col_name].create_index(keys, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                if code not in (48, 11000):
+                    raise
+
+    await asyncio.gather(
+        # ── Modelo canónico (M1) ────────────────────────────────
+        _try("parent_domains", [("flgactive", 1)]),
+        _try("glossary_terms", [("flgactive", 1)]),
+        _try("udp_definitions", [("flgactive", 1)]),
+        # DDL Export Rules (doc 30): colección chica (docenas); la unicidad del
+        # `name` la garantiza el apply de standards, no un índice único.
+        _try("ddl_rules", [("flgactive", 1)]),
+        _try("canonical_tables", [("flgactive", 1)]),
+        # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
+        # top-N se ordena por physicalName, y a escala un orden sobre campos sin
+        # índice sería full-scan (invariante de escala).
+        _try("canonical_tables", [("physicalName", 1)]),
+        # §9 control de duplicados (F1): chequeo de (schema, physicalName) en
+        # add_change/publish por regex anclado case-insensitive. NO-unique a
+        # propósito: el adaptador no soporta índices únicos sobre colecciones
+        # pobladas — la garantía vive en el router. El campo persistido es
+        # `schema` (alias del Pydantic `sql_schema`).
+        _try("canonical_tables", [("schema", 1), ("physicalName", 1)]),
+        _try("canonical_columns", [("tableId", 1)]),
+        _try("canonical_columns", [("parentDomainId", 1)]),
+        # ── Motor de consulta del reporting (07) ────────────────
+        # keyset/orden por physicalName (a escala, un orden sin índice sería
+        # full-scan) + filtro/group por dataType.
+        _try("canonical_columns", [("physicalName", 1)]),
+        _try("canonical_columns", [("dataType", 1)]),
+        # WILDCARD sobre el mapa embebido de UDP: cubre TODAS las keys UDP
+        # presentes Y futuras (el usuario crea UDP en runtime) → filtrar por
+        # cualquier UDP hace seek, sin DDL por-key. En tablas y columnas.
+        _try("canonical_columns", [("udpValues.$**", 1)]),
+        _try("canonical_tables", [("udpValues.$**", 1)]),
+        # ── Changesets (M2a) ────────────────────────────────────
+        _try("changesets", [("updatedAt", -1)]),
+        _try("changesets", [("status", 1)]),
+        # Un doc POR CAMBIO (un dict embebido con miles de cambios crecería sin
+        # techo; por eso un doc por cambio, versionado por changesets):
+        # overlay/diff/apply leen por csId (+collection) — el prefijo del
+        # compuesto cubre ambos.
+        _try("changeset_changes", [("csId", 1), ("collection", 1)]),
+        # Historial de auditoría por entidad (doc 51): GET /history cruza los
+        # cambios de UNA entidad a través de TODOS los changesets — sin este
+        # compuesto sería full-scan del ledger completo por apertura de panel.
+        _try("changeset_changes", [("collection", 1), ("entityId", 1)]),
+        # ── M3a: Projects + Subject Areas + Relationships + Views ──
+        _try("projects", [("flgactive", 1)]),
+        _try("subject_areas", [("projectId", 1)]),
+        # F5 — UDP del Modelo de Datos: wildcard sobre el mapa embebido (mismo
+        # patrón que canonical_columns/tables, líneas de arriba) → filtrar por
+        # cualquier UDP de canvas hace seek. `name` soporta el sort/keyset de
+        # la entidad `models` del reporting (a escala, un orden sin índice sería
+        # full-scan).
+        _try("subject_areas", [("udpValues.$**", 1)]),
+        _try("subject_areas", [("name", 1)]),
+        _try("relationships", [("flgactive", 1)]),
+        # El canvas resuelve relaciones por extremos ($in por tabla) — v2
+        # parent/child (doc 19). Los índices legacy source*/target* de BDs
+        # viejas quedan huérfanos (inofensivos) hasta droparse a mano.
+        _try("relationships", [("parentTableId", 1)]),
+        _try("relationships", [("childTableId", 1)]),
+        # §8 warning de eliminación (F1): GET /api/relationships/impact busca
+        # relaciones por columna DE ALGÚN PAR (multikey por dotted path).
+        _try("relationships", [("pairs.parentColumnId", 1)]),
+        _try("relationships", [("pairs.childColumnId", 1)]),
+        _try("views", [("flgactive", 1)]),
+        # Las vistas se listan por tabla (PropertiesPanel · tab Views).
+        _try("views", [("tableId", 1)]),
+        # F3: match canónico por fuentes (multi-fuente) — lo usan list_all
+        # ($or contains/$in) y la query del diagrama (showOnCanvas + $in).
+        _try("views", [("sourceTableIds", 1)]),
+        # ── R1a: Folders (jerarquía del Model Explorer) ──────────
+        _try("folders", [("projectId", 1)]),
+        # ── Esquemas como entidad versionada (doc 18) ────────────
+        # `name` soporta el chequeo de unicidad por regex anclado (NO-unique:
+        # el adaptador no soporta índices únicos sobre colecciones pobladas — la
+        # garantía vive en service/changesets, como canonical_tables).
+        _try("schemas", [("flgactive", 1)]),
+        _try("schemas", [("name", 1)]),
+        # ── R1c: naming_config (1 doc por scope; _id = scope) ────
+        _try("naming_config", [("scope", 1)]),
+        # ── Auth propia + RBAC + auditoría (2026-07-04) ──────────
+        _try("users", [("email", 1)]),
+        _try("audit_log", [("at", -1)]),
+        _try("audit_log", [("actor", 1)]),
+        # Data Standards: seq ÚNICO — dos apply/rollback concurrentes no pueden
+        # crear dos versiones con el mismo seq/label (el service reintenta ante
+        # la colisión). Sirve para ambos sentidos de orden (el app ordena en Python).
+        _try("standards_versions", [("seq", 1)], unique=True),
+    )
+    log.info("lakebase indexes ensured")

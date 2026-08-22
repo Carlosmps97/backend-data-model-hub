@@ -1,0 +1,62 @@
+# Databricks Asset Bundle — backend (FastAPI) como Databricks App.
+#
+# Declara lo que el bundle aplica en cada deploy: la app, sus permisos y los
+# bindings de secretos. La config de RUNTIME (command + env) vive en app.yaml;
+# el bloque `config:` de este archivo no se usa porque el CLI lo ignora en
+# silencio (bug databricks/cli #4901).
+#
+# Ninguna variable lleva `default:`: el workflow de deploy exporta cada una
+# como BUNDLE_VAR_<variable> desde la GitHub Variable homónima en MAYÚSCULAS.
+# Para un deploy manual, exportar esos BUNDLE_VAR_* y DATABRICKS_HOST antes de
+# `databricks bundle deploy --target <target>`.
+bundle:
+  name: bknd-data-model-hub
+
+variables:
+  secret_scope:
+    # GitHub Variable SECRET_SCOPE — ej. kv-scope-datacraft
+    description: "Scope de secretos del workspace que guarda las claves usadas por la app."
+  session_secret_key:
+    # GitHub Variable SESSION_SECRET_KEY — ej. session-secret-key
+    description: "Key (dentro del scope) del secreto con la SECRET_KEY de firma de sesión (JWT HS256)."
+  proxy_secret_key:
+    # GitHub Variable PROXY_SECRET_KEY — ej. dmh-proxy-secret (la misma key que usa el front)
+    description: "Key (dentro del scope) del secreto compartido front↔backend que autentica el relay SSO."
+  app_admin_user:
+    # GitHub Variable APP_ADMIN_USER — ej. usuario@dominio.com (usuario del workspace)
+    description: "Usuario que conserva CAN_MANAGE sobre la app (stop/start/logs desde la UI)."
+
+resources:
+  apps:
+    backend:                      # resource key: el workflow lo detecta para bind/run
+      name: bknd-data-model-hub   # nombre real de la app en el workspace
+      source_code_path: .
+      description: "Data Model Hub — backend de plataforma (FastAPI · Databricks Lakebase Postgres)."
+      resources:
+        - name: session_secret
+          description: "SECRET_KEY para firmar tokens de sesión."
+          secret:
+            scope: ${var.secret_scope}
+            key: ${var.session_secret_key}
+            permission: READ
+        - name: proxy_secret
+          description: "Secreto compartido front↔backend que autentica el relay de identidad SSO."
+          secret:
+            scope: ${var.secret_scope}
+            key: ${var.proxy_secret_key}
+            permission: READ
+      permissions:
+        - level: CAN_MANAGE       # el usuario administrador definido en app_admin_user
+          user_name: ${var.app_admin_user}
+        - level: CAN_USE
+          group_name: users       # todos los usuarios del workspace pueden abrir la app
+
+targets:
+  prod:
+    mode: production
+    default: true
+    workspace:
+      # Sin `host:` a propósito: el workspace destino sale de la variable de
+      # entorno DATABRICKS_HOST (un host acá ganaría sobre esa variable y
+      # obligaría a editar el repositorio por cada ambiente).
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

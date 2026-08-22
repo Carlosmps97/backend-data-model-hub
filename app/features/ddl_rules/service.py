@@ -1,0 +1,267 @@
+"""Negocio de `ddl_rules`. La edición es VERSIONADA: pasa por
+`data_standards.apply` (rulesUpsert/rulesDelete/ddlConfigPatch), como Glossary/
+Parent Domains/UDP. Este service expone la lectura, la validación stateless
+(bench del editor), el Test contra una tabla real, el impacto estimado y los
+helpers que el apply necesita (guard de borrado de UDP, catálogo de artefactos)."""
+from __future__ import annotations
+
+import copy
+
+import sqlglot
+from fastapi import HTTPException
+
+from app.core.audit import audit
+from app.features.catalog import repository as catalog_repo
+from app.features.data_standards import repository as std_repo
+from app.features.domains import repository as dom_repo
+from app.features.udp import repository as udp_repo
+
+from . import repository
+from .engine import conditions as engine_cond
+from .engine import generators as engine_generators
+from .engine import pipeline as engine_pipeline
+from .engine import render as engine_render
+from .engine import validate as engine_validate
+from .engine.context import column_ctx, names_by_id, table_ctx
+from .engine.expressions import RenderError, build_expression, expand_template
+from .models import ROOT_ARTIFACTS
+from .templates import SEED_LOOKUPS, SEED_RULES, TEMPLATES
+
+
+async def list_rules() -> list[dict]:
+    return await repository.list_rules()
+
+
+async def get_config() -> dict:
+    return await repository.get_config()
+
+
+async def validate_payload(rule: dict) -> dict:
+    """Los 5 checks (spec §9) contra el catálogo REAL de UDP defs + config +
+    artefactos. NO escribe nada — es el auto-check del editor (debounce)."""
+    defs = await udp_repo.list_udp()
+    config = await repository.get_config()
+    rules = await repository.list_rules()
+    arts = [a["id"] for a in artifact_catalog(rules)]
+    return engine_validate.validate_rule(rule, defs, config, arts)
+
+
+def rules_referencing(rules: list[dict], udp_ids: set[str]) -> list[dict]:
+    """Reglas (de la lista dada) que referencian alguno de `udp_ids` vía
+    `udpRefs` o vía el origen de un lookup. Puro — el llamador decide el estado
+    (p.ej. el apply lo evalúa sobre el estado POST-batch). Devuelve
+    [{id, name}] ordenado por name."""
+    hits: list[dict] = []
+    for r in rules:
+        refs = {ref.get("udpId") for ref in (r.get("udpRefs") or [])}
+        if refs & udp_ids:
+            hits.append({"id": r.get("id"), "name": r.get("name")})
+    hits.sort(key=lambda h: (h.get("name") or "").lower())
+    return hits
+
+
+def lookups_referencing(lookups: dict, udp_ids: set[str]) -> list[str]:
+    """Nombres de lookups cuyo UDP de origen está en `udp_ids`. Puro."""
+    return sorted(name for name, lk in (lookups or {}).items()
+                  if (lk or {}).get("fromUdpId") in udp_ids)
+
+
+def artifact_catalog(rules: list[dict]) -> list[dict]:
+    """Catálogo de artefactos: raíces + los declarados por generadores activos
+    (`action.emit.artifact`). NO es un enum cerrado (spec §5). Puro."""
+    out = [dict(a) for a in ROOT_ARTIFACTS]
+    seen = {a["id"] for a in out}
+    for r in rules:
+        if r.get("kind") != "generator":
+            continue
+        art = ((r.get("action") or {}).get("emit") or {}).get("artifact")
+        if art and art not in seen:
+            seen.add(art)
+            out.append({"id": art, "label": art.removeprefix("ddl."),
+                        "root": False, "generatedBy": r.get("name")})
+    return out
+
+
+async def templates_payload() -> dict:
+    """Plantillas del picker 16d + semillas del spec §8 con el lookup resuelto
+    a los ids REALES de UDP de esta BD (el front las aplica vía standards)."""
+    defs = await udp_repo.list_udp()
+    by_level_name = {(d.get("level"), d.get("name")): d.get("id") for d in defs}
+    lookups = copy.deepcopy(SEED_LOOKUPS)
+    for lk in lookups.values():
+        udp_id = by_level_name.get((lk.get("fromLevel"), lk.pop("fromUdpName", None)))
+        if udp_id:
+            lk["fromUdpId"] = udp_id
+    return {"templates": TEMPLATES, "seedRules": SEED_RULES, "seedLookups": lookups}
+
+
+# ── Test contra una tabla real + impacto (bench del editor, 16c) ──────────
+
+
+async def _engine_inputs() -> tuple[list[dict], dict, dict[str, str], dict[str, str]]:
+    defs = await udp_repo.list_udp()
+    config = await repository.get_config()
+    n_by_id = names_by_id(defs)
+    config = {**config, "lookups": engine_render.resolve_lookup_names(
+        config.get("lookups") or {}, n_by_id)}
+    domains = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+    return defs, config, n_by_id, domains
+
+
+def _why(rule_condition: str, ctx: dict) -> str | None:
+    """Detalle legible de por qué matcheó: el primer UDP citado y su valor en
+    el objeto (como el mock 16c: `criticidad = 'DAC'`)."""
+    try:
+        ast = engine_cond.parse_condition(rule_condition)
+        for base, name in engine_cond.udp_names_used(ast, rule_condition):
+            val = ((ctx.get(base) or {}).get("udp") or {}).get(name)
+            if val is not None:
+                return f"{name} = '{val}'"
+    except engine_cond.CondError:
+        return None
+    return None
+
+
+async def test_rule(rule: dict, table_id: str) -> dict:
+    """Corre la regla contra UNA tabla real del catálogo publicado (spec 15.4).
+    Devuelve los FRAGMENTOS generados de las columnas/objetos que matchean —
+    no el DDL completo (eso es del export)."""
+    defs, config, n_by_id, domains = await _engine_inputs()
+    tables = await catalog_repo.list_tables_by_ids([table_id])
+    if not tables:
+        raise HTTPException(status_code=404, detail="That table doesn't exist.")
+    table = tables[0]
+    cols = await catalog_repo.list_columns(table_id)
+    t_ctx = table_ctx(table, n_by_id)
+    base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}}}
+    cols_sorted = sorted(cols, key=lambda c: (c.get("ordinal") or 0))
+    cols_ctx = {}
+    for c in cols_sorted:
+        ctx = column_ctx(c, n_by_id, domains)
+        cols_ctx[ctx["nombre"]] = ctx
+    full = f"{t_ctx['esquema']}.{t_ctx['nombre']}" if t_ctx.get("esquema") else t_ctx["nombre"]
+    artifact = (rule.get("appliesTo") or ["ddl.tabla_fisica"])[0]
+    lookups = config.get("lookups") or {}
+    functions = config.get("functions") or []
+    fragments: list[dict] = []
+    matched = 0
+
+    try:
+        cond_ast = engine_cond.parse_condition(rule.get("condition") or "")
+        if rule.get("kind") == "generator":
+            stmts, _ = engine_generators.run_generators(
+                [rule], table, cols_sorted, base_ctx, cols_ctx, config)
+            matched = 1 if stmts else 0
+            fragments = [{"label": s["artifact"], "sql": s["sql"]} for s in stmts]
+            total = 1
+        elif rule.get("target") == "table":
+            total = 1
+            if engine_cond.eval_condition(cond_ast, base_ctx, rule.get("condition") or ""):
+                matched = 1
+                action = rule.get("action") or {}
+                if action.get("tags"):
+                    stmts, _ = engine_render.table_tag_statements(
+                        [rule], artifact, base_ctx, config, full)
+                    fragments += [{"label": full, "sql": s,
+                                   "why": _why(rule.get("condition") or "", base_ctx)} for s in stmts]
+                if action.get("tblproperties"):
+                    pairs = []
+                    for k in sorted(action["tblproperties"]):
+                        val = expand_template(str(action["tblproperties"][k]),
+                                              base_ctx, lookups, functions)
+                        if val is not None:
+                            pairs.append(f"'{k}' = '{val}'")
+                    if pairs:
+                        fragments.append({"label": full,
+                                          "sql": "TBLPROPERTIES (" + ", ".join(pairs) + ")",
+                                          "why": _why(rule.get("condition") or "", base_ctx)})
+        else:  # regla de columna
+            total = len(cols_sorted)
+            expr_tpl = ((rule.get("action") or {}).get("expression") or "").strip()
+            alias_tpl = ((rule.get("action") or {}).get("alias") or "").strip()
+            for name, ctx in cols_ctx.items():
+                cctx = {**base_ctx, "columna": ctx}
+                if not engine_cond.eval_condition(cond_ast, cctx, rule.get("condition") or ""):
+                    continue
+                matched += 1
+                why = _why(rule.get("condition") or "", cctx)
+                if expr_tpl:
+                    ast = build_expression(expr_tpl, cctx, sqlglot.parse_one(name, read="databricks"),
+                                           lookups, functions)
+                    alias = expand_template(alias_tpl, cctx, lookups, functions) if alias_tpl else name
+                    sql = ast.sql(dialect="databricks", normalize_functions="lower")
+                    fragments.append({"column": name, "sql": f"{sql} AS {alias or name}", "why": why})
+                elif (rule.get("action") or {}).get("tags"):
+                    stmts, _ = engine_render.column_tag_statements(
+                        [rule], artifact, base_ctx, {name: ctx}, config, full)
+                    fragments += [{"column": name, "sql": s, "why": why} for s in stmts]
+                else:
+                    fragments.append({"column": name, "sql": "— (no expression/tags)", "why": why})
+    except (engine_cond.CondError, RenderError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return {"table": full, "matched": matched, "total": total, "fragments": fragments}
+
+
+async def render_export_payload(actor: str, body: dict) -> dict:
+    """Puente del export (doc 30 §8): aplica las reglas SELECCIONADAS al payload
+    que manda el canvas (estado efectivo, drafts incluidos) vía el pipeline
+    PURO, y estampa la versión de standards usada — la evidencia de por qué el
+    DDL de marzo salió distinto al de junio (spec §12)."""
+    defs = await udp_repo.list_udp()
+    config = await repository.get_config()
+    domains = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+    wanted = set(body.get("ruleIds") or [])
+    rules = [r for r in await repository.list_rules() if r["id"] in wanted]
+    payload = {
+        "model": body.get("model"),
+        "options": body.get("options") or {},
+        "tables": [{"table": t.get("table") or {}, "columns": t.get("columns") or [],
+                    "baseSql": t.get("baseSql") or ""} for t in body.get("tables") or []],
+        "views": [{"name": v.get("name"), "schema": v.get("schema") or v.get("schema_"),
+                   "sql": v.get("sql") or "", "sourceTableIds": v.get("sourceTableIds") or [],
+                   "businessView": v.get("businessView", True)}
+                  for v in body.get("views") or []],
+    }
+    out = engine_pipeline.render_export(payload, rules, config, defs, domains)
+    versions = await std_repo.list_versions()
+    label = versions[0].get("label") if versions else "v0"
+    applied = sum(1 for e in out["log"] if e.get("status") == "applied")
+    skipped = sum(1 for e in out["log"] if e.get("status") == "skipped")
+    await audit(actor, "ddl.export_render", target=label, target_type="standards_version",
+                meta={"rules": len(rules), "applied": applied, "skipped": skipped,
+                      "tables": len(payload["tables"]), "views": len(payload["views"])})
+    return {**out, "rulesetVersion": label, "applied": applied, "skipped": skipped}
+
+
+async def impact(rule: dict) -> dict:
+    """'Matches 43 columns across 12 tables' — barrido liviano del catálogo
+    publicado. A la escala actual (~5k columnas) es instantáneo; si el catálogo
+    crece a millones, este es el punto para el fast-path Mongo + cache."""
+    defs, config, n_by_id, domains = await _engine_inputs()
+    try:
+        cond_ast = engine_cond.parse_condition(rule.get("condition") or "")
+        tables = await repository.tables_light()
+        t_ctx_by_id = {t["id"]: table_ctx(t, n_by_id) for t in tables}
+        if rule.get("kind") == "generator" or rule.get("target") == "table":
+            hit = 0
+            for tid, t_ctx in t_ctx_by_id.items():
+                ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}}}
+                if engine_cond.eval_condition(cond_ast, ctx, rule.get("condition") or ""):
+                    hit += 1
+            return {"columns": 0, "tables": hit}
+        cols = await repository.columns_light()
+        matched_cols = 0
+        matched_tables: set[str] = set()
+        for c in cols:
+            t_ctx = t_ctx_by_id.get(c.get("tableId"))
+            if t_ctx is None:
+                continue
+            ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
+                   "columna": column_ctx(c, n_by_id, domains)}
+            if engine_cond.eval_condition(cond_ast, ctx, rule.get("condition") or ""):
+                matched_cols += 1
+                matched_tables.add(c["tableId"])
+        return {"columns": matched_cols, "tables": len(matched_tables)}
+    except engine_cond.CondError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

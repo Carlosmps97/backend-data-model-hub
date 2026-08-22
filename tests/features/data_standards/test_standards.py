@@ -1,0 +1,140 @@
+"""Data Standards: diff/snapshot (puro) + apply/rollback (repos mockeados)."""
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock
+
+from app.features.data_standards import service
+from app.features.data_standards.schemas import ApplyBody, DomainEdit, NamingEdit, TermEdit
+
+
+# ── snapshot_of / build_diff (puro) ───────────────────────────────────────
+
+def test_snapshot_of_limpia_campos():
+    snap = service.snapshot_of(
+        domains=[{"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)", "extra": "x"}],
+        terms=[{"id": "t1", "term": "monto", "abbrev": "MTO", "scope": "column", "wordType": "prime", "junk": 1}],
+        naming={"column": {"separator": "_", "case": "upper"}, "table": {"separator": "", "case": "upper"}},
+    )
+    assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
+                                   "namingTerm": None, "description": None}
+    assert "junk" not in snap["dict"][0]
+    assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
+
+
+def test_build_diff_clasifica_add_edit_remove():
+    body = ApplyBody(
+        termsUpsert=[TermEdit(term="dólares", abbrev="USD", scope="column"),      # nuevo
+                     TermEdit(id="t1", term="monto", abbrev="MTO", scope="column")],  # editado
+        termsDelete=["t2"],
+        domainsUpsert=[DomainEdit(id="d1", name="Importe", defaultDataType="DECIMAL(20,4)")],  # cambio de tipo
+        namingConfig={"table": NamingEdit(separator="", case="upper")},
+    )
+    before_terms = {"t1": {"term": "monto"}, "t2": {"term": "viejo"}}
+    before_domains = {"d1": {"name": "Importe", "defaultDataType": "DECIMAL(18,2)"}}
+    diff = service.build_diff(body, before_domains, before_terms)
+    assert "Term dólares → USD" in diff["added"]
+    assert any("monto" in e for e in diff["edited"])
+    assert any("DECIMAL(18,2) → DECIMAL(20,4)" in e for e in diff["edited"])
+    assert "Term viejo" in diff["removed"]
+
+
+# ── apply (mockeado) ──────────────────────────────────────────────────────
+
+def _mock_apply(monkeypatch, *, before_domains=None, before_terms=None, rephys=None, impact_willupdate=0):
+    monkeypatch.setattr(service.dom_repo, "list_domains", AsyncMock(return_value=before_domains or []))
+    monkeypatch.setattr(service.dict_repo, "list_entries", AsyncMock(return_value=before_terms or []))
+    monkeypatch.setattr(service.dict_svc, "ensure_term_valid", AsyncMock())
+    monkeypatch.setattr(service.dom_svc, "impact", AsyncMock(return_value={"willUpdate": impact_willupdate}))
+    monkeypatch.setattr(service.dict_repo, "delete_entry", AsyncMock())
+    monkeypatch.setattr(service.dict_repo, "create_entry", AsyncMock())
+    monkeypatch.setattr(service.dict_repo, "update_entry", AsyncMock())
+    monkeypatch.setattr(service.set_repo, "upsert", AsyncMock())
+    monkeypatch.setattr(service.dom_repo, "delete_domain", AsyncMock())
+    monkeypatch.setattr(service.dom_repo, "create_domain", AsyncMock())
+    monkeypatch.setattr(service.dom_repo, "update_domain", AsyncMock())
+    monkeypatch.setattr(service.udp_repo, "list_udp", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.udp_repo, "create_udp", AsyncMock())
+    monkeypatch.setattr(service.udp_repo, "update_udp", AsyncMock())
+    monkeypatch.setattr(service.udp_repo, "delete_udp", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "list_rules", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.rules_repo, "get_config",
+                        AsyncMock(return_value={"id": "global", "lookups": {}, "functions": []}))
+    monkeypatch.setattr(service.rules_repo, "create_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "update_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "delete_rule", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "set_config", AsyncMock())
+    monkeypatch.setattr(service.dict_svc, "rephysicalize",
+                        AsyncMock(return_value={"updated": rephys or {"tables": 0, "columns": 0}}))
+    monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={"domains": [], "dict": [], "namingConfig": {}}))
+    inserted = {}
+    async def _ins(fields):  # el repo asigna seq/label; acá simulamos v17
+        inserted.update(fields); return {**fields, "seq": 17, "label": "v17", "id": "v-new"}
+    monkeypatch.setattr(service.repository, "insert_version_next_seq", AsyncMock(side_effect=_ins))
+    monkeypatch.setattr(service, "audit", AsyncMock())
+    return inserted
+
+
+def test_apply_registra_version_con_seq_incremental_e_impacto(monkeypatch):
+    inserted = _mock_apply(
+        monkeypatch,
+        before_domains=[{"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)"}],
+        before_terms=[],
+        rephys={"tables": 3, "columns": 12},
+        impact_willupdate=43,
+    )
+    body = ApplyBody(
+        termsUpsert=[TermEdit(term="dólares", abbrev="USD", scope="column")],
+        domainsUpsert=[DomainEdit(id="d1", name="Importe", defaultDataType="DECIMAL(20,4)")],
+    )
+    v = asyncio.run(service.apply("maria.rojas", body))
+    assert v["seq"] == 17 and v["label"] == "v17"           # max_seq(16)+1
+    assert v["author"] == "maria.rojas" and v["status"] == "applied"
+    # impacto = rephys.columns (12) + dominio willUpdate (43); tables de rephys.
+    assert inserted["impact"] == {"tables": 3, "columns": 55}
+    assert "Term dólares → USD" in inserted["diff"]["added"]
+
+
+def test_apply_sin_cambios_de_udp_no_rephysicaliza(monkeypatch):
+    _mock_apply(monkeypatch, before_domains=[{"id": "d1", "name": "X", "defaultDataType": "T"}])
+    body = ApplyBody(domainsDelete=["d1"])  # solo dominios → no re-deriva nombres
+    asyncio.run(service.apply("ana", body))
+    service.dict_svc.rephysicalize.assert_not_awaited()
+    service.dom_repo.delete_domain.assert_awaited_once()
+
+
+# ── rollback (mockeado) ───────────────────────────────────────────────────
+
+def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
+    target = {"seq": 16, "label": "v16", "snapshot": {
+        "domains": [{"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)"}],
+        "dict": [{"id": "t1", "term": "monto", "abbrev": "MTO", "scope": "column"}],
+        "namingConfig": {"column": {"separator": "_", "case": "upper"}},
+    }}
+    monkeypatch.setattr(service.repository, "get_version", AsyncMock(return_value=target))
+    rd = AsyncMock(); rdi = AsyncMock(); rn = AsyncMock()
+    monkeypatch.setattr(service.repository, "restore_domains", rd)
+    monkeypatch.setattr(service.repository, "restore_dict", rdi)
+    monkeypatch.setattr(service.repository, "restore_naming", rn)
+    monkeypatch.setattr(service.udp_repo, "restore_udp", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "restore_rules", AsyncMock())
+    monkeypatch.setattr(service.rules_repo, "restore_config", AsyncMock())
+    monkeypatch.setattr(service.dict_svc, "rephysicalize", AsyncMock(return_value={"updated": {"tables": 4, "columns": 12}}))
+    monkeypatch.setattr(service.dom_svc, "propagate", AsyncMock(return_value={"updated": 5}))
+    monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))
+    inserted = {}
+    async def _ins(fields):  # el repo asigna seq/label; acá simulamos v19
+        inserted.update(fields); return {**fields, "seq": 19, "label": "v19", "id": "v19"}
+    monkeypatch.setattr(service.repository, "insert_version_next_seq", AsyncMock(side_effect=_ins))
+    monkeypatch.setattr(service, "audit", AsyncMock())
+
+    v = asyncio.run(service.rollback("mr", 16))
+    assert v["seq"] == 19 and v["kind"] == "rollback" and v["revertsSeq"] == 16
+    rd.assert_awaited_once(); rdi.assert_awaited_once(); rn.assert_awaited_once()
+    # impacto = rephys.columns (12) + propagate (5 × 1 dominio) ; tables rephys.
+    assert inserted["impact"] == {"tables": 4, "columns": 17}
+
+
+def test_rollback_version_inexistente_es_none(monkeypatch):
+    monkeypatch.setattr(service.repository, "get_version", AsyncMock(return_value=None))
+    assert asyncio.run(service.rollback("mr", 999)) is None

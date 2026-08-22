@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+# Databricks Asset Bundle: artefactos de deploy (bundle.tf.json, estado); se
+# regeneran con `databricks bundle validate/deploy`, NO se commitean.
+.databricks/
+.DS_Store
+#tests/
+# Migration backups (contain data + password hashes — never commit)
+scripts/_backup_*.json
+.superpowers/
+.pytest_cache/
+standards_out/
+migration-reports/
+model_out/
