@@ -154,6 +154,7 @@ class ErwinDiagram:
 @dataclass
 class ErwinModel:
     name: str = ""
+    locator: str = ""          # ruta del Mart (erwin://Mart://Mart/<Proy>/<Dom>/<Modelo>)
     entities: dict[str, ErwinEntity] = field(default_factory=dict)
     views: dict[str, ErwinView] = field(default_factory=dict)
     relationships: dict[str, ErwinRelationship] = field(default_factory=dict)
@@ -445,6 +446,11 @@ def parse(xml_path: str) -> ErwinModel:
                 owner_path=op,
             ))
 
+        elif tag == "Locator":
+            # Ruta del Mart del modelo — capa de origen de carpetas (doc 54 §9).
+            if not m.locator:
+                m.locator = (el.text or "").strip()
+
         elif tag == "Annotation":
             m.annotations += 1
 
@@ -464,4 +470,17 @@ def parse(xml_path: str) -> ErwinModel:
         d = by_path.get(op)
         if d is not None:
             d.shapes.append((ref, anchor))
+
+    # SA dueña del diagrama por Owner_Path ("Modelo.SA"): el nombre de la SA
+    # puede llevar puntos ("1. Party") y el split ingenuo del handler trunca
+    # (" Party") — se re-resuelve contra los nombres REALES de SA, ganando el
+    # que sea sufijo más largo del path.
+    sa_names = {sa["name"] for sa in m.subject_areas if sa["name"]}
+    for d in m.diagrams:
+        if d.subject_area in sa_names:
+            continue
+        for n in sorted(sa_names, key=len, reverse=True):
+            if d.owner_path == n or d.owner_path.endswith("." + n):
+                d.subject_area = n
+                break
     return m

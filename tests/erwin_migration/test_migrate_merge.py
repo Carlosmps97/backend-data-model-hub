@@ -493,3 +493,42 @@ def test_gana_el_archivo_actualiza_en_su_sitio_y_reusa_ids_de_columna():
     # la vista espejo sigue la suerte de su tabla: actualizada EN vw-1
     assert db.data["views"]["vw-1"]["erwinLongId"] == "V1"
     assert mig.stats["tablas actualizadas (ganó el archivo por uso)"] == 1
+
+
+# ── Doc 54 §9 · capa de carpeta por archivo de origen ─────────────────────
+def test_capa_de_origen_agrupa_y_separa_homonimos_entre_archivos():
+    db = base_db()   # BD legacy PLANA: fold-1 "AREA" en la raíz
+    mig = Migrator(db, modelo_archivo_2(), "Familia DDV", None,
+                   source_folder="Otros")
+    mig.run()
+    folders = db.data["folders"]
+    src = [f for f in folders.values() if f["name"] == "Otros"]
+    assert len(src) == 1 and src[0].get("parentFolderId") is None
+    # la SA "AREA" del archivo ya NO se fusiona con el fold-1 legacy de la
+    # raíz: crea su propia carpeta bajo "Otros"
+    areas = [f for f in folders.values() if f["name"] == "AREA"]
+    assert {f.get("parentFolderId") for f in areas} == {None, src[0]["_id"]}
+    nueva = next(f for f in areas if f.get("parentFolderId") == src[0]["_id"])
+    canv = next(c for c in db.data["subject_areas"].values()
+                if c["name"] == "DIAG" and c["_id"] != "cv-1")
+    assert canv["folderId"] == nueva["_id"]
+    assert db.data["subject_areas"]["cv-1"]["folderId"] == "fold-1"
+
+
+def test_capa_de_origen_idempotente_en_rerun():
+    db = base_db()
+    for _ in range(2):
+        Migrator(db, modelo_archivo_2(), "Familia DDV", None,
+                 source_folder="Otros").run()
+    fl = db.data["folders"].values()
+    assert len([f for f in fl if f["name"] == "Otros"]) == 1
+    assert len([f for f in fl if f["name"] == "AREA"]) == 2
+
+
+def test_parse_mart_locator_capas():
+    got = pol.parse_mart_locator(
+        "erwin://Mart://Mart/Modelo UDV/Modelo Logico/UDV Logico V0.618?&version=1")
+    assert got == {"project": "Modelo UDV", "domain": "Modelo Logico",
+                   "model": "UDV Logico V0.618"}
+    assert pol.parse_mart_locator("Mart://Mart/P/M")["domain"] == ""
+    assert pol.parse_mart_locator("erwin://file://C:/x.erwin") is None

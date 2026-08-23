@@ -293,3 +293,36 @@ def test_glosario_cross_file_sin_archivos_compartidos_es_limpio():
         ("b.xml", [("Monto", "MTO"), ("Codigo", "")]),   # vacía no choca
         ("c.xml", [("Codigo", "COD")]),
     ]) == []
+
+
+_XML_SA_PUNTOS = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<erwin xmlns="http://www.erwin.com/dm" FileVersion="10.10" Format="erwin">
+ <Model id="M1" name="Modelo Puntos"><ModelProps><Name>Modelo Puntos</Name></ModelProps>
+  <Subject_Area_Groups>
+   <Subject_Area id="SA1" name="1. Party"><Subject_AreaProps><Name>1. Party</Name>
+    <Object_Order>0</Object_Order></Subject_AreaProps>
+    <ER_Diagram id="DG1" name="Party y Cuenta"><ER_DiagramProps><Name>Party y Cuenta</Name>
+     <Owner_Path>Modelo Puntos.1. Party</Owner_Path></ER_DiagramProps></ER_Diagram>
+   </Subject_Area>
+   <Subject_Area id="SA2" name="&lt;Vista Logica Completa&gt;"><Subject_AreaProps>
+    <Name>&lt;Vista Logica Completa&gt;</Name><Object_Order>1</Object_Order></Subject_AreaProps>
+    <ER_Diagram id="DG2" name="ER_Diagram_210"><ER_DiagramProps><Name>ER_Diagram_210</Name>
+     <Owner_Path>Modelo Puntos.&lt;Vista Logica Completa&gt;</Owner_Path></ER_DiagramProps></ER_Diagram>
+   </Subject_Area>
+  </Subject_Area_Groups>
+ </Model>
+</erwin>
+""")
+
+
+def test_diagrama_resuelve_sa_con_puntos_en_el_nombre(tmp_path):
+    """Doc 54 §8: las SAs numeradas ("1. Party") rompían el split del
+    Owner_Path y los canvases caían sin folder (UDV: 188/189 sueltos)."""
+    f = tmp_path / "puntos.xml"
+    f.write_text(_XML_SA_PUNTOS, encoding="utf-8")
+    m = ep.parse(str(f))
+    assert {d.name: d.subject_area for d in m.diagrams} == {
+        "Party y Cuenta": "1. Party",
+        "ER_Diagram_210": "<Vista Logica Completa>",
+    }

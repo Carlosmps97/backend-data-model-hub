@@ -255,3 +255,22 @@ def resolve_udp_values(udp_values: list, collapsed: dict) -> dict[tuple[str, str
         if is_phys:
             phys_won.add(slot)
     return out
+
+
+_MART_MARK = "Mart://Mart/"
+
+
+def parse_mart_locator(locator: str) -> dict | None:
+    """`erwin://Mart://Mart/<Proyecto>/<Dominio>/<Modelo>?...` → capas del Mart
+    de Erwin (doc 54). `domain` puede ser "" (modelo colgado del proyecto) o
+    "a / b" si el Mart anida subcarpetas. None si no es un locator de Mart o
+    le faltan proyecto + modelo."""
+    text = (locator or "").split("?", 1)[0]
+    i = text.find(_MART_MARK)
+    if i < 0:
+        return None
+    segs = [s.strip() for s in text[i + len(_MART_MARK):].split("/") if s.strip()]
+    if len(segs) < 2:
+        return None
+    return {"project": segs[0], "domain": " / ".join(segs[1:-1]),
+            "model": segs[-1]}

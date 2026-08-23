@@ -80,12 +80,17 @@ def _norm_type(t: str) -> str:
 
 class Migrator:
     def __init__(self, db, model: ep.ErwinModel, project_name: str | None,
-                 only_sa: str | None, keep_unused_udp_defs: bool = False):
+                 only_sa: str | None, keep_unused_udp_defs: bool = False,
+                 source_folder: str | None = None):
         self.db = db
         self.m = model
         self.project_name = project_name or model.name or "Modelo Erwin"
         self.only_sa = only_sa
         self.keep_unused_udp_defs = keep_unused_udp_defs
+        # Doc 54 §9: capa de ORIGEN — carpeta raíz del proyecto (dominio del
+        # Mart o nombre del archivo) que agrupa las SAs de ESTE archivo.
+        # None = plano (comportamiento previo; lo usan los tests).
+        self.source_folder = (source_folder or "").strip() or None
         self.schema_of = model.owner_schema()
         self.attr_idx = model.attr_index()
         self.stats: Counter = Counter()
@@ -233,9 +238,12 @@ class Migrator:
         for v in db.views.find(_ACTIVE, {"sourceTableIds": 1}):
             for tid in set(v.get("sourceTableIds") or []):
                 self.db_view_count[tid] += 1
-        self.ex_folders: dict[tuple[str, str], str] = {}
-        for f in db.folders.find(_ACTIVE, {"projectId": 1, "name": 1}):
-            self.ex_folders[(f.get("projectId") or "", (f.get("name") or "").upper())] = f["_id"]
+        # clave con el padre (doc 54 §9): los homónimos solo se reúsan DENTRO
+        # de la misma capa de origen, ya no entre archivos distintos.
+        self.ex_folders: dict[tuple[str, str, str], str] = {}
+        for f in db.folders.find(_ACTIVE, {"projectId": 1, "parentFolderId": 1, "name": 1}):
+            self.ex_folders[(f.get("projectId") or "", f.get("parentFolderId") or "",
+                             (f.get("name") or "").upper())] = f["_id"]
 
     # ---------- pasos ----------
     def standards(self) -> None:
@@ -805,21 +813,36 @@ class Migrator:
                 if k == key and val:
                     model_udp[self.udp_pid[key]] = val
 
+        # Doc 54 §9: carpeta de ORIGEN (dominio del Mart / archivo) como capa
+        # raíz del proyecto; las SAs del archivo cuelgan de ella. Reuso por
+        # nombre en la raíz para que los re-runs no dupliquen.
+        src_fid: str | None = None
+        if self.source_folder:
+            src_key = (proj_id, "", self.source_folder.upper())
+            src_fid = self.ex_folders.get(src_key) or pol.platform_id(
+                f"srcfolder|{self.project_name}|{self.source_folder.upper()}")
+            if src_key not in self.ex_folders:
+                self.ex_folders[src_key] = src_fid
+                self._upsert("folders", src_fid, {
+                    "projectId": proj_id, "parentFolderId": None,
+                    "name": self.source_folder, "order": 0})
+                self.stats["carpeta de origen (dominio del Mart / archivo)"] += 1
+
         folder_pid: dict[str, str] = {}
         for i, sa in enumerate(sorted(self.m.subject_areas, key=lambda s: s["order"])):
             if self.only_sa and sa["name"] != self.only_sa:
                 continue
-            # R8: folder homónimo del mismo proyecto (otro archivo de la
-            # familia) → se REUSA, sin re-escribirlo (conserva su orden).
-            hit = self.ex_folders.get((proj_id, sa["name"].upper()))
+            # R8: folder homónimo del mismo proyecto Y la misma capa de origen
+            # → se REUSA, sin re-escribirlo (conserva su orden).
+            hit = self.ex_folders.get((proj_id, src_fid or "", sa["name"].upper()))
             fid = hit or pol.platform_id(f"folder|{sa['id']}")
             folder_pid[sa["name"]] = fid
             if hit and hit != pol.platform_id(f"folder|{sa['id']}"):
                 self.stats["folders reusados (homónimos de otro archivo)"] += 1
                 continue
-            self.ex_folders[(proj_id, sa["name"].upper())] = fid
+            self.ex_folders[(proj_id, src_fid or "", sa["name"].upper())] = fid
             self._upsert("folders", fid, {
-                "projectId": proj_id, "parentFolderId": None,
+                "projectId": proj_id, "parentFolderId": src_fid,
                 "name": sa["name"], "order": i, "erwinLongId": sa["id"]})
             self.stats["folders"] += 1
 
@@ -971,9 +994,17 @@ def main(argv: list[str] | None = None) -> int:
             rc = 1
             continue
 
+        # Doc 54 §9: capa de ORIGEN = dominio del Mart del propio XML; sin
+        # Locator (modelo nunca guardado en Mart), el nombre del archivo.
+        parsed_loc = pol.parse_mart_locator(m.locator) if m.locator else None
+        source = ((parsed_loc or {}).get("domain")
+                  or os.path.splitext(os.path.basename(path))[0])
+        print(f"Carpeta de origen (capa por archivo): {source}")
+
         t1 = time.perf_counter()
         mig = Migrator(db, m, args.project, args.only_sa,
-                       keep_unused_udp_defs=args.keep_unused_udp_defs)
+                       keep_unused_udp_defs=args.keep_unused_udp_defs,
+                       source_folder=source)
         mig.run()
         elapsed = time.perf_counter() - t1
         print(f"\nRESULTADO ({elapsed:.1f}s · {mig.ops_flushed:,} escrituras en "

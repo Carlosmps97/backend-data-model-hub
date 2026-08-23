@@ -52,11 +52,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import unescape
 
+from scripts.erwin_migration.policies import parse_mart_locator as parse_locator
+
 ROOT = Path(__file__).resolve().parent.parent
 _PY = sys.executable
 
 _LOCATOR_RE = re.compile(rb"<Locator>([^<]{1,600})</Locator>")
-_MART_MARK = "Mart://Mart/"
 _PEEK_CHUNK = 8 * 1024 * 1024
 _PEEK_CAP = 64 * 1024 * 1024
 
@@ -88,24 +89,6 @@ def read_locator(path: Path, cap: int = _PEEK_CAP,
                 return unescape(m.group(1).decode("utf-8", "replace"))
             tail = (tail + chunk)[-700:]
     return None
-
-
-def parse_locator(locator: str) -> dict[str, str] | None:
-    """`erwin://Mart://Mart/<Proyecto>/<Dominio>/<Modelo>?...` → capas del Mart.
-
-    `domain` puede ser "" (modelo colgado directo del proyecto) o "a / b" si
-    el Mart anida subcarpetas. None si no es un locator de Mart (p. ej.
-    modelo de archivo local) o no tiene al menos proyecto + modelo.
-    """
-    text = locator.split("?", 1)[0]
-    i = text.find(_MART_MARK)
-    if i < 0:
-        return None
-    segs = [s.strip() for s in text[i + len(_MART_MARK):].split("/") if s.strip()]
-    if len(segs) < 2:
-        return None
-    return {"project": segs[0], "domain": " / ".join(segs[1:-1]),
-            "model": segs[-1]}
 
 
 def plan_files(files: list[Path], root: Path, locator_of=read_locator) -> list[dict]:
