@@ -52,15 +52,14 @@ def _loads(value: Any) -> Any:
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
-# Las 19 colecciones propias + column_catalog (del servicio de agentes; se
-# preserva). Se pre-crean al conectar; cualquier otra se crea on-demand.
+# Las 19 colecciones propias. Se pre-crean al conectar; cualquier otra se
+# crea on-demand.
 KNOWN_COLLECTIONS = [
     "projects", "folders", "subject_areas", "schemas",
     "canonical_tables", "canonical_columns", "relationships", "views",
     "changesets", "changeset_changes", "standards_versions",
     "parent_domains", "glossary_terms", "udp_definitions", "naming_config",
     "users", "roles", "saved_reports", "audit_log",
-    "column_catalog",
 ]
 
 

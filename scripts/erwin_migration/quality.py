@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 
@@ -61,9 +62,44 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     dup_tables = [f"{k} ×{len(v)}" for k, v in by_key.items() if len(v) > 1]
     _finding(f, "W-DUP-TABLE", "WARN",
              "Tablas duplicadas por schema+nombre físico",
-             "gana la copia MÁS USADA (score doc 32b R3); las demás quedan "
-             "como alias — el detalle sale en el reporte de migración",
+             "se migran TODAS (política 2026-08-22): la MÁS USADA conserva el "
+             "nombre y las demás llevan sufijo _DUPn con su contenido intacto "
+             "— el mapeo exacto sale en el reporte de migración",
              dup_tables)
+
+    # regla de plataforma doc 50: el físico de tabla es único GLOBAL (el
+    # esquema NO participa). Homónimos en esquemas DISTINTOS no los toca R3:
+    # entrarían como docs separados y quedan en grandfather — visibilizar.
+    schemas_of_phys: dict[str, set[str]] = defaultdict(set)
+    for e in m.entities.values():
+        if not e.physical:      # sin físico resoluble no hay clave que chocar
+            continue
+        schemas_of_phys[e.physical.upper()].add(
+            pol.schema_or_default(schema_of.get(e.id)).upper())
+    dup_global = [f"{phys} en {len(ss)} esquemas: {', '.join(sorted(ss))}"
+                  for phys, ss in sorted(schemas_of_phys.items()) if len(ss) > 1]
+    _finding(f, "W-DUP-TABLE-GLOBAL", "WARN",
+             "Nombre físico repetido en esquemas DISTINTOS (regla global doc 50)",
+             "la migración conserva UNO y renombra el resto con sufijo _DUPn "
+             "(política 2026-08-22) para respetar la unicidad global",
+             dup_global)
+
+    # doc 53 §2.1: en modelos SOLO lógicos el equipo repite nombres de entidad
+    # (el físico deriva del lógico vía macro) → esas copias caen en el colapso
+    # R3 aunque sean entidades distintas a propósito. Aviso previo pedido.
+    by_logical: dict[str, list[str]] = defaultdict(list)
+    for e in m.entities.values():
+        key = (e.name or "").strip().lower()
+        if key:
+            by_logical[key].append(e.name)
+    dup_logical = [f"{names[0]} ×{len(names)}"
+                   for _k, names in sorted(by_logical.items()) if len(names) > 1]
+    _finding(f, "W-DUP-LOGICAL-NAME", "WARN",
+             "Entidades con el MISMO nombre lógico (case-insensitive)",
+             "la plataforma no exige unicidad del lógico; si el físico deriva "
+             "del lógico (macro %EntityName), los homónimos físicos se migran "
+             "TODOS con sufijo _DUPn (política 2026-08-22) — revisar con el "
+             "equipo cuáles son duplicados reales", dup_logical)
 
     # columnas duplicadas dentro del mismo objeto
     dup_cols = []
@@ -126,7 +162,8 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
             if r.parent_ref not in m.entities or r.child_ref not in m.views:
                 broken_rels.append(f"{r.name} (tabla→vista con extremo inexistente)")
             continue
-        if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
+        if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
+                              ep.REL_SUBTYPE):
             continue
         if r.parent_ref not in m.entities or r.child_ref not in m.entities:
             broken_rels.append(f"{r.name} (extremo inexistente)")
@@ -143,6 +180,33 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
              "Relaciones tabla-tabla sin pares de columnas FK resolubles",
              "se OMITEN (la plataforma exige columna origen y destino)",
              no_pairs)
+
+    # ── Subcategorías (doc 53) ───────────────────────────────────────────
+    sym_of = m.subtype_symbol_of_rel()
+    orphan_sub = []
+    for r in m.relationships.values():
+        if r.rel_type == ep.REL_SUBTYPE and r.id not in sym_of:
+            pn = m.entities[r.parent_ref].physical if r.parent_ref in m.entities else "?"
+            cn = m.entities[r.child_ref].physical if r.child_ref in m.entities else "?"
+            orphan_sub.append(f"{r.name} ({pn} → {cn})")
+    _finding(f, "W-SUBTYPE-ORPHAN-REL", "WARN",
+             "Relaciones de subtipo (Type 9) sin Subtype_Symbol que las agrupe",
+             "se migran con un símbolo sintético propio (grupo de 1)",
+             orphan_sub)
+
+    child_groups: dict[str, set[str]] = defaultdict(set)
+    for s in m.subtype_symbols.values():
+        for rid in s.rel_refs:
+            r = m.relationships.get(rid)
+            if r is not None and r.rel_type == ep.REL_SUBTYPE:
+                child_groups[r.child_ref].add(s.id)
+    multi_child = [
+        f"{m.entities[c].physical if c in m.entities else c} en {len(g)} grupos"
+        for c, g in child_groups.items() if len(g) > 1]
+    _finding(f, "W-SUBTYPE-CHILD-MULTI", "WARN",
+             "Entidades que son subtipo en MÁS de un grupo de subcategoría",
+             "Erwin no lo permite por defecto — revisar el modelo origen "
+             "(la migración las carga tal cual)", multi_child)
 
     # ── Dominios / UDP / Glosario ────────────────────────────────────────
     dead_domain = [f"{e.physical}.{a.physical}" for e in m.entities.values()
@@ -192,10 +256,12 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     # ── Canvases ─────────────────────────────────────────────────────────
     known_objs = set(m.entities) | set(m.views)
     rel_ids = set(m.relationships)
+    sym_ids = set(m.subtype_symbols)   # doc 53: el círculo se deriva en canvas
     rel_shapes = sum(1 for d in m.diagrams for ref, _a in d.shapes if ref in rel_ids)
     dead_shapes = [f"{d.name}: {ref[:24]}…" for d in m.diagrams
                    for ref, _a in d.shapes
-                   if ref and ref not in known_objs and ref not in rel_ids]
+                   if ref and ref not in known_objs and ref not in rel_ids
+                   and ref not in sym_ids]
     _finding(f, "I-SHAPE-RELATIONSHIP", "INFO",
              "Shapes de línea de relación en diagramas (esperado)",
              "el canvas de la plataforma deriva los wires de `relationships`",
@@ -248,6 +314,37 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     return [x for x in f if x["count"] > 0]
 
 
+def glossary_cross_conflicts(files: list[tuple[str, list[tuple[str, ...]]]]) -> list[dict]:
+    """Full outer join del glosario ENTRE archivos (política 2026-08-22): que
+    un término exista solo en un archivo NO es problema (la unión los suma);
+    la incongruencia real es el MISMO término con abreviatura DISTINTA en
+    archivos distintos (p. ej. "monto" = MTO vs MTOS). Dentro de cada archivo
+    manda la 1ª aparición (misma regla que la migración; los duplicados
+    internos ya los cubre E-GLOSSARY-DUP-TERM). Comparación case-insensitive.
+    Devuelve [{term, byFile: {archivo: abbrev}}]. Puro."""
+    by_term: dict[str, dict[str, str]] = {}
+    display: dict[str, str] = {}
+    for fname, glossary in files:
+        seen_local: set[str] = set()
+        for g in glossary:
+            term = (g[0] or "").strip()
+            if not term:
+                continue
+            key = term.upper()
+            if key in seen_local:
+                continue
+            seen_local.add(key)
+            display.setdefault(key, term)
+            by_term.setdefault(key, {})[fname] = (g[1].strip() if len(g) > 1 else "")
+    out: list[dict] = []
+    for key in sorted(by_term):
+        entry = by_term[key]
+        distinct = {a.upper() for a in entry.values() if a}
+        if len(entry) > 1 and len(distinct) > 1:
+            out.append({"term": display[key], "byFile": entry})
+    return out
+
+
 def summarize(m: ep.ErwinModel) -> dict:
     schema_of = m.owner_schema()
     return {
@@ -261,6 +358,9 @@ def summarize(m: ep.ErwinModel) -> dict:
         "relaciones_tabla_tabla": sum(1 for r in m.relationships.values()
                                       if r.rel_type in (ep.REL_IDENTIFYING,
                                                         ep.REL_NON_IDENTIFYING)),
+        "relaciones_subtipo": sum(1 for r in m.relationships.values()
+                                  if r.rel_type == ep.REL_SUBTYPE),
+        "simbolos_subcategoria": len(m.subtype_symbols),
         "derivaciones_tabla_vista": sum(1 for r in m.relationships.values()
                                         if r.rel_type == ep.REL_TABLE_TO_VIEW),
         "dominios_custom": sum(1 for d in m.domains.values() if not d.builtin),
@@ -276,13 +376,19 @@ def main(argv: list[str] | None = None) -> int:
         description="Gate de calidad sobre exports .xml de Erwin (solo lectura)")
     ap.add_argument("xml", nargs="+", help="ruta(s) al .xml exportado de Erwin")
     ap.add_argument("--json", dest="json_out", help="volcar reporte completo a JSON")
+    ap.add_argument("--brief", action="store_true",
+                    help="vista compacta (8 muestras por finding). Por DEFECTO "
+                         "se imprime TODO lo encontrado (política 2026-08-22: "
+                         "la validación es transparente, sin resumir)")
     args = ap.parse_args(argv)
 
     all_reports = []
+    glossaries: list[tuple[str, list[tuple[str, ...]]]] = []
     worst = 0
     for path in args.xml:
         print(f"\n{'=' * 72}\nARCHIVO: {path}")
         m = ep.parse(path)
+        glossaries.append((path, m.glossary))
         s = summarize(m)
         print(f"Modelo: {s['modelo']}")
         print("  " + " · ".join(f"{k}={v}" for k, v in s.items() if k != "modelo"))
@@ -294,15 +400,35 @@ def main(argv: list[str] | None = None) -> int:
             for x in group:
                 print(f"\n[{tag}] {x['code']} — {x['title']}  ({x['count']})")
                 print(f"        acción: {x['action']}")
-                for s_ in x["samples"]:
+                shown = x["samples"] if args.brief else x["items"]
+                for s_ in shown:
                     print(f"        · {s_}")
-                if x["count"] > len(x["samples"]):
-                    print(f"        · … y {x['count'] - len(x['samples'])} más")
+                if x["count"] > len(shown):
+                    print(f"        · … y {x['count'] - len(shown)} más (--brief off = todo)")
         print(f"\nRESULTADO: {len(errors)} ERROR / {len(warns)} WARN / {len(infos)} INFO"
               + ("  →  APTO PARA MIGRAR (revisar WARN/INFO)" if not errors
                  else "  →  REQUIERE DECISIÓN ANTES DE MIGRAR"))
         all_reports.append({"file": path, "summary": s, "findings": findings})
         worst = max(worst, 1 if errors else 0)
+
+    # ── Glosario ENTRE archivos (full outer join, política 2026-08-22) ──────
+    if len(glossaries) > 1:
+        conflicts = glossary_cross_conflicts(glossaries)
+        print(f"\n{'=' * 72}\nGLOSARIO ENTRE ARCHIVOS (full outer join)")
+        if conflicts:
+            print(f"[ERROR] E-GLOSSARY-XFILE-CONFLICT — mismo término con "
+                  f"abreviatura DISTINTA entre archivos  ({len(conflicts)})")
+            print("        acción: decidir la abreviatura correcta ANTES de "
+                  "migrar (la migración conserva la vigente y reporta la otra)")
+            for c in conflicts:
+                detail = " · ".join(f"{os.path.basename(f)} → {a or '(vacía)'}"
+                                    for f, a in c["byFile"].items())
+                print(f"        · {c['term']}: {detail}")
+            worst = 1
+        else:
+            print("  Sin incongruencias: los términos compartidos usan la misma "
+                  "abreviatura; los exclusivos de cada archivo se suman sin conflicto.")
+        all_reports.append({"crossFile": {"glossaryConflicts": conflicts}})
 
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as fh:

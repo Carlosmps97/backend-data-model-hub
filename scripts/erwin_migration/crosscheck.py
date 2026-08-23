@@ -52,7 +52,8 @@ class FileAnalysis:
         self.udp_vals = pol.resolve_udp_values(m.udp_values, self.collapsed)
         self.x_rels: Counter = Counter()
         for r in m.relationships.values():
-            if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
+            if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
+                              ep.REL_SUBTYPE):
                 self.x_rels[r.parent_ref] += 1
                 self.x_rels[r.child_ref] += 1
         self.x_canv: Counter = Counter()
@@ -220,15 +221,18 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
     out["udp"] = {"createdWithUse": udp_new, "skippedA4": udp_skip,
                   "enumAdds": udp_merge, "caseVariantsIgnored": udp_variants}
 
-    # estimación de carga (con la escritura bufferizada de migrate)
-    adopt = sum(1 for o in overlaps if o["verdict"].startswith("ADOPTA"))
-    n_tables = sum(1 for _k, c in fa.tables_by_key.items()) - adopt
-    n_cols = sum(len(pol.dedupe_columns(fa.winner(c).attributes)[0])
-                 for k, c in fa.tables_by_key.items()
-                 if not any(o["key"] == k and o["verdict"].startswith("ADOPTA")
-                            for o in overlaps))
+    # estimación de carga (con la escritura bufferizada de migrate). Política
+    # _DUPn (2026-08-22): TODAS las copias homónimas migran como tablas reales;
+    # solo la keeper de una clave ADOPTADA no se re-escribe.
+    adopted_keys = {o["key"] for o in overlaps if o["verdict"].startswith("ADOPTA")}
+    n_tables = sum(len(c) for c in fa.tables_by_key.values()) - len(adopted_keys)
+    n_cols = sum(len(pol.dedupe_columns(e.attributes)[0])
+                 for k, copies in fa.tables_by_key.items()
+                 for e in copies
+                 if not (k in adopted_keys and e is fa.winner(copies)))
     n_rels = sum(1 for r in fa.m.relationships.values()
-                 if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING))
+                 if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
+                                   ep.REL_SUBTYPE))
     ops = (n_tables + n_cols + len(fa.views_by_key) + n_rels
            + len(fa.m.diagrams) + len(fa.m.subject_areas) + out["schemas_new"]
            + len(gl_new) + len(out["domains_new"]) + len(udp_new))
@@ -276,9 +280,12 @@ def main(argv: list[str] | None = None) -> int:
         if dups:
             distintas = sum(1 for d in dups if not d["identical"])
             print(f"  duplicados internos: {len(dups)} claves "
-                  f"({distintas} con estructura DISTINTA) → alias de la más usada (R3)")
-            for d in [x for x in dups if not x["identical"]][:6]:
-                print(f"     ⚠ {d['key']} ×{d['copies']} scores={d['scores']}")
+                  f"({distintas} con estructura DISTINTA) → se migran TODAS; "
+                  "las homónimas llevan sufijo _DUPn (política 2026-08-22)")
+            # Transparencia total (2026-08-22): el detalle completo, sin resumir.
+            for d in dups:
+                mark = "⚠" if not d["identical"] else "≡"
+                print(f"     {mark} {d['key']} ×{d['copies']} scores={d['scores']}")
         parts = fa.partitions_to_reassign()
         rep["partitions_reassign"] = parts
         if parts:
@@ -311,9 +318,9 @@ def main(argv: list[str] | None = None) -> int:
             u = vs["udp"]
             print(f"  UDP: defs nuevas con uso={len(u['createdWithUse'])} · "
                   f"saltadas A4={len(u['skippedA4'])} · enums que crecen={len(u['enumAdds'])}")
-            for x in u["enumAdds"][:8]:
+            for x in u["enumAdds"]:
                 print(f"     + {x}")
-            for x in u["caseVariantsIgnored"][:6]:
+            for x in u["caseVariantsIgnored"]:
                 print(f"     ≈ variante de grafía ignorada (A3): {x}")
             est = vs["load_estimate"]
             print(f"  carga estimada: ~{est['upserts']:,} upserts en {est['batches']} lotes"

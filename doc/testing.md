@@ -553,7 +553,7 @@ Características de robustez del seed:
 
 - **Streaming por lotes** (`Batcher` + `insert_many(ordered=False)`) con bajo consumo de memoria y progreso.
 - **Tolerancia a throttling**: detectaba errores transitorios de rate-limit y reintentaba el lote con backoff exponencial (0.5 s → hasta 20 s, 10 intentos).
-- **Regenera** (drop) `projects`, `folders`, `subject_areas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`; **limpia** `changesets` y `changeset_changes`; **preserva** usuarios, roles, estándares, dominios, glosario y naming; y **nunca toca** `column_catalog` (colección del agente), con un `assert` guardián.
+- **Regenera** (drop) `projects`, `folders`, `subject_areas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`; **limpia** `changesets` y `changeset_changes`; **preserva** usuarios, roles, estándares, dominios, glosario y naming; y **nunca tocaba** `column_catalog` (colección del planteamiento inicial con agente, retirada en doc 54), con un `assert` guardián.
 - Inserta una **versión de producción baseline** (`approved` + `appliedAt`) para que el canvas pueda abrir el modelo y snapshotear desde producción.
 - Recrea los índices correctos al final con `ensure_indexes`.
 
@@ -619,7 +619,7 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 - **El adaptador tiene su propia suite viva** (`tests/lakebase/test_adapter_live.py`, 43 tests con `LAKEBASE_TESTS=1`) que valida esa superficie contra el Postgres real en un schema efímero (sección 3.4).
 - **Credenciales rotativas:** el password de Postgres es un token OAuth de ~60 minutos que la app acuña sola vía `databricks-sdk` (caché de 50 min); el pool asyncpg pide token fresco por conexión y tolera el wake del compute (scale-to-zero).
 - **Índices:** se recrean con `ensure_indexes(db)` al arrancar el lifespan; el planner del reporting rechaza (422) ordenar por campos sin índice, así que los índices esperados deben existir para las consultas a escala.
-- **Colección protegida:** `column_catalog` (usada por el agente de modelado) nunca debe ser borrada por los scripts de carga/reset; lo garantizan con `assert`/guardrail.
+- **Colección retirada:** `column_catalog` (del planteamiento inicial con agente de modelado) ya no existe para la plataforma (doc 54): el adaptador no la pre-crea y el reset destructivo (`scripts/reset_for_migration.py`) la elimina junto con todo el schema.
 - **Sin lifespan no hay DB:** el `TestClient` de los unit tests se construye sin lifespan a propósito, y el `/api/health` reporta `degraded` con `db_connected: false` cuando no hay conexión — comportamiento verificado en `tests/test_smoke.py`.
 - **Cosmos DB (legacy):** el camino `DB_BACKEND=cosmos` (Motor contra Azure Cosmos DB con API de Mongo) se conserva en código como rollback dormido; el throttling por RU/s (429 / código 16500) que condicionó a los seeds de estrés era de esa época.
 

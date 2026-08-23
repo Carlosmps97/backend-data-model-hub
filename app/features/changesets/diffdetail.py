@@ -27,6 +27,9 @@ NOISE_BY_COLLECTION: dict[str, set[str]] = {
     # tableId/sourceTableIds: compat — las filas por fuente (sources) los cubren;
     # sql: derivado del editor de vistas (sources es el canónico).
     "views": {"tableId", "sourceTableIds", "sql"},
+    # subtypeSymbolId: UUID interno del grupo de subcategoría (doc 53) — el
+    # revisor ya ve "Subcategory" + padre/hijo; el id del símbolo es ruido.
+    "relationships": {"subtypeSymbolId"},
 }
 
 # key → label (en INGLÉS, regla UI); el ORDEN es el de presentación.
@@ -52,6 +55,7 @@ FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
         ("parentTableId", "Parent table"), ("childTableId", "Child table"),
         ("parentCardinality", "Parent cardinality"),
         ("childCardinality", "Child cardinality"), ("identifying", "Identifying"),
+        ("subcategory", "Subcategory"),
     ),
     "schemas": (("name", "Name"), ("description", "Definition")),
     "projects": (("name", "Name"), ("description", "Definition")),

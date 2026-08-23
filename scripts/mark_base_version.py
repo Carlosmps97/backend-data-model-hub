@@ -18,9 +18,10 @@ resto del cierre:
 Guardas (idempotente): si ya existe una version `v1` o cualquier version
 APLICADA, no crea el marcador (la plataforma ya tiene historial).
 
-Dry-run por default; `--apply` para escribir.
+Dry-run por default; `--apply` para escribir. `--title` pone el título del
+marcador (default: "Base - Migración Erwin (XML)").
   .venv/bin/python -m scripts.mark_base_version            # dry-run
-  .venv/bin/python -m scripts.mark_base_version --apply
+  .venv/bin/python -m scripts.mark_base_version --apply [--title "Base - ..."]
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def main(apply: bool) -> None:
+async def main(apply: bool, title: str) -> None:
     from app.core.db.client import connect, disconnect, get_db
     from app.features.changesets.models import ChangesetDoc
     from app.features.data_standards import service as std_service
@@ -67,8 +68,7 @@ async def main(apply: bool) -> None:
             print("- OJO: hay versiones APLICADAS sin label v1 -> no se crea "
                   "marcador (revisar a mano).")
         else:
-            print("- Se crea el marcador v1 'Base - Modelo DDV (XML)' "
-                  "(approved, 0 cambios).")
+            print(f"- Se crea el marcador v1 '{title}' (approved, 0 cambios).")
         print("- Baseline de Data Standards: "
               + ("se crea." if n_std == 0 else "ya hay versiones, no hace falta."))
         print("- Permiso `rollback`: se asegura en administrador/revisor.")
@@ -82,7 +82,7 @@ async def main(apply: bool) -> None:
             projects = await db["projects"].find(_ACTIVE, {"_id": 1}).to_list(None)
             cs = ChangesetDoc.model_validate({
                 "id": str(uuid.uuid4()),
-                "title": "Base - Modelo DDV (XML)",
+                "title": title,
                 "owner": "system",
                 "status": "approved",
                 "description": ("Version base: el estado publicado tal como "
@@ -101,7 +101,7 @@ async def main(apply: bool) -> None:
 
         if n_std == 0:
             v = await std_service._record(
-                "system", "baseline", "Base - Data Standards (XML DDV)",
+                "system", "baseline", "Base - Data Standards (XML)",
                 "Baseline inicial de estandares del XML migrado.",
                 {"added": [], "edited": [], "removed": []},
                 {"tables": 0, "columns": 0})
@@ -122,4 +122,7 @@ if __name__ == "__main__":
         description="Crea el marcador de version base v1 tras la migracion")
     ap.add_argument("--apply", action="store_true",
                     help="escribir de verdad (sin esto: dry-run)")
-    asyncio.run(main(ap.parse_args().apply))
+    ap.add_argument("--title", default="Base - Migración Erwin (XML)",
+                    help="título del changeset marcador v1")
+    _args = ap.parse_args()
+    asyncio.run(main(_args.apply, _args.title))

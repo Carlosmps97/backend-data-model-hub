@@ -133,12 +133,16 @@ def merge_allowed_values(existing: list[str], incoming: list[str]) -> list[str]:
 
 
 def rel_nat_key(parent_tid: str, child_tid: str,
-                name_pairs: list[tuple[str, str]]) -> tuple:
+                name_pairs: list[tuple[str, str]],
+                subcategory: bool = False) -> tuple:
     """Clave natural de una relación (doc 32b R4): con N archivos del mismo
     modelo, la MISMA FK conceptual llega repetida con ids Erwin distintos —
-    se identifica por extremos + pares de columnas POR NOMBRE."""
-    return (parent_tid, child_tid,
+    se identifica por extremos + pares de columnas POR NOMBRE. Una relación de
+    subcategoría (doc 53) lleva marcador propio: no debe fusionarse con una
+    identifying de los mismos extremos y pares."""
+    base = (parent_tid, child_tid,
             tuple(sorted((p.upper(), c.upper()) for p, c in name_pairs)))
+    return base + ("subcategory",) if subcategory else base
 
 
 def map_cardinality(erwin_code: str) -> str:

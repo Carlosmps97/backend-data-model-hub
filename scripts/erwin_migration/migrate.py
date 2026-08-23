@@ -91,9 +91,9 @@ class Migrator:
         self.stats: Counter = Counter()
         self.warnings: list[str] = []
         self.report: dict[str, list] = {
-            "adopted": [], "conflicts": [], "aliases": [], "rels_reused": [],
+            "adopted": [], "conflicts": [], "renamed_dups": [], "rels_reused": [],
             "cols_dropped": [], "partitions_reassigned": [],
-            "views_discarded": [], "udp_defs_skipped": [],
+            "views_discarded": [], "udp_defs_skipped": [], "glossary_conflicts": [],
         }
         # mapas Erwin id → id de plataforma FINAL (puede ser un doc preexistente)
         self.domain_pid: dict[str, str] = {}
@@ -114,7 +114,6 @@ class Migrator:
         self.table_verdicts: dict[str, str] = {}
         # columnas escritas/adoptadas por dueño Erwin: PHYS.upper → col pid
         self._cols_by_owner: dict[str, dict[str, str]] = {}
-        self._table_aliases: dict[str, str] = {}   # entity id perdedora → ganadora
         self._stale_scope: dict[str, set[str]] = {}  # table pid escrito → cpids vigentes
         self._buf: dict[str, list[UpdateOne]] = defaultdict(list)
         self.ops_flushed = 0
@@ -155,7 +154,8 @@ class Migrator:
         """Uso de cada objeto DENTRO del archivo (para el score R2/R3)."""
         self.x_rels: Counter = Counter()
         for r in self.m.relationships.values():
-            if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
+            if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
+                              ep.REL_SUBTYPE):
                 self.x_rels[r.parent_ref] += 1
                 self.x_rels[r.child_ref] += 1
         self.x_canv: Counter = Counter()
@@ -178,9 +178,22 @@ class Migrator:
     def _prefetch(self) -> None:
         db = self.db
         self.ex_tables: dict[tuple[str, str], dict] = {}
-        for t in db.canonical_tables.find(_ACTIVE, {"schema": 1, "physicalName": 1}):
-            key = ((t.get("schema") or "").upper(), (t.get("physicalName") or "").upper())
+        # Política _DUPn (2026-08-22): el físico es único GLOBAL (doc 50) →
+        # censo global de nombres tomados + continuidad por erwinLongId para
+        # que los re-runs conserven el sufijo asignado (sin ratchet _DUPn+1).
+        self.taken_global: set[str] = set()
+        self.ex_by_erwin: dict[str, dict] = {}
+        for t in db.canonical_tables.find(_ACTIVE, {"schema": 1, "physicalName": 1,
+                                                    "erwinLongId": 1}):
+            phys = t.get("physicalName") or ""
+            key = ((t.get("schema") or "").upper(), phys.upper())
             self.ex_tables[key] = {"_id": t["_id"]}
+            if phys:
+                self.taken_global.add(phys.upper())
+            if t.get("erwinLongId"):
+                self.ex_by_erwin[t["erwinLongId"]] = {
+                    "_id": t["_id"], "physicalName": phys,
+                    "schema": t.get("schema") or ""}
         self.ex_views: dict[tuple[str, str], str] = {}
         for v in db.views.find(_ACTIVE, {"schema": 1, "name": 1}):
             self.ex_views[((v.get("schema") or "").upper(),
@@ -191,9 +204,12 @@ class Migrator:
         self.ex_domains: dict[str, str] = {
             (d.get("name") or "").upper(): d["_id"]
             for d in db.parent_domains.find(_ACTIVE, {"name": 1})}
-        self.ex_gloss: set[str] = {
-            (g.get("term") or "").upper()
-            for g in db.glossary_terms.find(_ACTIVE, {"term": 1})}
+        # term.upper() → abbrev vigente (para detectar conflictos de glosario
+        # entre archivos/corridas — política 2026-08-22: la BD nunca se pisa,
+        # pero la discrepancia SÍ se reporta).
+        self.ex_gloss: dict[str, str] = {
+            (g.get("term") or "").upper(): (g.get("abbrev") or "").strip()
+            for g in db.glossary_terms.find(_ACTIVE, {"term": 1, "abbrev": 1})}
         self.ex_udp: dict[tuple[str, str], dict] = {}
         for u in db.udp_definitions.find(_ACTIVE, {"name": 1, "level": 1, "allowedValues": 1}):
             self.ex_udp[((u.get("name") or "").upper(), u.get("level") or "")] = {
@@ -241,20 +257,41 @@ class Migrator:
                 "erwinLongId": d.id})
             self.stats["dominios creados"] += 1
 
-        # glosario (term+abbrev; nunca tocar existentes/locked)
-        seen_terms: set[str] = set()
+        # glosario (term+abbrev; nunca tocar existentes/locked). Full outer
+        # join entre archivos (política 2026-08-22): los términos nuevos se
+        # SUMAN; el mismo término con abreviatura DISTINTA es una incongruencia
+        # que se detecta y reporta (gana la vigente — 1º BD, luego 1ª del
+        # archivo), jamás se pisa en silencio.
+        file_abbrev: dict[str, str] = {}
         for g in self.m.glossary:
             term = g[0].strip()
             abbrev = g[1].strip() if len(g) > 1 else ""
-            if not term or term.upper() in seen_terms:
-                self.stats["glosario duplicado omitido"] += bool(term)
+            if not term:
                 continue
-            seen_terms.add(term.upper())
-            if term.upper() in self.ex_gloss:
-                self.stats["glosario reusado"] += 1
+            key = term.upper()
+            if key in file_abbrev:
+                prev = file_abbrev[key]
+                if abbrev and prev and abbrev.upper() != prev.upper():
+                    self.report["glossary_conflicts"].append(
+                        {"term": term, "kept": prev, "ignored": abbrev,
+                         "source": "duplicado dentro del archivo"})
+                    self.stats["glosario en conflicto (abbrev distinta)"] += 1
+                else:
+                    self.stats["glosario duplicado omitido"] += 1
                 continue
-            self.ex_gloss.add(term.upper())
-            self._upsert("glossary_terms", pol.platform_id(f"gloss|{term.upper()}"), {
+            file_abbrev[key] = abbrev
+            db_abbrev = self.ex_gloss.get(key)
+            if db_abbrev is not None:
+                if abbrev and db_abbrev and abbrev.upper() != db_abbrev.upper():
+                    self.report["glossary_conflicts"].append(
+                        {"term": term, "kept": db_abbrev, "ignored": abbrev,
+                         "source": "ya existente en BD (otro archivo/corrida)"})
+                    self.stats["glosario en conflicto (abbrev distinta)"] += 1
+                else:
+                    self.stats["glosario reusado"] += 1
+                continue
+            self.ex_gloss[key] = abbrev
+            self._upsert("glossary_terms", pol.platform_id(f"gloss|{key}"), {
                 "term": term, "abbrev": abbrev, "scope": "column",
                 "wordType": None, "locked": False})
             self.stats["glosario creado"] += 1
@@ -316,44 +353,90 @@ class Migrator:
                 out[self.udp_pid[key]] = val
         return out
 
-    # ---------- tablas (R1/R2/R3/R5/R6) ----------
-    def _internal_winners(self) -> tuple[list, dict[str, str]]:
-        """Duplicados internos (R3): agrupa entidades por clave natural; gana
-        la copia con MÁS USO dentro del archivo (empate → la 1ª). Devuelve
-        (ganadoras en orden de archivo, alias perdedora→ganadora)."""
-        groups: dict[str, list] = defaultdict(list)
-        order: list[str] = []
+    # ---------- tablas (R1/R2/_DUPn/R5/R6) ----------
+    def _resolve_dup_names(self) -> dict[str, str]:
+        """Nombres EFECTIVOS por entidad (política 2026-08-22, reemplaza el
+        alias R3): TODAS las copias se migran como tablas reales; los
+        homónimos reciben sufijo correlativo `_DUPn` (contenido intacto — solo
+        cambia el físico) para no violar la unicidad GLOBAL del físico
+        (doc 50) y conservar la metadata de cada duplicado para revisión del
+        equipo. Reglas, deterministas para el mismo archivo:
+
+        1. CONTINUIDAD: una tabla ya migrada (mismo erwinLongId + schema en
+           BD) conserva el físico con el que quedó — re-runs sin ratchet.
+        2. En cada grupo homónimo (schema+físico) conserva el nombre limpio la
+           copia de MÁS USO (score R2; empate → 1ª del archivo), que además es
+           la que adopta/actualiza el doc vivo homónimo si existe (R1/R2).
+        3. El resto — y cualquier colisión GLOBAL con la BD (otro esquema) —
+           toma el primer `_DUPn` libre, en orden de archivo.
+        """
+        eff: dict[str, str] = {}
+        claimed: set[str] = set()
+        pending: list = []
         for e in self.m.entities.values():
-            key = f"{pol.schema_or_default(self.schema_of.get(e.id))}.{e.physical}".upper()
+            prev = self.ex_by_erwin.get(e.id)
+            schema = pol.schema_or_default(self.schema_of.get(e.id))
+            if prev and prev["physicalName"] and prev["schema"].upper() == schema.upper():
+                eff[e.id] = prev["physicalName"]
+                claimed.add(prev["physicalName"].upper())
+            else:
+                pending.append(e)
+
+        groups: dict[tuple[str, str], list] = defaultdict(list)
+        order: list[tuple[str, str]] = []
+        for e in pending:
+            schema = pol.schema_or_default(self.schema_of.get(e.id))
+            key = (schema.upper(), e.physical.upper())
             if key not in groups:
                 order.append(key)
             groups[key].append(e)
-        winners, aliases = [], {}
+
         for key in order:
             copies = groups[key]
-            win = max(copies, key=lambda e: self._xml_score(e.id))  # max estable
-            winners.append(win)
-            for e in copies:
-                if e is win:
+            raw = copies[0].physical
+            if not raw:              # sin físico resoluble no hay clave que chocar
+                for e in copies:
+                    eff[e.id] = e.physical
+                continue
+            nat_live = key in self.ex_tables
+            keeper = max(copies, key=lambda e: self._xml_score(e.id))  # max estable
+            renamed: list[dict] = []
+            for e in [keeper] + [c for c in copies if c is not keeper]:
+                up = e.physical.upper()
+                # Conserva el crudo el PRIMERO en reclamarlo (el keeper) cuando
+                # es su doc vivo homónimo (nat_live ⇒ adopción/score R1/R2) o
+                # el nombre está libre GLOBALMENTE; el resto va a `_DUPn`.
+                if up not in claimed and (nat_live or up not in self.taken_global):
+                    eff[e.id] = e.physical
+                    claimed.add(up)
                     continue
-                aliases[e.id] = win.id
-                self.stats["tablas duplicadas → alias de la más usada"] += 1
-            if len(copies) > 1:
-                self.report["aliases"].append({
-                    "key": key, "copies": len(copies),
-                    "winnerScore": self._xml_score(win.id),
-                    "loserScores": [self._xml_score(e.id) for e in copies if e is not win]})
-        return winners, aliases
+                k = 1
+                while f"{e.physical}_DUP{k}".upper() in claimed \
+                        or f"{e.physical}_DUP{k}".upper() in self.taken_global:
+                    k += 1
+                suffixed = f"{e.physical}_DUP{k}"
+                eff[e.id] = suffixed
+                claimed.add(suffixed.upper())
+                renamed.append({"erwinLongId": e.id, "logicalName": e.name,
+                                "from": e.physical, "to": suffixed})
+                self.stats["tablas duplicadas → renombradas con sufijo _DUPn"] += 1
+            if renamed:
+                schema = pol.schema_or_default(self.schema_of.get(copies[0].id))
+                self.report["renamed_dups"].append({
+                    "key": f"{schema}.{raw}".upper(), "copies": len(copies),
+                    "kept": eff[keeper.id], "renamed": renamed})
+        return eff
 
     def tables(self) -> None:
-        winners, self._table_aliases = self._internal_winners()
+        eff = self._resolve_dup_names()
+        entities = list(self.m.entities.values())
 
         # columnas existentes de las tablas cuya clave natural YA está en BD
         # (adopción/score/estabilidad de ids en update-in-place)
         matched: dict[str, str] = {}     # entity id → _id existente
-        for e in winners:
+        for e in entities:
             schema = pol.schema_or_default(self.schema_of.get(e.id))
-            hit = self.ex_tables.get((schema.upper(), e.physical.upper()))
+            hit = self.ex_tables.get((schema.upper(), eff[e.id].upper()))
             if hit:
                 matched[e.id] = hit["_id"]
         self.ex_cols: dict[tuple[str, str], str] = {}
@@ -370,9 +453,9 @@ class Migrator:
         fk_ids = {a for pairs in self.m.fk_pairs().values() for p, c in pairs for a in (p, c)}
         udp_counts = Counter(oid for (oid, _k) in self.udp_vals)
 
-        for e in winners:
+        for e in entities:
             schema = pol.schema_or_default(self.schema_of.get(e.id))
-            nat_key = f"{schema}.{e.physical}".upper()
+            nat_key = f"{schema}.{eff[e.id]}".upper()
             own_pid = pol.platform_id(e.id)
             existing_id = matched.get(e.id)
 
@@ -412,7 +495,7 @@ class Migrator:
             self.schemas_used.add(schema)
             self.schemas_tables.add(schema)
             self._upsert("canonical_tables", pid, {
-                "physicalName": e.physical, "logicalName": e.name,
+                "physicalName": eff[e.id], "logicalName": e.name,
                 "schema": schema,
                 "description": e.definition or e.comment or None,
                 "udpValues": self._udp_values_for(e.id, "table"),
@@ -471,17 +554,9 @@ class Migrator:
                 self.stats["columnas"] += 1
             self._cols_by_owner[e.id] = owner_cols
             self._stale_scope[pid] = current_cpids
-
-        # ALIAS (R3): columnas de las copias perdedoras → homónimas de la
-        # ganadora, para que sus relaciones/vistas re-apunten en vez de perderse.
-        for loser_id, winner_id in self._table_aliases.items():
-            self.table_pid[loser_id] = self.table_pid[winner_id]
-            owner_cols = self._cols_by_owner.get(winner_id, {})
-            loser = self.m.entities[loser_id]
-            for a in loser.attributes:
-                cpid = owner_cols.get(a.physical.upper())
-                if cpid:
-                    self.col_pid[a.id] = cpid
+        # (El alias R3 murió con la política _DUPn 2026-08-22: cada copia es
+        # una tabla real con sus columnas — sus relaciones/canvases la siguen
+        # por su propio id de entidad, sin re-apuntar nada.)
 
     def _stale_columns(self) -> None:
         """Re-runs auto-saneados: columnas MIGRADAS de las tablas ESCRITAS en
@@ -520,10 +595,16 @@ class Migrator:
                 name_pairs.append((pk[1], ck[1]))
             if name_pairs:
                 seen[pol.rel_nat_key(r.get("parentTableId"), r.get("childTableId"),
-                                     name_pairs)] = r
+                                     name_pairs,
+                                     subcategory=bool(r.get("subcategory")))] = r
 
+        # doc 53: relación Type 9 → símbolo Erwin que la agrupa (el símbolo NO
+        # se persiste como entidad: las aristas comparten `subtypeSymbolId`).
+        sym_of = self.m.subtype_symbol_of_rel()
         for r in self.m.relationships.values():
-            if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
+            is_sub = r.rel_type == ep.REL_SUBTYPE
+            if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING) \
+                    and not is_sub:
                 continue
             child_t = self.table_pid.get(r.child_ref)    # hijo = lado FK
             parent_t = self.table_pid.get(r.parent_ref)  # padre = lado PK
@@ -541,26 +622,43 @@ class Migrator:
             if not rel_pairs:
                 self.stats["relaciones omitidas (sin pares FK)"] += 1
                 continue
-            key = pol.rel_nat_key(parent_t, child_t, name_pairs)
+            key = pol.rel_nat_key(parent_t, child_t, name_pairs, subcategory=is_sub)
             prev = seen.get(key)
             if prev is not None:
                 self.stats["relaciones reusadas (ya existían — R4)"] += 1
                 entry = {"key": r.name, "parent": parent_t, "child": child_t}
                 if isinstance(prev, dict) and "identifying" in prev and \
-                        bool(prev.get("identifying")) != (r.rel_type == ep.REL_IDENTIFYING):
+                        bool(prev.get("identifying")) != (is_sub or r.rel_type == ep.REL_IDENTIFYING):
                     entry["discrepancy"] = "identifying difiere — se conserva la existente"
                 self.report["rels_reused"].append(entry)
                 continue
             seen[key] = {}
+            if is_sub:
+                sym_eid = sym_of.get(r.id)
+                if sym_eid is None:
+                    # 0 casos en los XML UDV; defensivo (W-SUBTYPE-ORPHAN-REL).
+                    self.warnings.append(
+                        f"relación de subtipo {r.name} sin Subtype_Symbol — "
+                        f"se agrupa en símbolo sintético propio")
+                    sym_eid = f"subsym|{r.id}"
+                extra = {"subcategory": True,
+                         "subtypeSymbolId": pol.platform_id(sym_eid),
+                         # ES-UN (doc 53): 1:1 estricto; la PK del padre migra
+                         # como PK del hijo → identifying, como en Erwin.
+                         "parentCardinality": "one",
+                         "childCardinality": "one",
+                         "identifying": True}
+                self.stats["relaciones de subcategoría (supertipo→subtipo)"] += 1
+            else:
+                extra = {"subcategory": False, "subtypeSymbolId": None,
+                         # Lado padre desde Null_Option_Type ("100" = FK
+                         # nullable → padre opcional 0..1), como el rombo Erwin.
+                         "parentCardinality": pol.map_parent_cardinality(r.null_option),
+                         "childCardinality": pol.map_cardinality(r.cardinality),
+                         "identifying": r.rel_type == ep.REL_IDENTIFYING}
             self._upsert("relationships", pol.platform_id(r.id), {
                 "parentTableId": parent_t, "childTableId": child_t,
-                "pairs": rel_pairs,
-                # Lado padre desde Null_Option_Type ("100" = FK nullable →
-                # padre opcional 0..1), como el rombo del diagrama Erwin.
-                "parentCardinality": pol.map_parent_cardinality(r.null_option),
-                "childCardinality": pol.map_cardinality(r.cardinality),
-                "identifying": r.rel_type == ep.REL_IDENTIFYING,
-                "erwinLongId": r.id})
+                "pairs": rel_pairs, **extra, "erwinLongId": r.id})
             self.stats["relaciones"] += 1
             if len(rel_pairs) > 1:
                 self.stats["relaciones compuestas (2+ pares)"] += 1
@@ -799,7 +897,8 @@ def _dry_run_plan(m: ep.ErwinModel, project: str | None) -> None:
                     for e in m.entities.values())
     dups = sum(n - 1 for n in dup_t.values() if n > 1)
     if dups:
-        print(f"  duplicados internos de tabla: {dups} copias → alias de la más usada (R3)")
+        print(f"  duplicados internos de tabla: {dups} copias → se migran TODAS "
+              "con sufijo _DUPn (política 2026-08-22; detalle en el reporte)")
     udp_vals = pol.resolve_udp_values(m.udp_values, collapsed)
     reassign = 0
     for e in m.entities.values():

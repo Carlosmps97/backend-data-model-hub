@@ -214,13 +214,25 @@ def test_fk_repetida_entre_archivos_no_se_duplica(corrida):
     assert len(db.data["relationships"]) == 3  # rel-1 + rel-2 + la nueva de TAB_B
 
 
-# ── R3 · alias de duplicados internos ─────────────────────────────────────
-def test_copia_interna_es_alias_de_la_ganadora(corrida):
-    _, mig = corrida
-    assert mig.table_pid["E4"] == mig.table_pid["E1"] == "tbl-1"
-    assert mig.col_pid["A1B"] == "col-1"
-    assert mig.report["aliases"][0]["key"] == "S1.TAB_A"
-    assert mig.stats["tablas duplicadas → alias de la más usada"] == 1
+# ── Duplicados internos → sufijo _DUPn (política 2026-08-22) ──────────────
+def test_copia_interna_migra_como_tabla_propia_con_sufijo(corrida):
+    db, mig = corrida
+    # E4 (copia de TAB_A) ya NO es alias: migra como tabla real _DUP1, con su
+    # contenido intacto (lógico igual, columnas propias).
+    assert mig.table_pid["E4"] == pol.platform_id("E4") != mig.table_pid["E1"]
+    dup = db.data["canonical_tables"][pol.platform_id("E4")]
+    assert dup["physicalName"] == "TAB_A_DUP1"
+    assert dup["logicalName"] == "tab_a"          # solo cambia el físico
+    assert mig.col_pid["A1B"] == pol.platform_id("A1B") != "col-1"
+    cols_dup = [c for c in db.data["canonical_columns"].values()
+                if c.get("tableId") == pol.platform_id("E4")]
+    assert [c["physicalName"] for c in cols_dup] == ["CODA"]
+    # reporte transparente: el mapeo exacto de renombres
+    rep = mig.report["renamed_dups"][0]
+    assert rep["key"] == "S1.TAB_A" and rep["kept"] == "TAB_A" and rep["copies"] == 2
+    assert rep["renamed"] == [{"erwinLongId": "E4", "logicalName": "tab_a",
+                               "from": "TAB_A", "to": "TAB_A_DUP1"}]
+    assert mig.stats["tablas duplicadas → renombradas con sufijo _DUPn"] == 1
 
 
 # ── vistas sobre tablas adoptadas ─────────────────────────────────────────
@@ -254,10 +266,191 @@ def test_folder_y_canvas_homonimos_se_fusionan(corrida):
     assert mig.stats["folders reusados (homónimos de otro archivo)"] == 1
     cv = db.data["subject_areas"]["cv-1"]          # DIAG fusionado en cv-1
     assert len(db.data["subject_areas"]) == 2      # cv-1 y cv-2, sin nuevos
-    # unión de tablas: las vivas + TAB_B nueva; la copia alias NO duplica nodo
-    assert cv["tableIds"] == ["tbl-1", "tbl-3", pol.platform_id("E2")]
+    # unión de tablas: las vivas + la copia _DUP (nodo propio, política
+    # 2026-08-22) + TAB_B nueva — en el orden del diagrama (E1, E4, E2)
+    assert cv["tableIds"] == ["tbl-1", "tbl-3",
+                              pol.platform_id("E4"), pol.platform_id("E2")]
     # el layout trabajado se preserva
     assert cv["layout"]["tbl-1"] == {"x": 11, "y": 22}
+
+
+# ── política _DUPn (2026-08-22): correlativos, re-runs y colisión global ──
+def _modelo_party_triple() -> ep.ErwinModel:
+    """Tres copias de PARTY en el mismo schema; E2 es la MÁS usada (padre de
+    una relación) → conserva el nombre limpio; E1 y E3 → _DUP1/_DUP2 en orden
+    de archivo."""
+    m = ep.ErwinModel(name="M")
+    m.entities = {
+        "E1": entity("E1", "PARTY", [attr("A1", "E1", "COD", 1)]),
+        "E2": entity("E2", "PARTY", [attr("B1", "E2", "COD", 1)], pk=("B1",)),
+        "E3": entity("E3", "PARTY", [attr("C1", "E3", "COD", 1)]),
+        "E4": entity("E4", "OTRA", [
+            attr("D1", "E4", "COD", 1, parent_attr="B1", parent_rel="R1")]),
+    }
+    m.relationships = {"R1": rel("R1", "E2", "E4")}
+    m.hive_dbs = {"S1": ["E1", "E2", "E3", "E4"]}
+    return m
+
+
+def test_sufijos_correlativos_y_rerun_estable():
+    db = FakeDb()
+    mig = Migrator(db, _modelo_party_triple(), "Fam", None)
+    mig.run()
+
+    by_erwin = {d["erwinLongId"]: d["physicalName"]
+                for d in db.data["canonical_tables"].values()}
+    assert by_erwin == {"E1": "PARTY_DUP1", "E2": "PARTY",
+                        "E3": "PARTY_DUP2", "E4": "OTRA"}
+    assert mig.stats["tablas duplicadas → renombradas con sufijo _DUPn"] == 2
+    n0 = len(db.data["canonical_tables"])
+
+    # re-run del MISMO archivo: continuidad por erwinLongId — mismos nombres,
+    # cero docs nuevos y cero ratchet (_DUP3 jamás aparece)
+    mig2 = Migrator(db, _modelo_party_triple(), "Fam", None)
+    mig2.run()
+    by_erwin2 = {d["erwinLongId"]: d["physicalName"]
+                 for d in db.data["canonical_tables"].values()}
+    assert by_erwin2 == by_erwin
+    assert len(db.data["canonical_tables"]) == n0
+    assert mig2.report["renamed_dups"] == []
+    assert mig2.stats["tablas duplicadas → renombradas con sufijo _DUPn"] == 0
+
+
+def test_colision_global_entre_esquemas_tambien_sufija():
+    """Regla doc 50: el físico es único GLOBAL — un homónimo en OTRO esquema
+    de la BD también fuerza el sufijo (antes entraba como grandfather)."""
+    db = FakeDb({"canonical_tables": {
+        "tbl-x": {"_id": "tbl-x", "schema": "OTRO", "physicalName": "PARTY"}}})
+    m = ep.ErwinModel(name="M")
+    m.entities = {"E1": entity("E1", "PARTY", [attr("A1", "E1", "COD", 1)])}
+    m.hive_dbs = {"S1": ["E1"]}
+    mig = Migrator(db, m, "Fam", None)
+    mig.run()
+
+    mine = db.data["canonical_tables"][pol.platform_id("E1")]
+    assert mine["physicalName"] == "PARTY_DUP1" and mine["schema"] == "S1"
+    assert db.data["canonical_tables"]["tbl-x"]["physicalName"] == "PARTY"  # intacta
+    rep = mig.report["renamed_dups"][0]
+    assert rep["renamed"][0]["to"] == "PARTY_DUP1"
+
+    # re-run: el erwinLongId ancla el nombre — sin _DUP2
+    mig2 = Migrator(db, m, "Fam", None)
+    mig2.run()
+    assert db.data["canonical_tables"][pol.platform_id("E1")]["physicalName"] == "PARTY_DUP1"
+    assert len(db.data["canonical_tables"]) == 2
+
+
+def test_glosario_conflicto_vs_bd_se_reporta_y_la_bd_gana():
+    db = FakeDb({"glossary_terms": {
+        "g1": {"_id": "g1", "term": "Monto", "abbrev": "MTO"}}})
+    m = ep.ErwinModel(name="M")
+    m.glossary = [("Monto", "MTOS"), ("Codigo", "COD"), ("Codigo", "CODIG")]
+    mig = Migrator(db, m, "Fam", None)
+    mig.run()
+
+    # la BD nunca se pisa; el término nuevo se SUMA (full outer join)
+    assert db.data["glossary_terms"]["g1"]["abbrev"] == "MTO"
+    created = [g for g in db.data["glossary_terms"].values() if g.get("term") == "Codigo"]
+    assert len(created) == 1 and created[0]["abbrev"] == "COD"
+    # ambas incongruencias quedan reportadas (vs BD y duplicado interno)
+    conflicts = {(c["term"], c["kept"], c["ignored"])
+                 for c in mig.report["glossary_conflicts"]}
+    assert conflicts == {("Monto", "MTO", "MTOS"), ("Codigo", "COD", "CODIG")}
+    assert mig.stats["glosario en conflicto (abbrev distinta)"] == 2
+
+
+# ── doc 53 · subcategorías (supertipo→subtipo) ────────────────────────────
+def _modelo_subtipos() -> ep.ErwinModel:
+    """Party con dos subtipos (Individuo, Organizacion) agrupados por UN
+    símbolo; la PK del supertipo viene heredada en cada hijo (como Erwin)."""
+    m = ep.ErwinModel(name="M Subtipos")
+    e1 = entity("E1", "PARTY", [attr("A1", "E1", "CODPARTY", 1)], pk=("A1",))
+    e2 = entity("E2", "INDIVIDUO", [
+        attr("B1", "E2", "CODPARTY", 1, parent_attr="A1", parent_rel="R9")],
+        pk=("B1",))
+    e3 = entity("E3", "ORGANIZACION", [
+        attr("C1", "E3", "CODPARTY", 1, parent_attr="A1", parent_rel="R9B")],
+        pk=("C1",))
+    m.entities = {e.id: e for e in (e1, e2, e3)}
+    m.relationships = {
+        "R9": rel("R9", "E1", "E2", rel_type=ep.REL_SUBTYPE),
+        "R9B": rel("R9B", "E1", "E3", rel_type=ep.REL_SUBTYPE),
+    }
+    m.subtype_symbols = {"SY1": ep.ErwinSubtypeSymbol(
+        id="SY1", name="Subtype_Symbol_Party", rel_refs=["R9", "R9B"])}
+    m.hive_dbs = {"S1": ["E1", "E2", "E3"]}
+    return m
+
+
+def test_subtipo_migra_como_subcategoria_1a1_con_simbolo_compartido():
+    db = FakeDb()
+    mig = Migrator(db, _modelo_subtipos(), "Fam", None)
+    mig.run()
+
+    rels = {r["erwinLongId"]: r for r in db.data["relationships"].values()}
+    assert set(rels) == {"R9", "R9B"}
+    r9 = rels["R9"]
+    assert r9["subcategory"] is True
+    # el símbolo agrupa: ambas aristas comparten el MISMO subtypeSymbolId
+    assert r9["subtypeSymbolId"] == pol.platform_id("SY1")
+    assert rels["R9B"]["subtypeSymbolId"] == pol.platform_id("SY1")
+    # ES-UN: identifying + 1:1 estricto (ignora cardinality/null_option crudos)
+    assert r9["identifying"] is True
+    assert (r9["parentCardinality"], r9["childCardinality"]) == ("one", "one")
+    assert r9["pairs"] == [{"parentColumnId": pol.platform_id("A1"),
+                            "childColumnId": pol.platform_id("B1"),
+                            "roleName": None}]
+    assert mig.stats["relaciones de subcategoría (supertipo→subtipo)"] == 2
+    assert mig.stats["relaciones"] == 2
+    assert mig.warnings == []
+
+
+def test_subtipo_sin_simbolo_usa_sintetico_y_avisa():
+    db = FakeDb()
+    m = _modelo_subtipos()
+    m.subtype_symbols = {}          # nadie agrupa las Type 9
+    mig = Migrator(db, m, "Fam", None)
+    mig.run()
+
+    rels = {r["erwinLongId"]: r for r in db.data["relationships"].values()}
+    assert rels["R9"]["subcategory"] is True
+    assert rels["R9"]["subtypeSymbolId"] == pol.platform_id("subsym|R9")
+    assert rels["R9B"]["subtypeSymbolId"] == pol.platform_id("subsym|R9B")
+    assert sum("símbolo sintético" in w for w in mig.warnings) == 2
+
+
+def test_subcategoria_no_se_fusiona_con_identifying_de_iguales_extremos():
+    """R4 multi-archivo: una identifying con los MISMOS extremos y pares por
+    nombre que una subcategoría ya migrada NO debe reusarla (el marcador de la
+    clave natural las separa); el mismo subtipo re-llegado SÍ se reusa."""
+    db = FakeDb()
+    Migrator(db, _modelo_subtipos(), "Fam", None).run()
+    n0 = len(db.data["relationships"])
+    assert n0 == 2                      # R9 + R9B
+
+    # archivo 2: misma pareja PARTY→INDIVIDUO y mismo par CODPARTY→CODPARTY,
+    # pero como identifying "normal" → doc NUEVO, sin dedup
+    m2 = ep.ErwinModel(name="M2")
+    m2.entities = {
+        "E1": entity("E1", "PARTY", [attr("A1", "E1", "CODPARTY", 1)], pk=("A1",)),
+        "E2": entity("E2", "INDIVIDUO", [
+            attr("B1", "E2", "CODPARTY", 1, parent_attr="A1", parent_rel="RID")],
+            pk=("B1",)),
+    }
+    m2.relationships = {"RID": ep.ErwinRelationship(
+        id="RID", name="RID", rel_type=ep.REL_IDENTIFYING, cardinality="-1",
+        parent_ref="E1", child_ref="E2", null_option="101")}
+    m2.hive_dbs = {"S1": ["E1", "E2"]}
+    mig2 = Migrator(db, m2, "Fam", None)
+    mig2.run()
+    assert mig2.stats["relaciones reusadas (ya existían — R4)"] == 0
+    assert len(db.data["relationships"]) == n0 + 1
+
+    # archivo 3: el MISMO modelo de subtipos otra vez → ambas se reusan
+    mig3 = Migrator(db, _modelo_subtipos(), "Fam", None)
+    mig3.run()
+    assert mig3.stats["relaciones reusadas (ya existían — R4)"] == 2
+    assert len(db.data["relationships"]) == n0 + 1
 
 
 # ── R2 · cuando el archivo está MÁS usado, gana y actualiza en su sitio ───

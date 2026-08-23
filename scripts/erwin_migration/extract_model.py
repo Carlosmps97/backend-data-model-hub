@@ -115,23 +115,35 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
 
     pairs = model.fk_pairs()
     attr_idx = model.attr_index()
+    sym_of = model.subtype_symbol_of_rel()
     rels = []
     for r in model.relationships.values():
-        if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING):
+        if r.rel_type not in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
+                              ep.REL_SUBTYPE):
             continue  # tipo 16 (tabla→vista) ya está expresado en views.json
         parent = model.entities.get(r.parent_ref)
         child = model.entities.get(r.child_ref)
         if not parent or not child:
             continue
-        rels.append({
+        if r.rel_type == ep.REL_IDENTIFYING:
+            rtype = "identifying"
+        elif r.rel_type == ep.REL_NON_IDENTIFYING:
+            rtype = "non-identifying"
+        else:
+            rtype = "subcategory"
+        entry = {
             "name": r.name or None,
-            "type": "identifying" if r.rel_type == ep.REL_IDENTIFYING else "non-identifying",
+            "type": rtype,
             "parentTable": _qual(schema_for(parent.id), parent.physical),
             "childTable": _qual(schema_for(child.id), child.physical),
             "columnPairs": [
                 {"parentColumn": attr_idx[p].physical, "childColumn": attr_idx[c].physical}
                 for (p, c) in pairs.get(r.id, []) if p in attr_idx and c in attr_idx],
-        })
+        }
+        if r.rel_type == ep.REL_SUBTYPE:
+            sym = model.subtype_symbols.get(sym_of.get(r.id, ""))
+            entry["subtypeSymbol"] = sym.name if sym else None
+        rels.append(entry)
     rels.sort(key=lambda r: (r["parentTable"], r["childTable"]))
 
     canvases = []

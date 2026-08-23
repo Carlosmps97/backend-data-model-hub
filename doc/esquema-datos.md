@@ -60,11 +60,11 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 | `saved_reports` | SavedReportDoc (en `reporting/query/reports.py`, no en `models/`) | — | ✅ | `id` (uuid) |
 | `audit_log` | (sin modelo) | — | append-only | `ObjectId` auto |
 
-> **`column_catalog` NO es de este backend.** Lo administra el servicio de agentes (`app-agents-modeler`) sobre la MISMA base; los scripts (`reset_for_migration`, `seed_*`) lo **preservan**. No confundir con `canonical_columns` (el store real de columnas de esta app).
+> **`column_catalog` fue RETIRADA (doc 54, 2026-08-22).** Pertenecía al planteamiento inicial de un agente conversacional embebido, hoy descartado por completo: el adaptador ya no la pre-crea y el reset destructivo (`scripts/reset_for_migration.py`) la elimina junto con todo el schema. No confundir con `canonical_columns` (el store real de columnas de esta app).
 >
 > **Entidades virtuales del reporting** (no son colecciones): `COLL_OF` en `reporting/query/executor.py` mapea `view_columns → views` y `models → subject_areas`.
 >
-> **Tablas físicas en Lakebase:** el adaptador pre-crea 20 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = 19 de este mapa + la ajena `column_catalog`); `ddl_rules` y `ddl_ruleset_config` (doc 30) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
+> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
 
 ---
 
@@ -449,7 +449,7 @@ Solo **descripción del estado actual** (no recomendaciones de destino):
 5. **Alias `schema`**: en `canonical_tables` y `views` el atributo Python es `sql_schema` pero el campo persistido es `schema`.
 6. **Campos legacy/aditivos fuera del modelo**: por `extra="ignore"`, los docs persistidos pueden traer `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`, y (relaciones pre-v2) `sourceTableId`/`targetTableId`. **Están en la BD aunque el modelo no los liste** — mirar el doc real al migrar.
 7. **Colecciones sin `*Doc`**: `saved_reports` (modelo en `reporting/query/reports.py`) y `audit_log` (shape en `core/audit.py`).
-8. **Ajenas a este backend**: `column_catalog` (servicio de agentes) — se preserva, no se administra acá.
+8. **Retiradas**: `column_catalog` (del planteamiento inicial con agente conversacional, descartado — doc 54): ya no se pre-crea ni se preserva; el reset destructivo la elimina.
 9. **Foto de la data (verificada 2026-07-26; doc 34 de plan-implementacion/)**: un solo proyecto-familia `Modelo de Datos DDV_FISICO` (XML CPYBCA + "Otros"; quedan ~13 XML de la familia por cargar al MISMO proyecto) — 48 `folders` · 275 `subject_areas` (canvases) · 388 `schemas` · 2,108 `canonical_tables` · 96,184 `canonical_columns` · 1,630 `relationships` · 1,932 `views` · 17 `udp_definitions` · 48 `parent_domains` · 120 `glossary_terms` (activos).
 10. **Versiones vigentes**: el Model tiene SOLO `v1 Base` — un changeset MARCADOR (status `approved`, `appliedAt` estampado, 0 docs en `changeset_changes`) creado por `scripts/mark_base_version.py`; sin él la web bloquea el módulo Model. Las cargas de migración Erwin escriben DIRECTO a las colecciones publicadas, sin crear changesets. Data Standards tiene `v1` (baseline) + `v2` "Base — DDL export rules"; los estándares vivos DERIVARON de esos snapshots — no hacer rollback de Standards hasta registrar una baseline nueva.
 

@@ -14,7 +14,7 @@ import pytest
 
 from scripts.erwin_migration import erwin_parser as ep
 from scripts.erwin_migration import policies as pol
-from scripts.erwin_migration.quality import analyze, summarize
+from scripts.erwin_migration.quality import analyze, glossary_cross_conflicts, summarize
 
 NS = 'xmlns="http://www.erwin.com/dm/data"'
 
@@ -270,3 +270,26 @@ def test_quality_detecta_las_incongruencias(model):
     s = summarize(model)
     assert s["tablas"] == 2 and s["vistas"] == 2 and s["diagramas"] == 1
     assert s["columnas_tabla"] == 5 and s["columnas_vista"] == 2
+
+
+# ── glosario ENTRE archivos (full outer join, política 2026-08-22) ──────
+def test_glosario_cross_file_solo_reporta_abreviaturas_en_conflicto():
+    files = [
+        ("a.xml", [("Monto", "MTO"), ("Codigo", "COD"), ("Solo A", "SA"),
+                   ("Monto", "OTRA")]),          # dup interno: manda la 1ª
+        ("b.xml", [("Monto", "MTOS"), ("Codigo", "cod"), ("Solo B", "SB")]),
+    ]
+    out = glossary_cross_conflicts(files)
+    # unión sin conflicto (Solo A/Solo B) no reporta; case-insensitive
+    # (COD ≡ cod) tampoco; "Monto" MTO vs MTOS SÍ.
+    assert [c["term"] for c in out] == ["Monto"]
+    assert out[0]["byFile"] == {"a.xml": "MTO", "b.xml": "MTOS"}
+
+
+def test_glosario_cross_file_sin_archivos_compartidos_es_limpio():
+    assert glossary_cross_conflicts([("a.xml", [("Monto", "MTO")])]) == []
+    assert glossary_cross_conflicts([
+        ("a.xml", [("Monto", "MTO")]),
+        ("b.xml", [("Monto", "MTO"), ("Codigo", "")]),   # vacía no choca
+        ("c.xml", [("Codigo", "COD")]),
+    ]) == []

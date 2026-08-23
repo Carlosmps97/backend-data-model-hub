@@ -84,3 +84,14 @@ def test_rel_nat_key_por_nombres_y_orden_estable():
     k2 = pol.rel_nat_key("T1", "T2", [("B", "b2"), ("CODCLI", "codcli")])
     assert k1 == k2                       # case-insensitive y sin orden
     assert k1 != pol.rel_nat_key("T2", "T1", [("CODCLI", "CODCLI"), ("B", "B2")])
+
+
+def test_rel_nat_key_marca_subcategoria():
+    """doc 53: una subcategoría con los mismos extremos y pares NO es la misma
+    relación conceptual que una identifying — el marcador las separa."""
+    pairs = [("CODPARTY", "CODPARTY")]
+    normal = pol.rel_nat_key("T1", "T2", pairs)
+    sub = pol.rel_nat_key("T1", "T2", pairs, subcategory=True)
+    assert normal != sub
+    assert pol.rel_nat_key("T1", "T2", pairs, subcategory=False) == normal
+    assert pol.rel_nat_key("T1", "T2", pairs, subcategory=True) == sub

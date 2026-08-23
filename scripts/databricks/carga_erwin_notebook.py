@@ -2,18 +2,26 @@
 # MAGIC %md
 # MAGIC # Carga Erwin (XML) -> Lakebase, desde dentro de Databricks
 # MAGIC
-# MAGIC Plan B de `plan-implementacion/35-MIGRACION-A-OTRO-DATABRICKS.md`: se usa
-# MAGIC cuando el endpoint Lakebase no es alcanzable desde la laptop (el
-# MAGIC front-end "service direct" acepta el TCP y descarta el trafico). Desde un
-# MAGIC cluster del mismo workspace si se llega.
+# MAGIC Ejecuta el ORQUESTADOR `scripts/run_migration.py` (doc 54) sobre los XML
+# MAGIC bajados de ADLS. **No reimplementa nada**: el orquestador invoca los
+# MAGIC MISMOS scripts del repo (quality, reset, create_admin, migrate, audit,
+# MAGIC seed de data functions, arrange, mark_base_version) con las mismas
+# MAGIC reglas de merge, `_DUPn` y glosario cruzado.
 # MAGIC
-# MAGIC **No reimplementa nada**: invoca los MISMOS scripts del repo, con las
-# MAGIC mismas reglas de merge, limpieza y prioridad. Solo cambia desde donde se
-# MAGIC ejecutan.
+# MAGIC Dos modos (widget `modo`):
+# MAGIC - **one-shot** (DESTRUCTIVO): baja TODOS los `.xml` de la carpeta raiz
+# MAGIC   (recursivo, espejando subcarpetas) y deja la plataforma como un primer
+# MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja +
+# MAGIC   `admin`/`admin`, migra archivo por archivo (SECUENCIAL a proposito),
+# MAGIC   siembra las data functions, hace el layout y marca la version base v1.
+# MAGIC   El proyecto destino de cada archivo sale del `<Locator>` del Mart
+# MAGIC   (`Mart://Mart/<Proyecto>/<Dominio>/<Modelo>`); sin Locator, el nombre
+# MAGIC   del archivo.
+# MAGIC - **append** (no destructivo): baja UN archivo y lo SUMA a la BD viva
+# MAGIC   (sin reset, sin admin, sin seeds, sin marcador).
 # MAGIC
-# MAGIC **Todo se parametriza en los widgets de arriba.** Los defaults son los
-# MAGIC del entorno actual: al migrar a otro Databricks, esa lista de widgets es
-# MAGIC exactamente lo que hay que volver a apuntar.
+# MAGIC El gate de calidad corre ANTES de borrar nada: si falla, la BD queda
+# MAGIC intacta (salvo `force = si`, que continua omitiendo los objetos con ERROR).
 # MAGIC
 # MAGIC ## Prerequisitos
 # MAGIC 1. Cluster **classic** (no serverless), DBR con Python 3.10+, single node
@@ -21,10 +29,10 @@
 # MAGIC 2. Este notebook abierto **desde el repo** (Git folder de `back-dmh-01`),
 # MAGIC    para que las rutas relativas al repo funcionen solas.
 # MAGIC 3. Los XML en ADLS (`abfss://`) y el cluster con access mode
-# MAGIC    **Dedicated** (antes "Single user"): la copia del XML al disco del
-# MAGIC    driver lo requiere. OJO: la **Policy** ("Unrestricted") NO es el
-# MAGIC    access mode; ese vive en Compute > Edit > Advanced > Access mode
-# MAGIC    (en "Standard/Shared" la copia falla con "on Shared cluster").
+# MAGIC    **Dedicated** (antes "Single user"): la copia al disco del driver lo
+# MAGIC    requiere. OJO: la **Policy** ("Unrestricted") NO es el access mode; ese
+# MAGIC    vive en Compute > Edit > Advanced > Access mode (en "Standard/Shared"
+# MAGIC    la copia falla con "on Shared cluster").
 # MAGIC 4. Tu usuario con rol de Postgres en el proyecto Lakebase.
 
 # COMMAND ----------
@@ -41,26 +49,33 @@ dbutils = globals()["dbutils"]  # type: ignore[assignment]
 # --- Origen de los XML (ADLS) -------------------------------------------------
 dbutils.widgets.text("storage_account", "adlsagentslab01", "1. Storage account")
 dbutils.widgets.text("container", "agentsdata", "2. Container")
-dbutils.widgets.text("folder_path", "", "3. Carpeta dentro del container")
-dbutils.widgets.text("xml1_name", "DDV - CPYBCA.xml", "4. Archivo XML 1")
-dbutils.widgets.text("xml2_name", "DDV Modelo de Datos Fisico Otros V0.214.xml", "5. Archivo XML 2")
+dbutils.widgets.text("folder_path", "",
+                     "3. Carpeta RAIZ de los .xml (lectura recursiva)")
+
+# --- Modo de carga ------------------------------------------------------------
+dbutils.widgets.dropdown("modo", "one-shot", ["one-shot", "append"],
+                         "4. Modo (one-shot = BORRA TODO y carga)")
+dbutils.widgets.text("archivo_append", "",
+                     "5. (append) Ruta del .xml dentro del container")
+dbutils.widgets.text("append_project", "",
+                     "6. (append) Proyecto destino (vacio = auto)")
+dbutils.widgets.text("base_title", "Base - Migración Erwin (XML)",
+                     "7. (one-shot) Titulo de la version base v1")
+dbutils.widgets.dropdown("force", "no", ["no", "si"],
+                         "8. force (seguir aunque el gate tenga ERRORs)")
+dbutils.widgets.dropdown("confirmar_wipe", "no", ["no", "si"],
+                         "9. CONFIRMAR one-shot (BORRA TODA LA BD)")
 
 # --- Destino ------------------------------------------------------------------
-dbutils.widgets.text("project", "Modelo de Datos DDV_FISICO", "6. Proyecto destino")
 dbutils.widgets.text("lakebase_endpoint",
                      "projects/dmh-proj/branches/production/endpoints/primary",
-                     "7. Lakebase endpoint")
+                     "10. Lakebase endpoint")
 dbutils.widgets.text("pghost",
                      "ep-orange-sunset-e1gjz1qx.database.eastus2.azuredatabricks.net",
-                     "8. PGHOST")
-dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "9. PGUSER (Role de Lakebase)")
-dbutils.widgets.text("pgschema", "dmh", "10. Schema PG")
-dbutils.widgets.text("repo_dir", "", "11. Ruta del repo (vacio = autodetectar)")
-
-# DESTRUCTIVO. Solo para la PRIMERA carga o para rehacerla desde cero.
-# Cuando lleguen mas XML para sumar al mismo modelo, esto va en "no".
-dbutils.widgets.dropdown("reset_previo", "no", ["no", "si"],
-                         "12. RESET previo (BORRA lo ya cargado)")
+                     "11. PGHOST")
+dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "12. PGUSER (Role de Lakebase)")
+dbutils.widgets.text("pgschema", "dmh", "13. Schema PG")
+dbutils.widgets.text("repo_dir", "", "14. Ruta del repo (vacio = autodetectar)")
 
 print("Widgets creados.")
 
@@ -110,46 +125,52 @@ W = dbutils.widgets.get
 
 ACCOUNT, CONTAINER = W("storage_account").strip(), W("container").strip()
 FOLDER = W("folder_path").strip().strip("/")
-PROJECT = W("project").strip()
+MODO = W("modo").strip()
+ARCHIVO_APPEND = W("archivo_append").strip().strip("/")
+APPEND_PROJECT = W("append_project").strip()
+BASE_TITLE = W("base_title").strip() or "Base - Migración Erwin (XML)"
+FORCE = W("force").strip().lower() == "si"
+CONFIRMAR_WIPE = W("confirmar_wipe").strip().lower() == "si"
 LAKEBASE_ENDPOINT = W("lakebase_endpoint").strip()
 PGHOST, PGUSER = W("pghost").strip(), W("pguser").strip()
 PGSCHEMA = W("pgschema").strip() or "dmh"
 
+if MODO == "one-shot" and not FOLDER:
+    raise ValueError("modo one-shot necesita `folder_path` (carpeta raiz de los XML).")
+if MODO == "append" and not ARCHIVO_APPEND:
+    raise ValueError("modo append necesita `archivo_append` (ruta del .xml).")
 
-def adls(nombre: str) -> str:
-    ruta = f"{FOLDER}/{nombre}" if FOLDER else nombre
+
+def adls(ruta: str) -> str:
     return f"abfss://{CONTAINER}@{ACCOUNT}.dfs.core.windows.net/{ruta}"
 
-
-# Slots opcionales: para una carga incremental deja uno vacio y pon el archivo
-# nuevo en el otro. Las celdas de un slot vacio no hacen nada.
-_n1, _n2 = W("xml1_name").strip(), W("xml2_name").strip()
-XML1_SRC = adls(_n1) if _n1 else ""
-XML2_SRC = adls(_n2) if _n2 else ""
-RESET_PREVIO = W("reset_previo").strip().lower() == "si"
 
 REPO_DIR = W("repo_dir").strip()
 if not REPO_DIR:
     # El notebook vive en <repo>/scripts/databricks/ y su CWD es esa carpeta.
-    # (os.getcwd() funciona en cualquier modo de acceso del cluster.)
     REPO_DIR = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
 if not os.path.isfile(os.path.join(REPO_DIR, "requirements.txt")):
     raise ValueError(f"REPO_DIR no parece la raiz del backend: {REPO_DIR}")
 
 print(f"repo     : {REPO_DIR}")
-print(f"proyecto : {PROJECT}")
-print(f"xml 1    : {XML1_SRC or '(slot vacio: se saltea)'}")
-print(f"xml 2    : {XML2_SRC or '(slot vacio: se saltea)'}")
+print(f"modo     : {MODO}{' (FORCE)' if FORCE else ''}")
+if MODO == "one-shot":
+    print(f"carpeta  : {adls(FOLDER)}  (recursivo)")
+    print(f"v1 title : {BASE_TITLE}")
+    print(f"wipe     : {'CONFIRMADO - se borra TODO' if CONFIRMAR_WIPE else 'no confirmado (solo dry-run)'}")
+else:
+    print(f"archivo  : {adls(ARCHIVO_APPEND)}")
+    print(f"proyecto : {APPEND_PROJECT or '(auto: Locator del Mart o nombre del archivo)'}")
 print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
-print(f"reset    : {'SI - se borra lo ya cargado' if RESET_PREVIO else 'no'}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Materializar los XML en el driver
-# MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Los scripts trabajan
-# MAGIC sobre archivo, asi que se baja una vez al disco local del driver (se
-# MAGIC saltea si ya esta). Requiere access mode **Dedicated**.
+# MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Se baja al disco local
+# MAGIC del driver — en one-shot, TODA la carpeta recursivamente, espejando las
+# MAGIC subcarpetas (asi dos archivos homonimos de distintas subcarpetas no se
+# MAGIC pisan). Requiere access mode **Dedicated**.
 
 # COMMAND ----------
 
@@ -157,9 +178,9 @@ WORK = "/local_disk0/tmp/erwin" if os.path.isdir("/local_disk0") else "/tmp/erwi
 os.makedirs(WORK, exist_ok=True)
 
 
-def bajar(uri: str) -> str:
-    dst = os.path.join(WORK, uri.rsplit("/", 1)[-1])
+def bajar(uri: str, dst: str) -> str:
     if not os.path.isfile(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
         try:
             dbutils.fs.cp(uri, "file:" + dst)
         except Exception as exc:
@@ -175,8 +196,31 @@ def bajar(uri: str) -> str:
     return dst
 
 
-XML1 = bajar(XML1_SRC) if XML1_SRC else None
-XML2 = bajar(XML2_SRC) if XML2_SRC else None
+def walk_xmls(uri: str) -> list:
+    """Todos los .xml bajo `uri` (recursivo), via dbutils.fs.ls."""
+    out = []
+    for f in dbutils.fs.ls(uri):
+        if f.isDir():
+            out += walk_xmls(f.path)
+        elif f.name.lower().endswith(".xml"):
+            out.append(f)
+    return out
+
+
+if MODO == "one-shot":
+    LOCAL_ROOT = os.path.join(WORK, "carpeta")
+    base_uri = adls(FOLDER).rstrip("/") + "/"
+    files = walk_xmls(base_uri)
+    if not files:
+        raise ValueError(f"No hay .xml bajo {base_uri} (busqueda recursiva).")
+    for f in files:
+        rel = f.path[len(base_uri):] if f.path.startswith(base_uri) else f.name
+        bajar(f.path, os.path.join(LOCAL_ROOT, *rel.split("/")))
+    print(f"\n{len(files)} XML materializados bajo {LOCAL_ROOT}")
+    TARGET = LOCAL_ROOT
+else:
+    TARGET = bajar(adls(ARCHIVO_APPEND),
+                   os.path.join(WORK, "append", ARCHIVO_APPEND.rsplit("/", 1)[-1]))
 
 # COMMAND ----------
 
@@ -244,136 +288,13 @@ print("listo | python:", sys.version.split()[0])
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. RESET previo (opcional, DESTRUCTIVO)
-# MAGIC
-# MAGIC Deja la base lista para una carga limpia: vacia **modelo**
-# MAGIC (proyectos, folders, canvases, schemas, tablas, columnas, relaciones,
-# MAGIC vistas), **estandares** (dominios, glosario, definiciones UDP, versiones)
-# MAGIC y **governance** (changesets). PRESERVA usuarios, roles, `naming_config`,
-# MAGIC `column_catalog` y el audit log.
-# MAGIC
-# MAGIC **Cuando SI**: primera carga sobre una base que quedo con restos de
-# MAGIC pruebas, o rehacer todo desde cero.
-# MAGIC **Cuando NO**: cargas incrementales (llego un XML nuevo del mismo
-# MAGIC modelo). Ahi borrarias justamente lo que ya cargaste.
-# MAGIC
-# MAGIC Dos candados: la celda de abajo es solo dry-run, y el `--apply` no corre
-# MAGIC salvo que el widget `reset_previo` diga `si`.
-
-# COMMAND ----------
-
-run("-m", "scripts.reset_for_migration")          # dry-run: solo lista que borraria
-
-# COMMAND ----------
-
-if RESET_PREVIO:
-    run("-m", "scripts.reset_for_migration", "--apply")
-else:
-    print("reset_previo = no -> no se borro nada (revisa el dry-run de arriba).")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 7. Usuario para entrar a la web
-# MAGIC Crea `admin` / `admin` y los 4 roles con su matriz de permisos default.
-# MAGIC Los usuarios reales se crean despues desde Admin (la plataforma tiene su
-# MAGIC propio padron, no hereda los del workspace). Cambia esa clave al entrar.
-
-# COMMAND ----------
-
-run("scripts/create_admin.py")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 8. XML 1 (CPYBCA): calidad -> cruce vs BD -> dry-run -> apply
-# MAGIC El orden importa: CPYBCA primero, Otros despues (el desempate por uso
-# MAGIC actualiza sobre lo ya cargado).
-
-# COMMAND ----------
-
-if XML1:
-    run("-m", "scripts.erwin_migration.quality", XML1)
-
-# COMMAND ----------
-
-if XML1:
-    run("-m", "scripts.erwin_migration.crosscheck", XML1)
-
-# COMMAND ----------
-
-if XML1:
-    run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT)
-
-# COMMAND ----------
-
-if XML1:
-    run("-m", "scripts.erwin_migration.migrate", XML1, "--project", PROJECT, "--apply")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 9. XML 2 (Otros V0.214): mismo flujo, MISMO proyecto
-# MAGIC Aca actua el merge multi-archivo: adopcion por clave natural, conflicto
-# MAGIC resuelto por score de uso, dedup de FKs, fusion de folders y canvases
-# MAGIC homonimos, particiones por orden fisico, vistas sin fuente descartadas.
-
-# COMMAND ----------
-
-if XML2:
-    run("-m", "scripts.erwin_migration.quality", XML2)
-
-# COMMAND ----------
-
-if XML2:
-    run("-m", "scripts.erwin_migration.crosscheck", XML2)
-
-# COMMAND ----------
-
-if XML2:
-    run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT)
-
-# COMMAND ----------
-
-if XML2:
-    run("-m", "scripts.erwin_migration.migrate", XML2, "--project", PROJECT, "--apply")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 10. Validacion de la data cargada
-# MAGIC Esperado: 0 fixables. Los informativos son politicas conocidas (doc 34).
-
-# COMMAND ----------
-
-run("-m", "scripts.audit_data_consistency")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 11. Reglas base de DDL Export
-# MAGIC Glosario, dominios padre y definiciones UDP ya entraron con `migrate`.
-# MAGIC Esto siembra el ruleset de exportacion: 8 reglas + los lookups
-# MAGIC `vacuum_map` / `dac_map`, como una version de Data Standards.
-
-# COMMAND ----------
-
-run("-m", "scripts.seed_ddl_export_rules")            # dry-run
-
-# COMMAND ----------
-
-run("-m", "scripts.seed_ddl_export_rules", "--apply")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 12. Layout de canvases (opcional: necesita Node)
-# MAGIC `arrange_all` corre elkjs sobre Node. Los DBR suelen traer `node` PELADO
-# MAGIC (sin npm), asi que elkjs no se instala: se baja el tarball del registry
-# MAGIC y se usa su `elk.bundled.js` via `ELKJS_PATH` (mismo bundle y version
-# MAGIC que el front -> mismo layout que el boton "Autoarrange" de la web).
-# MAGIC Si no hay Node o no hay salida al registry, se saltea: la migracion ya
-# MAGIC deja layout en grilla y la web puede reordenar canvas por canvas.
+# MAGIC ## 6. elkjs para el layout (opcional: necesita Node)
+# MAGIC El orquestador corre `arrange_all` (elkjs sobre Node) como paso
+# MAGIC INFORMATIVO: si no hay Node o no se pudo bajar el bundle, ese paso queda
+# MAGIC en WARNING y la carga sigue valida (la migracion deja layout en grilla).
+# MAGIC Los DBR suelen traer `node` PELADO (sin npm): se baja el tarball del
+# MAGIC registry y se apunta `ELKJS_PATH` a su `elk.bundled.js` (mismo bundle y
+# MAGIC version que el front -> mismo layout que "Autoarrange" de la web).
 
 # COMMAND ----------
 
@@ -384,7 +305,7 @@ import urllib.request
 ELKJS_VERSION = "0.11.1"     # = web-data-model-hub/package.json (mantener en sync)
 
 if not shutil.which("node"):
-    print("Node no esta disponible en el cluster: saltear el auto-arrange.")
+    print("Node no esta disponible en el cluster: arrange_all quedara en WARNING.")
 else:
     elk_dir = os.path.join(WORK, "elk")
     os.makedirs(elk_dir, exist_ok=True)
@@ -400,36 +321,57 @@ else:
                 except TypeError:        # Python viejo sin `filter`
                     t.extractall(elk_dir)
         except Exception as exc:
-            print(f"No se pudo bajar elkjs del registry ({exc}): saltear el auto-arrange.")
+            print(f"No se pudo bajar elkjs del registry ({exc}): arrange en WARNING.")
     if os.path.isfile(bundle):
         ENV["ELKJS_PATH"] = bundle
-        run("scripts/arrange_all.py", "--project", PROJECT)
+        print(f"ELKJS_PATH = {bundle}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 13. Version base v1 (cierre)
-# MAGIC La migracion escribe directo a publicado y NO crea versiones; sin una
-# MAGIC version aplicada, la web bloquea Model. `mark_base_version` crea el
-# MAGIC marcador **v1** (approved, 0 cambios) = "todo lo cargado es la base",
-# MAGIC deja el baseline de Data Standards (si hace falta) y activa el permiso
-# MAGIC de rollback. Correr AL FINAL de la carga completa (con 15 XML: despues
-# MAGIC del ultimo). Idempotente: si v1 ya existe, no toca nada.
+# MAGIC ## 7. DRY-RUN del orquestador
+# MAGIC Imprime el plan completo SIN ejecutar nada: archivos descubiertos con su
+# MAGIC proyecto destino (Locator del Mart o nombre de archivo), los pasos con
+# MAGIC sus comandos exactos y — en one-shot — los conteos actuales de la BD
+# MAGIC (todo lo que se borraria). REVISAR ESTO antes de la celda 8.
+
+# COMMAND ----------
+
+ARGS = ["--folder", TARGET] if MODO == "one-shot" else ["--append", TARGET]
+if MODO == "one-shot":
+    ARGS += ["--base-title", BASE_TITLE]
+if MODO == "append" and APPEND_PROJECT:
+    ARGS += ["--project", APPEND_PROJECT]
+if FORCE:
+    ARGS += ["--force"]
+
+run("-m", "scripts.run_migration", *ARGS)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 8. EJECUTAR
+# MAGIC - **one-shot**: exige el widget `confirmar_wipe = si` (doble candado: el
+# MAGIC   gate de calidad corre primero y, si falla sin `force`, no se borra nada).
+# MAGIC - **append**: corre directo (no borra nada).
 # MAGIC
-# MAGIC Conteos esperados con los 2 archivos: 1 proyecto, 2108 tablas, 96184
-# MAGIC columnas, 1630 relaciones, 1932 vistas, 275 canvases, 388 schemas,
-# MAGIC 48 folders.
+# MAGIC La salida completa de cada paso se streamea aqui; el resumen queda en
+# MAGIC `migration-reports/run_migration-<ts>.json` y los reportes de decisiones
+# MAGIC de cada archivo en `migration-reports/<xml>-<ts>.json`.
 
 # COMMAND ----------
 
-run("-m", "scripts.mark_base_version")             # dry-run: muestra el plan
-
-# COMMAND ----------
-
-run("-m", "scripts.mark_base_version", "--apply")
+if MODO == "one-shot" and not CONFIRMAR_WIPE:
+    print("confirmar_wipe = no -> NO se ejecuta. Revisa el dry-run de arriba y "
+          "pon el widget en 'si' para la carga real (BORRA TODA LA BD).")
+else:
+    run("-m", "scripts.run_migration", *ARGS, "--apply")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC (`reset_to_base_version` NO es parte de la carga: queda para el futuro,
-# MAGIC cuando quieras limpiar versiones de prueba y volver a v1.)
+# MAGIC ## 9. Cierre
+# MAGIC Tras un one-shot OK la web ya abre con `admin` / `admin` (cambiar la clave
+# MAGIC al entrar): produccion v1 marcada, data functions sembradas y layout
+# MAGIC aplicado. Los usuarios reales se crean desde Admin (la plataforma tiene
+# MAGIC su propio padron, no hereda los del workspace).

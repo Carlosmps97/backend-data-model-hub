@@ -1,13 +1,16 @@
-"""Reset previo a una migración Erwin REAL (doc 19 fase B).
+"""Reset DESTRUCTIVO previo a una migración one-shot (doc 54).
 
-Vacía las colecciones de MODELO + ESTÁNDARES + GOVERNANCE para que `migrate`
-cargue el XML real sobre una base limpia (sin mezclarse con la demo sintética
-ni chocar por claves naturales). PRESERVA la plataforma: usuarios/roles,
-naming_config (motor de naming corporativo), column_catalog (invariante:
-NUNCA se borra) y audit_log (historia).
+Borra TODA la información de la plataforma: enumera las tablas existentes en
+el schema (`list_collection_names`, que lee `pg_tables`) y las DROPea —
+modelo, estándares, governance, usuarios, roles, auditoría y cualquier
+vestigial. Incluye `column_catalog`: pertenecía al planteamiento inicial con
+agente conversacional embebido, descartado por completo (la plataforma es
+únicamente el reemplazo de Erwin; doc 54 §3.1).
 
-A diferencia de `seed_ddv_synthetic` (que borra Y re-siembra TODO, usuarios
-incluidos), esto solo limpia lo que la migración va a poblar.
+No deja la base "vacía y rota": el siguiente `connect()` (p. ej.
+`scripts/create_admin.py`, paso inmediato del one-shot) re-crea las 19
+colecciones propias con sus índices (`KNOWN_COLLECTIONS` + `ensure_indexes`).
+La secuencia completa la orquesta `scripts/run_migration.py --folder`.
 
 Uso (desde la raíz del backend):
   .venv/bin/python -m scripts.reset_for_migration           # dry-run
@@ -16,25 +19,28 @@ Uso (desde la raíz del backend):
 from __future__ import annotations
 
 import argparse
-import os
 
-WIPE = [
-    # modelo publicado
-    "projects", "folders", "subject_areas", "schemas",
-    "canonical_tables", "canonical_columns", "relationships", "views",
-    # estándares (el XML real trae los suyos: glosario NSM, dominios, UDPs)
-    "parent_domains", "glossary_terms", "udp_definitions", "standards_versions",
-    # governance (los changesets de la demo referencian ids que dejan de existir)
-    "changesets", "changeset_changes",
-    # vestigiales (por si existen)
-    "saved_reports", "project_relationships", "project_tables", "semantic_types", "udps",
-]
-PRESERVE = ["users", "roles", "naming_config", "column_catalog", "audit_log"]
+
+def wipe(db, apply: bool) -> tuple[int, int]:
+    """DROPea todas las tablas del schema. Retorna (tablas, docs)."""
+    names = sorted(db.list_collection_names())
+    print(f"== {'BORRANDO (drop)' if apply else 'DRY-RUN (usar --apply)'} ==")
+    total = 0
+    for c in names:
+        n = db[c].count_documents({})
+        total += n
+        print(f"  {c}: {n} docs")
+        if apply:
+            db[c].drop()
+    print(f"\n{'BORRADAS' if apply else 'A BORRAR'}: {len(names)} tablas · {total} docs")
+    return len(names), total
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Reset de modelo/estándares para migración Erwin real")
-    ap.add_argument("--apply", action="store_true", help="borrar de verdad (sin esto: dry-run)")
+    ap = argparse.ArgumentParser(
+        description="Reset DESTRUCTIVO: dropea TODAS las tablas del schema")
+    ap.add_argument("--apply", action="store_true",
+                    help="borrar de verdad (sin esto: dry-run)")
     args = ap.parse_args()
 
     from dotenv import load_dotenv
@@ -42,26 +48,11 @@ def main() -> int:
     from app.core.db.sync import get_sync_db
     load_dotenv()
     db = get_sync_db()
-
-    existing = set(db.list_collection_names())
-    assert "column_catalog" not in WIPE, "column_catalog NUNCA se borra"
-
-    print("== PRESERVADAS (no se tocan) ==")
-    for c in PRESERVE:
-        print(f"  {c}: {db[c].count_documents({}) if c in existing else 0} docs")
-
-    print(f"\n== {'BORRANDO' if args.apply else 'DRY-RUN (usar --apply)'} ==")
-    total = 0
-    for c in WIPE:
-        n = db[c].count_documents({}) if c in existing else 0
-        total += n
-        print(f"  {c}: {n} docs")
-        if args.apply and n:
-            db[c].delete_many({})
-    print(f"\n{'BORRADOS' if args.apply else 'A BORRAR'}: {total} docs en {len(WIPE)} colecciones")
+    wipe(db, args.apply)
 
     if args.apply:
-        print("\nSiguiente paso: .venv/bin/python -m scripts.erwin_migration.migrate <xml> --apply")
+        print("\nSiguiente paso: scripts/create_admin.py — re-crea tablas e "
+              "índices (connect), los 4 roles de caja y admin/admin.")
     return 0
 
 

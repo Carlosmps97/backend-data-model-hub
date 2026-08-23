@@ -209,6 +209,7 @@ async def relationships_report(limit: int = 2000) -> list[dict]:
                 "child": f"{ct_name}.{cc}", "childSchema": ct.get("schema"),
                 "roleName": p.get("roleName"),
                 "cardinality": card, "identifying": bool(r.get("identifying")),
+                "subcategory": bool(r.get("subcategory")),
                 "isSelfReferencing": r["parentTableId"] == r["childTableId"],
                 "crossSchema": pt.get("schema") != ct.get("schema"),
                 "label": f"{pt_name}.{pc} → {ct_name}.{cc} ({card})",

@@ -495,7 +495,7 @@ Checklist mínimo de producción: rol PG del SP con GRANTs (Lakebase, doc 28 §1
 
 **BD: Databricks Lakebase Postgres** (única) — las colecciones propias viven como tablas `(id, doc jsonb)` en el schema `dmh`, con el adaptador de `app/core/db/lakebase/`; password = token OAuth acuñado por el SP/PAT y compute con scale-to-zero (el pool tolera el wake). Consideraciones:
 
-- La BD se comparte con el servicio de agentes (`app-agents-modeler`) sobre **colecciones disjuntas**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports`, más las on-demand `ddl_rules` y `ddl_ruleset_config` (**21 colecciones propias** = 19 pre-creadas + 2 on-demand — referencia campo por campo en `esquema-datos.md`); el agente administra `column_catalog`, que este backend **nunca toca**.
+- La BD es **exclusiva de esta plataforma**: este backend administra `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `changesets`, `changeset_changes`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `users`, `roles`, `audit_log`, `saved_reports`, más las on-demand `ddl_rules` y `ddl_ruleset_config` (**21 colecciones propias** = 19 pre-creadas + 2 on-demand — referencia campo por campo en `esquema-datos.md`). La tabla `column_catalog` del planteamiento inicial con agente conversacional fue retirada (doc 54): el reset destructivo la elimina y nada la recrea.
 - Los `POST /query` sobre `canonical_columns` (400k documentos) son las operaciones más caras del reporting; se acotan con proyección mínima, paginación keyset y el `maxTimeMS` (15 s) como circuit-breaker.
 - Los **índices se aseguran al arrancar** (`ensure_indexes`, idempotente). El índice wildcard `udpValues.$**` es crítico para filtrar por UDP creados en runtime y debe existir después del bulk load inicial (por ejemplo el import one-shot de Erwin).
 - La app tolera `NamespaceExists` (48) y duplicate-key (11000) al crear índices; cualquier otro error de índice sí propaga.
@@ -506,7 +506,6 @@ Checklist mínimo de producción: rol PG del SP con GRANTs (Lakebase, doc 28 §1
 flowchart TD
     FE["Frontend Vite SPA"] -->|X-Session-Token /api| BE["backend-data-model-hub FastAPI uvicorn"]
     BE -->|asyncpg jsonb| LB["Databricks Lakebase Postgres schema dmh"]
-    AG["app-agents-modeler"] -->|column_catalog| LB
     subgraph Hosting
         BE
     end

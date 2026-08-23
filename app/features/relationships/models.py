@@ -81,6 +81,11 @@ class RelationshipDoc(BaseModel):
     parentCardinality: str = "one"        # one | zero-one | one-only | many | one-many | zero-many
     childCardinality: str = "zero-many"
     identifying: bool = False        # sólida; la FK es parte de la PK del hijo
+    # Subcategoría (doc 53): relación de subtipo supertipo→subtipo (ES-UN,
+    # Erwin Type 9). El símbolo NO es una entidad persistida: las aristas del
+    # mismo grupo comparten `subtypeSymbolId` y el canvas deriva el círculo.
+    subcategory: bool = False
+    subtypeSymbolId: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -88,3 +93,20 @@ class RelationshipDoc(BaseModel):
         if isinstance(data, dict) and not data.get("pairs") and data.get("sourceTableId"):
             return normalize_legacy(dict(data))
         return data
+
+    @model_validator(mode="after")
+    def _subcategory_shape(self) -> "RelationshipDoc":
+        """Normaliza la variante subcategoría (doc 53): ES-UN es 1:1 estricto y
+        la PK del padre migra como PK del hijo, así que se fuerzan `identifying`
+        y las cardinalidades — todo consumidor que ramifica por esos campos
+        queda coherente sin conocer el tipo nuevo. Sin subcategoría, el símbolo
+        se limpia (coherencia del par de campos)."""
+        if self.subcategory:
+            if not (self.subtypeSymbolId or "").strip():
+                raise ValueError("subcategory relationship requires subtypeSymbolId")
+            self.identifying = True
+            self.parentCardinality = "one"
+            self.childCardinality = "one"
+        elif self.subtypeSymbolId is not None:
+            self.subtypeSymbolId = None
+        return self

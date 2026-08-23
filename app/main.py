@@ -13,8 +13,7 @@ acotadas:
   separador/case por scope).
 
 Identidad por seam conmutable (`app/core/identity`, modo local/databricks). El
-modelo de permisos por rol se reintroducirá al final como una matriz robusta. El
-agente de modelado conversacional vive en `app-agents-modeler` (fuera de este MVP).
+modelo de permisos por rol se reintroducirá al final como una matriz robusta.
 """
 
 from __future__ import annotations
@@ -124,8 +123,7 @@ def create_app() -> FastAPI:
         title="Data Modeler Platform Backend",
         description=(
             "API REST de plataforma del Data Modeler. Maneja proyectos, modelos "
-            "y su persistencia en Databricks Lakebase Postgres. El agente "
-            "conversacional vive en `app-agents-modeler`."
+            "y su persistencia en Databricks Lakebase Postgres."
         ),
         version="1.0.0",
         lifespan=lifespan,

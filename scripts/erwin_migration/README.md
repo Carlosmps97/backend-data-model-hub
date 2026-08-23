@@ -6,6 +6,27 @@ nativo `<erwin xmlns="http://www.erwin.com/dm">`). Análisis de origen: doc
 
 ## Flujo
 
+**Recomendado (doc 54): el orquestador `scripts/run_migration.py`** — un solo
+comando encadena toda la secuencia (dry-run por default):
+
+```bash
+# ONE-SHOT (DESTRUCTIVO): carpeta recursiva → primer deployment completo
+#   quality (gate + glosario cruzado) → reset total → create_admin → migrate
+#   por archivo (secuencial) → audit → data functions → arrange → versión v1
+.venv/bin/python -m scripts.run_migration --folder "ruta/carpeta"            # plan
+.venv/bin/python -m scripts.run_migration --folder "ruta/carpeta" --apply [--force]
+
+# APPEND (no destructivo): suma UN archivo a la BD viva
+.venv/bin/python -m scripts.run_migration --append "ruta/modelo.xml" --apply
+```
+
+Proyecto destino por archivo: capa 1 del `<Locator>` del Mart
+(`Mart://Mart/<Proyecto>/<Dominio>/<Modelo>` — archivos del mismo proyecto
+Mart migran como familia al MISMO proyecto); sin Locator → nombre del
+archivo. En Databricks: `scripts/databricks/carga_erwin_notebook.py`.
+
+Paso a paso manual (lo mismo que encadena el orquestador):
+
 ```bash
 # 1) GATE DE CALIDAD (solo lectura, no toca la BD) — correr SIEMPRE primero
 .venv/bin/python -m scripts.erwin_migration.quality "ruta/DDV - CPYBCA.xml" [--json rep.json]
@@ -31,12 +52,14 @@ clave natural**, así que la config duplicada entre archivos converge sola.
 | Tema | Decisión |
 |---|---|
 | Tablas/vistas sin Hive_Database | schema **"No_Definido"** |
+| Tablas homónimas (mismo esquema o colisión global doc 50) | se migran **TODAS** (política 2026-08-22): la más usada conserva el nombre; el resto lleva sufijo **`_DUPn`** con su contenido intacto — mapeo completo en el reporte; re-runs conservan el sufijo por `erwinLongId` |
 | Columnas duplicadas en un objeto | se conserva la **1ª** (orden físico) |
 | Vistas | se migran TODAS con **showOnCanvas=True** |
 | Anotaciones de diagrama | se **descartan** |
 | Índices (Key_Group IF*) | **no se migran** (pendiente feature web) |
 | UDP | Entity→table, Attribute→column, Model→canvas; Logical/Physical homónimas se colapsan (gana Physical); niveles View/Key_Group/Relationship se omiten |
-| Glosario | scope=column, wordType=None; término duplicado exacto → 1º |
+| Glosario | scope=column, wordType=None; término duplicado exacto → 1º; full outer join entre archivos — término nuevo se SUMA; **misma palabra con abreviatura distinta = conflicto detectado y reportado (gana la vigente, jamás se pisa)**; `quality a.xml b.xml` lo chequea pre-carga |
+| Relaciones de subtipo (Type 9 + Subtype_Symbol) | se migran como **subcategorías** (doc 53): `subcategory=true` + `subtypeSymbolId` compartido por grupo |
 
 ## Mapeo
 

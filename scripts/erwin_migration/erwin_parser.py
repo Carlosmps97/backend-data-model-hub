@@ -22,6 +22,7 @@ _GLOSS_SEP = re.compile(r"\\#x1F|\x1f")
 # Tipos de relación Erwin relevantes.
 REL_IDENTIFYING = "2"
 REL_NON_IDENTIFYING = "7"
+REL_SUBTYPE = "9"          # subcategoría supertipo→subtipo (doc 53)
 REL_TABLE_TO_VIEW = "16"
 
 # Null_Option_Type de la RELACIÓN (no confundir con el de atributo 0/1):
@@ -97,11 +98,22 @@ class ErwinView:
 class ErwinRelationship:
     id: str
     name: str
-    rel_type: str              # "2" identifying | "7" non-identifying | "16" tabla→vista
+    rel_type: str              # "2" identifying | "7" non-identifying | "9" subtipo | "16" tabla→vista
     cardinality: str           # códigos Erwin: -3, -1, -2, N
     parent_ref: str            # entidad padre (lado PK)
     child_ref: str             # entidad o vista hija (lado FK / derivada)
     null_option: str = ""      # Null_Option_Type: "100" nulls allowed | "101" no nulls
+
+
+@dataclass
+class ErwinSubtypeSymbol:
+    """Símbolo de subcategoría (doc 53): el círculo que agrupa las relaciones
+    Type 9 de un mismo supertipo. En el XML es un objeto de modelo propio
+    (Type 19, `Hide_In_Physical=true`) cuyo `Relationships_Ref_Array` apunta a
+    las relaciones del grupo."""
+    id: str
+    name: str
+    rel_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -145,6 +157,7 @@ class ErwinModel:
     entities: dict[str, ErwinEntity] = field(default_factory=dict)
     views: dict[str, ErwinView] = field(default_factory=dict)
     relationships: dict[str, ErwinRelationship] = field(default_factory=dict)
+    subtype_symbols: dict[str, ErwinSubtypeSymbol] = field(default_factory=dict)
     domains: dict[str, ErwinDomain] = field(default_factory=dict)
     udp_defs: dict[str, ErwinUdpDef] = field(default_factory=dict)
     # valores UDP explícitos: [(owner_id, owner_tag, def_id, valor)]
@@ -183,6 +196,14 @@ class ErwinModel:
                 if a.parent_attr_ref and a.parent_rel_ref:
                     out.setdefault(a.parent_rel_ref, []).append(
                         (a.parent_attr_ref, a.id))
+        return out
+
+    def subtype_symbol_of_rel(self) -> dict[str, str]:
+        """rel_id (Type 9) → id del Subtype_Symbol que la agrupa (doc 53)."""
+        out: dict[str, str] = {}
+        for s in self.subtype_symbols.values():
+            for rid in s.rel_refs:
+                out[rid] = s.id
         return out
 
     def attr_index(self) -> dict[str, ErwinAttribute]:
@@ -382,6 +403,20 @@ def parse(xml_path: str) -> ErwinModel:
             name = el.get("name") or ""
             if name:
                 m.hive_dbs.setdefault(name, []).extend(refs)
+
+        elif tag == "Subtype_Symbol":
+            # doc 53: el contenido útil es el array de relaciones del grupo;
+            # el resto (UDP de estilo, shapes) sigue siendo ruido y el tag
+            # permanece en _CLEAR_TAGS (la limpieza corre después del handler).
+            p = _props(el, "Subtype_SymbolProps")
+            refs = [r.text or "" for r in el.findall(
+                "./{*}Subtype_SymbolProps/{*}Relationships_Ref_Array/{*}Relationships_Ref")]
+            s = ErwinSubtypeSymbol(
+                id=el.get("id") or "",
+                name=el.get("name") or _txt(p, "Name"),
+                rel_refs=[r for r in refs if r],
+            )
+            m.subtype_symbols[s.id] = s
 
         elif tag == "Subject_Area":
             p = _props(el, "Subject_AreaProps")

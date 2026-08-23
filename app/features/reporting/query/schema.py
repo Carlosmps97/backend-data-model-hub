@@ -90,6 +90,7 @@ _RELATIONSHIPS = [
     _s("parentCardinality", "Parent cardinality", type="enum", enumValues=_CARDINALITY_ENUM),
     _s("childCardinality", "Child cardinality", type="enum", enumValues=_CARDINALITY_ENUM),
     _s("identifying", "Identifying", type="boolean"),
+    _s("subcategory", "Subcategory", type="boolean"),
 ]
 _VIEWS = [
     _s("name", "Name", sortable=False),

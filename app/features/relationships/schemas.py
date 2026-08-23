@@ -17,3 +17,5 @@ class RelationshipBody(BaseModel):
     parentCardinality: str = "one"
     childCardinality: str = "zero-many"
     identifying: bool = False
+    subcategory: bool = False
+    subtypeSymbolId: str | None = None
