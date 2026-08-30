@@ -59,15 +59,3 @@ def test_validate_changes_junta_errores_de_todas_las_colecciones():
 def test_validate_changes_vacio_ok():
     assert validate_changes({}) == []
     assert validate_changes(None) == []
-
-
-def test_safe_path_part_guard_de_dot_path():
-    """`set_approval` sigue armando dot-paths de Mongo (`approvals.<actor>`):
-    segmentos con '.' o que empiecen con '$' se rechazan (inyección de path)."""
-    from app.features.changesets.repository import _safe_path_part
-
-    assert _safe_path_part("canonical_columns")
-    assert _safe_path_part("col-123e4567-e89b")
-    assert not _safe_path_part("")
-    assert not _safe_path_part("a.b")
-    assert not _safe_path_part("$set")

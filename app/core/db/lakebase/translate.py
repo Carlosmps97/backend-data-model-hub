@@ -211,7 +211,7 @@ def regex_clause(field: str, pattern: str, options: str, s: Sql, doc: str) -> st
 
 # ─── Updates ────────────────────────────────────────────────────────────
 
-_UPDATE_OPS = {"$set", "$setOnInsert", "$unset", "$inc", "$push"}
+_UPDATE_OPS = {"$set", "$setOnInsert", "$unset", "$inc", "$push", "$mergeObjects"}
 
 
 def is_update_doc(update: dict) -> bool:
@@ -231,6 +231,12 @@ def update_expr(update: dict, s: Sql, doc: str = "doc") -> str:
     de un upsert). Los paths con punto crean padres objeto si faltan
     (jsonb_set anidado), leyendo SIEMPRE del doc original (los ops de un
     mismo update no se pisan entre sí, como en Mongo).
+
+    `$mergeObjects` (dialecto propio, sin equivalente pymongo): mergea un
+    objeto DENTRO de un campo top-level (`{campo: {k: v}}`) creándolo si
+    falta. Las keys internas viajan como DATO jsonb — es la vía para keys
+    dinámicas con caracteres de path (p.ej. `approvals.<correo>`: un dot-path
+    splitearía el correo por los puntos).
     """
     validate_update(update)
     expr = doc
@@ -248,6 +254,17 @@ def update_expr(update: dict, s: Sql, doc: str = "doc") -> str:
                 f"COALESCE({doc} #> {s.add_text_array(parent)}, '{{}}'::jsonb), true)"
             )
         expr = f"jsonb_set({expr}, {s.add_text_array(segs)}, {s.add_json(value)}, true)"
+    for field, obj in (update.get("$mergeObjects", {}) or {}).items():
+        if "." in field:
+            raise NotImplementedError(f"$mergeObjects sólo sobre campos top-level: {field}")
+        if not isinstance(obj, dict):
+            raise NotImplementedError(f"$mergeObjects espera un objeto en {field!r}: {obj!r}")
+        fld = s.add(field)
+        expr = (
+            f"jsonb_set({expr}, {s.add_text_array([field])}, "
+            f"(CASE WHEN jsonb_typeof({doc} -> {fld}) = 'object' "
+            f"THEN {doc} -> {fld} ELSE '{{}}'::jsonb END) || {s.add_json(obj)}, true)"
+        )
     for field in (update.get("$unset", {}) or {}):
         if "." in field:
             expr = f"({expr} #- {s.add_text_array(_segs(field))})"
@@ -283,6 +300,9 @@ def upsert_doc(flt: dict, update: dict) -> dict:
         base[key] = value
     base.update(update.get("$setOnInsert", {}) or {})
     base.update(update.get("$set", {}) or {})
+    for key, obj in (update.get("$mergeObjects", {}) or {}).items():
+        cur = base.get(key)
+        base[key] = {**cur, **obj} if isinstance(cur, dict) else dict(obj)
     for key, delta in (update.get("$inc", {}) or {}).items():
         base[key] = delta
     for key, item in (update.get("$push", {}) or {}).items():

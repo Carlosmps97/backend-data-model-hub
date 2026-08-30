@@ -22,9 +22,9 @@ La filosofía es una pirámide clásica:
 flowchart TD
     A["Estres (historico, seeds retirados 2026-07-20)<br/>10k tablas / 400k columnas / 9k vistas / 150 canvases"]
     B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>21 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
-    L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>43 tests contra el Postgres real en schema efimero"]
+    L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>44 tests contra el Postgres real en schema efimero"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts<br/>833 tests (suite normal, verde 2026-08-28) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts<br/>841 tests (suite normal, verde 2026-08-30) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -39,23 +39,24 @@ Principios de diseño de las pruebas:
 
 - **Unit puros con repositorios mockeados.** La lógica de negocio vive en funciones puras (`physicalize`, `overlay`, `structured_diff`, `table_rows`, `effective_permissions`, etc.) o en orquestadores async que se testean sustituyendo el `repository` por `AsyncMock` con `monkeypatch`. No se levanta ninguna base de datos.
 - **Invariantes de capas verificados por código.** Dos tests de arquitectura leen los archivos fuente y fallan si alguien filtra el store fuera de `repository.py` o si reaparecen árboles/features legacy.
-- **Integración real del adaptador.** La suite viva `tests/lakebase/test_adapter_live.py` (43 tests) pega al Postgres real de Lakebase en un schema efímero `dmh_test_<rand>` que se dropea al final; solo corre con `LAKEBASE_TESTS=1`, por eso no entra en el `pytest` normal.
+- **Integración real del adaptador.** La suite viva `tests/lakebase/test_adapter_live.py` (44 tests) pega al Postgres real de Lakebase en un schema efímero `dmh_test_<rand>` que se dropea al final; solo corre con `LAKEBASE_TESTS=1`, por eso no entra en el `pytest` normal.
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-08-28):** la suite normal son **833 tests** (verde). `pytest tests/ --collect-only -q` recolecta **876** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-08-30):** la suite normal son **841 tests** (verde). `pytest tests/ --collect-only -q` recolecta **885** porque incluye además los **44** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning) | 10 | 40 |
 | `tests/architecture` (invariantes de capas) | 2 | 4 |
-| `tests/features` (todas las features; incluye los 162 de `bulk_upload`, doc 55) | 94 | 720 |
+| `tests/features` (todas las features; incluye los 162 de `bulk_upload`, doc 55) | 95 | 722 |
 | `tests/erwin_migration` (kit de migración multi-archivo) | 5 | 51 |
 | `tests/scripts` (orquestadores de migración) | 3 | 16 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
-| **Subtotal — suite normal** | **115** | **833** |
-| `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 43 |
-| **Total recolectado** | **116** | **876** |
+| `tests/lakebase/test_translate.py` (traducción de updates pura, corre en la suite normal — doc 56) | 1 | 6 |
+| **Subtotal — suite normal** | **117** | **841** |
+| `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 44 |
+| **Total recolectado** | **118** | **885** |
 
 La carga masiva desde Excel (`tests/features/bulk_upload/`, 12 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*` son puros (contexto armado a mano con `helpers.py`), `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
@@ -87,7 +88,7 @@ tests/
 │   ├── admin/           (1)         # RBAC, guards anti-lockout, hash de password, auditoria
 │   ├── auth/            (2)         # permisos efectivos, login/lockout, token-first + warmup SSO
 │   ├── catalog/         (4)         # columnas aditivas, derivacion de tipo, search_columns, usage
-│   ├── changesets/      (12)        # politica de versionado, payloads, effective+search, duplicados,
+│   ├── changesets/      (16)        # politica de versionado, payloads, effective+search, duplicados,
 │   │                                # schemas versionados, diffdetail, rollback a cualquier version,
 │   │                                # lote de cambios (add_changes_bulk + set_changes_bulk, doc 39)
 │   ├── data_standards/  (3)         # diff/snapshot + apply/rollback versionado + guards de glossary/lock
@@ -105,7 +106,8 @@ tests/
 │   ├── udp/             (1)         # niveles de definiciones UDP
 │   └── views/           (6)         # vistas versionadas, multifuente, validacion, queries por canvas
 ├── lakebase/
-│   └── test_adapter_live.py         # suite VIVA del adaptador (43) — solo con LAKEBASE_TESTS=1
+│   ├── test_adapter_live.py         # suite VIVA del adaptador (44) — solo con LAKEBASE_TESTS=1
+│   └── test_translate.py            # traduccion de updates PURA (6) — $mergeObjects (doc 56)
 └── scripts/                         # vacio (los tests de seeds se retiraron con sus scripts, 2026-07-20)
 ```
 
@@ -115,7 +117,7 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 833 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
+Los 841 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
@@ -209,10 +211,10 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 833 passed + 43 skipped.
+`tests/lakebase/test_adapter_live.py` (**44 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 44 tests se saltan, por eso el `pytest` normal reporta 841 passed + 44 skipped.
 
 ```bash
-LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 43 tests contra el Postgres real
+LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 44 vivos + 6 puros contra el Postgres real
 ```
 
 ### 3.5 E2E contra el backend en vivo
@@ -234,13 +236,13 @@ Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, 
 No requieren base de datos ni variables de entorno. Ejemplos:
 
 ```bash
-# Toda la suite normal (833 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
+# Toda la suite normal (841 passed; los 44 vivos salen como skipped sin LAKEBASE_TESTS)
 .venv/bin/python -m pytest -q
 
-# Solo recolectar (verificar el conteo: 876 = 833 + 43 vivos, ~0.2 s)
+# Solo recolectar (verificar el conteo: 885 = 841 + 44 vivos, ~0.2 s)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
-# Suite viva del adaptador Lakebase (43, requiere el Postgres real alcanzable)
+# Suite viva del adaptador Lakebase (44 + 6 puros, requiere el Postgres real alcanzable)
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q
 
 # Un area completa

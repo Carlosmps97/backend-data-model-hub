@@ -79,11 +79,6 @@ async def list_summaries() -> list[dict]:
     return [ChangesetDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
 
-def _safe_path_part(s: str) -> bool:
-    """Apto como segmento de dot-path de Mongo (no vacío, sin '.' ni '$')."""
-    return bool(s) and "." not in s and not s.startswith("$")
-
-
 def change_key(cs_id: str, collection: str, entity_id: str) -> str:
     """`_id` determinista del cambio: el upsert por `_id` da last-write-wins
     por entidad, sin duplicados posibles (misma semántica del viejo dot-path)."""
@@ -240,14 +235,19 @@ async def changes_map(cs_id: str, collections: list[str] | None = None) -> dict[
 
 
 async def set_approval(cs_id: str, actor: str, entry: dict) -> dict | None:
-    """Registra la decisión de UN revisor con `$set` atómico (`approvals.<actor>`),
-    sólo en `submitted`: dos revisores decidiendo a la vez no se pisan."""
-    if not _safe_path_part(actor):
+    """Registra la decisión de UN revisor de forma atómica, sólo en `submitted`
+    (dos revisores decidiendo a la vez no se pisan). La key es el username TAL
+    CUAL — los usernames SSO son correos (`carlos@dominio.com`), y un dot-path
+    `approvals.<actor>` los splitearía por los puntos (el guard viejo devolvía
+    None y el router lo disfrazaba de "no longer in review", bug 2026-08-30):
+    con `$mergeObjects` la key viaja como DATO jsonb, nunca como path."""
+    if not actor:
         return None
     db = await get_db()
     res = await db[COLL].find_one_and_update(
         {"_id": cs_id, "status": "submitted"},
-        {"$set": {f"approvals.{actor}": entry, "updatedAt": _now()}},
+        {"$mergeObjects": {"approvals": {actor: entry}},
+         "$set": {"updatedAt": _now()}},
         return_document=ReturnDocument.AFTER,
     )
     return ChangesetDoc.model_validate(_to_doc(res)).model_dump() if res else None

@@ -258,6 +258,31 @@ def test_update_one_dotted_dynamic_path(coll):
     assert run(coll.find_one({"_id": "cs2"}))["approvals"] == {"ana": {"status": "rejected"}}
 
 
+def test_merge_objects_approvals_con_correo(coll):
+    """`$mergeObjects` (dialecto propio): keys dinámicas como DATO jsonb — un
+    correo con puntos queda como UNA key literal (el dot-path de `$set` lo
+    splitearía por los puntos). Es la escritura de `set_approval`."""
+    seed(coll, [{"_id": "cs1", "status": "submitted", "title": "bb"}])
+    doc = run(coll.find_one_and_update(
+        {"_id": "cs1", "status": "submitted"},
+        {"$mergeObjects": {"approvals": {"carlosmps97@hotmail.com": {"status": "approved"}}},
+         "$set": {"updatedAt": "T1"}},
+        return_document=True,
+    ))
+    assert doc["approvals"] == {"carlosmps97@hotmail.com": {"status": "approved"}}
+    # Segundo revisor: mergea sobre el campo ya existente sin pisar al primero.
+    doc = run(coll.find_one_and_update(
+        {"_id": "cs1", "status": "submitted"},
+        {"$mergeObjects": {"approvals": {"ana": {"status": "rejected"}}}},
+        return_document=True,
+    ))
+    assert doc["approvals"] == {
+        "carlosmps97@hotmail.com": {"status": "approved"},
+        "ana": {"status": "rejected"},
+    }
+    assert doc["updatedAt"] == "T1"
+
+
 def test_update_one_upsert_with_setoninsert(coll):
     res = run(coll.update_one(
         {"_id": "cfg"},
