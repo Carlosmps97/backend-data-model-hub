@@ -9,8 +9,9 @@ acotadas:
 - Montar los routers de cada feature: `health`, `identity`, `domains`,
   `dictionary`, `catalog`, `changesets`, `projects` (+ subject areas),
   `folders`, `relationships`, `views`, `summary` (counts del Home), `reporting`
-  (agregación tabular de metadata, solo lectura) y `settings` (naming_config:
-  separador/case por scope).
+  (agregación tabular de metadata, solo lectura), `settings` (naming_config:
+  separador/case por scope) y `bulk_upload` (carga masiva desde Excel dentro
+  de un draft, doc 55).
 
 Identidad por seam conmutable (`app/core/identity`, modo local/databricks). El
 modelo de permisos por rol se reintroducirá al final como una matriz robusta.
@@ -38,6 +39,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.ratelimit import limiter
 from app.features.admin.router import router as admin_router
 from app.features.auth.router import router as auth_router
+from app.features.bulk_upload.router import router as bulk_upload_router
 from app.features.catalog.router import router as catalog_router
 from app.features.data_standards.router import router as data_standards_router
 from app.features.ddl_rules.router import router as ddl_rules_router
@@ -275,6 +277,11 @@ def create_app() -> FastAPI:
     app.include_router(ddl_rules_router)
     app.include_router(catalog_router)
     app.include_router(changesets_router)
+    # Carga masiva desde Excel (doc 55): jobs de validación/aplicación bajo
+    # `/api/changesets/{cs}/uploads`. Va DESPUÉS del router de changesets
+    # (sus rutas `/{cs_id}/...` son más generales) y antes de las estáticas
+    # hermanas para que FastAPI resuelva el prefijo literal `/uploads`.
+    app.include_router(bulk_upload_router)
     app.include_router(versions_router)
     app.include_router(requests_router)
     app.include_router(projects_router)

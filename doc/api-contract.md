@@ -1,6 +1,6 @@
 # Contrato de API — Data Model Hub Backend
 
-Actualizado: 2026-07-31. Referencia completa de los 128 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
+Actualizado: 2026-08-28. Referencia completa de los 132 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
 
 ---
 
@@ -2792,6 +2792,31 @@ La entidad `schemas` opera dentro del changeset con endpoints propios (doc 18): 
 
 ---
 
+### 8.18 Carga masiva desde Excel (`/api/changesets/{cs_id}/uploads`)
+
+Propósito (doc 55): crear o actualizar **proyectos, carpetas, canvases, esquemas, tablas y columnas** dentro del draft a partir de la plantilla `dmh-upload-template.xlsx` (hojas `Tablas` y `Atributos`). El front parsea el `.xlsx` (SheetJS) y manda JSON por hoja; el backend valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos, arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** y escribe por `add_changes_bulk` (tandas de 1000, orden proyectos → carpetas → canvases → esquemas → tablas → columnas). Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403) y la versión estar en `draft` (409).
+
+| Método y ruta | Cuerpo / respuesta |
+|---|---|
+| `POST …/uploads` | `UploadWorkbookBody` = `{fileName, sheets: {tables?: Sheet, columns?: Sheet}}`, `Sheet = {headers: string[], rows: [{row, cells: {CABECERA: texto}}]}`. Topes: 5,000 filas de tablas y 20,000 de columnas (413); más de 20 jobs activos del usuario → 429. Responde **202** con el job en `validating` |
+| `GET …/uploads/{job_id}` | `{id, csId, fileName, status, progress: {phase, done, total}, report, result, error, createdAt, updatedAt}`. 404 si el job no existe o expiró (reinicio del proceso) — el front pide validar de nuevo |
+| `POST …/uploads/{job_id}/apply` | **202** con el job en `applying`; 409 si no está `validated`, si el reporte tiene errores, si hay otro apply en curso sobre la misma versión, o si el draft ya no acepta cambios |
+| `DELETE …/uploads/{job_id}` | `{deleted: true}`; cancela la validación si sigue corriendo; 409 mientras aplica (cancelar a mitad dejaría tandas sin el resto) |
+
+Estados: `validating → validated | failed`; `validated → applying → applied | failed`. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount}` con `Issue = {severity, sheet, row, column, code, message}` (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
+
+Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5): lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; `ESQUEMA` obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); `PROJECT`/`SPACE`/`SUBJECT`/`DIAGRAMA` se crean o reusan por nombre; UDP por definición del nivel (valores de lista contra `allowedValues`, vacío → default al crear / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft.
+
+```bash
+curl -X POST http://localhost:8000/api/changesets/cs-9/uploads \
+  -H "Content-Type: application/json" \
+  -d '{"fileName":"carga.xlsx","sheets":{"tables":{"headers":["PROJECT","DIAGRAMA","ESQUEMA","TABLA_LOGICO"],
+        "rows":[{"row":3,"cells":{"PROJECT":"DDV","DIAGRAMA":"Clientes","ESQUEMA":"ddv","TABLA_LOGICO":"Cliente"}}]}}}'
+# → 202 {"success":true,"data":{"id":"…","status":"validating",…}}
+curl http://localhost:8000/api/changesets/cs-9/uploads/<job_id>          # polling hasta validated/failed
+curl -X POST http://localhost:8000/api/changesets/cs-9/uploads/<job_id>/apply
+```
+
 ## 9. Requests (Home / Review)
 
 Router hermano en el mismo archivo — `requests_router`, prefijo `/api/requests`.
@@ -3329,7 +3354,7 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 
 ## 14. Índice rápido de endpoints (Parte 2)
 
-Las 76 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el total del backend es 128).
+Las 80 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el total del backend es 132 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28).
 
 | Método | Ruta | Sección |
 |---|---|---|
@@ -3362,6 +3387,9 @@ Las 76 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | POST | `/api/changesets/{cs_id}/rollback` | 8.16 |
 | GET | `/api/changesets/{cs_id}/schemas/{schema_id}/impact` | 8.17 |
 | POST | `/api/changesets/{cs_id}/schemas/{schema_id}/rename` `/delete` | 8.17 |
+| POST | `/api/changesets/{cs_id}/uploads` | 8.18 |
+| GET/DELETE | `/api/changesets/{cs_id}/uploads/{job_id}` | 8.18 |
+| POST | `/api/changesets/{cs_id}/uploads/{job_id}/apply` | 8.18 |
 | GET | `/api/requests` | 9.1 |
 | GET | `/api/versions` · `/api/versions/published` | 10.1 / 10.2 |
 | GET | `/api/reporting/tables` `/columns` `/catalog` `/facets` | 11.1 / 11.2 / 11.4 / 11.9 |

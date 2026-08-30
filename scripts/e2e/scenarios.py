@@ -6,6 +6,7 @@ Todos usan fixtures AISLADOS (tag único por proceso) y limpian al final. Correr
 """
 from __future__ import annotations
 
+import time
 import uuid
 
 from scripts.e2e import harness as H
@@ -956,6 +957,89 @@ def s20_composite_key_relationships() -> Suite:
     return s
 
 
+# ══ S21 · Carga masiva desde Excel (doc 55) ═════════════════════════════════
+
+
+def s21_bulk_upload() -> Suite:
+    """Validate → reporte → apply dentro del draft, con polling del job: crea
+    proyecto/space/canvas/esquema/tablas/columnas; un job ajeno es 403; un
+    reporte con errores no se aplica (409); la re-carga idéntica es unchanged."""
+    s = Suite("s21_bulk_upload")
+    mod, otro = Client("modelador"), Client("modelador2")
+    pname = f"{TAG} proyecto carga"
+    pid = mod.create_project(name=pname)
+    cs = mod.snapshot([pid], title=f"{TAG} s21")
+    t_uno, t_dos = f"{TAG} carga uno", f"{TAG} carga dos"
+    p_uno, p_dos = f"{TAG}_CARGA_UNO".upper(), f"{TAG}_CARGA_DOS".upper()
+
+    def workbook(tipo_nombre="varchar(50)"):
+        hdr_t = ["PROJECT", "SPACE", "DIAGRAMA", "ESQUEMA", "TABLA_LOGICO", "TABLA_FISICA", "DEF_TABLA"]
+        hdr_c = ["TABLA_LOGICO", "CAMPO_LOGICO", "CAMPO_FISICO", "TIPO_DATO", "PK"]
+        base = {"PROJECT": pname, "SPACE": f"{TAG} space", "DIAGRAMA": f"{TAG} diagrama", "ESQUEMA": "e2e"}
+        return {"fileName": f"{TAG}.xlsx", "sheets": {
+            "tables": {"headers": hdr_t, "rows": [
+                {"row": 3, "cells": {**base, "TABLA_LOGICO": t_uno, "TABLA_FISICA": p_uno,
+                                     "DEF_TABLA": "Definición\ncon salto y ñ"}},
+                {"row": 4, "cells": {**base, "TABLA_LOGICO": t_dos, "TABLA_FISICA": p_dos}}]},
+            "columns": {"headers": hdr_c, "rows": [
+                {"row": 3, "cells": {"TABLA_LOGICO": t_uno, "CAMPO_LOGICO": "identificador",
+                                     "CAMPO_FISICO": f"{TAG}_ID".upper(), "TIPO_DATO": "bigint", "PK": "X"}},
+                {"row": 4, "cells": {"TABLA_LOGICO": t_uno, "CAMPO_LOGICO": "nombre",
+                                     "CAMPO_FISICO": f"{TAG}_NOMBRE".upper(), "TIPO_DATO": tipo_nombre}}]}}}
+
+    def wait(job_id):
+        r = None
+        for _ in range(120):
+            r = mod.get(f"/api/changesets/{cs}/uploads/{job_id}")
+            if r.status != 200 or (r.data or {}).get("status") in ("validated", "applied", "failed"):
+                return r
+            time.sleep(0.5)
+        return r
+
+    # 1) validación async → reporte limpio
+    r = mod.post(f"/api/changesets/{cs}/uploads", workbook())
+    s.eq("POST uploads → 202", r.status, 202)
+    job = (wait(r.data["id"]).data or {})
+    s.eq("validación termina en validated", job.get("status"), "validated")
+    rep = job.get("report") or {}
+    s.eq("reporte sin errores", rep.get("errorCount"), 0)
+    s.eq("resumen: 2 tablas a crear", (rep.get("summary") or {}).get("tables", {}).get("create"), 2)
+    s.eq("resumen: 2 columnas a crear", (rep.get("summary") or {}).get("columns", {}).get("create"), 2)
+    s.eq("resumen: 1 canvas a crear", (rep.get("summary") or {}).get("canvases", {}).get("create"), 1)
+    s.eq("job de otro usuario → 403", otro.get(f"/api/changesets/{cs}/uploads/{job['id']}").status, 403)
+
+    # 2) apply async → escribe en el draft; el canvas afectado vuelve en el resultado
+    r = mod.post(f"/api/changesets/{cs}/uploads/{job['id']}/apply")
+    s.eq("apply → 202", r.status, 202)
+    done = (wait(job["id"]).data or {})
+    s.eq("apply termina en applied", done.get("status"), "applied", )
+    s.eq("1 canvas afectado", len((done.get("result") or {}).get("affectedCanvasIds") or []), 1)
+    eff = mod.get(f"/api/changesets/{cs}/effective/canonical_tables?q={p_uno[:-4]}").data or []
+    s.eq("effective muestra las 2 tablas nuevas",
+         len([t for t in eff if t["physicalName"] in (p_uno, p_dos)]), 2)
+    tid = next((t["id"] for t in eff if t["physicalName"] == p_uno), None)
+    cols = mod.get(f"/api/changesets/{cs}/effective/canonical_columns?tableId={tid}").data or []
+    s.eq("la tabla uno tiene sus 2 columnas", len(cols), 2)
+    s.check("la PK quedó marcada con posición 0",
+            any(c.get("isPrimaryKey") and c.get("pkPosition") == 0 for c in cols))
+    prod = mod.get("/api/catalog/tables").data or []
+    s.check("producción NO ve las tablas (draft aislado)", not any(t["physicalName"] == p_uno for t in prod))
+
+    # 3) tipo inválido → reporte con error → apply 409
+    r = mod.post(f"/api/changesets/{cs}/uploads", workbook(tipo_nombre="texto raro"))
+    bad = (wait(r.data["id"]).data or {})
+    s.eq("reporte con 1 error (invalid-type)", (bad.get("report") or {}).get("errorCount"), 1)
+    s.eq("apply con errores → 409", mod.post(f"/api/changesets/{cs}/uploads/{bad['id']}/apply").status, 409)
+
+    # 4) re-carga idéntica → todo unchanged, sin cambios nuevos
+    r = mod.post(f"/api/changesets/{cs}/uploads", workbook())
+    again = (wait(r.data["id"]).data or {})
+    s.eq("re-carga idéntica: 2 tablas unchanged", (again.get("report") or {}).get("summary", {}).get("tables", {}).get("unchanged"), 2)
+    s.eq("re-carga idéntica: 2 columnas unchanged", (again.get("report") or {}).get("summary", {}).get("columns", {}).get("unchanged"), 2)
+    s.eq("discard del job → 200", mod.delete(f"/api/changesets/{cs}/uploads/{again['id']}").status, 200)
+    return s
+
+
 ALL = {
     "s01_rbac": s01_rbac, "s02_version_lifecycle": s02_version_lifecycle,
     "s03_convergence": s03_convergence, "s04_domain_cascade": s04_domain_cascade,
@@ -974,4 +1058,6 @@ ALL = {
     "s19_bulk_changes": s19_bulk_changes,
     # Relaciones con llave compuesta (doc 47)
     "s20_composite_key_relationships": s20_composite_key_relationships,
+    # Carga masiva desde Excel (doc 55)
+    "s21_bulk_upload": s21_bulk_upload,
 }

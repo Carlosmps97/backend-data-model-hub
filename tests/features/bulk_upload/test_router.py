@@ -1,0 +1,104 @@
+"""Endpoints de la carga masiva (doc 55 §7): rutas, códigos y mapeo de la
+semántica del service a HTTP. El service va mockeado; el permiso `model.edit`
+se sobreescribe con `dependency_overrides` (no hay BD en tests)."""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import pytest
+from starlette.testclient import TestClient
+
+from app.features.bulk_upload import service
+from app.features.bulk_upload.jobs import TooManyJobsError
+from app.features.bulk_upload.router import _can_edit
+from app.features.bulk_upload.schemas import MAX_TABLE_ROWS
+from app.main import app
+
+JOB = {"id": "j1", "csId": "c1", "status": "validating", "progress": {"phase": "Queued", "done": 0, "total": 0},
+       "report": None, "result": None, "error": None, "fileName": "f.xlsx",
+       "createdAt": "2026-08-28T00:00:00+00:00", "updatedAt": "2026-08-28T00:00:00+00:00"}
+BODY = {"fileName": "f.xlsx", "sheets": {"tables": {"headers": ["TABLA_LOGICO"],
+                                                    "rows": [{"row": 3, "cells": {"TABLA_LOGICO": "A"}}]}}}
+
+
+@pytest.fixture
+def client():
+    app.dependency_overrides[_can_edit] = lambda: {"username": "ana"}
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(_can_edit, None)
+
+
+def test_post_crea_job_202(client, monkeypatch):
+    start = AsyncMock(return_value=JOB)
+    monkeypatch.setattr(service, "start_validation", start)
+    r = client.post("/api/changesets/c1/uploads", json=BODY)
+    assert r.status_code == 202 and r.json() == {"success": True, "data": JOB}
+    cs_id, actor, body = start.await_args.args
+    assert (cs_id, actor, body.fileName, body.sheets.tables.rows[0].cells) == ("c1", "ana", "f.xlsx", {"TABLA_LOGICO": "A"})
+
+
+@pytest.mark.parametrize("res,status", [(None, 404), ("forbidden", 403), ("locked", 409)])
+def test_post_mapea_guards(client, monkeypatch, res, status):
+    monkeypatch.setattr(service, "start_validation", AsyncMock(return_value=res))
+    assert client.post("/api/changesets/c1/uploads", json=BODY).status_code == status
+
+
+def test_post_413_si_excede_las_filas(client, monkeypatch):
+    start = AsyncMock(return_value=JOB)
+    monkeypatch.setattr(service, "start_validation", start)
+    rows = [{"row": 3 + i, "cells": {"TABLA_LOGICO": "A"}} for i in range(MAX_TABLE_ROWS + 1)]
+    r = client.post("/api/changesets/c1/uploads", json={"sheets": {"tables": {"headers": ["TABLA_LOGICO"], "rows": rows}}})
+    assert r.status_code == 413
+    start.assert_not_called()
+
+
+def test_post_429_si_hay_demasiados_jobs(client, monkeypatch):
+    monkeypatch.setattr(service, "start_validation", AsyncMock(side_effect=TooManyJobsError("too many")))
+    assert client.post("/api/changesets/c1/uploads", json=BODY).status_code == 429
+
+
+def test_get_job(client, monkeypatch):
+    monkeypatch.setattr(service, "get_job", AsyncMock(return_value={**JOB, "status": "validated"}))
+    r = client.get("/api/changesets/c1/uploads/j1")
+    assert r.status_code == 200 and r.json()["data"]["status"] == "validated"
+    service.get_job.assert_awaited_once_with("c1", "ana", "j1")
+
+
+@pytest.mark.parametrize("res,status", [(None, 404), ("forbidden", 403)])
+def test_get_job_mapea(client, monkeypatch, res, status):
+    monkeypatch.setattr(service, "get_job", AsyncMock(return_value=res))
+    assert client.get("/api/changesets/c1/uploads/j1").status_code == status
+
+
+def test_apply_202(client, monkeypatch):
+    monkeypatch.setattr(service, "start_apply", AsyncMock(return_value={**JOB, "status": "applying"}))
+    r = client.post("/api/changesets/c1/uploads/j1/apply")
+    assert r.status_code == 202 and r.json()["data"]["status"] == "applying"
+    service.start_apply.assert_awaited_once_with("c1", "ana", "j1")
+
+
+@pytest.mark.parametrize("res,status", [(None, 404), ("forbidden", 403), ("locked", 409),
+                                        ("not-validated", 409), ("has-errors", 409), ("busy", 409)])
+def test_apply_mapea(client, monkeypatch, res, status):
+    monkeypatch.setattr(service, "start_apply", AsyncMock(return_value=res))
+    r = client.post("/api/changesets/c1/uploads/j1/apply")
+    assert r.status_code == status
+    if res in ("not-validated", "has-errors", "busy"):
+        assert r.json()["detail"]
+
+
+def test_delete(client, monkeypatch):
+    monkeypatch.setattr(service, "discard", AsyncMock(return_value=True))
+    r = client.delete("/api/changesets/c1/uploads/j1")
+    assert r.status_code == 200 and r.json()["data"] == {"deleted": True}
+    monkeypatch.setattr(service, "discard", AsyncMock(return_value=False))
+    assert client.delete("/api/changesets/c1/uploads/j1").status_code == 404
+    monkeypatch.setattr(service, "discard", AsyncMock(return_value="forbidden"))
+    assert client.delete("/api/changesets/c1/uploads/j1").status_code == 403
+
+
+def test_delete_409_mientras_aplica(client, monkeypatch):
+    monkeypatch.setattr(service, "discard", AsyncMock(return_value="busy"))
+    assert client.delete("/api/changesets/c1/uploads/j1").status_code == 409

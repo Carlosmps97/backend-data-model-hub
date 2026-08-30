@@ -21,10 +21,10 @@ La filosofía es una pirámide clásica:
 ```mermaid
 flowchart TD
     A["Estres (historico, seeds retirados 2026-07-20)<br/>10k tablas / 400k columnas / 9k vistas / 150 canvases"]
-    B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>19 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
+    B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>21 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>43 tests contra el Postgres real en schema efimero"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration<br/>598 tests (suite normal, verde 2026-08-14) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts<br/>833 tests (suite normal, verde 2026-08-28) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -43,18 +43,21 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-08-14):** la suite normal son **598 tests** (verde). `pytest tests/ --collect-only -q` recolecta **641** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-08-28):** la suite normal son **833 tests** (verde). `pytest tests/ --collect-only -q` recolecta **876** porque incluye además los **43** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning) | 10 | 40 |
 | `tests/architecture` (invariantes de capas) | 2 | 4 |
-| `tests/features` (todas las features) | 78 | 520 |
-| `tests/erwin_migration` (kit de migración multi-archivo) | 4 | 32 |
+| `tests/features` (todas las features; incluye los 162 de `bulk_upload`, doc 55) | 94 | 720 |
+| `tests/erwin_migration` (kit de migración multi-archivo) | 5 | 51 |
+| `tests/scripts` (orquestadores de migración) | 3 | 16 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
-| **Subtotal — suite normal** | **95** | **598** |
+| **Subtotal — suite normal** | **115** | **833** |
 | `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 43 |
-| **Total recolectado** | **96** | **641** |
+| **Total recolectado** | **116** | **876** |
+
+La carga masiva desde Excel (`tests/features/bulk_upload/`, 12 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*` son puros (contexto armado a mano con `helpers.py`), `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
 ---
 
@@ -112,7 +115,7 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 598 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
+Los 833 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
@@ -206,7 +209,7 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 598 passed + 43 skipped.
+`tests/lakebase/test_adapter_live.py` (**43 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 43 tests se saltan, por eso el `pytest` normal reporta 833 passed + 43 skipped.
 
 ```bash
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 43 tests contra el Postgres real
@@ -231,10 +234,10 @@ Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, 
 No requieren base de datos ni variables de entorno. Ejemplos:
 
 ```bash
-# Toda la suite normal (598 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
+# Toda la suite normal (833 passed; los 43 vivos salen como skipped sin LAKEBASE_TESTS)
 .venv/bin/python -m pytest -q
 
-# Solo recolectar (verificar el conteo: 641 = 598 + 43 vivos, ~0.2 s)
+# Solo recolectar (verificar el conteo: 876 = 833 + 43 vivos, ~0.2 s)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (43, requiere el Postgres real alcanzable)
@@ -266,7 +269,7 @@ Requiere el backend levantado (por defecto `http://localhost:8000`, configurable
 # Levantar el backend (en otra terminal)
 .venv/bin/uvicorn app.main:app --port 8000
 
-# Correr TODOS los escenarios (s01–s19) en serie (imprime ===E2E_TOTAL===)
+# Correr TODOS los escenarios (s01–s21) en serie (imprime ===E2E_TOTAL===)
 .venv/bin/python -m scripts.e2e.run_e2e all
 
 # Un escenario puntual (imprime ===E2E_RESULT=== con JSON)
@@ -481,7 +484,7 @@ sequenceDiagram
 
 ### 6.2 Escenarios (`scripts/e2e/scenarios.py`)
 
-Hay **19 escenarios** (`s01`–`s19`), cada uno aislado con tag único y auto-limpieza:
+Hay **21 escenarios** (`s01`–`s21`), cada uno aislado con tag único y auto-limpieza:
 
 | Escenario | Foco | Qué valida |
 |-----------|------|-----------|
@@ -504,6 +507,8 @@ Hay **19 escenarios** (`s01`–`s19`), cada uno aislado con tag único y auto-li
 | `s17_vistas_multifuente` | Vistas multifuente | Vista con varias fuentes (`sources[]` conserva `castType`/alias), aparece en el diagrama con `showOnCanvas`, desaparece al apagar el flag, y el payload legacy (`sourceTableIds`) se normaliza al grabarse. |
 | `s18_udp_canvas_models` | UDP a nivel canvas | Definición con `level=canvas`; el reporting filtra models por UDP de canvas, expone `models.tableCount` derivado en el catálogo y el insight udp-coverage lista la key de canvas. |
 | `s19_bulk_changes` | Lote de cambios (doc 39) | `PUT /changes/bulk`: tabla+columnas en un lote (effective las muestra); dup intra-lote → 409 sin grabar NADA; payload inválido y colección no versionada → 422; no-owner → 403; cascada de deletes en lote (effective deja de mostrar la tabla, producción intacta pre-publish). |
+| `s20_composite_key_relationships` | Relaciones con llave compuesta (doc 47) | La relación debe migrar la llave COMPLETA del padre (N=N): pares incompletos → 409; llave completa + columnas hijas en el mismo lote → 200 y effective trae los pares. |
+| `s21_bulk_upload` | Carga masiva desde Excel (doc 55) | `POST /uploads` → job `validated` con reporte limpio (2 tablas, 2 columnas, 1 canvas a crear); job de otro usuario → 403; `apply` → `applied` con 1 canvas afectado, tablas/columnas en effective (PK con `pkPosition` 0) y producción intacta; tipo inválido → reporte con error y `apply` 409; re-carga idéntica → todo `unchanged`; `DELETE` del job → 200. |
 
 Cada escenario imprime un JSON como este (formato `Suite.summary()`):
 

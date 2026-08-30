@@ -391,7 +391,7 @@ async def earliest_applied() -> dict | None:
 
 
 async def published(collection: str, flt: dict | None = None, limit: int | None = None,
-                    sort_field: str | None = None) -> list[dict]:
+                    sort_field: str | None = None, projection: dict | None = None) -> list[dict]:
     """Lista publicada de una colección versionada (para overlay/diff).
     `flt` opcional (p.ej. `{"tableId": ...}` o `{"_id": {"$in": [...]}}`): a
     escala (15k tablas / 300k columnas) traer la colección COMPLETA por request
@@ -402,9 +402,13 @@ async def published(collection: str, flt: dict | None = None, limit: int | None 
     tiene índice en esa colección: a escala un orden sin índice sería full-scan
     (mismo motivo por el que folders ordena en Python). Hoy el único
     caso es canonical_tables.physicalName (índice en core/db/indexes.py). Sin
-    sort_field el corte es en orden natural y el llamador re-ordena en Python."""
+    sort_field el corte es en orden natural y el llamador re-ordena en Python.
+
+    `projection` (doc 55): campos a traer cuando el llamador necesita la
+    colección entera pero solo algunos campos (la carga masiva resuelve
+    identidades de tablas por nombre sobre TODO el pool)."""
     db = await get_db()
-    cursor = db[collection].find({"flgactive": {"$ne": False}, **(flt or {})})
+    cursor = db[collection].find({"flgactive": {"$ne": False}, **(flt or {})}, projection)
     if limit is not None and limit > 0:
         if sort_field:
             cursor = cursor.sort(sort_field, 1)
