@@ -18,7 +18,7 @@ UDP_TYPES = ("string", "number", "boolean", "date", "list")
 # Nivel/jerarquía ("Class" en Erwin) al que pertenece una key UDP. Cada UDP vive
 # en UN nivel (segmentado, no multi-nivel). 'canvas' = el Modelo de Datos
 # completo (la subject area) — F5, spec 10 §10.
-UDP_LEVELS = ("table", "column", "canvas")
+UDP_LEVELS = ("table", "column", "canvas", "view")
 
 
 class UdpDefinitionDoc(BaseModel):
@@ -26,7 +26,7 @@ class UdpDefinitionDoc(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str                              # la KEY, p.ej. "Clasificación del Dato"
-    level: str = "column"                  # Class: 'table' | 'column' | 'canvas'
+    level: str = "column"                  # Class: 'table' | 'column' | 'canvas' | 'view'
     dataType: str = "string"               # string | number | boolean | date | list
     defaultValue: str | None = None        # valor por defecto al asignar
     allowedValues: list[str] = []          # para dataType='list' (enum: [DAC, NO DAC, ...])

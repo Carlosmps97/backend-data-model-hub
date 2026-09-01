@@ -4,6 +4,11 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class SqlParseBody(BaseModel):
+    """Body del sandbox de Query SQL (doc 61): script a validar/interpretar."""
+    sql: str = ""
+
+
 class ViewBody(BaseModel):
     name: str
     sql: str = ""
@@ -24,3 +29,7 @@ class ViewBody(BaseModel):
     sourceTableIds: list[str] = []
     showOnCanvas: bool = False
     joinOverride: str | None = None
+    # ── Doc 61: modo Personalizada + UDPs de vista (espejo de ViewDoc) ──
+    customSql: str | None = None
+    customColumns: list[dict] = []
+    udpValues: dict[str, str] = {}

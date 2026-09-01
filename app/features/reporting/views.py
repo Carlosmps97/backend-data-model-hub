@@ -93,12 +93,16 @@ async def udp_coverage() -> list[dict]:
     col_total = await db["canonical_columns"].count_documents(ACTIVE)
     tbl_total = await db["canonical_tables"].count_documents(ACTIVE)
     sa_total = await db["subject_areas"].count_documents(ACTIVE)
-    col_pairs, tbl_pairs, sa_pairs = await asyncio.gather(
+    vw_total = await db["views"].count_documents(ACTIVE)
+    col_pairs, tbl_pairs, sa_pairs, vw_pairs = await asyncio.gather(
         _coverage_pairs("canonical_columns"), _coverage_pairs("canonical_tables"),
-        _coverage_pairs("subject_areas"))
-    # Fuente por nivel (F5: 'canvas' = subject_areas). Fallback: tablas.
-    pairs_of = {"column": col_pairs, "table": tbl_pairs, "canvas": sa_pairs}
-    total_of = {"column": col_total, "table": tbl_total, "canvas": sa_total}
+        _coverage_pairs("subject_areas"), _coverage_pairs("views"))
+    # Fuente por nivel (F5: 'canvas' = subject_areas; doc 61: 'view' = views).
+    # Fallback: tablas.
+    pairs_of = {"column": col_pairs, "table": tbl_pairs, "canvas": sa_pairs,
+                "view": vw_pairs}
+    total_of = {"column": col_total, "table": tbl_total, "canvas": sa_total,
+                "view": vw_total}
     rows = []
     for d in defs:
         did, level = str(d["_id"]), d.get("level")

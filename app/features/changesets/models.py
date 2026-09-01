@@ -79,3 +79,7 @@ class ChangesetDoc(BaseModel):
     # detectable, y recuperable con `scripts/reapply_changeset.py` (el apply es
     # idempotente — upserts por _id).
     appliedAt: str | None = None
+    # Procedencia de una RESTAURACIÓN (doc 65, aditivo): {csId, versionLabel,
+    # appliedAt} de la versión publicada que este draft restaura. La estampa
+    # `service.rollback`; el UI muestra "Restored from vN" en Home/historial.
+    restoredFrom: dict | None = None

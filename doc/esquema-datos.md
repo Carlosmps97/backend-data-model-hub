@@ -198,6 +198,9 @@ Un doc por relación Erwin con **todos** sus pares de columnas (FK compuesta = v
 | sourceTableIds | list[str] | [] | refs `canonical_tables.id`; el **orden** define los alias `t1, t2…` |
 | showOnCanvas | bool | false | flag GLOBAL: la vista aparece en todo canvas con ≥1 fuente presente |
 | joinOverride | str? | null | condición JOIN manual (la consume el DDL del front; el backend no la valida) |
+| customSql | str? | null | doc 61: script del modo **Personalizada** — NO vacío ⇒ el cuerpo del `CREATE VIEW` ES este script (validado con sqlglot `databricks` al escribir; anti-`SELECT *`); null ⇒ **Regular** (DDL desde `sources`) |
+| customColumns | list[dict] | [] | doc 61: columnas de salida `{name, expression?}` DERIVADAS del parse de `customSql` — el backend las RE-deriva en cada escritura (create/update directo y apply del changeset) |
+| udpValues | dict | {} | doc 61: `{udpDefId: value}` — keys de `udp_definitions` con `level='view'` (mismo contrato que tablas/columnas/canvas) |
 
 **Shape de cada item de `sources`** (free-form; las claves nuevas persisten): `{ column?, tableId?, outputAlias?, expression?, castType?, description? }`.
 - `column` = columna origen (por **nombre**); `tableId` = de qué fuente viene (F3 multi-fuente); `castType` = override de tipo (DDL emite `CAST(...) AS`); `description` = definición funcional propia de la columna-de-vista (F5, override del origen físico).
@@ -283,11 +286,13 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | lockedAt | str? | null | |
 
 ### `udp_definitions` — UdpDefinitionDoc  *(User Defined Properties = etiquetas key-value)*
+
+> Doc 61 r2: el catálogo es **FIJO** (`scripts/erwin_migration/standard_udps.py`) — la migración lo siembra completo y mapea los valores del XML contra él (match CI + alias); las defs ya no se derivan del XML.
 | Campo | Tipo | Default | Notas |
 |---|---|---|---|
 | id | str | uuid4 | PK (los `udpValues` de tablas/columnas/canvases usan este `id` como key) |
 | name | str | — | la KEY visible (p. ej. `"Clasificación del Dato"`) |
-| level | str | "column" | `table` \| `column` \| `canvas` |
+| level | str | "column" | `table` \| `column` \| `canvas` \| `view` (doc 61) |
 | dataType | str | "string" | `string` \| `number` \| `boolean` \| `date` \| `list` |
 | defaultValue | str? | null | |
 | allowedValues | list[str] | [] | enum cuando `dataType='list'` (p. ej. `[DAC, NO DAC, …]`) |
@@ -442,7 +447,7 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 
 Solo **descripción del estado actual** (no recomendaciones de destino):
 
-1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas), `layout` (map → `{x,y}`) y `drawings` (list) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`, `udpRefs`/`action` en `ddl_rules`, `lookups`/`functions` en `ddl_ruleset_config`.
+1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas/views), `layout` (map → `{x,y}`) y `drawings` (list) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`, `udpRefs`/`action` en `ddl_rules`, `lookups`/`functions` en `ddl_ruleset_config`.
 2. **Referencias sin integridad referencial**: todo apunta por string (id o **nombre** — `schema` y `sources[].column` son por nombre). Nada lo valida el almacén.
 3. **Soft-delete** por `flgactive:false` + `deletedAt` en casi todo; `audit_log` es append-only; `changesets`/`changeset_changes`/`standards_versions` no usan `flgactive`.
 4. **`_id` especiales**: `changeset_changes._id` es DETERMINISTA (`{csId}::{collection}::{entityId}`); `naming_config._id = scope`; `users._id = username`; `roles._id = key`; `ddl_ruleset_config._id = 'global'`; `audit_log._id` = ObjectId auto. El resto = `id` uuid4.

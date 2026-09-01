@@ -235,7 +235,7 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
     unsupported = sorted({d.full_name for d in m.udp_defs.values()
                           if d.owner_class not in pol.UDP_LEVEL_MAP})
     _finding(f, "I-UDP-LEVEL-UNSUPPORTED", "INFO",
-             "Defs UDP de niveles sin equivalente (View/Key_Group/Relationship/…)",
+             "Defs UDP de niveles sin equivalente (Key_Group/Relationship/…)",
              "se OMITEN (decisión doc 12)", unsupported)
 
     terms = Counter(g[0].strip().upper() for g in m.glossary if g)

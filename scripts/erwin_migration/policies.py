@@ -41,7 +41,8 @@ _NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://data-model-hub/erwin-migration")
 _CARDINALITY = {"-3": "zero-many", "-1": "one-many", "-2": "zero-one"}
 
 # Nivel Erwin (owner_class de la def UDP) → nivel de plataforma.
-UDP_LEVEL_MAP = {"Entity": "table", "Attribute": "column", "Model": "canvas"}
+UDP_LEVEL_MAP = {"Entity": "table", "Attribute": "column", "Model": "canvas",
+                 "View": "view"}   # doc 61 r2: las vistas ganan su nivel UDP
 
 
 def platform_id(erwin_long_id: str) -> str:

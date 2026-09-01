@@ -244,11 +244,21 @@ def test_vista_espejo_cuelga_de_la_tabla_viva(corrida):
     assert vistas[0]["sources"][0]["column"] == "CODA"
 
 
-# ── A4 · defs UDP sin uso ─────────────────────────────────────────────────
+# ── Doc 61 r2 · catálogo FIJO (reemplaza la poda A4) ──────────────────────
 def test_def_udp_basura_no_se_crea(corrida):
+    from scripts.erwin_migration.standard_udps import FIXED_UDPS
     db, mig = corrida
-    assert db.data.get("udp_definitions", {}) == {}
-    assert [d["name"] for d in mig.report["udp_defs_skipped"]] == ["Basura"]
+    # El catálogo fijo se siembra COMPLETO aunque nadie lo use…
+    defs = {(d["level"], d["name"]) for d in db.data["udp_definitions"].values()}
+    assert len(defs) == len(FIXED_UDPS)
+    assert ("view", "Tipo de Vista") in defs
+    vt = next(d for d in db.data["udp_definitions"].values()
+              if d["level"] == "view")
+    assert vt["allowedValues"] == ["Regular", "Personalizada"]
+    assert vt["defaultValue"] == "Regular"
+    # …y la def del XML fuera del catálogo NO se crea (al reporte).
+    skipped = [d for d in mig.report["udp_defs_skipped"] if d["name"] == "Basura"]
+    assert skipped and skipped[0]["motivo"] == "fuera del catálogo fijo"
 
 
 # ── schemas ───────────────────────────────────────────────────────────────
@@ -532,3 +542,27 @@ def test_parse_mart_locator_capas():
                    "model": "UDV Logico V0.618"}
     assert pol.parse_mart_locator("Mart://Mart/P/M")["domain"] == ""
     assert pol.parse_mart_locator("erwin://file://C:/x.erwin") is None
+
+
+# ── Doc 62 · homologación de defaults de dominio al sembrar ───────────────
+def test_dominios_se_siembran_con_tipo_homologado():
+    """El XML trae la grafía cruda de Erwin (`Array`, `BIG INTEGER`,
+    `DECIMAL (22,4)`); la siembra debe escribir la CANÓNICA de la plataforma."""
+    m = modelo_archivo_2()
+    m.domains = {
+        "D1": ep.ErwinDomain(id="D1", name="ColArray", builtin=False,
+                             data_type="Array", parent_ref=None, definition=""),
+        "D2": ep.ErwinDomain(id="D2", name="BigInt", builtin=False,
+                             data_type="BIG INTEGER", parent_ref=None, definition=""),
+        "D3": ep.ErwinDomain(id="D3", name="Monto", builtin=False,
+                             data_type="DECIMAL (22,4)", parent_ref=None, definition=""),
+        "D4": ep.ErwinDomain(id="D4", name="SinTipo", builtin=False,
+                             data_type="", parent_ref=None, definition=""),
+    }
+    db = base_db()
+    mig = Migrator(db, m, "Familia DDV", None)
+    mig.run()
+    tipos = {d["name"]: d["defaultDataType"]
+             for d in db.data["parent_domains"].values()}
+    assert tipos == {"ColArray": "ARRAY<>", "BigInt": "BIGINT",
+                     "Monto": "DECIMAL(22,4)", "SinTipo": "STRING"}

@@ -34,6 +34,7 @@ from .schemas import (
     ChangesBulkBody,
     ChangesetCreate,
     CommentBody,
+    CompareDetailsBody,
     DiffDetailsBody,
     ReviewBody,
     ReviewDecisionBody,
@@ -431,6 +432,41 @@ async def list_versions():
 async def current_production():
     """Versión de producción actual (la última approved/aplicada — fila verde)."""
     return ok(await service.current_production())
+
+
+def _compare_http(res):
+    """Mapea los sentinels del compare (doc 65) a HTTP; devuelve el dict OK."""
+    if res is None:
+        raise HTTPException(status_code=404, detail="Version not found.")
+    if res == "not-applied":
+        raise HTTPException(status_code=409,
+                            detail="Both versions must be published to compare them.")
+    if res == "same":
+        raise HTTPException(status_code=409,
+                            detail="Pick two different versions to compare.")
+    return res
+
+
+@versions_router.get("/compare")
+async def compare_versions(fromId: str = Query(...), toId: str = Query(...)):
+    """Diferencias NETAS entre dos versiones publicadas (doc 65): buckets por
+    colección + conteos + entidades irreconstruibles (pre before-images).
+    READ-ONLY (mismo criterio de acceso que GET /api/versions y /diff);
+    cualquier orden de extremos — se normaliza a cronológico."""
+    return ok(_compare_http(await service.compare_versions(fromId, toId)))
+
+
+@versions_router.post("/compare/details")
+async def compare_details(body: CompareDetailsBody):
+    """Diff de campos antes→después de entidades puntuales del rango comparado
+    (doc 65) — shape del popup doc 31. Entidades fuera del rango se omiten."""
+    bad = sorted({i.collection for i in body.items} - set(VERSIONED))
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown collection(s): {', '.join(bad)}.")
+    res = await service.compare_details(
+        body.fromId, body.toId, [(i.collection, i.entityId) for i in body.items])
+    return ok(_compare_http(res))
 
 
 requests_router = APIRouter(prefix="/api/requests", tags=["requests"])

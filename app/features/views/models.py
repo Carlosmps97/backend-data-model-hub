@@ -60,6 +60,20 @@ class ViewDoc(BaseModel):
     # Condición de JOIN manual (2+ fuentes sin relación modelada, u override
     # de la inferida). El backend NO la valida: la consume el DDL del front.
     joinOverride: str | None = None
+    # ── Doc 61: Properties de vista — modo Personalizada + UDPs ──
+    # `customSql` NO vacío = vista "Personalizada": el cuerpo del CREATE VIEW
+    # ES este script (validado con sqlglot `databricks` al escribir; ver
+    # custom_sql.py). Ausente/None = "Regular" (DDL generado de sources/filter/
+    # joinOverride, como siempre). NO confundir con `sql` (referencia congelada
+    # del preview del editor — no autoritativa).
+    customSql: str | None = None
+    # Columnas de salida derivadas del parse de `customSql` ({name,
+    # expression?}). Las RE-deriva el backend en cada escritura (no se confía
+    # en el cliente); alimentan el bloque del canvas y la pestaña Columns.
+    customColumns: list[dict] = []
+    # Valores UDP de la vista ({defId: value}) — mismo contrato que tablas/
+    # columnas/canvas (doc 06); aplican las keys con level='view'.
+    udpValues: dict[str, str] = {}
 
     @model_validator(mode="before")
     @classmethod

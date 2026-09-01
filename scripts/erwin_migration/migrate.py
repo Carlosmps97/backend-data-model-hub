@@ -26,7 +26,8 @@ solapamiento es el flujo NORMAL:
     (correlativos incongruentes = reasignados, al reporte).
   - Estándares: glosario/dominios/defs UDP se REUSAN por clave natural; los
     enums convergen case-insensitive (A3); defs sin uso y sin presencia en
-    BD NO se crean (A4) salvo `--keep-unused-udp-defs`.
+    BD NO se crean. (Doc 61 r2: las defs UDP son un CATÁLOGO FIJO —
+    `--keep-unused-udp-defs` quedó DEPRECADO, se acepta y se ignora.)
 
 Rendimiento: escrituras BUFFEREADAS por colección y despachadas con
 `bulk_write` (el adaptador Lakebase las ejecuta en 2 round-trips por lote) +
@@ -46,7 +47,7 @@ Uso:
       [--only-sa CPYBCAPYM]      migrar solo canvases/folders de esa SA
       [--force]                  continuar aunque el gate tenga ERRORs
       [--report ruta.json]       reporte de decisiones (default: migration-reports/)
-      [--keep-unused-udp-defs]   crear también defs UDP sin uso (A4 off)
+      [--keep-unused-udp-defs]   DEPRECADO (doc 61 r2: catálogo fijo) — no-op
 """
 from __future__ import annotations
 
@@ -63,6 +64,7 @@ from pymongo import UpdateOne
 
 from . import erwin_parser as ep
 from . import policies as pol
+from . import standard_udps as std_udps
 from .quality import analyze, summarize
 
 _STAMP = {"migratedFrom": "erwin"}
@@ -99,6 +101,7 @@ class Migrator:
             "adopted": [], "conflicts": [], "renamed_dups": [], "rels_reused": [],
             "cols_dropped": [], "partitions_reassigned": [],
             "views_discarded": [], "udp_defs_skipped": [], "glossary_conflicts": [],
+            "udp_values_unmatched": [],
         }
         # mapas Erwin id → id de plataforma FINAL (puede ser un doc preexistente)
         self.domain_pid: dict[str, str] = {}
@@ -249,6 +252,10 @@ class Migrator:
     def standards(self) -> None:
         # dominios padre (solo custom; los builtin de Erwin no aportan).
         # Reuso por nombre case-insensitive vía cache (cero round-trips).
+        # Doc 62: el default se HOMOLOGA a la grafía canónica de la plataforma
+        # (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`). Import perezoso:
+        # app está en el path donde corre la migración (backend root/notebook).
+        from app.core.datatypes import canonicalize_default_type
         for d in self.m.domains.values():
             if d.builtin or d.name.startswith("<"):
                 continue
@@ -260,7 +267,8 @@ class Migrator:
                 continue
             self.ex_domains[d.name.strip().upper()] = pid
             self._upsert("parent_domains", pid, {
-                "name": d.name, "defaultDataType": d.data_type or "STRING",
+                "name": d.name,
+                "defaultDataType": canonicalize_default_type(d.data_type) or "STRING",
                 "namingTerm": None, "description": d.definition or None,
                 "erwinLongId": d.id})
             self.stats["dominios creados"] += 1
@@ -304,61 +312,63 @@ class Migrator:
                 "wordType": None, "locked": False})
             self.stats["glosario creado"] += 1
 
-        # defs UDP (lookup SIEMPRE por nombre + NIVEL — lección C8, doc 11 §4b).
-        # A4 (owner 2026-07-24): una def SIN uso observado en este archivo y
-        # que NO exista ya en BD no se crea (los XML arrastran defs basura de
-        # Erwin: sufijos _NNNN, copias muertas). `--keep-unused-udp-defs` la
-        # desactiva. Las existentes en BD siempre se reusan y sus enums
-        # convergen case-insensitive (A3).
-        values_by_key: dict[str, set] = defaultdict(set)
-        for (oid, key), val in self.udp_vals.items():
-            values_by_key[key].add(val)
+        # defs UDP — CATÁLOGO FIJO (doc 61 ronda 2, owner 2026-08-30): las
+        # definiciones ya NO se derivan del XML. Se siembra/actualiza SIEMPRE
+        # el catálogo completo (lookup por nombre + NIVEL — lección C8; el
+        # catálogo MANDA: pisa dataType/default/allowedValues de la homónima
+        # existente — reemplaza la convergencia A3 y la poda A4, que aplicaban
+        # cuando las defs venían del XML). Las defs del XML solo se MAPEAN a
+        # las fijas (nombre case-insensitive) para asociar valores; fuera del
+        # catálogo → no se crean (al reporte).
+        self.udp_fixed: dict[str, dict] = {}   # clave colapsada → def FIJA
+        fixed_pid: dict[tuple[str, str], str] = {}
+        for fx in std_udps.FIXED_UDPS:
+            lookup_key = (fx["name"].strip().upper(), fx["level"])
+            existing = self.ex_udp.get(lookup_key)
+            pid = (existing["_id"] if existing
+                   else pol.platform_id(f"udpfix|{fx['level']}|{fx['name']}"))
+            fixed_pid[(fx["level"], pol.norm_enum(fx["name"]))] = pid
+            allowed = list(fx["allowedValues"])
+            self._upsert("udp_definitions", pid, {
+                "name": fx["name"], "level": fx["level"],
+                "dataType": fx["dataType"], "defaultValue": fx["defaultValue"],
+                "allowedValues": allowed,
+                "description": fx.get("description") or "Estándar fijo (doc 61)"})
+            self.ex_udp[lookup_key] = {"_id": pid, "allowedValues": allowed}
+            self.stats["defs UDP fijas sembradas"] += 1
+        lk = std_udps.fixed_lookup()
         for key, entry in self.collapsed.items():
-            existing = self.ex_udp.get((entry["name"].strip().upper(), entry["level"]))
-            used = bool(values_by_key.get(key))
-            if not existing and not used and not self.keep_unused_udp_defs:
+            fx = lk.get((entry["level"], pol.norm_enum(entry["name"])))
+            if not fx:
                 self.report["udp_defs_skipped"].append(
                     {"name": entry["name"], "level": entry["level"],
-                     "dataType": entry["dataType"]})
-                self.stats["defs UDP sin uso omitidas (A4)"] += 1
+                     "dataType": entry["dataType"],
+                     "motivo": "fuera del catálogo fijo"})
+                self.stats["defs UDP del XML fuera del catálogo fijo"] += 1
                 continue
-            allowed: list[str] = []
-            if entry["dataType"] == "list":
-                allowed = list(entry.get("allowed_values") or [])
-                extra = values_by_key.get(key, set()) | (
-                    {entry["default"]} if entry["default"] else set())
-                allowed += pol.merge_allowed_values(allowed, sorted(extra))
-            pid = existing["_id"] if existing else pol.platform_id(f"udp|{key}")
-            self.udp_pid[key] = pid
-            if existing:
-                # converge la lista entre archivos: agrega SOLO lo que falte,
-                # comparando case/espacios-insensitive (A3) — 'NO DAC' no
-                # duplica 'No DAC'; la grafía ya guardada gana.
-                missing = pol.merge_allowed_values(existing["allowedValues"], allowed)
-                if missing:
-                    self._upsert("udp_definitions", pid, {
-                        "allowedValues": existing["allowedValues"] + missing})
-                    existing["allowedValues"] = existing["allowedValues"] + missing
-                    self.stats["defs UDP con valores agregados"] += 1
-                self.stats["defs UDP reusadas"] += 1
-                continue
-            self.ex_udp[(entry["name"].strip().upper(), entry["level"])] = {
-                "_id": pid, "allowedValues": allowed}
-            self._upsert("udp_definitions", pid, {
-                "name": entry["name"], "level": entry["level"],
-                "dataType": entry["dataType"], "defaultValue": entry["default"],
-                "allowedValues": allowed,
-                "description": "Migrada de Erwin"})
-            self.stats["defs UDP creadas"] += 1
+            self.udp_pid[key] = fixed_pid[(fx["level"], pol.norm_enum(fx["name"]))]
+            self.udp_fixed[key] = fx
 
     def _udp_values_for(self, erwin_id: str, level: str) -> dict[str, str]:
+        """Valores UDP de una entidad contra el CATÁLOGO FIJO (doc 61 r2):
+        match case/espacios-insensitive (+ alias de typos conocidos) → se
+        asigna la grafía CANÓNICA; sin match → la key NO se escribe (rige el
+        default de la definición). Una muestra va al reporte."""
         out = {}
-        for key, entry in self.collapsed.items():
-            if entry["level"] != level or key not in self.udp_pid:
+        for key, fx in self.udp_fixed.items():
+            if fx["level"] != level:
                 continue
-            val = self.udp_vals.get((erwin_id, key))
-            if val:
-                out[self.udp_pid[key]] = val
+            raw = self.udp_vals.get((erwin_id, key))
+            if not raw:
+                continue
+            val = std_udps.match_value(fx, raw)
+            if val is None:
+                self.stats["valores UDP sin match (quedan en default)"] += 1
+                if len(self.report["udp_values_unmatched"]) < 200:
+                    self.report["udp_values_unmatched"].append(
+                        {"udp": fx["name"], "level": level, "valor": raw})
+                continue
+            out[self.udp_pid[key]] = val
         return out
 
     # ---------- tablas (R1/R2/_DUPn/R5/R6) ----------
@@ -762,6 +772,9 @@ class Migrator:
                 "tableId": source_pids[0], "sourceTableIds": source_pids,
                 "sources": sources, "tags": [], "filter": None,
                 "outputAlias": None, "expression": None,
+                # doc 61 r2: nivel UDP 'view' (Tipo de Vista si el XML lo trae;
+                # sin valor ⇒ rige el default Regular de la def fija).
+                "udpValues": self._udp_values_for(v.id, "view"),
                 # decisión owner: TODAS las vistas visibles en canvas
                 "showOnCanvas": True, "joinOverride": None,
                 "erwinLongId": v.id})
@@ -806,12 +819,14 @@ class Migrator:
 
         # UDP de nivel canvas definidos a nivel Model → a todos los canvases
         model_udp: dict[str, str] = {}
-        for key, entry in self.collapsed.items():
-            if entry["level"] != "canvas" or key not in self.udp_pid:
+        for key, fx in self.udp_fixed.items():
+            if fx["level"] != "canvas":
                 continue
             for (oid, k), val in self.udp_vals.items():
                 if k == key and val:
-                    model_udp[self.udp_pid[key]] = val
+                    mv = std_udps.match_value(fx, val)
+                    if mv is not None:
+                        model_udp[self.udp_pid[key]] = mv
 
         # Doc 54 §9: carpeta de ORIGEN (dominio del Mart / archivo) como capa
         # raíz del proyecto; las SAs del archivo cuelgan de ella. Reuso por

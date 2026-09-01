@@ -15,6 +15,7 @@ from app.core.versioning import overlay, summarize_diff
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas import service as schemas_service
 from app.features.settings import service as settings_service
+from app.features.views.custom_sql import CustomSqlError, parse_custom_sql
 from app.features.views.models import normalize_source_tables
 
 from . import diffdetail, repository, validation
@@ -52,6 +53,17 @@ def apply_plan(changes: dict) -> list[tuple]:
                 # (build_canvas_query matchea SOLO sourceTableIds). También
                 # sanea drafts pendientes legacy.
                 payload = normalize_source_tables(payload)
+                # Doc 61: customColumns se RE-derivan del script al publicar
+                # (el payload del draft pudo mentir); sin script → Regular.
+                sql = (payload.get("customSql") or "").strip()
+                if sql:
+                    try:
+                        payload = {**payload, "customSql": sql,
+                                   "customColumns": parse_custom_sql(sql)["columns"]}
+                    except CustomSqlError:
+                        pass  # el gate validate_changes ya lo rechazó; defensivo
+                else:
+                    payload = {**payload, "customSql": None, "customColumns": []}
             plan.append((collection, eid, ch.get("op"), payload))
     return plan
 
@@ -225,6 +237,7 @@ def version_row(cs: dict) -> dict:
         "updatedAt": cs.get("updatedAt"),
         "submittedAt": cs.get("submittedAt"),
         "appliedAt": cs.get("appliedAt"),
+        "restoredFrom": cs.get("restoredFrom"),
     }
 
 
@@ -257,6 +270,7 @@ def history_events(changes: list[dict], headers: dict[str, dict]) -> list[dict]:
             "userId": hdr.get("owner"),
             "publishedById": hdr.get("reviewedBy"),
             "approvedByIds": approved,
+            "restoredFrom": hdr.get("restoredFrom"),
             "origin": ch.get("origin") if action == "created" else None,
             # Insumo del detalle de campos (entity_detail): before estampado.
             "change": {"op": op, "payload": ch.get("payload"), "at": ch.get("at"),
@@ -1132,10 +1146,18 @@ async def rollback(cs_id: str, actor: str) -> dict | str | None:
         return "empty"
     label = cs.get("versionLabel") or cs.get("title") or cs_id[:8]
     n_ver = len(after)
+    # Doc 65: el draft de restauración nace con etiqueta autoincremental (como
+    # snapshot — antes quedaba sin label y la fila salía "—") y con la
+    # PROCEDENCIA estructurada de la versión restaurada: el UI muestra
+    # "Restored from vN" en Home/historial sin parsear títulos.
+    existing = [c.get("versionLabel") for c in await repository.list_summaries()]
     draft = await repository.create(
-        f"Rollback a {label}", actor,
-        extra={"description": f"Restaura el modelo al estado de {label}: deshace "
-                              f"{n_ver} versión(es) posterior(es) sobre {len(inverse)} entidades."})
+        f"Restore to {label}", actor,
+        extra={"description": f"Restores the model to the state of {label}: undoes "
+                              f"{n_ver} later version(s) across {len(inverse)} entities.",
+               "versionLabel": next_version_label(existing),
+               "restoredFrom": {"csId": cs["id"], "versionLabel": cs.get("versionLabel"),
+                                "appliedAt": cs.get("appliedAt")}})
     for ch in inverse:
         await repository.set_change(draft["id"], ch["collection"], ch["entityId"],
                                     ch["op"], ch["payload"])
@@ -1525,7 +1547,7 @@ async def diff_details(cs_id: str, items: list[tuple[str, str]]) -> dict | None:
 
 
 # Alcance del historial (pedido: tablas y columnas). Extender = agregar acá.
-HISTORY_COLLECTIONS = ("canonical_tables", "canonical_columns")
+HISTORY_COLLECTIONS = ("canonical_tables", "canonical_columns", "views")
 
 
 async def _history_resolvers(collection: str) -> dict:
@@ -1568,6 +1590,17 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
     events = history_events(changes, headers)[: max(1, limit)]
 
     res = await _history_resolvers(collection) if events else {}
+    if events and collection == "views":
+        # Doc 61: las filas "Columns · <tabla>" del detalle resuelven la tabla
+        # fuente por NOMBRE (mismo criterio que _detail_resolvers).
+        entries = [("views", e["change"].get("before"), e["change"].get("payload"))
+                   for e in events]
+        tids, _cids = diffdetail.collect_ref_ids(entries)
+        if tids:
+            docs = await repository.published(
+                "canonical_tables", {"_id": {"$in": sorted(tids)}})
+            res["tables"] = {d["id"]: d.get("physicalName") or d.get("logicalName")
+                             or d["id"] for d in docs}
     users: dict[str, dict] = {}
     ids = {e["userId"] for e in events} | {e["publishedById"] for e in events} \
         | {uid for e in events for uid in e["approvedByIds"]}
@@ -1585,6 +1618,7 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
             "publishedBy": _user_ref(e["publishedById"], users),
             "approvedBy": [u for uid in e["approvedByIds"] if (u := _user_ref(uid, users))],
             "origin": e["origin"], "name": detail.get("name"),
+            "restoredFrom": e.get("restoredFrom"),
             "fields": detail.get("fields") or [], "synthetic": False,
         })
 
@@ -1603,6 +1637,216 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
                     "name": None, "fields": [], "synthetic": True,
                 })
     return {"items": items}
+
+
+# ── Comparación entre versiones publicadas (doc 65) ────────────────────────
+
+
+def compose_versions_range(ordered_changes: list[dict]) -> tuple[dict, list[dict]]:
+    """Compone los ledgers de versiones aplicadas EN ORDEN CRONOLÓGICO
+    (oldest→newest) en un estado NETO por entidad. Puro.
+
+    Por entidad tocada en el rango: `before` = imagen previa de la PRIMERA
+    versión que la tocó (el estado tal como quedó en la versión base del
+    compare) y `op`/`after` = el desenlace de la ÚLTIMA. Devuelve
+    ({(collection, entityId): {before, op, after}}, faltantes) — `faltantes` =
+    entidades cuya primera versión del rango no estampó imagen previa
+    (publicadas antes de la captura de before-images): su "antes" real es
+    irreconstruible y se EXCLUYEN del diff (nunca se inventa un antes)."""
+    state: dict[tuple[str, str], dict] = {}
+    for changes in ordered_changes:
+        for coll, per in (changes or {}).items():
+            for eid, ch in per.items():
+                entry = state.get((coll, eid))
+                if entry is None:
+                    entry = {"missing": not ch.get("beforeAt"),
+                             "before": ch.get("before") if ch.get("beforeAt") else None}
+                    state[(coll, eid)] = entry
+                entry["op"] = ch.get("op")
+                entry["after"] = ch.get("payload") if ch.get("op") != "delete" else None
+    out: dict[tuple[str, str], dict] = {}
+    missing: list[dict] = []
+    for (coll, eid), entry in state.items():
+        if entry.pop("missing", False):
+            doc = entry.get("after") or {}
+            missing.append({"collection": coll, "id": eid,
+                            "name": doc.get("physicalName") or doc.get("logicalName")
+                            or doc.get("name")})
+            continue
+        out[(coll, eid)] = entry
+    return out, missing
+
+
+def compare_buckets(composed: dict, res: dict) -> dict:
+    """Estado neto compuesto → buckets {collection: {added, edited, deleted}}
+    con nombres legibles (relaciones como "PADRE → HIJO" vía resolvers). El
+    verbo exige DIFERENCIA VISIBLE con el mismo motor de campos del popup de
+    revisión: una entidad editada y luego devuelta a su estado original dentro
+    del rango no es un cambio (neto cero), igual que una creada y borrada. Puro."""
+    cols: dict[str, dict] = {}
+    for (coll, eid), entry in composed.items():
+        before, op = entry.get("before"), entry.get("op")
+        detail = diffdetail.entity_detail(
+            coll, eid, {"op": op, "payload": entry.get("after"),
+                        "before": before, "beforeAt": "composed"}, None, res)
+        if op == "delete":
+            if before is None:
+                continue  # creada y borrada dentro del rango: neto cero
+            verb = "deleted"
+        elif before is None:
+            verb = "added"
+        elif not detail["fields"]:
+            continue  # sin campos visibles distintos: neto cero
+        else:
+            verb = "edited"
+        bucket = cols.setdefault(coll, {"added": [], "edited": [], "deleted": []})
+        bucket[verb].append({"id": eid, "name": detail["name"], "collection": coll})
+    for bucket in cols.values():
+        for verb in ("added", "edited", "deleted"):
+            bucket[verb].sort(key=lambda e: str(e.get("name") or "").lower())
+    return cols
+
+
+async def _compare_resolvers(composed: dict) -> dict:
+    """Mapas id→nombre para el compare (doc 65) — mismos catálogos que el popup
+    de revisión (UDP, dominios, tablas/columnas referidas, proyectos/folders),
+    con fallback a los DOCS DEL PROPIO RANGO para entidades que ya no existen
+    publicadas (p.ej. una tabla referida por una relación y borrada después)."""
+    from app.features.domains import repository as dom_repo
+    from app.features.udp import repository as udp_repo
+
+    cols = {c for c, _ in composed}
+    res: dict = {"udp": {}, "domains": {}, "tables": {}, "columns": {},
+                 "projects": {}, "folders": {}}
+    if cols & {"canonical_tables", "canonical_columns", "subject_areas"}:
+        res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp()}
+    if "canonical_columns" in cols:
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+    entries = [(coll, entry.get("before"), entry.get("after"))
+               for (coll, _eid), entry in composed.items()]
+    tids, cids = diffdetail.collect_ref_ids(entries)
+
+    def _range_names(key: str, coll: str, ids: set[str]) -> None:
+        # Nombre desde los docs del rango cuando el publicado ya no lo tiene.
+        for (c, eid), entry in composed.items():
+            if c != coll or eid not in ids or eid in res[key]:
+                continue
+            doc = entry.get("after") or entry.get("before") or {}
+            nm = doc.get("physicalName") or doc.get("logicalName") or doc.get("name")
+            if nm:
+                res[key][eid] = nm
+
+    if tids:
+        docs = await repository.published("canonical_tables", {"_id": {"$in": sorted(tids)}})
+        res["tables"] = {d["id"]: d.get("physicalName") or d.get("logicalName") or d["id"]
+                         for d in docs}
+        _range_names("tables", "canonical_tables", tids)
+    if cids:
+        docs = await repository.published("canonical_columns", {"_id": {"$in": sorted(cids)}})
+        res["columns"] = {d["id"]: d.get("physicalName") or d.get("logicalName") or d["id"]
+                          for d in docs}
+        _range_names("columns", "canonical_columns", cids)
+    if cols & {"folders", "subject_areas"}:
+        res["projects"] = {d["id"]: d.get("name") or d["id"]
+                           for d in await repository.published("projects")}
+        _range_names("projects", "projects", {e for (c, e) in composed if c == "projects"})
+    if "subject_areas" in cols:
+        res["folders"] = {d["id"]: d.get("name") or d["id"]
+                          for d in await repository.published("folders")}
+        _range_names("folders", "folders", {e for (c, e) in composed if c == "folders"})
+    return res
+
+
+async def _compare_headers(from_id: str, to_id: str):
+    """Valida y NORMALIZA los extremos del compare al orden cronológico.
+    Devuelve (older, newer) o sentinel: None (no existe) · "same" (misma
+    versión en ambos extremos) · "not-applied" (una no está publicada)."""
+    a, b = await repository.get(from_id), await repository.get(to_id)
+    if not a or not b:
+        return None
+    if a["id"] == b["id"]:
+        return "same"
+    for cs in (a, b):
+        if cs.get("status") != "approved" or not cs.get("appliedAt"):
+            return "not-applied"
+    if str(a["appliedAt"]) > str(b["appliedAt"]):
+        a, b = b, a
+    return a, b
+
+
+async def _compare_composed(from_id: str, to_id: str):
+    """Rango aplicado (older, newer] COMPUESTO: (older, newer, span, composed,
+    faltantes) o el sentinel de `_compare_headers`. `span` = cabeceras de las
+    versiones del rango en orden cronológico (newer incluida)."""
+    norm = await _compare_headers(from_id, to_id)
+    if norm is None or isinstance(norm, str):
+        return norm
+    older, newer = norm
+    span = [v for v in await repository.applied_after(older["appliedAt"])
+            if str(v.get("appliedAt") or "") <= str(newer["appliedAt"])]
+    span.sort(key=lambda v: str(v.get("appliedAt") or ""))
+    if not any(v["id"] == newer["id"] for v in span):
+        # appliedAt idénticos entre versiones distintas (edge legacy): el
+        # extremo nuevo entra igual al rango.
+        span.append({"id": newer["id"], "appliedAt": newer.get("appliedAt"),
+                     "versionLabel": newer.get("versionLabel")})
+    composed, missing = compose_versions_range(
+        [await repository.changes_map(v["id"]) for v in span])
+    return older, newer, span, composed, missing
+
+
+async def compare_versions(from_id: str, to_id: str) -> dict | str | None:
+    """Diferencias NETAS entre dos versiones publicadas (doc 65): qué entidades
+    quedaron distintas entre el estado de `from` y el de `to`, con conteos por
+    colección. READ-ONLY: deriva del mismo ledger que alimenta historial y
+    rollback — no toca estado ni contratos existentes. `fromId`/`toId` aceptan
+    cualquier orden (se normaliza a cronológico)."""
+    got = await _compare_composed(from_id, to_id)
+    if got is None or isinstance(got, str):
+        return got
+    older, newer, span, composed, missing = got
+
+    def _hdr(cs: dict) -> dict:
+        return {"id": cs["id"], "versionLabel": cs.get("versionLabel"),
+                "title": cs.get("title"), "appliedAt": cs.get("appliedAt")}
+
+    buckets = compare_buckets(composed, await _compare_resolvers(composed))
+    counts = {"added": 0, "edited": 0, "deleted": 0}
+    for bucket in buckets.values():
+        for verb in counts:
+            counts[verb] += len(bucket[verb])
+    return {"from": _hdr(older), "to": _hdr(newer), "versionsSpanned": len(span),
+            "collections": buckets,
+            "counts": {**counts, "total": sum(counts.values())},
+            "unreconstructed": missing}
+
+
+async def compare_details(from_id: str, to_id: str,
+                          items: list[tuple[str, str]]) -> dict | str | None:
+    """Detalle de campos ANTES→DESPUÉS de entidades PUNTUALES del rango
+    comparado (doc 65) — mismo shape del popup doc 31 (el front reutiliza el
+    renderer). Bajo demanda por selección; entidades fuera del rango se OMITEN
+    de la respuesta (igual que diff_details con las ajenas al changeset)."""
+    got = await _compare_composed(from_id, to_id)
+    if got is None or isinstance(got, str):
+        return got
+    _older, _newer, _span, composed, _missing = got
+    seen: set[tuple[str, str]] = set()
+    wanted: list[tuple[str, str]] = []
+    for c, e in items:
+        if (c, e) in seen:
+            continue
+        seen.add((c, e))
+        if (c, e) in composed:
+            wanted.append((c, e))
+    res = await _compare_resolvers(composed)
+    out = []
+    for c, e in wanted:
+        entry = composed[(c, e)]
+        out.append(diffdetail.entity_detail(
+            c, e, {"op": entry.get("op"), "payload": entry.get("after"),
+                   "before": entry.get("before"), "beforeAt": "composed"}, None, res))
+    return {"items": out}
 
 
 # Los compat M-series /approve y /reject ya NO tienen funciones propias: el

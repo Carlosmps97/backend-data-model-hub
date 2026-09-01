@@ -105,3 +105,12 @@ catálogo completo aunque un valor no se use; niveles no-Entity/Attribute/Model
 ```bash
 .venv/bin/python -m pytest tests/erwin_migration -q
 ```
+
+
+## Catálogo FIJO de UDPs (doc 61 ronda 2 — 2026-08-30)
+
+Las definiciones UDP ya **no se derivan del XML**: `standard_udps.py` es el catálogo canónico
+(Table/Column/View/Model; "Tipo de Vista" [Regular default, Personalizada] es el único de View).
+`migrate` lo siembra completo SIEMPRE y solo asocia los VALORES del XML: match case/espacios-
+insensitive + `ALIASES` de typos conocidos → grafía canónica; sin match → default (key no escrita;
+muestra en `udp_values_unmatched` del reporte). `--keep-unused-udp-defs` quedó deprecado (no-op).

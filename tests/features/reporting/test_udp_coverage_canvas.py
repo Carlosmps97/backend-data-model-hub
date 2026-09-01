@@ -42,7 +42,8 @@ def test_udp_coverage_def_sin_level_no_500(monkeypatch):
     db = _FakeDb({"udp_definitions": _FakeColl(docs=defs),
                   "canonical_columns": _FakeColl(count=100),
                   "canonical_tables": _FakeColl(count=10),
-                  "subject_areas": _FakeColl(count=5)})
+                  "subject_areas": _FakeColl(count=5),
+                  "views": _FakeColl(count=0)})
     monkeypatch.setattr(views, "get_db", AsyncMock(return_value=db))
 
     async def _fake_pairs(coll):
@@ -62,7 +63,8 @@ def test_udp_coverage_nivel_canvas(monkeypatch):
     db = _FakeDb({"udp_definitions": _FakeColl(docs=defs),
                   "canonical_columns": _FakeColl(count=100),
                   "canonical_tables": _FakeColl(count=10),
-                  "subject_areas": _FakeColl(count=5)})
+                  "subject_areas": _FakeColl(count=5),
+                  "views": _FakeColl(count=0)})
     monkeypatch.setattr(views, "get_db", AsyncMock(return_value=db))
 
     async def _fake_pairs(coll):

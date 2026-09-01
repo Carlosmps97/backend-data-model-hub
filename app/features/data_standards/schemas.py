@@ -1,7 +1,9 @@
 """DTOs de Data Standards (apply/rollback)."""
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.core.datatypes import canonicalize_default_type
 
 
 class TermEdit(BaseModel):
@@ -19,6 +21,13 @@ class DomainEdit(BaseModel):
     namingTerm: str | None = None
     description: str | None = None
 
+    # Doc 62: misma homologación que ParentDomainBody — el apply de Standards
+    # es el otro camino de escritura de dominios.
+    @field_validator("defaultDataType")
+    @classmethod
+    def _canonicalize(cls, v: str) -> str:
+        return canonicalize_default_type(v)
+
 
 class NamingEdit(BaseModel):
     separator: str
@@ -29,7 +38,7 @@ class NamingEdit(BaseModel):
 class UdpEdit(BaseModel):
     id: str | None = None            # None = definición UDP nueva
     name: str
-    level: str = "column"            # Class: 'table' | 'column' | 'canvas'
+    level: str = "column"            # Class: 'table' | 'column' | 'canvas' | 'view'
     dataType: str = "string"         # string | number | boolean | date | list
     defaultValue: str | None = None
     allowedValues: list[str] = []    # para dataType='list' (enum)

@@ -367,7 +367,8 @@ async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
     docs = await db[COLL].find(
         {"_id": {"$in": sorted(set(cs_ids))}},
         {"versionLabel": 1, "title": 1, "owner": 1, "status": 1,
-         "appliedAt": 1, "reviewedBy": 1, "approvals": 1}).to_list(None)
+         "appliedAt": 1, "reviewedBy": 1, "approvals": 1,
+         "restoredFrom": 1}).to_list(None)
     out: dict[str, dict] = {}
     for d in docs:
         d = dict(d)

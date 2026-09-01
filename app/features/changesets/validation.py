@@ -24,6 +24,7 @@ from app.features.domains.models import ParentDomainDoc
 from app.features.projects.models import ProjectDoc, SubjectAreaDoc
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas.models import SchemaDoc
+from app.features.views.custom_sql import CustomSqlError, parse_custom_sql
 from app.features.views.models import ViewDoc
 
 # Colección versionada → modelo de documento (espeja VERSIONED del repository).
@@ -65,6 +66,16 @@ def payload_error(collection: str, entity_id: str, op: str | None, payload: dict
         # El id de la entidad es la KEY del cambio (no el del payload): se valida
         # el documento como quedaría publicado.
         model.model_validate({**(payload or {}), "id": entity_id})
+        # Doc 61: un customSql no parseable ES un payload inválido de vista —
+        # mismo choke point para PUT /changes, el bulk y el gate del apply.
+        if collection == "views":
+            sql = ((payload or {}).get("customSql") or "").strip()
+            if sql:
+                try:
+                    parse_custom_sql(sql)
+                except CustomSqlError as e:
+                    return (f"{collection}/{entity_id}: invalid custom SQL — "
+                            f"{e.message} (line {e.line}, col {e.col})")
         return None
     except ValidationError as exc:
         detail = "; ".join(

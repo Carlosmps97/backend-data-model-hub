@@ -2389,13 +2389,27 @@ curl -X POST http://localhost:8000/api/views \
 
 Respuesta: `201 Created`.
 
+`customSql` (doc 61, modo **Personalizada**): si viene NO vacío, el backend lo valida con sqlglot (dialecto `databricks`; un solo statement, raíz SELECT — `WITH … AS` y set-ops soportados —, anti-`SELECT *`, expresiones con alias) y **re-deriva** `customColumns` (no se confía en el cliente). Inválido → **422** `{ "detail": { "message", "line", "col" } }`. Vacío/ausente → modo Regular (`customSql=null`, `customColumns=[]`). El camino changeset valida igual al grabar el cambio (`payload_error`) y re-deriva en el apply.
+
 ### 6.3 PUT /api/views/{vid}
 
-Propósito: actualiza. **404** (`"Vista no encontrada."`) si no existe.
+Propósito: actualiza. **404** (`"Vista no encontrada."`) si no existe. Misma validación/derivación de `customSql` que el POST.
 
 ### 6.4 DELETE /api/views/{vid}
 
 Propósito: elimina. **404** si no existe. Respuesta: `{ "id": "<vid>" }`.
+
+### 6.5 POST /api/views/sql/parse *(doc 61)*
+
+Propósito: valida e interpreta el SQL custom **sin guardar** (botón Validate del sandbox de Query SQL del panel de vista). Body `{ "sql": "<script>" }`.
+
+Respuesta (`data`): `{ "columns": [{ "name", "expression"? }], "tables": ["schema.tabla", …] }` — `columns` = proyección del SELECT final; `tables` = tablas referenciadas reales (CTEs excluidos, para diagnóstico). Inválido → **422** `{ "detail": { "message", "line", "col" } }` (posiciones 1-based para el caret del editor).
+
+```bash
+curl -X POST http://localhost:8000/api/views/sql/parse \
+  -H "Content-Type: application/json" \
+  -d '{ "sql": "WITH b AS (SELECT id FROM core.t1) SELECT id AS codigo FROM b" }'
+```
 
 ---
 

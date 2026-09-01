@@ -31,12 +31,16 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
                                            "before": {"id": "t1", "physicalName": "VIEJO"},
                                            "payload": {"physicalName": "NUEVO"}}}},
     }
-    gets = {"v1": target, "draft1": {"id": "draft1", "title": "Rollback a v1"}}
+    gets = {"v1": target, "draft1": {"id": "draft1", "title": "Restore to v1"}}
     monkeypatch.setattr(service.repository, "get", AsyncMock(side_effect=lambda cid: gets.get(cid)))
     monkeypatch.setattr(service.repository, "applied_after", AsyncMock(return_value=after))
     monkeypatch.setattr(service.repository, "changes_map",
                         AsyncMock(side_effect=lambda cid, cols=None: changes_by_id.get(cid, {})))
-    monkeypatch.setattr(service.repository, "create", AsyncMock(return_value={"id": "draft1"}))
+    monkeypatch.setattr(service.repository, "list_summaries",
+                        AsyncMock(return_value=[{"versionLabel": "v1"}, {"versionLabel": "v2"},
+                                                {"versionLabel": "v3"}]))
+    create = AsyncMock(return_value={"id": "draft1"})
+    monkeypatch.setattr(service.repository, "create", create)
     sets: list[tuple] = []
     monkeypatch.setattr(service.repository, "set_change",
                         AsyncMock(side_effect=lambda did, coll, eid, op, payload: sets.append((coll, eid, op))))
@@ -46,6 +50,13 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
     assert ops[("canonical_tables", "t3")] == "delete"    # creada en v3 → se borra
     assert ops[("canonical_tables", "t1")] == "upsert"     # modificada en v2 → se restaura
     assert res["id"] == "draft1"
+    # Doc 65: el draft nace con etiqueta autoincremental, título en inglés y la
+    # PROCEDENCIA estructurada de la restauración (chip "Restored from vN").
+    assert create.await_args.args[0] == "Restore to v1"
+    extra = create.await_args.kwargs["extra"]
+    assert extra["versionLabel"] == "v4"
+    assert extra["restoredFrom"] == {"csId": "v1", "versionLabel": "v1",
+                                     "appliedAt": "2026-01-01"}
 
 
 def test_rollback_version_actual_es_empty(monkeypatch):

@@ -22,6 +22,15 @@ class DiffDetailsBody(BaseModel):
     items: list[DiffDetailItem] = Field(min_length=1, max_length=200)
 
 
+class CompareDetailsBody(BaseModel):
+    """Body de `POST /api/versions/compare/details` (doc 65): detalle de campos
+    antes→después de entidades puntuales del rango comparado. Mismo techo por
+    lote que el popup de revisión (el front trocea)."""
+    fromId: str
+    toId: str
+    items: list[DiffDetailItem] = Field(min_length=1, max_length=200)
+
+
 class SnapshotBody(BaseModel):
     """Crea un draft (working copy) a partir del estado publicado.
     `title`/`projectIds` opcionales; `versionLabel` se autogenera si no viene."""
