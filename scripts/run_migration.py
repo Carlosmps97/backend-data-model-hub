@@ -249,7 +249,7 @@ def oneshot_steps(plans: list[dict], *, force: bool, base_title: str,
     steps += [
         {"name": "reset DESTRUCTIVO (borra todo el schema)", "klass": "abort",
          "cmd": [_PY, "-m", "scripts.reset_for_migration", "--apply"]},
-        {"name": "create_admin (4 roles de caja + admin/admin)", "klass": "abort",
+        {"name": "create_admin (4 roles + admin + whitelist Modeladores)", "klass": "abort",
          "cmd": [_PY, "scripts/create_admin.py"]},
     ]
     for p in plans:

@@ -11,8 +11,9 @@
 # MAGIC Dos modos (widget `modo`):
 # MAGIC - **one-shot** (DESTRUCTIVO): baja TODOS los `.xml` de la carpeta raiz
 # MAGIC   (recursivo, espejando subcarpetas) y deja la plataforma como un primer
-# MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja +
-# MAGIC   `admin`/`admin`, migra archivo por archivo (SECUENCIAL a proposito),
+# MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja, la
+# MAGIC   cuenta local `admin` y la whitelist SSO de Modeladores (doc 75), migra
+# MAGIC   archivo por archivo (SECUENCIAL a proposito),
 # MAGIC   siembra las data functions, hace el layout y marca la version base v1
 # MAGIC   de cada proyecto. El proyecto destino de cada archivo lo decide el
 # MAGIC   MANIFIESTO `projects.json` en la carpeta raiz (doc 75: p. ej. todos los
@@ -382,7 +383,10 @@ else:
 
 # MAGIC %md
 # MAGIC ## 9. Cierre
-# MAGIC Tras un one-shot OK la web ya abre con `admin` / `admin` (cambiar la clave
-# MAGIC al entrar): produccion v1 marcada, data functions sembradas y layout
-# MAGIC aplicado. Los usuarios reales se crean desde Admin (la plataforma tiene
-# MAGIC su propio padron, no hereda los del workspace).
+# MAGIC Tras un one-shot OK la plataforma ya abre: la cuenta local `admin` entra
+# MAGIC con la contraseña definida en `scripts/create_admin.py` (cambiarla al
+# MAGIC entrar) y los Modeladores declarados en `MODELER_EMAILS` entran por el
+# MAGIC SSO de Databricks (su padron ya esta en la whitelist). Produccion v1
+# MAGIC marcada, data functions sembradas y layout aplicado. Cualquier otro
+# MAGIC usuario se crea desde Admin (la plataforma tiene su propio padron, no
+# MAGIC hereda los del workspace).

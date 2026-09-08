@@ -99,7 +99,7 @@ proyecto va cada archivo ANTES de tocar la BD:
 **Secuencia manual equivalente** (lo que el orquestador hace por dentro; útil
 para diagnosticar o para el notebook corporativo):
 ```
-0)    create_admin                                        # admin/admin + los 4 roles (idempotente)
+0)    create_admin                                        # cuenta admin + 4 roles + whitelist de Modeladores (idempotente)
 1..N) por CADA proyecto y CADA uno de sus XML:
       quality → crosscheck --project "P" → migrate --project "P" [--description "…"] (dry-run) → --apply
 Al final, por CADA proyecto:

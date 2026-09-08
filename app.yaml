@@ -12,7 +12,13 @@
 #
 # uvicorn toma host y puerto de UVICORN_HOST/UVICORN_PORT, que el runtime de
 # Apps inyecta solo — no hace falta pasarlos.
-command: ["uvicorn", "app.main:app"]
+#
+# --workers 2: la instancia Medium da hasta 2 vCPU y un solo proceso usaba
+# ~1. Con 2 procesos se aprovechan ambos — el costo DBU depende del Instance
+# size, NO del nº de workers. Cada worker abre su propio pool de Lakebase, asi
+# que conexiones reales = workers x pool.max_size (2 x 15 = 30; pool.py). El
+# DDL de arranque se serializa entre workers con un advisory lock (client.py).
+command: ["uvicorn", "app.main:app", "--workers", "2"]
 
 env:
   # Formato de los logs de la app — ej. json

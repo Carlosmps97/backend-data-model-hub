@@ -380,7 +380,7 @@ La salida es correr la carga de data **DESDE un cluster del mismo workspace** co
 
 La guía completa del kit es [migracion-erwin.md](migracion-erwin.md); esta es la secuencia (camino A, recomendado: re-migrar los XML de Erwin). Todo se corre desde la raíz del repo con el `.venv` activo y el `.env` apuntando al workspace NUEVO (o desde el notebook de §4.2):
 
-1. `scripts/create_admin.py` — usuario `admin/admin` + los 4 roles (idempotente).
+1. `scripts/create_admin.py` — cuenta local `admin` (contraseña declarada en el script) + los 4 roles + la whitelist SSO de Modeladores (idempotente).
 2. Por CADA XML de la familia, en orden: `quality` (gate 1, el archivo en frío) → `crosscheck` (gate 2, contra la BD y entre archivos) → `migrate --project "Modelo de Datos DDV_FISICO"` en dry-run → `--apply`.
 3. Al final de TODOS los archivos: `arrange_all.py --project "Modelo de Datos DDV_FISICO"` (requiere node + elkjs del repo front) → `audit_data_consistency.py` (esperado: 0 fixables).
 4. `seed_ddl_export_rules.py` (dry-run → `--apply`) — ruleset base del DDL Export; desde 2026-07-30 auto-crea las dos defs UDP que el kit omite por `usedBy=0` ("Tipo de Vista" y "Frecuencia Vacuum").

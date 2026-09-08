@@ -311,7 +311,7 @@ Con la app en modo desarrollo (`REQUIRE_AUTH` sin definir), la documentación in
 Bootstrap de datos (scripts en `scripts/`):
 
 ```bash
-# Crea/actualiza el usuario admin/admin y los roles (idempotente, no borra nada)
+# Crea/actualiza la cuenta admin, los roles y la whitelist de Modeladores (idempotente, no borra nada)
 .venv/bin/python scripts/create_admin.py
 
 # Carga un modelo desde un XML de Erwin a Lakebase (kit multi-archivo)

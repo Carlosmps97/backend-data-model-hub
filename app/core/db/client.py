@@ -21,6 +21,10 @@ log = logging.getLogger(__name__)
 
 _pg_db: Any | None = None
 
+# Clave fija del advisory lock que serializa el DDL de arranque entre
+# workers uvicorn (procesos distintos). Cualquier bigint estable sirve.
+_STARTUP_DDL_LOCK = 528491
+
 
 async def connect() -> None:
     """Abre la conexión a Lakebase y asegura tablas/índices.
@@ -35,8 +39,19 @@ async def connect() -> None:
     pool = await create_pool()
     db = LakebaseDatabase(pool, settings.LAKEBASE_PGSCHEMA)
     try:
-        await db.ensure_base()
-        await ensure_indexes(db)
+        # Con varios workers uvicorn (procesos separados) cada uno corre este
+        # arranque a la vez; el _ddl_lock del adaptador es POR proceso y no
+        # serializa entre ellos. Un advisory lock de Postgres (global al
+        # servidor) deja que solo UN worker corra el DDL de arranque a la vez
+        # — el resto espera y encuentra todo creado (IF NOT EXISTS = no-op).
+        # Evita la carrera de CREATE INDEX/TABLE concurrente del 1er arranque.
+        async with pool.acquire() as ddl_conn:
+            await ddl_conn.execute("SELECT pg_advisory_lock($1)", _STARTUP_DDL_LOCK)
+            try:
+                await db.ensure_base()
+                await ensure_indexes(db)
+            finally:
+                await ddl_conn.execute("SELECT pg_advisory_unlock($1)", _STARTUP_DDL_LOCK)
     except Exception:
         # Sin esto, cada reintento del lifespan filtraba un pool a medio
         # abrir cuando el DDL de arranque fallaba (visto en Apps).

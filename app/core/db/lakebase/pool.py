@@ -67,7 +67,7 @@ async def _open_pool(host: str, direct_tls: bool) -> asyncpg.Pool:
         password=_password,
         ssl=_ssl_arg(direct_tls),
         min_size=0,
-        max_size=10,
+        max_size=15,  # × nº de workers uvicorn = conexiones reales (ver app.yaml)
         max_inactive_connection_lifetime=300.0,
         timeout=75.0,  # cubre el wake del compute suspendido
         statement_cache_size=256,
