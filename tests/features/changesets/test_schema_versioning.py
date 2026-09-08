@@ -29,7 +29,7 @@ def test_schemas_esta_en_versioned_antes_de_tablas():
 
 
 def test_payload_schema_valido_pasa():
-    assert payload_error("schemas", "s1", "upsert", {"name": "core"}) is None
+    assert payload_error("schemas", "s1", "upsert", {"projectId": "p1", "name": "core"}) is None
 
 
 def test_payload_schema_sin_name_falla():
@@ -57,7 +57,7 @@ def test_publish_duplicates_detecta_esquema_duplicado(monkeypatch):
         return {"schemas": [{"id": "s1", "name": "core"}]}.get(collection, [])
     monkeypatch.setattr(service.repository, "published", _pub)
     changes = {"schemas": {"s9": {"op": "upsert", "payload": {"name": "CORE"}}}}
-    assert asyncio.run(service._publish_duplicates(changes)) == ["Schema CORE already exists"]
+    assert asyncio.run(service._publish_duplicates("p1", changes)) == ["Schema CORE already exists"]
 
 
 # ── Overlay por esquema (puro) + guard de delete-en-uso ───────────────────
@@ -87,7 +87,7 @@ def test_publish_schema_deletes_detecta_uso(monkeypatch):
         }.get(collection, [])
     monkeypatch.setattr(service.repository, "published", _pub)
     changes = {"schemas": {"s1": {"op": "delete"}}}
-    errors = asyncio.run(service._publish_schema_deletes(changes))
+    errors = asyncio.run(service._publish_schema_deletes("p1", changes))
     assert len(errors) == 1 and "core" in errors[0]
 
 
@@ -105,7 +105,7 @@ def test_publish_schema_deletes_ok_si_el_draft_vacia_el_esquema(monkeypatch):
         "schemas": {"s1": {"op": "delete"}},
         "canonical_tables": {"t1": {"op": "delete"}},
     }
-    assert asyncio.run(service._publish_schema_deletes(changes)) == []
+    assert asyncio.run(service._publish_schema_deletes("p1", changes)) == []
 
 
 def test_apply_and_finalize_revierte_claim_si_esquema_en_uso(monkeypatch):
@@ -133,7 +133,7 @@ def test_apply_and_finalize_revierte_claim_si_esquema_en_uso(monkeypatch):
 
     with pytest.raises(SchemaInUseError):
         asyncio.run(service._apply_and_finalize(
-            "c1", {"status": "approved"}, submitted_at="2026-01-01T00:00:00+00:00"))
+            {"id": "c1", "projectId": "p1"}, {"status": "approved"}, submitted_at="2026-01-01T00:00:00+00:00"))
 
     assert ("submitted", "approved") in transitions   # claim
     assert ("approved", "submitted") in transitions   # revert
@@ -145,6 +145,8 @@ def test_apply_and_finalize_revierte_claim_si_esquema_en_uso(monkeypatch):
 
 def _mock_rename_env(monkeypatch, *, tables: list[dict], views: list[dict],
                      changes: dict | None = None):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={
+        "id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core", "description": None}]))
     recorded: list[tuple] = []
@@ -188,6 +190,7 @@ def test_rename_schema_nombre_invalido_422(monkeypatch):
 
 
 def test_rename_schema_inexistente_devuelve_none(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[]))
     assert asyncio.run(service.rename_schema("c1", "u1", "sX", "core_v2")) is None
 
@@ -196,6 +199,7 @@ def test_rename_schema_inexistente_devuelve_none(monkeypatch):
 
 
 def test_schema_impact_cuenta_tablas_vistas_y_canvases(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core", "description": None}]))
 
@@ -221,11 +225,13 @@ def test_schema_impact_cuenta_tablas_vistas_y_canvases(monkeypatch):
 
 
 def test_schema_impact_esquema_inexistente_none(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[]))
     assert asyncio.run(service.schema_impact("c1", "sX")) is None
 
 
 def test_schema_impact_respeta_overlay_del_draft(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     # el draft borra t1 → el impacto NO la cuenta (ni a su canvas)
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core", "description": None}]))
@@ -250,6 +256,7 @@ def test_schema_impact_respeta_overlay_del_draft(monkeypatch):
 
 
 def test_delete_schema_in_changeset_en_uso(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core", "description": None}]))
 
@@ -264,6 +271,7 @@ def test_delete_schema_in_changeset_en_uso(monkeypatch):
 
 
 def test_delete_schema_in_changeset_vacio_registra_delete(monkeypatch):
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core", "description": None}]))
 
@@ -280,6 +288,8 @@ def test_delete_schema_in_changeset_vacio_registra_delete(monkeypatch):
 
 def test_rename_schema_conserva_kind(monkeypatch):
     # el upsert del rename espeja el doc EFECTIVO completo: kind (doc 44) viaja
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={
+        "id": "c1", "projectId": "p1", "status": "draft", "owner": "u1"}))
     monkeypatch.setattr(service, "effective", AsyncMock(return_value=[
         {"id": "s1", "name": "core_vu", "description": None, "kind": "views"}]))
     recorded: list[tuple] = []

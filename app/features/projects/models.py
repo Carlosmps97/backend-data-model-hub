@@ -10,6 +10,8 @@ from app.core.models import DOC_CONFIG
 
 
 class ProjectDoc(BaseModel):
+    """Raíz del alcance (doc 75): no lleva `projectId`. Se crea directo; se
+    renombra/describe/borra por draft del propio proyecto (D5)."""
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -40,3 +42,9 @@ class SubjectAreaDoc(BaseModel):
     # level='canvas'. Aditivo con default (invariante §2.6: declarado acá Y en
     # el TS SubjectArea, o el dato desaparece al recargar).
     udpValues: dict[str, str] = Field(default_factory=dict)
+    # Doc 70 §2: membresía EXPLÍCITA de vistas en el canvas (paridad con
+    # `tableIds`; la posición ya vivía en `layout[viewId]`). None = canvas
+    # LEGACY que nunca materializó su lista: rige la regla vieja del doc 10 D3
+    # (`showOnCanvas` ∧ fuentes ∩ tableIds). Lista (aun vacía) = sólo esas
+    # vistas. Aditivo (invariante §2.6): declarado acá Y en el TS SubjectArea.
+    viewIds: list[str] | None = None

@@ -189,7 +189,7 @@ def _mock_apply(monkeypatch, before_rules):
         monkeypatch.setattr(s.rules_repo, fn, AsyncMock())
     monkeypatch.setattr(s, "current_snapshot", AsyncMock(return_value={}))
     monkeypatch.setattr(s.repository, "insert_version_next_seq",
-                        AsyncMock(side_effect=lambda f: {**f, "seq": 7, "label": "v7", "id": "v7"}))
+                        AsyncMock(side_effect=lambda pid, f: {**f, "seq": 7, "label": "v7", "id": "v7"}))
     monkeypatch.setattr(s, "audit", AsyncMock())
     return s
 
@@ -198,10 +198,10 @@ def test_apply_borrar_generador_fuente_409(monkeypatch):
     s = _mock_apply(monkeypatch, [dict(TABLA_REJ), dict(VISTA_REJ)])
     from app.features.data_standards.schemas import ApplyBody
     with pytest.raises(HTTPException) as e:
-        asyncio.run(s.apply("mr", ApplyBody(rulesDelete=["g1"])))
+        asyncio.run(s.apply("mr", "p1", ApplyBody(rulesDelete=["g1"])))
     assert e.value.status_code == 409 and "vista_rechazos" in e.value.detail
     # borrar la cascada COMPLETA sí procede
-    v = asyncio.run(s.apply("mr", ApplyBody(rulesDelete=["g1", "g2"])))
+    v = asyncio.run(s.apply("mr", "p1", ApplyBody(rulesDelete=["g1", "g2"])))
     assert v["seq"] == 7
 
 
@@ -213,5 +213,58 @@ def test_apply_ciclo_en_el_batch_400(monkeypatch):
     b = DdlRuleEdit(name="gen_b", kind="generator", sourceArtifact="ddl.x",
                     condition="true", action={"emit": {"artifact": "ddl.y", "type": "table"}})
     with pytest.raises(HTTPException) as e:
-        asyncio.run(s.apply("mr", ApplyBody(rulesUpsert=[a, b])))
+        asyncio.run(s.apply("mr", "p1", ApplyBody(rulesUpsert=[a, b])))
     assert e.value.status_code == 400 and "cycle" in e.value.detail
+
+
+# ── Doc 71 H3/H5 · reglas sobre la tabla GENERADA + añadidas homónimas ────
+
+TAGS_REJ = {
+    "id": "r9", "name": "tags_rej", "kind": "rule", "target": "column",
+    "condition": 'columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\'',
+    "action": {"tags": {"clasificacion_dato": "{udp:Clasificacion del Dato}"}},
+    "appliesTo": ["ddl.tabla_rej"], "priority": 50, "enabled": True, "validationState": "valid",
+}
+PROPS_REJ = {
+    "id": "r10", "name": "props_rej", "kind": "rule", "target": "table", "condition": "",
+    "action": {"tblproperties": {"quality": "rejected"}},
+    "appliesTo": ["ddl.tabla_rej"], "priority": 40, "enabled": True, "validationState": "valid",
+}
+
+
+def test_reglas_de_tags_y_tblproperties_aplican_a_la_tabla_generada():
+    """Una regla que NOMBRA el artefacto generado (appliesTo ddl.tabla_rej) lo
+    decora: TBLPROPERTIES dentro de su CREATE y tags aparte, con el mismo funnel
+    de identificadores; la física NO se toca (la regla no la nombra)."""
+    stmts, log = g.run_generators([TABLA_REJ, TAGS_REJ, PROPS_REJ], TABLE, COLS, BASE, COLS_CTX, {})
+    assert [s["artifact"] for s in stmts] == ["ddl.tabla_rej", "ddl.tabla_rej.tags"]
+    rej = stmts[0]["sql"]
+    assert rej.endswith("USING delta\nTBLPROPERTIES (\n  'quality' = 'rejected'\n);")
+    assert "`cod_cliente`  STRING" in rej                      # el CREATE conserva su formato
+    assert stmts[1]["sql"] == ("ALTER TABLE `core`.`tbl_cliente_rej` ALTER COLUMN `nom_cliente` "
+                               "SET TAGS ('clasificacion_dato' = 'DAC-NOMBRE');")
+    assert any(e.get("rule") == "tags_rej" and e["status"] == "applied" for e in log)
+
+
+def test_tags_sobre_generada_respetan_casing_del_export():
+    stmts, _ = g.run_generators([TABLA_REJ, TAGS_REJ], TABLE, COLS, BASE, COLS_CTX, {},
+                                {"identifierCase": "upper"})
+    assert stmts[1]["sql"].startswith("ALTER TABLE `CORE`.`TBL_CLIENTE_REJ` ALTER COLUMN `NOM_CLIENTE` SET TAGS (")
+
+
+def test_columna_anadida_homonima_reemplaza_a_la_heredada():
+    gen = {**TABLA_REJ, "action": {"emit": {**TABLA_REJ["action"]["emit"],
+                                            "add_columns": [{"name": "cod_cliente", "type": "BIGINT"},
+                                                            {"name": "", "type": "STRING"}]}}}
+    stmts, _ = g.run_generators([gen], TABLE, COLS, BASE, COLS_CTX, {})
+    sql = stmts[0]["sql"]
+    assert sql.count("`cod_cliente`") == 1 and "`cod_cliente`  BIGINT" in sql   # una sola definición
+    assert "``" not in sql                                                       # la vacía se ignora
+
+
+def test_artifact_cols_ctx_hereda_udp_y_tipo_del_artefacto():
+    art = {"columns": [{"name": "nom_cliente", "type": "STRING"}, {"name": "rej_motivo", "type": "STRING"}]}
+    ctx = g.artifact_cols_ctx(art, COLS_CTX)
+    assert list(ctx) == ["nom_cliente", "rej_motivo"]
+    assert ctx["nom_cliente"]["udp"] == {"Clasificacion del Dato": "DAC-NOMBRE"}
+    assert ctx["rej_motivo"]["udp"] == {} and ctx["rej_motivo"]["tipo"] == "STRING"

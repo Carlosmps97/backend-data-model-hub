@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pymongo import ReturnDocument
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 from .models import ParentDomainDoc
 
@@ -26,16 +27,18 @@ def _to_doc(doc: dict) -> dict:
     return doc
 
 
-async def list_domains() -> list[dict]:
+async def list_domains(project_id: str) -> list[dict]:
+    """Dominios activos DEL PROYECTO (doc 75 D3)."""
     db = await get_db()
-    docs = await db[COLL].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs = await db[COLL].find(scoped(project_id, {"flgactive": {"$ne": False}})).to_list(None)
     docs.sort(key=lambda d: (d.get("name") or "").lower())
     return [ParentDomainDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
 
-async def create_domain(data: dict) -> dict:
+async def create_domain(project_id: str, data: dict) -> dict:
     db = await get_db()
-    d = ParentDomainDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})
+    d = ParentDomainDoc.model_validate({**data, "projectId": project_id,
+                                        "id": data.get("id") or str(uuid.uuid4())})
     payload = d.model_dump()
     await db[COLL].insert_one(
         {"_id": d.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
@@ -71,6 +74,15 @@ async def update_domain(domain_id: str, data: dict, cascade: bool = True) -> dic
              "dataType": old_type, "flgactive": {"$ne": False}},
             {"$set": {"dataType": new_type, "updatedAt": _now()}},
         )
+    # Doc 69: cascada de la faceta LÓGICA con su propio override.
+    old_logical = old.get("logicalDataType")
+    new_logical = data.get("logicalDataType")
+    if cascade and new_logical is not None and new_logical != old_logical:
+        await db[COLUMNS].update_many(
+            {"parentDomainId": domain_id, "logicalTypeOverridden": {"$ne": True},
+             "logicalDataType": old_logical, "flgactive": {"$ne": False}},
+            {"$set": {"logicalDataType": new_logical, "updatedAt": _now()}},
+        )
     return ParentDomainDoc.model_validate(_to_doc(res)).model_dump()
 
 
@@ -101,6 +113,23 @@ async def propagate_type(cascade_query: dict, data_type: str) -> int:
     res = await db[COLUMNS].update_many(
         cascade_query, {"$set": {"dataType": data_type, "updatedAt": _now()}}
     )
+    return res.modified_count
+
+
+async def get_domain_types(domain_id: str) -> tuple[str | None, str | None]:
+    """(`defaultDataType` físico, `logicalDataType`) ACTUALES del dominio;
+    (None, None) si no existe (doc 69)."""
+    db = await get_db()
+    d = await db[COLL].find_one({"_id": domain_id, "flgactive": {"$ne": False}},
+                                {"defaultDataType": 1, "logicalDataType": 1})
+    return (d.get("defaultDataType"), d.get("logicalDataType")) if d else (None, None)
+
+
+async def propagate_field(cascade_query: dict, field: str, value: str) -> int:
+    """Aplica `value` al campo `field` de las columnas que matchean (faceta
+    lógica: doc 69). Update directo. Devuelve el nº actualizado."""
+    db = await get_db()
+    res = await db[COLUMNS].update_many(cascade_query, {"$set": {field: value, "updatedAt": _now()}})
     return res.modified_count
 
 

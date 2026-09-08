@@ -3,25 +3,26 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.features.auth.deps import write_guard
-
 from app.core.api.envelope import ok
+from app.features.auth.deps import write_guard
+from app.features.projects.deps import alive_project
 
 from . import service
 from .schemas import ParentDomainBody
 
-router = APIRouter(prefix="/api/domains", tags=["domains"],
-                   dependencies=[Depends(write_guard("standards.edit"))])
+# Doc 75 D3/D4: dominios POR PROYECTO — prefijo `/api/projects/{project_id}/domains`.
+router = APIRouter(prefix="/api/projects/{project_id}/domains", tags=["domains"],
+                   dependencies=[Depends(write_guard("standards.edit")), Depends(alive_project)])
 
 
 @router.get("")
-async def list_domains():
-    return ok(await service.list_domains())
+async def list_domains(project_id: str):
+    return ok(await service.list_domains(project_id))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_domain(body: ParentDomainBody):
-    return ok(await service.create_domain(body))
+async def create_domain(project_id: str, body: ParentDomainBody):
+    return ok(await service.create_domain(project_id, body))
 
 
 @router.put("/{domain_id}")

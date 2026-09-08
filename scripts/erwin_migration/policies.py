@@ -9,18 +9,23 @@ Reglas aprobadas:
     se DESCARTAN (owner 2026-07-24).
   - Anotaciones de diagrama: se descartan.
   - Índices (Key_Group IF*): NO se migran (pendiente decidir feature web).
-  - UDP: Entity→'table', Attribute→'column', Model→'canvas'; el resto de
-    niveles Erwin (View, Key_Group, Relationship, Hive_Database) se omite.
-    Las defs Logical/Physical con el mismo nombre se COLAPSAN en una sola
-    (si un objeto tiene valor en ambas, gana la Physical).
+  - UDP: Entity→'table', Attribute→'column', Model→'canvas', View→'view'; el
+    resto de niveles Erwin (Key_Group, Relationship, Hive_Database) se omite.
+    Doc 69: las defs Logical/Physical con el mismo nombre son defs DISTINTAS
+    de plataforma (clave `level|view|nombre`) — cada faceta conserva su valor
+    (antes se colapsaban y la Physical pisaba la Logical).
   - Glosario: scope='column', wordType=None (defaults de plataforma).
   - Cardinalidad del lado PADRE: del Null_Option_Type de la relación
     ("100" nulls allowed → 0..1; "101"/otro → exactamente 1) — 2026-07-17.
+  - Orden ÚNICO de columnas (doc 74, owner 2026-09-07): la plataforma maneja
+    UN solo orden (`ordinal`, el mismo en lógico y físico). La migración lo
+    hereda como «físico normal»: llaves primarias primero (en el orden de la
+    llave) y el resto en el Column order de Erwin (`column_order`).
   - Partición (v2, owner 2026-07-24, doc 32b R6): TODA columna con UDP
     "Particion" = PART_nn se marca `isPartition`; el orden EFECTIVO es el
-    orden físico (lo que el DDL emite). Correlativos duplicados o en desorden
-    se entienden REASIGNADOS por orden físico y se reportan; el valor UDP
-    queda visible tal cual llegó.
+    orden de columnas (lo que el DDL emite). Correlativos duplicados o en
+    desorden se entienden REASIGNADOS por ese orden y se reportan; el valor
+    UDP queda visible tal cual llegó.
   - Multi-archivo (doc 32b, owner 2026-07-24): un modelo Erwin puede venir
     partido en ~15 archivos. La identidad cross-archivo es la CLAVE NATURAL
     (schema+nombre); en conflicto de versiones gana la de MÁS USO
@@ -48,6 +53,13 @@ UDP_LEVEL_MAP = {"Entity": "table", "Attribute": "column", "Model": "canvas",
 def platform_id(erwin_long_id: str) -> str:
     """Id determinista de plataforma para un Long_Id de Erwin."""
     return str(uuid.uuid5(_NS, erwin_long_id))
+
+
+def project_scoped_id(project_id: str, long_id: str) -> str:
+    """Id de plataforma NAMESPACEADO por proyecto (doc 75 D11): el mismo GUID de
+    Erwin en dos proyectos son dos documentos; dentro del proyecto sigue siendo
+    determinista (idempotencia y adopción por archivo)."""
+    return platform_id(f"{project_id}|{long_id}")
 
 
 def schema_or_default(schema: str | None) -> str:
@@ -161,8 +173,9 @@ def map_parent_cardinality(null_option: str) -> str:
 
 # ── Partición nativa desde el UDP de Erwin (convención DDV: PART_01, PART_02…) ─
 
-# Clave COLAPSADA de la def UDP que Erwin usa para particiones (nivel columna).
-PARTITION_UDP_KEY = "column|Particion"
+# Clave de la def UDP que Erwin usa para particiones (columna, faceta física;
+# doc 69: `level|view|nombre`, ver `udp_key`).
+PARTITION_UDP_KEY = "column|physical|Particion"
 _PARTITION_RE = re.compile(r"^PART[_-]?(\d+)$", re.IGNORECASE)
 
 
@@ -176,12 +189,13 @@ def partition_correlative(value: str | None) -> int | None:
 def partition_marks(vals: list[tuple[str, int]]) -> tuple[set[str], str | None]:
     """Qué columnas de una tabla marcar `isPartition` a partir de sus UDP.
 
-    `vals` = [(attr_id, correlativo)] EN ORDEN FÍSICO. Política v2 (owner
-    2026-07-24, doc 32b R6): se marcan TODAS las columnas PART_nn — el orden
-    EFECTIVO de la partición es el físico, que es lo que el DDL de la
-    plataforma emite. Si los correlativos vienen duplicados o en desorden se
-    entienden REASIGNADOS por orden físico: se marca igual y se devuelve el
-    motivo para el reporte (el valor UDP original no se toca).
+    `vals` = [(attr_id, correlativo)] EN EL ORDEN DE COLUMNAS de la plataforma
+    (`column_order`). Política v2 (owner 2026-07-24, doc 32b R6): se marcan
+    TODAS las columnas PART_nn — el orden EFECTIVO de la partición es el de
+    las columnas, que es lo que el DDL de la plataforma emite. Si los
+    correlativos vienen duplicados o en desorden se entienden REASIGNADOS por
+    ese orden: se marca igual y se devuelve el motivo para el reporte (el
+    valor UDP original no se toca).
 
     Devuelve (ids_a_marcar, motivo_de_reasignación | None)."""
     if not vals:
@@ -191,11 +205,26 @@ def partition_marks(vals: list[tuple[str, int]]) -> tuple[set[str], str | None]:
     if len(nums) != len(set(nums)):
         dup = sorted({n for n in nums if nums.count(n) > 1})
         return ids, (f"correlativo duplicado (PART_{dup[0]:02d} aparece "
-                     f"{nums.count(dup[0])} veces) → reasignado por orden físico")
+                     f"{nums.count(dup[0])} veces) → reasignado por orden de columnas")
     if nums != sorted(nums):
-        return ids, ("orden por correlativo ≠ orden físico "
-                     f"(correlativos leídos: {nums}) → reasignado por orden físico")
+        return ids, ("orden por correlativo ≠ orden de columnas "
+                     f"(correlativos leídos: {nums}) → reasignado por orden de columnas")
     return ids, None
+
+
+def column_order(attrs: list, pk_attr_ids: set[str], pk_attr_order: list[str]) -> list:
+    """Orden ÚNICO de columnas de la plataforma (doc 74): las llaves primarias
+    primero, en el orden de la llave (miembros del Key_Group PK; una PK sin
+    posición va después de las ordenadas), y luego el resto en el Column order
+    de Erwin (`ErwinAttribute.column_order`, que ya trae la cadena
+    Columns_Order_Ref_Array → Attributes_Order_Ref_Array → Physical_Order).
+    Empates → `Physical_Order`. Devuelve una lista NUEVA; `ordinal` = índice."""
+    pk_pos = {aid: i for i, aid in enumerate(pk_attr_order)}
+    tail = len(pk_attr_order)
+    return sorted(attrs, key=lambda a: (
+        0 if a.id in pk_attr_ids else 1,
+        pk_pos.get(a.id, tail) if a.id in pk_attr_ids else 0,
+        a.column_order, a.order))
 
 
 def udp_datatype(code: str) -> str:
@@ -203,58 +232,53 @@ def udp_datatype(code: str) -> str:
     return "list" if code == "6" else "string"
 
 
-def collapse_udp_defs(defs: dict) -> dict[str, dict]:
-    """Colapsa defs Logical/Physical homónimas por (nivel plataforma, nombre).
+def udp_key(level: str, view: str, name: str) -> str:
+    """Clave de plataforma de una def UDP: `level|view|nombre` (doc 69)."""
+    return f"{level}|{view}|{name}"
 
-    Devuelve {clave: {"name", "level", "dataType", "default", "allowed_values",
-    "erwin_ids", "physical_ids"}} solo para niveles soportados. `erwin_ids` = todas las
-    defs Erwin que caen en esta def de plataforma; `physical_ids` = las de
-    vista Physical (sus valores ganan en conflicto).
-    """
+
+def udp_defs_by_view(defs: dict) -> dict[str, dict]:
+    """UNA def de plataforma por (nivel, faceta, nombre) — doc 69: las defs
+    `Entity.Logical.X` y `Entity.Physical.X` ya NO se colapsan (antes «Physical
+    pisaba Logical» y las solo-lógicas como «Atributo Cross» se perdían).
+    View/Model son siempre físicas (Erwin no define UDPs lógicos ahí).
+
+    Devuelve {clave: {"name", "level", "view", "dataType", "default",
+    "allowed_values", "erwin_ids"}} solo para niveles soportados."""
     out: dict[str, dict] = {}
     for d in defs.values():
         level = UDP_LEVEL_MAP.get(d.owner_class)
         if not level:
             continue
-        key = f"{level}|{d.short_name}"
+        view = "logical" if (d.view_mode == "Logical" and level in ("table", "column")) else "physical"
+        key = udp_key(level, view, d.short_name)
         entry = out.setdefault(key, {
-            "name": d.short_name, "level": level,
+            "name": d.short_name, "level": level, "view": view,
             "dataType": udp_datatype(d.data_type_code),
             "default": d.default or None,
-            "allowed_values": [],          # lista explícita (unión, orden Erwin)
-            "erwin_ids": set(), "physical_ids": set(),
+            "allowed_values": [],          # lista explícita (orden Erwin)
+            "erwin_ids": set(),
         })
         entry["erwin_ids"].add(d.id)
-        if d.view_mode == "Physical":
-            entry["physical_ids"].add(d.id)
         if udp_datatype(d.data_type_code) == "list":
             entry["dataType"] = "list"
         if not entry["default"] and d.default:
             entry["default"] = d.default
-        for v in d.allowed_values:          # unión de las listas Logical+Physical
+        for v in d.allowed_values:
             if v not in entry["allowed_values"]:
                 entry["allowed_values"].append(v)
     return out
 
 
-def resolve_udp_values(udp_values: list, collapsed: dict) -> dict[tuple[str, str], str]:
-    """(owner_id, clave_def_colapsada) → valor final (Physical pisa Logical)."""
-    def_to_key: dict[str, tuple[str, bool]] = {}
-    for key, entry in collapsed.items():
-        for did in entry["erwin_ids"]:
-            def_to_key[did] = (key, did in entry["physical_ids"])
+def resolve_udp_values(udp_values: list, defs: dict) -> dict[tuple[str, str], str]:
+    """(owner_id, clave_def) → valor explícito. Cada faceta conserva el suyo;
+    si Erwin trae la misma def duplicada (`X_1`) gana el último valor leído."""
+    def_to_key = {did: key for key, entry in defs.items() for did in entry["erwin_ids"]}
     out: dict[tuple[str, str], str] = {}
-    phys_won: set[tuple[str, str]] = set()
     for owner_id, _owner_tag, def_id, value in udp_values:
-        if def_id not in def_to_key or not value:
-            continue
-        key, is_phys = def_to_key[def_id]
-        slot = (owner_id, key)
-        if slot in phys_won:
-            continue
-        out[slot] = value
-        if is_phys:
-            phys_won.add(slot)
+        key = def_to_key.get(def_id)
+        if key and value:
+            out[(owner_id, key)] = value
     return out
 
 

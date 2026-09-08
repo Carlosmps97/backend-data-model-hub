@@ -1,7 +1,9 @@
 """DTOs de Data Standards (apply/rollback)."""
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.datatypes import canonicalize_default_type
 
@@ -18,6 +20,8 @@ class DomainEdit(BaseModel):
     id: str | None = None            # None = dominio nuevo
     name: str
     defaultDataType: str
+    # Doc 69: tipo LÓGICO del dominio (faceta Entidad/Atributo); opcional.
+    logicalDataType: str | None = None
     namingTerm: str | None = None
     description: str | None = None
 
@@ -27,6 +31,14 @@ class DomainEdit(BaseModel):
     @classmethod
     def _canonicalize(cls, v: str) -> str:
         return canonicalize_default_type(v)
+
+    # Doc 69: misma homologación para el tipo lógico ('' ⇒ None).
+    @field_validator("logicalDataType")
+    @classmethod
+    def _canonicalize_logical(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return canonicalize_default_type(v) or None
 
 
 class NamingEdit(BaseModel):
@@ -39,6 +51,7 @@ class UdpEdit(BaseModel):
     id: str | None = None            # None = definición UDP nueva
     name: str
     level: str = "column"            # Class: 'table' | 'column' | 'canvas' | 'view'
+    view: str = "physical"           # faceta (doc 69): 'logical' | 'physical'
     dataType: str = "string"         # string | number | boolean | date | list
     defaultValue: str | None = None
     allowedValues: list[str] = []    # para dataType='list' (enum)
@@ -93,3 +106,9 @@ class RollbackBody(BaseModel):
     """Restaura el estado de estándares al de `targetSeq` (la versión a la que se
     revierte). El rollback se registra como una versión NUEVA (15g)."""
     targetSeq: int
+
+
+class CopyFromBody(BaseModel):
+    """Doc 75 D15: bloques de estándares que un proyecto NUEVO copia de otro."""
+    projectId: str
+    blocks: list[Literal["glossary", "domains", "udp", "naming", "ddl"]] = Field(min_length=1)

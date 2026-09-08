@@ -24,6 +24,8 @@ class NamingConfigDoc(BaseModel):
     model_config = DOC_CONFIG
 
     scope: str  # 'column' | 'table'
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     separator: str = ""
     case: str = "upper"  # 'upper' | 'lower' | 'camel'
     maxLength: int = 150  # límite de caracteres del nombre físico

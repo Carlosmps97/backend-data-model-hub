@@ -4,6 +4,9 @@ Semántica validada contra el Lakebase real (doc 28 §2, sonda 20/20):
 - Igualdad escalar → jsonpath **lax** `doc @? '$."a"."b" ? (@ == v)'`:
   cubre a la vez el valor escalar y el "array-contains" multikey de Mongo
   (lax des-anida arrays en cada paso). Indexable por el GIN jsonb_path_ops.
+- `projectId` (modo table) → columna GENERADA `project_id` (doc 75 D19):
+  igualdad escalar / `$eq` / `$in` de strings van por la columna (btree
+  compuestos usables + estadísticas del planner); lo demás sigue por jsonb.
 - `$ne` / `$nin` → NOT(...) e incluyen docs sin el campo (como Mongo).
 - Comparaciones: strings → texto `COLLATE "C"` (orden por code points, igual
   que Mongo y que los índices); números → jsonpath (tipado, sin casts frágiles).
@@ -87,6 +90,29 @@ def pg_path(field: str, s: Sql) -> str:
 
 _LOGICAL = {"$or", "$and", "$nor"}
 
+# Doc 75 D19: campos que en modo `table` viven ADEMÁS en una columna real de la
+# tabla, generada desde el doc (`project_id GENERATED ALWAYS AS (doc->>'projectId')`).
+# Igualdad escalar / $eq / $in de strings van por la columna: así los btree
+# compuestos con `project_id` líder sirven a listados y órdenes por proyecto y el
+# planner tiene estadísticas reales. Cualquier otra forma ($ne, null, $exists,
+# modo doc) sigue por jsonb — correcta, sólo menos frecuente.
+COLUMN_FIELDS: dict[str, str] = {"projectId": "project_id"}
+
+
+def _column_clause(column: str, cond: Any, s: Sql) -> str | None:
+    """Predicado por columna, o None si la condición no es igualdad/$eq/$in de
+    strings (el llamador cae al camino jsonb)."""
+    if isinstance(cond, str):
+        return f"{column} = {s.add(cond)}"
+    if isinstance(cond, dict) and cond:
+        if set(cond) == {"$eq"} and isinstance(cond["$eq"], str):
+            return f"({column} = {s.add(cond['$eq'])})"
+        values = cond.get("$in")
+        if set(cond) == {"$in"} and isinstance(values, list) and values \
+                and all(isinstance(v, str) for v in values):
+            return f"({column} = ANY({s.add_text_array(values)}))"
+    return None
+
 
 def filter_sql(flt: dict | None, s: Sql, doc: str = "doc", mode: str = "table") -> str:
     """Traduce un filtro Mongo a una expresión boolean SQL (no-NULL)."""
@@ -112,6 +138,10 @@ def filter_sql(flt: dict | None, s: Sql, doc: str = "doc", mode: str = "table") 
 
 
 def _field_clause(field: str, cond: Any, s: Sql, doc: str, mode: str) -> str:
+    if mode == "table" and field in COLUMN_FIELDS:
+        clause = _column_clause(COLUMN_FIELDS[field], cond, s)
+        if clause is not None:
+            return clause
     is_id = mode == "table" and field == "_id"
     if isinstance(cond, dict) and cond and all(k.startswith("$") for k in cond):
         clauses: list[str] = []

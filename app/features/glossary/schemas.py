@@ -21,10 +21,6 @@ class PhysicalizeBody(BaseModel):
     separator: str | None = None
 
 
-class LogicalizeBody(BaseModel):
-    physical: str
-
-
 class RephysicalizeBody(BaseModel):
     # R5: re-physicalize retroactivo. Sin scope ⇒ ambos ('table' y 'column').
     scope: str | None = None

@@ -108,7 +108,7 @@ def test_rollback_que_pisa_contenido_locked_409_sin_restaurar(monkeypatch):
                       "lockedBy": None, "lockedAt": None}]}
     mocks = _mock_rollback(monkeypatch, snapshot=snap, cur_dict=[LOCKED_NOW])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.rollback("mr", 16))
+        asyncio.run(service.rollback("mr", "p1", 16))
     assert exc.value.status_code == 409
     assert "'codigo'" in exc.value.detail
     for m in mocks.values():  # NINGÚN restore debe haberse ejecutado
@@ -120,7 +120,7 @@ def test_rollback_que_eliminaria_termino_locked_409(monkeypatch):
     snap = {"domains": [], "namingConfig": {}, "udp": [], "dict": []}
     mocks = _mock_rollback(monkeypatch, snapshot=snap, cur_dict=[LOCKED_NOW])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.rollback("mr", 16))
+        asyncio.run(service.rollback("mr", "p1", 16))
     assert exc.value.status_code == 409
     mocks["restore_dict"].assert_not_awaited()
 
@@ -133,9 +133,9 @@ def test_rollback_snapshot_pre_lock_identico_procede_y_preserva_lock(monkeypatch
             "dict": [{**LOCKED_NOW, "locked": False, "lockedBy": None, "lockedAt": None}]}
     mocks = _mock_rollback(monkeypatch, snapshot=snap, cur_dict=[LOCKED_NOW])
     _mock_rollback_tail(monkeypatch)
-    v = asyncio.run(service.rollback("mr", 16))
+    v = asyncio.run(service.rollback("mr", "p1", 16))
     assert v["seq"] == 17
-    mocks["restore_dict"].assert_awaited_once_with(snap["dict"], preserve_ids={"t1"})
+    mocks["restore_dict"].assert_awaited_once_with("p1", snap["dict"], preserve_ids={"t1"})
 
 
 def test_rollback_con_locked_identico_post_lock_procede_y_preserva(monkeypatch):
@@ -144,9 +144,9 @@ def test_rollback_con_locked_identico_post_lock_procede_y_preserva(monkeypatch):
     snap = {"domains": [], "namingConfig": {}, "udp": [], "dict": [dict(LOCKED_NOW)]}
     mocks = _mock_rollback(monkeypatch, snapshot=snap, cur_dict=[dict(LOCKED_NOW)])
     _mock_rollback_tail(monkeypatch)
-    v = asyncio.run(service.rollback("mr", 16))
+    v = asyncio.run(service.rollback("mr", "p1", 16))
     assert v["seq"] == 17
-    mocks["restore_dict"].assert_awaited_once_with(snap["dict"], preserve_ids={"t1"})
+    mocks["restore_dict"].assert_awaited_once_with("p1", snap["dict"], preserve_ids={"t1"})
 
 
 # ── restore_dict con preserve_ids (repo, fake db) ──────────────────────────
@@ -170,7 +170,7 @@ def test_restore_dict_preserva_entradas_bloqueadas_identicas(monkeypatch):
     entries = [{"id": "t1", "term": "codigo", "abbrev": "COD", "scope": "column",
                 "locked": False},   # pre-bloqueo: NO debe escribirse
                {"id": "t2", "term": "monto", "abbrev": "MTO", "scope": "column"}]
-    asyncio.run(ds_repo.restore_dict(entries, preserve_ids={"t1"}))
+    asyncio.run(ds_repo.restore_dict("p1", entries, preserve_ids={"t1"}))
     flt, _ = coll.update_many_calls[0]
     assert set(flt["_id"]["$nin"]) == {"t1", "t2"}       # t1 NO se soft-deletea
     assert [op._filter["_id"] for op in coll.bulk_ops] == ["t2"]  # t1 sin upsert (lock intacto)

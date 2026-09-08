@@ -1,7 +1,8 @@
 # Scripts del backend — kit XML → Lakebase
 
-**Actualizado:** 2026-07-24 (doc 32b: kit multi-archivo) · **Todo corre contra
-Lakebase** (conexión del `.env`), **desde la raíz del backend** con su `.venv`.
+**Actualizado:** 2026-09-08 (doc 75: proyectos independientes) · **Todo corre
+contra Lakebase** (conexión del `.env`), **desde la raíz del backend** con su
+`.venv`.
 
 Guía detallada de la migración (flags, políticas, qué migra y qué no):
 `doc/migracion-erwin.md`. Un modelo Erwin llega partido en ~15 archivos: el
@@ -19,15 +20,15 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | 1 | `quality` | **Gate 1 — el archivo en frío**: audita contra las reglas de la plataforma (ERROR/WARN/INFO; exit 1 si hay ERRORs) | No |
 | 2 | `crosscheck` | **Gate 2 — el archivo contra la BD** (y entre archivos): solapes de tablas/vistas/schemas con veredicto ADOPTA/ACTUALIZA (score), estándares (enums que crecen, defs A4), estimación de carga | Solo lee |
 | 3 | `extract_standards` / `extract_model` | **Resúmenes a archivos** (JSON/CSV): glosario/dominios/UDP · tablas/columnas/vistas/relaciones/canvases | No |
-| 4 | `reset_for_migration` | Vacía modelo+estándares+governance para carga limpia. **Preserva** usuarios/roles, naming_config, `column_catalog` y audit_log | Sí (`--apply`) |
-| 5 | `migrate` | **La carga real** (merge multi-archivo + lotes). Sin `--apply` = dry-run. `--project` obligatorio si el proyecto ya existe | Sí (`--apply`) |
+| 4 | `reset_for_migration` | Reset DESTRUCTIVO: DROPea todas las tablas del schema `dmh` (modelo, estándares, governance, usuarios, roles, auditoría); el one-shot vuelve a crear `admin` y los roles | Sí (`--apply`) |
+| 5 | `migrate` | **La carga real** (merge multi-archivo + lotes) dentro de UN proyecto. Sin `--apply` = dry-run. `--project` obligatorio si el proyecto ya existe; `--description` si se crea | Sí (`--apply`) |
 
 ```bash
 # 1. Gate 1: auditar el XML (siempre primero)
 .venv/bin/python -m scripts.erwin_migration.quality "../folder_data/modelo.xml"
 
-# 2. Gate 2: cruzarlo contra la BD viva (y contra otros XML si pasas varios)
-.venv/bin/python -m scripts.erwin_migration.crosscheck "../folder_data/modelo.xml" [--json out.json]
+# 2. Gate 2: cruzarlo contra la BD viva DEL PROYECTO (y contra otros XML si pasas varios)
+.venv/bin/python -m scripts.erwin_migration.crosscheck "../folder_data/modelo.xml" --project "Familia" [--json out.json]
 
 # 3. Resúmenes en frío (opcional)
 .venv/bin/python -m scripts.erwin_migration.extract_standards "../folder_data/modelo.xml" --csv
@@ -36,10 +37,10 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 # 4. (solo si REEMPLAZAS la BD) reset previo
 .venv/bin/python -m scripts.reset_for_migration --apply
 
-# 5. Migrar (los archivos de una familia comparten proyecto — R8)
+# 5. Migrar (los archivos de una familia comparten proyecto — R8; el one-shot lo toma del manifiesto)
 .venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia"           # dry-run
 .venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia" --apply
-#   flags: --report ruta.json · --keep-unused-udp-defs · --only-sa SA · --force
+#   flags: --description "…" · --report ruta.json · --keep-unused-udp-defs · --only-sa SA · --force
 ```
 
 `erwin_parser.py` y `policies.py` son librerías internas de estos comandos
@@ -52,9 +53,9 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros) | Siempre tras `migrate --apply` |
 | `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C10 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes…) | Siempre tras migrar (esperado: 0 fixables) |
 | `create_admin` | Crea/actualiza el usuario `admin`/`admin` + los 4 roles (idempotente) | BD nueva, para poder entrar |
-| `mark_base_version` | **Marca lo cargado como versión base**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards si el stream está vacío y permiso `rollback`. Idempotente; aborta si ya hay versiones aplicadas | UNA vez, al FINAL de la carga completa (después del último XML) |
-| `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 30): 8 reglas (masking técnico, desencriptación de negocio `bcp_ddv_desencrypt`, tags, TBLPROPERTIES vacuum, cascada `_rej` + vista técnica) + lookups `vacuum_map`/`dac_map`, como UNA versión de Data Standards. Aborta si ya hay reglas | BD nueva, tras `create_admin` |
-| `fix_particiones_ddv_20260717` | Re-aplica las **3 correcciones de partición decididas por el owner** (doc 21 §3). No están en el XML: re-migrar el DDV las pisa (C10 avisa) | Solo si re-migras `DDV - CPYBCA.xml` |
+| `mark_base_version` | **Marca lo cargado como versión base DE CADA PROYECTO**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards del proyecto si su stream está vacío y permiso `rollback`. Idempotente; un proyecto con versiones aplicadas no recibe marcador | UNA vez, al FINAL de la carga completa (después del último XML) |
+| `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 30) POR PROYECTO (`--project "X"` o `--all-projects`): 8 reglas (masking técnico, desencriptación de negocio `bcp_ddv_desencrypt`, tags, TBLPROPERTIES vacuum, cascada `_rej` + vista técnica) + lookups `vacuum_map`/`dac_map`, como UNA versión de Data Standards del proyecto. Salta los proyectos que ya tienen reglas | BD nueva, tras `create_admin` |
+| `fix_particiones_ddv_20260717` | Re-aplica las **3 correcciones de partición decididas por el owner** (doc 21 §3) en el proyecto del DDV (`--project`, default «Modelo DDV»). No están en el XML: re-migrar el DDV las pisa (C10 avisa) | Solo si re-migras `DDV - CPYBCA.xml` |
 
 ```bash
 .venv/bin/python scripts/arrange_all.py                     # requiere node + elkjs (repo front hermano)
@@ -88,53 +89,82 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 
 ## 4 · Volver a la VERSIÓN BASE (`reset_to_base_version`)
 
-**Deja la web solo con lo migrado del XML y el historial de versiones limpio:
-UNA versión por módulo** — `v1 Base` en Model y `v1` (baseline) en Data
-Standards. Úsalo cuando las pruebas (E2E o manuales) llenaron la web de
-versiones/residuos y quieres volver al punto de partida.
+**Deja un proyecto (o todos) solo con lo migrado del XML y el historial de
+versiones limpio: UNA versión por módulo** — `v1 Base` en Model y `v1`
+(baseline) en Data Standards del proyecto. Úsalo cuando las pruebas (E2E o
+manuales) llenaron la web de versiones/residuos y quieres volver al punto de
+partida. Doc 75: las versiones son por proyecto, así que el reset también
+(`--project "X"`; sin él, todos los proyectos, uno por uno).
 
-Qué hace con `--apply`:
+Qué hace con `--apply`, por proyecto:
 1. **Conserva** la versión base (`versionLabel="v1"`) y TODO lo migrado — no
    re-migra: la data publicada del XML y las correcciones quedan intactas.
 2. **Deshace en producción** lo que aplicaron las versiones posteriores a v1
    (restaura entidades modificadas con su imagen previa, borra las creadas).
-3. **Borra el registro de todas las demás versiones** (aplicadas, drafts,
-   submitted, rejected) — el historial de la web queda solo con v1.
-4. Crea el **baseline de Data Standards** si no existe y asegura el permiso
-   `rollback` (administrador/revisor).
+3. **Borra el registro de todas las demás versiones del proyecto** (aplicadas,
+   drafts, submitted, rejected) — el historial de la web queda solo con v1.
+4. Crea el **baseline de Data Standards** del proyecto si no existe y asegura
+   el permiso `rollback` (administrador/revisor).
 
 Después: cualquier versión nueva que publiques puede volver a la base con el
 botón **Restore** sobre v1 (rollback normal de la plataforma) — sin scripts.
 
 ```bash
-.venv/bin/python -m scripts.reset_to_base_version            # dry-run: muestra el plan
-.venv/bin/python -m scripts.reset_to_base_version --apply    # ⚠️ DESTRUCTIVO
+.venv/bin/python -m scripts.reset_to_base_version                            # dry-run, todos los proyectos
+.venv/bin/python -m scripts.reset_to_base_version --project "Modelo DDV" --apply   # ⚠️ DESTRUCTIVO (ese proyecto)
 ```
 
-Requiere que exista el changeset `v1` (lo dejó la migración real; si no está,
-aborta sin tocar nada). Preserva usuarios/roles, naming_config,
-`column_catalog` y audit_log.
+Requiere que exista el changeset `v1` del proyecto (lo dejó la migración
+real; si no está, ese proyecto se salta sin tocar nada). Preserva
+usuarios/roles, audit_log y los demás proyectos.
 
 ## Flujo completo (BD nueva en otro workspace)
 
 ```bash
+# Recomendado: el orquestador con el manifiesto de proyectos de la carpeta (doc 54 + doc 75)
+.venv/bin/python -m scripts.run_migration --folder ../folder_data                 # plan
+.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force
+
+# Paso a paso (lo mismo que encadena el orquestador):
 .venv/bin/python -m scripts.erwin_migration.quality "modelo.xml"        # gate OK
-.venv/bin/python -m scripts.erwin_migration.migrate "modelo.xml" --apply
+.venv/bin/python -m scripts.erwin_migration.migrate "modelo.xml" --project "Mi proyecto" --apply
 .venv/bin/python scripts/arrange_all.py
 .venv/bin/python scripts/create_admin.py
-.venv/bin/python -m scripts.seed_ddl_export_rules --apply               # ruleset base de export
+.venv/bin/python -m scripts.seed_ddl_export_rules --all-projects --apply   # ruleset base por proyecto
 .venv/bin/python -m scripts.audit_data_consistency                      # esperado: 0
-.venv/bin/python -m scripts.mark_base_version --apply                   # marcador v1 + baseline + rollback
+.venv/bin/python -m scripts.mark_base_version --apply                   # v1 + baseline por proyecto + rollback
 # solo si el XML es el DDV actual:
-.venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply
+.venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply --project "Modelo DDV"
 ```
 
-> El marcador `versionLabel="v1"` (0 cambios) es OBLIGATORIO tras migrar a una
-> BD nueva: `migrate` escribe directo a publicado sin crear versiones, y sin
-> una versión aplicada la web bloquea el módulo Model (huevo-y-gallina: el
-> diálogo "Open model" exige producción publicada). Lo crea
-> `mark_base_version --apply` al final de la carga completa. En Databricks:
-> `scripts/databricks/carga_erwin_notebook.py` §13.
+> El marcador `versionLabel="v1"` (0 cambios) es OBLIGATORIO en cada proyecto
+> tras migrar a una BD nueva: `migrate` escribe directo a publicado sin crear
+> versiones, y sin una versión aplicada la web bloquea el módulo Model de ese
+> proyecto (huevo-y-gallina: el diálogo "Open model" exige producción
+> publicada). Lo crea `mark_base_version --apply` al final de la carga
+> completa. En Databricks: `scripts/databricks/carga_erwin_notebook.py` §13.
+
+## Proyectos (doc 75, 2026-09-08)
+
+Los proyectos son **independientes**: cada doc del modelo y de los estándares
+lleva `projectId`, los ids de plataforma van namespaceados por proyecto
+(`uuid5("<projectId>|<Long_Id de Erwin>")`), la unicidad del nombre físico de
+tabla es por proyecto y los estándares (glosario, dominios, defs UDP, naming,
+reglas DDL) y las versiones se siembran y se marcan **por proyecto**.
+
+- **Proyecto destino por archivo** = manifiesto `projects.json` en la carpeta
+  del one-shot (`{"projects": [{"name", "files": [patrones], "description"?}]}`;
+  p. ej. `Modelo de Datos DDV_FISICO/*.xml` → «Modelo DDV»). Regla general para
+  lo que ningún patrón matchea: el nombre del archivo (`UDV INT FISICO.xml` →
+  «UDV INT FISICO»). Dos archivos que caerían al mismo nombre sin estar unidos
+  por el manifiesto = error antes de tocar la BD. `--manifest` para otra ruta.
+- **Estándares de un proyecto con varios archivos** = unión DISTINTA: el
+  primero gana; abreviatura o tipo de dominio distinto en otro archivo → al
+  reporte (`glossary_conflicts`, `domain_conflicts`; hoja «Dominios en
+  conflicto» de `migration_detail_report`).
+- Flags nuevos: `migrate --description`, `seed_ddl_export_rules
+  --project|--all-projects`, `crosscheck --project`, `reset_to_base_version
+  --project`, `fix_particiones_ddv_20260717 --project`.
 
 ## Retirados (2026-07-20, en historial git)
 
@@ -146,3 +176,10 @@ aborta sin tocar nada). Preserva usuarios/roles, naming_config,
 `lakebase/` (utilería de carga inicial de datos a Lakebase, retirada).
 (`reset_to_base_version` se retiró y se RESTAURÓ el mismo día como herramienta
 permanente, sin la dependencia del seed.)
+
+## Retirados (2026-09-07, doc 75 D14)
+
+`backfill_canvas_views` · `backfill_schema_kind` · `backfill_udp_view` ·
+`homologate_domain_types` · `purge_invalid_relationships` · `seed_view_type_udp`:
+todos superados por el one-shot (regla de la casa: nada de backfill/refix — lo
+que sale del XML lo pone el kit y se re-migra) o por `audit_data_consistency --fix`.

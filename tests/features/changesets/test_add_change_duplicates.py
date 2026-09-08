@@ -13,11 +13,13 @@ from app.features.changesets.validation import DuplicateEntityError, NameTooLong
 
 def _mock_repo(monkeypatch, published, changes_map, max_length=150):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=published))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes_map))
     set_change = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "set_change", set_change)
+    # Doc 75 I2: el guard anti-cruce tiene sus propios tests (test_cross_project_guard).
+    monkeypatch.setattr(service, "_cross_project_check", AsyncMock())
     # add_change ahora consulta el naming_config (límite de caracteres del físico)
     # → se mockea para no tocar la BD.
     monkeypatch.setattr(service.settings_service, "get_naming_for",

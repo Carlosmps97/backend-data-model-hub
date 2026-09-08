@@ -13,13 +13,15 @@ class _FakeColl:
     def __init__(self, docs=None, count=0):
         self._docs, self._count = docs or [], count
 
-    def find(self, *_a, **_k):
+    def find(self, flt=None, *_a, **_k):
+        self.last_filter = flt
         return self
 
     async def to_list(self, _n):
         return self._docs
 
-    async def count_documents(self, *_a, **_k):
+    async def count_documents(self, flt=None, *_a, **_k):
+        self.last_filter = flt
         return self._count
 
 
@@ -46,12 +48,15 @@ def test_udp_coverage_def_sin_level_no_500(monkeypatch):
                   "views": _FakeColl(count=0)})
     monkeypatch.setattr(views, "get_db", AsyncMock(return_value=db))
 
-    async def _fake_pairs(coll):
+    async def _fake_pairs(project_id, coll):
         return {}
 
     monkeypatch.setattr(views, "_coverage_pairs", _fake_pairs)
 
-    rows = asyncio.run(views.udp_coverage())
+    rows = asyncio.run(views.udp_coverage("p1"))
+    # Doc 75: defs y totales acotados al proyecto.
+    assert db["udp_definitions"].last_filter["projectId"] == "p1"
+    assert db["canonical_tables"].last_filter["projectId"] == "p1"
     assert [r["defId"] for r in rows] == ["u1", "u2"]   # None-level primero ("")
     assert rows[0]["level"] is None
     assert rows[0]["totalEntities"] == 10               # fallback: canonical_tables
@@ -67,12 +72,12 @@ def test_udp_coverage_nivel_canvas(monkeypatch):
                   "views": _FakeColl(count=0)})
     monkeypatch.setattr(views, "get_db", AsyncMock(return_value=db))
 
-    async def _fake_pairs(coll):
+    async def _fake_pairs(project_id, coll):
         return {"u9": {"Riesgos": 2, "Finanzas": 1}} if coll == "subject_areas" else {}
 
     monkeypatch.setattr(views, "_coverage_pairs", _fake_pairs)
 
-    rows = asyncio.run(views.udp_coverage())
+    rows = asyncio.run(views.udp_coverage("p1"))
     row = rows[0]
     assert row["level"] == "canvas"
     assert row["totalEntities"] == 5      # subject_areas, NO canonical_tables (10)

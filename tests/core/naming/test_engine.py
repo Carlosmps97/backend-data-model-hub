@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.naming.engine import logicalize, physicalize
+from app.core.naming.engine import physicalize
 
 DICT = {"monto": "MTO", "deuda": "DEU", "dólares": "USD", "tipo de cambio": "TPC"}
 # Mapa per-table del diseño (screen 08b): cuenta riesgo → CTARIESGO.
@@ -24,14 +24,6 @@ def test_physicalize_token_no_mapeado_va_en_mayuscula():
 
 def test_physicalize_vacio():
     assert physicalize("", DICT) == ""
-
-
-def test_logicalize_reversa():
-    assert logicalize("MTO_DEU_USD", DICT) == "monto deuda dólares"
-
-
-def test_logicalize_multi_palabra():
-    assert logicalize("TPC_MTO", DICT) == "tipo de cambio monto"
 
 
 # ── case + separator configurables (R1c) ─────────────────────────────────

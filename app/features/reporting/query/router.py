@@ -1,5 +1,6 @@
 """Endpoints del motor de consulta del reporting (Field Catalog + query + facets).
-Lecturas abiertas (como el resto de reporting; el login global gatea en prod)."""
+Lecturas abiertas (como el resto de reporting; el login global gatea en prod).
+Doc 75: todo es de UN proyecto — `projectId` obligatorio (query param o cuerpo)."""
 from __future__ import annotations
 
 import csv
@@ -8,11 +9,12 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.api.envelope import ok
 from app.core.db.client import get_db
 from app.core.identity import Principal, current_principal
+from app.core.scope import scoped
 
 from .. import views
 from . import executor as ex
@@ -27,23 +29,26 @@ router = APIRouter(prefix="/api/reporting", tags=["reporting-query"])
 
 class SqlBody(BaseModel):
     text: str
+    projectId: str = Field(min_length=1)
 
 
-async def _spec_from_sql(text: str) -> QuerySpec:
+async def _spec_from_sql(text: str, project_id: str) -> QuerySpec:
     from_ = parser.parse_from(text)
     if from_ not in ex.COLL_OF:
         raise parser.SqlError(f"Vista desconocida en FROM: {from_}")
-    cat = build_catalog(from_, await ex._udp_defs())
-    return parser.to_spec(text, cat, from_)
+    cat = build_catalog(from_, await ex._udp_defs(project_id))
+    return parser.to_spec(text, cat, from_, project_id)
 
 
 @router.get("/catalog")
-async def catalog(from_: str = Query(default="columns", alias="from")):
-    """Field Catalog de la vista: campos estáticos + UDP dinámicos, con ops por
-    tipo, enumValues, sortable/indexed. Alimenta el query-builder y el SQL."""
+async def catalog(projectId: str = Query(min_length=1),
+                  from_: str = Query(default="columns", alias="from")):
+    """Field Catalog de la vista para el proyecto: campos estáticos + UDP
+    dinámicos (los del proyecto), con ops por tipo, enumValues,
+    sortable/indexed. Alimenta el query-builder y el SQL."""
     if from_ not in ex.COLL_OF:
         raise HTTPException(400, f"Vista desconocida: {from_}")
-    cat = build_catalog(from_, await ex._udp_defs())
+    cat = build_catalog(from_, await ex._udp_defs(projectId))
     return ok({"from": from_, "fields": [fd.to_public() for fd in cat.values()]})
 
 
@@ -62,7 +67,7 @@ async def validate_sql(body: SqlBody):
     """SQL-like → QuerySpec (round-trip para el editor). Devuelve {spec, errors}
     con {line,col,message} para subrayar en la caja de texto."""
     try:
-        spec = await _spec_from_sql(body.text)
+        spec = await _spec_from_sql(body.text, body.projectId)
         return ok({"spec": spec.model_dump(by_alias=True), "errors": []})
     except parser.SqlError as e:
         return ok({"spec": None, "errors": [{"line": e.line, "col": e.col, "message": e.message}]})
@@ -72,7 +77,7 @@ async def validate_sql(body: SqlBody):
 async def run_sql(body: SqlBody, cursor: str | None = Query(default=None)):
     """Parsea el SQL → QuerySpec y lo ejecuta (mismo motor que /query)."""
     try:
-        spec = await _spec_from_sql(body.text)
+        spec = await _spec_from_sql(body.text, body.projectId)
     except parser.SqlError as e:
         raise HTTPException(400, e.message) from e
     try:
@@ -115,58 +120,65 @@ async def export_csv(spec: QuerySpec):
 
 # ── Vistas curadas / Insights (07 §3) ────────────────────────────────────────
 @router.get("/insights/scorecard")
-async def insights_scorecard():
-    """Model Health Scorecard: métricas globales de calidad + completenessScore."""
-    return ok(await views.scorecard())
+async def insights_scorecard(projectId: str = Query(min_length=1)):
+    """Model Health Scorecard del proyecto: métricas de calidad + completenessScore."""
+    return ok(await views.scorecard(projectId))
 
 
 @router.get("/insights/udp-coverage")
-async def insights_udp_coverage():
+async def insights_udp_coverage(projectId: str = Query(min_length=1)):
     """Cobertura por UDP: setCount, missingCount, coveragePct, valueBreakdown, invalidCount."""
-    return ok(await views.udp_coverage())
+    return ok(await views.udp_coverage(projectId))
 
 
 @router.get("/insights/domain-usage")
-async def insights_domain_usage():
+async def insights_domain_usage(projectId: str = Query(min_length=1)):
     """Uso de cada Parent Domain: columnCount, overridePct, distinctDataTypes, isUnused."""
-    return ok(await views.domain_usage())
+    return ok(await views.domain_usage(projectId))
 
 
 @router.get("/insights/glossary-usage")
-async def insights_glossary_usage():
-    return ok(await views.glossary_usage())
+async def insights_glossary_usage(projectId: str = Query(min_length=1)):
+    return ok(await views.glossary_usage(projectId))
 
 
 @router.get("/insights/relationships")
-async def insights_relationships(limit: int = Query(default=2000, ge=1, le=5000)):
+async def insights_relationships(projectId: str = Query(min_length=1),
+                                 limit: int = Query(default=2000, ge=1, le=5000)):
     """Relaciones con ambos extremos resueltos (schema.tabla.columna), cardinalidad."""
-    return ok(await views.relationships_report(limit=limit))
+    return ok(await views.relationships_report(projectId, limit=limit))
 
 
 @router.get("/reports")
-async def list_reports(principal: Principal = Depends(current_principal)):
-    return ok(await reports.list_reports(principal.username))
+async def list_reports(projectId: str = Query(min_length=1),
+                       principal: Principal = Depends(current_principal)):
+    return ok(await reports.list_reports(principal.username, projectId))
 
 
-def _validate_report_spec(spec: dict) -> None:
+def _stamped_body(body: reports.SavedReportBody) -> reports.SavedReportBody:
     """Defensa en profundidad: solo se persisten specs que sean un QuerySpec bien
-    formado (aunque /query re-valida al ejecutar, no guardamos blobs arbitrarios)."""
+    formado (aunque /query re-valida al ejecutar, no guardamos blobs arbitrarios).
+    El spec queda estampado con el proyecto del reporte (doc 75): un spec de
+    OTRO proyecto es un error, no se re-etiqueta en silencio."""
+    spec_pid = body.spec.get("projectId")
+    if spec_pid is not None and spec_pid != body.projectId:
+        raise HTTPException(422, "The report spec belongs to another project.")
+    spec = {**body.spec, "projectId": body.projectId}
     try:
         QuerySpec.model_validate(spec)
     except ValidationError as e:
         raise HTTPException(422, "El spec del reporte no es una consulta válida.") from e
+    return body.model_copy(update={"spec": spec})
 
 
 @router.post("/reports", status_code=status.HTTP_201_CREATED)
 async def create_report(body: reports.SavedReportBody, principal: Principal = Depends(current_principal)):
-    _validate_report_spec(body.spec)
-    return ok(await reports.create_report(principal.username, body))
+    return ok(await reports.create_report(principal.username, _stamped_body(body)))
 
 
 @router.put("/reports/{rid}")
 async def update_report(rid: str, body: reports.SavedReportBody, principal: Principal = Depends(current_principal)):
-    _validate_report_spec(body.spec)
-    r = await reports.update_report(principal.username, rid, body)
+    r = await reports.update_report(principal.username, rid, _stamped_body(body))
     if r is None:
         raise HTTPException(404, "Reporte no encontrado (o no es tuyo).")
     return ok(r)
@@ -180,12 +192,13 @@ async def delete_report(rid: str, principal: Principal = Depends(current_princip
 
 
 @router.get("/facets")
-async def facets(field: str, from_: str = Query(default="columns", alias="from"),
+async def facets(field: str, projectId: str = Query(min_length=1),
+                 from_: str = Query(default="columns", alias="from"),
                  q: str | None = Query(default=None, max_length=80), limit: int = Query(default=50, ge=1, le=200)):
-    """Opciones de un campo para el typeahead del filtro (server-side). enum →
-    allowedValues; dominio → {value:id, label:name}; resto → distinct acotado.
-    Reemplaza el hack de cargar 400k client-side para las facetas."""
-    cat = build_catalog(from_, await ex._udp_defs())
+    """Opciones de un campo del proyecto para el typeahead del filtro
+    (server-side). enum → allowedValues; dominio → {value:id, label:name};
+    resto → distinct acotado. Reemplaza el hack de cargar 400k client-side."""
+    cat = build_catalog(from_, await ex._udp_defs(projectId))
     fd = cat.get(field)
     if fd is None:
         raise HTTPException(400, f"Campo desconocido: {field}")
@@ -200,8 +213,9 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
     if fd.enumValues:
         vals = [v for v in fd.enumValues if not q or q.lower() in v.lower()][:limit]
         return ok([{"value": v, "label": v} for v in vals])
+    active = scoped(projectId, ex.ACTIVE)
     if fd.hydrate == "domain":
-        query = {"flgactive": {"$ne": False}}
+        query = dict(active)
         if q:
             query["name"] = {"$regex": re.escape(q), "$options": "i"}  # escapado: sin ReDoS/inyección
         doms = await db["parent_domains"].find(query, {"name": 1}).limit(limit).to_list(limit)
@@ -209,7 +223,7 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
     if from_ == "view_columns" and fd.path.startswith("sources."):
         # Entidad virtual (F5): las columnas viven en el array `sources` → unwind
         # antes de facetar (el distinct genérico agruparía por el array entero).
-        pipe = [{"$match": {"flgactive": {"$ne": False}}}, {"$unwind": "$sources"}]
+        pipe = [{"$match": active}, {"$unwind": "$sources"}]
         if q:
             pipe.append({"$match": {fd.path: {"$regex": re.escape(q), "$options": "i"}}})  # escapado
         pipe += [{"$group": {"_id": f"${fd.path}"}}, {"$sort": {"_id": 1}}, {"$limit": limit}]
@@ -218,7 +232,7 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
     # distinct acotado sobre el path (barato si el campo está indexado). Campos
     # cross-entity (schema en columns vive en la tabla) se facetan en la tabla.
     coll = db["canonical_tables"] if fd.entity == "table" else db[ex.COLL_OF[from_]]
-    match = {"flgactive": {"$ne": False}}
+    match = dict(active)
     if q:
         match[fd.path] = {"$regex": re.escape(q), "$options": "i"}  # escapado: sin ReDoS/inyección
     vals = await coll.aggregate(

@@ -14,12 +14,12 @@ from datetime import datetime, timezone
 from pymongo import UpdateOne
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 from .models import RULE_KINDS, RULE_TARGETS, VALIDATION_STATES, DdlRuleDoc, DdlRulesetConfigDoc
 
 COLL = "ddl_rules"
 CONFIG_COLL = "ddl_ruleset_config"
-CONFIG_ID = "global"
 
 
 def _now() -> str:
@@ -60,11 +60,11 @@ def _clean(data: dict) -> dict:
 # ── Reglas ─────────────────────────────────────────────────────────────────
 
 
-async def list_rules() -> list[dict]:
-    """Reglas activas en orden de ejecución: (priority DESC, name ASC) — el
-    mismo orden determinista del motor (spec §7.1) y del catálogo 16b."""
+async def list_rules(project_id: str) -> list[dict]:
+    """Reglas activas DEL PROYECTO en orden de ejecución: (priority DESC, name ASC)
+    — el mismo orden determinista del motor (spec §7.1) y del catálogo 16b."""
     db = await get_db()
-    docs = await db[COLL].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs = await db[COLL].find(scoped(project_id, {"flgactive": {"$ne": False}})).to_list(None)
     docs.sort(key=lambda d: (-(d.get("priority") or 0), (d.get("name") or "").lower()))
     return [DdlRuleDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
@@ -75,9 +75,10 @@ async def get_rule(rule_id: str) -> dict | None:
     return DdlRuleDoc.model_validate(_to_doc(doc)).model_dump() if doc else None
 
 
-async def create_rule(data: dict) -> dict:
+async def create_rule(project_id: str, data: dict) -> dict:
     db = await get_db()
-    d = DdlRuleDoc.model_validate({**_clean(data), "id": data.get("id") or str(uuid.uuid4())})
+    d = DdlRuleDoc.model_validate({**_clean(data), "projectId": project_id,
+                                   "id": data.get("id") or str(uuid.uuid4())})
     payload = d.model_dump()
     await db[COLL].insert_one(
         {"_id": d.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
@@ -104,19 +105,20 @@ async def delete_rule(rule_id: str) -> bool:
     return res.modified_count > 0
 
 
-async def restore_rules(rules: list[dict]) -> None:
+async def restore_rules(project_id: str, rules: list[dict]) -> None:
     """Rollback: deja SOLO las reglas del snapshot activas (soft-delete de las
-    demás) y upserta las del snapshot. Espeja `udp.restore_udp`."""
+    demás) y upserta las del snapshot. Espeja `udp.restore_udp`. Doc 75 I5:
+    ACOTADO al proyecto."""
     db = await get_db()
     keep = {r["id"] for r in rules if r.get("id")}
-    await db[COLL].update_many({"_id": {"$nin": list(keep)}, "flgactive": {"$ne": False}},
+    await db[COLL].update_many(scoped(project_id, {"_id": {"$nin": list(keep)}, "flgactive": {"$ne": False}}),
                                {"$set": {"flgactive": False, "deletedAt": _now()}})
     ops = []
     for r in rules:
         rid = r.get("id")
         if not rid:
             continue
-        payload = DdlRuleDoc.model_validate(_clean({**r, "id": rid})).model_dump()
+        payload = DdlRuleDoc.model_validate(_clean({**r, "id": rid, "projectId": project_id})).model_dump()
         ops.append(UpdateOne(
             {"_id": rid},
             {"$set": {"flgactive": True, "updatedAt": _now(),
@@ -129,56 +131,59 @@ async def restore_rules(rules: list[dict]) -> None:
 # ── Lecturas livianas del catálogo (para /impact — proyección mínima) ─────
 
 
-async def tables_light() -> list[dict]:
+async def tables_light(project_id: str) -> list[dict]:
     db = await get_db()
     docs = await db["canonical_tables"].find(
-        {"flgactive": {"$ne": False}},
+        scoped(project_id, {"flgactive": {"$ne": False}}),
         {"physicalName": 1, "schema": 1, "udpValues": 1, "description": 1}).to_list(None)
     return [{**d, "id": str(d.pop("_id"))} for d in docs]
 
 
-async def columns_light() -> list[dict]:
+async def columns_light(project_id: str) -> list[dict]:
     db = await get_db()
     docs = await db["canonical_columns"].find(
-        {"flgactive": {"$ne": False}},
+        scoped(project_id, {"flgactive": {"$ne": False}}),
         {"tableId": 1, "physicalName": 1, "dataType": 1, "isNullable": 1,
          "isPrimaryKey": 1, "ordinal": 1, "parentDomainId": 1, "udpValues": 1,
          "description": 1}).to_list(None)
     return [{**d, "id": str(d.pop("_id"))} for d in docs]
 
 
-# ── Config del ruleset (singleton) ─────────────────────────────────────────
+# ── Config del ruleset (uno por proyecto: `_id` == projectId, doc 75 D3) ───
 
 
-async def get_config() -> dict:
+async def get_config(project_id: str) -> dict:
     db = await get_db()
-    doc = await db[CONFIG_COLL].find_one({"_id": CONFIG_ID})
+    doc = await db[CONFIG_COLL].find_one({"_id": project_id})
     if not doc:
-        return DdlRulesetConfigDoc(id=CONFIG_ID).model_dump()
-    return DdlRulesetConfigDoc.model_validate(_to_doc(doc)).model_dump()
+        return DdlRulesetConfigDoc(id=project_id, projectId=project_id).model_dump()
+    return DdlRulesetConfigDoc.model_validate({**_to_doc(doc), "projectId": project_id}).model_dump()
 
 
-async def set_config(lookups: dict | None = None, functions: list | None = None) -> dict:
+async def set_config(project_id: str, lookups: dict | None = None,
+                     functions: list | None = None) -> dict:
     """Reemplaza el/los bloque(s) que vengan no-None (el patch del apply manda
     el set COMPLETO de lookups/functions, no deltas — payload chico)."""
     db = await get_db()
-    sets: dict = {"updatedAt": _now()}
+    sets: dict = {"updatedAt": _now(), "projectId": project_id}
     if lookups is not None:
         sets["lookups"] = lookups
     if functions is not None:
         sets["functions"] = functions
     await db[CONFIG_COLL].update_one(
-        {"_id": CONFIG_ID},
+        {"_id": project_id},
         {"$set": sets, "$setOnInsert": {"createdAt": _now()}}, upsert=True)
-    return await get_config()
+    return await get_config(project_id)
 
 
-async def restore_config(snapshot: dict) -> None:
-    """Rollback: deja el singleton EXACTAMENTE como el snapshot (snapshots
-    pre-feature sin 'ddlConfig' → vacío)."""
+async def restore_config(project_id: str, snapshot: dict) -> None:
+    """Rollback: deja la config DEL PROYECTO exactamente como el snapshot
+    (snapshots pre-feature sin 'ddlConfig' → vacío)."""
     db = await get_db()
-    cfg = DdlRulesetConfigDoc.model_validate({**(snapshot or {}), "id": CONFIG_ID}).model_dump()
+    cfg = DdlRulesetConfigDoc.model_validate(
+        {**(snapshot or {}), "id": project_id, "projectId": project_id}).model_dump()
     await db[CONFIG_COLL].update_one(
-        {"_id": CONFIG_ID},
-        {"$set": {"lookups": cfg["lookups"], "functions": cfg["functions"], "updatedAt": _now()},
+        {"_id": project_id},
+        {"$set": {"lookups": cfg["lookups"], "functions": cfg["functions"],
+                  "projectId": project_id, "updatedAt": _now()},
          "$setOnInsert": {"createdAt": _now()}}, upsert=True)

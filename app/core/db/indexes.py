@@ -14,9 +14,30 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# Doc 73 §11.2 — índices RETIRADOS. En el adaptador Lakebase un índice por campo
+# es un btree sobre `(doc ->> 'campo')`: para un ARRAY jsonb eso indexa el texto
+# del array completo — inútil para el array-contains (que ya sirve el GIN
+# `gin_<tabla>` con jsonb_path_ops) y, con arrays grandes, viola el límite de
+# fila del btree ("index row size 4056 exceeds btree version 4 maximum 2704",
+# visto al migrar DDV Otros 2026-09-07: canvases con cientos de vistas). Se
+# dropean si existen (BDs creadas con el doc 70); en Apps el SP puede no ser
+# owner → el error se traga, como en _try.
+RETIRED_INDEXES: tuple[tuple[str, str], ...] = (
+    ("subject_areas", "ix_subject_areas_viewIds"),
+    ("views", "ix_views_sourceTableIds"),
+    # Doc 75: la unicidad y el orden pasan a ser POR PROYECTO y `projectId` se
+    # indexa por la columna generada `project_id` (D19); los btree por expresión
+    # legacy sobre `projectId` y los índices que cambian de forma se retiran.
+    ("standards_versions", "ix_standards_versions_seq"),
+    ("canonical_tables", "ix_canonical_tables_schema_physicalName"),
+    ("folders", "ix_folders_projectId"),
+    ("subject_areas", "ix_subject_areas_projectId"),
+)
+
 
 async def ensure_indexes(db: Any) -> None:
-    """Crea los índices de las colecciones del backend de plataforma."""
+    """Crea los índices de las colecciones del backend de plataforma (y retira
+    los declarados en RETIRED_INDEXES)."""
 
     # Los índices se crean en lotes acotados para no abrir demasiadas sesiones
     # lógicas a la vez: lanzar ~30 create_index en paralelo sobre una BD recién
@@ -34,6 +55,17 @@ async def ensure_indexes(db: Any) -> None:
                 if code not in (48, 11000):
                     raise
 
+    async def _drop(col_name: str, idx_name: str) -> None:
+        async with sem:
+            drop = getattr(db[col_name], "drop_index", None)
+            if drop is None:
+                return
+            try:
+                await drop(idx_name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("no se pudo retirar el índice %s.%s: %s", col_name, idx_name, exc)
+
+    await asyncio.gather(*(_drop(c, i) for c, i in RETIRED_INDEXES))
     await asyncio.gather(
         # ── Modelo canónico (M1) ────────────────────────────────
         _try("parent_domains", [("flgactive", 1)]),
@@ -42,17 +74,24 @@ async def ensure_indexes(db: Any) -> None:
         # DDL Export Rules (doc 30): colección chica (docenas); la unicidad del
         # `name` la garantiza el apply de standards, no un índice único.
         _try("ddl_rules", [("flgactive", 1)]),
+        # Doc 75 D19: estándares POR PROYECTO — btree sobre la columna generada
+        # `project_id` (los proyectos chicos hacen index-scan; DDV, seq-scan).
+        _try("parent_domains", [("projectId", 1)]),
+        _try("glossary_terms", [("projectId", 1)]),
+        _try("udp_definitions", [("projectId", 1)]),
+        _try("naming_config", [("projectId", 1)]),
+        _try("ddl_rules", [("projectId", 1)]),
         _try("canonical_tables", [("flgactive", 1)]),
         # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
         # top-N se ordena por physicalName, y a escala un orden sobre campos sin
         # índice sería full-scan (invariante de escala).
         _try("canonical_tables", [("physicalName", 1)]),
-        # §9 control de duplicados (F1): chequeo de (schema, physicalName) en
-        # add_change/publish por regex anclado case-insensitive. NO-unique a
-        # propósito: el adaptador no soporta índices únicos sobre colecciones
-        # pobladas — la garantía vive en el router. El campo persistido es
-        # `schema` (alias del Pydantic `sql_schema`).
-        _try("canonical_tables", [("schema", 1), ("physicalName", 1)]),
+        # Doc 75 D6/D19: unicidad de físico POR PROYECTO — compuesto con la
+        # columna generada `project_id` líder: sirve al chequeo de duplicados
+        # (regex anclado CI) y al listado ordenado del catálogo del proyecto.
+        # NO-unique a propósito (soft-delete): la garantía vive en el service.
+        _try("canonical_tables", [("projectId", 1), ("physicalName", 1)]),
+        _try("canonical_columns", [("projectId", 1), ("physicalName", 1)]),
         _try("canonical_columns", [("tableId", 1)]),
         _try("canonical_columns", [("parentDomainId", 1)]),
         # ── Motor de consulta del reporting (07) ────────────────
@@ -68,6 +107,9 @@ async def ensure_indexes(db: Any) -> None:
         # ── Changesets (M2a) ────────────────────────────────────
         _try("changesets", [("updatedAt", -1)]),
         _try("changesets", [("status", 1)]),
+        # Doc 75 D2: versiones POR PROYECTO (bandeja/Home/producción del proyecto).
+        _try("changesets", [("projectId", 1), ("status", 1)]),
+        _try("changesets", [("projectId", 1), ("appliedAt", 1)]),
         # Un doc POR CAMBIO (un dict embebido con miles de cambios crecería sin
         # techo; por eso un doc por cambio, versionado por changesets):
         # overlay/diff/apply leen por csId (+collection) — el prefijo del
@@ -87,7 +129,10 @@ async def ensure_indexes(db: Any) -> None:
         # full-scan).
         _try("subject_areas", [("udpValues.$**", 1)]),
         _try("subject_areas", [("name", 1)]),
+        # Doc 70: la membresía de vistas por canvas (`viewIds`, array) la sirve
+        # el GIN de la tabla; su btree se RETIRÓ (doc 73 §11.2, RETIRED_INDEXES).
         _try("relationships", [("flgactive", 1)]),
+        _try("relationships", [("projectId", 1)]),                  # doc 75 D19
         # El canvas resuelve relaciones por extremos ($in por tabla) — v2
         # parent/child (doc 19). Los índices legacy source*/target* de BDs
         # viejas quedan huérfanos (inofensivos) hasta droparse a mano.
@@ -98,11 +143,11 @@ async def ensure_indexes(db: Any) -> None:
         _try("relationships", [("pairs.parentColumnId", 1)]),
         _try("relationships", [("pairs.childColumnId", 1)]),
         _try("views", [("flgactive", 1)]),
+        _try("views", [("projectId", 1)]),                          # doc 75 D19
         # Las vistas se listan por tabla (PropertiesPanel · tab Views).
         _try("views", [("tableId", 1)]),
-        # F3: match canónico por fuentes (multi-fuente) — lo usan list_all
-        # ($or contains/$in) y la query del diagrama (showOnCanvas + $in).
-        _try("views", [("sourceTableIds", 1)]),
+        # F3: `sourceTableIds` (array) — array-contains/$in por el GIN de la
+        # tabla; su btree se RETIRÓ (doc 73 §11.2, RETIRED_INDEXES).
         # ── R1a: Folders (jerarquía del Model Explorer) ──────────
         _try("folders", [("projectId", 1)]),
         # ── Esquemas como entidad versionada (doc 18) ────────────
@@ -111,15 +156,19 @@ async def ensure_indexes(db: Any) -> None:
         # garantía vive en service/changesets, como canonical_tables).
         _try("schemas", [("flgactive", 1)]),
         _try("schemas", [("name", 1)]),
+        _try("schemas", [("projectId", 1), ("name", 1)]),          # doc 75 D6/D19
         # ── R1c: naming_config (1 doc por scope; _id = scope) ────
         _try("naming_config", [("scope", 1)]),
         # ── Auth propia + RBAC + auditoría (2026-07-04) ──────────
         _try("users", [("email", 1)]),
         _try("audit_log", [("at", -1)]),
         _try("audit_log", [("actor", 1)]),
-        # Data Standards: seq ÚNICO — dos apply/rollback concurrentes no pueden
-        # crear dos versiones con el mismo seq/label (el service reintenta ante
-        # la colisión). Sirve para ambos sentidos de orden (el app ordena en Python).
-        _try("standards_versions", [("seq", 1)], unique=True),
+        # Reporting (doc 75 D13): reportes guardados por proyecto.
+        _try("saved_reports", [("projectId", 1)]),
+        # Data Standards: seq ÚNICO POR PROYECTO (doc 75 D3) — dos apply/rollback
+        # concurrentes del mismo proyecto no pueden crear dos versiones con el
+        # mismo seq/label (el service reintenta ante la colisión). Se crea sobre
+        # una colección vacía (el one-shot dropea el schema).
+        _try("standards_versions", [("projectId", 1), ("seq", 1)], unique=True),
     )
     log.info("lakebase indexes ensured")

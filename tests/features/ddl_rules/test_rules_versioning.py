@@ -104,7 +104,7 @@ def _mock_apply(monkeypatch, *, before_rules=None, config=None):
     monkeypatch.setattr(service.rules_repo, "set_config", set_cfg)
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))
     inserted = {}
-    async def _ins(fields):
+    async def _ins(pid, fields):
         inserted.update(fields); return {**fields, "seq": 9, "label": "v9", "id": "v-new"}
     monkeypatch.setattr(service.repository, "insert_version_next_seq", AsyncMock(side_effect=_ins))
     monkeypatch.setattr(service, "audit", AsyncMock())
@@ -121,12 +121,12 @@ def test_apply_reglas_crea_version_y_muta(monkeypatch):
         rulesDelete=[],
         ddlConfigPatch=DdlConfigPatch(functions=[{"name": "f", "params": [], "body": "1"}]),
     )
-    v = asyncio.run(service.apply("maria.rojas", body))
+    v = asyncio.run(service.apply("maria.rojas", "p1", body))
     assert v["seq"] == 9 and inserted["kind"] == "ddl"
     updated.assert_awaited_once()                       # r1 existente → update
     created.assert_awaited_once()                       # tags_tabla nueva → create
-    assert created.await_args.args[0]["updatedBy"] == "maria.rojas"
-    set_cfg.assert_awaited_once_with(lookups=None, functions=[{"name": "f", "params": [], "body": "1"}])
+    assert created.await_args.args[1]["updatedBy"] == "maria.rojas"
+    set_cfg.assert_awaited_once_with("p1", lookups=None, functions=[{"name": "f", "params": [], "body": "1"}])
     assert "Rule tags_tabla" in inserted["diff"]["added"]
     deleted.assert_not_awaited()                        # el batch no traía rulesDelete
 
@@ -134,7 +134,7 @@ def test_apply_reglas_crea_version_y_muta(monkeypatch):
 def test_apply_udp_delete_referenciado_por_regla_409(monkeypatch):
     _, created, _, deleted, _ = _mock_apply(monkeypatch, before_rules=[RULE])
     with pytest.raises(HTTPException) as e:
-        asyncio.run(service.apply("mr", ApplyBody(udpDelete=["u-dac-col"])))
+        asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-dac-col"])))
     assert e.value.status_code == 409 and "enmascarar_dac" in e.value.detail
     deleted.assert_not_awaited()                        # fail-fast: nada mutado
     service.udp_repo.delete_udp.assert_not_awaited()
@@ -145,7 +145,7 @@ def test_apply_udp_delete_referenciado_por_lookup_409(monkeypatch):
                                      "lookups": {"vacuum_map": {"fromUdpId": "u-vac"}},
                                      "functions": []})
     with pytest.raises(HTTPException) as e:
-        asyncio.run(service.apply("mr", ApplyBody(udpDelete=["u-vac"])))
+        asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-vac"])))
     assert e.value.status_code == 409 and "vacuum_map" in e.value.detail
 
 
@@ -153,7 +153,7 @@ def test_apply_udp_delete_ok_si_la_regla_cae_en_el_mismo_batch(monkeypatch):
     """El guard evalúa el estado POST-batch: si el batch borra también la regla
     que referenciaba el UDP, no hay nada que proteger."""
     inserted, *_ = _mock_apply(monkeypatch, before_rules=[RULE])
-    v = asyncio.run(service.apply("mr", ApplyBody(udpDelete=["u-dac-col"], rulesDelete=["r1"])))
+    v = asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-dac-col"], rulesDelete=["r1"])))
     assert v["seq"] == 9
     service.udp_repo.delete_udp.assert_awaited_once_with("u-dac-col")
     service.rules_repo.delete_rule.assert_awaited_once_with("r1")
@@ -163,15 +163,15 @@ def test_apply_nombre_duplicado_409(monkeypatch):
     _mock_apply(monkeypatch, before_rules=[RULE])
     # colisión con una existente
     with pytest.raises(HTTPException) as e1:
-        asyncio.run(service.apply("mr", ApplyBody(rulesUpsert=[DdlRuleEdit(name="enmascarar_dac")])))
+        asyncio.run(service.apply("mr", "p1", ApplyBody(rulesUpsert=[DdlRuleEdit(name="enmascarar_dac")])))
     assert e1.value.status_code == 409
     # duplicado intra-batch (dos altas nuevas con el mismo name)
     with pytest.raises(HTTPException) as e2:
-        asyncio.run(service.apply("mr", ApplyBody(
+        asyncio.run(service.apply("mr", "p1", ApplyBody(
             rulesUpsert=[DdlRuleEdit(name="x_rule"), DdlRuleEdit(name="x_rule")])))
     assert e2.value.status_code == 409
     # renombrar la MISMA regla a su propio nombre no choca
-    v = asyncio.run(service.apply("mr", ApplyBody(
+    v = asyncio.run(service.apply("mr", "p1", ApplyBody(
         rulesUpsert=[DdlRuleEdit(id="r1", name="enmascarar_dac")])))
     assert v["seq"] == 9
 
@@ -189,7 +189,7 @@ def _mock_rollback(monkeypatch, snapshot: dict):
     monkeypatch.setattr(service.rules_repo, "restore_config", rc)
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))
     monkeypatch.setattr(service.repository, "insert_version_next_seq",
-                        AsyncMock(side_effect=lambda f: {**f, "seq": 4, "label": "v4", "id": "v4"}))
+                        AsyncMock(side_effect=lambda pid, f: {**f, "seq": 4, "label": "v4", "id": "v4"}))
     monkeypatch.setattr(service, "audit", AsyncMock())
     return rr, rc
 
@@ -197,16 +197,16 @@ def _mock_rollback(monkeypatch, snapshot: dict):
 def test_rollback_restaura_reglas_y_config(monkeypatch):
     cfg = {"lookups": {"vacuum_map": {"fromUdpId": "u-vac", "values": {}}}, "functions": []}
     rr, rc = _mock_rollback(monkeypatch, {"ddlRules": [RULE, GEN], "ddlConfig": cfg})
-    v = asyncio.run(service.rollback("mr", 3))
+    v = asyncio.run(service.rollback("mr", "p1", 3))
     assert v["kind"] == "rollback" and v["revertsSeq"] == 3
-    rr.assert_awaited_once_with([RULE, GEN])
-    rc.assert_awaited_once_with(cfg)
+    rr.assert_awaited_once_with("p1", [RULE, GEN])
+    rc.assert_awaited_once_with("p1", cfg)
 
 
 def test_rollback_snapshot_pre_feature_deja_catalogo_vacio(monkeypatch):
     """Snapshots anteriores al doc 30 no traen 'ddlRules'/'ddlConfig': el
     rollback restaura con vacío (mismo criterio que tuvo 'udp')."""
     rr, rc = _mock_rollback(monkeypatch, {"dict": [], "domains": []})
-    asyncio.run(service.rollback("mr", 3))
-    rr.assert_awaited_once_with([])
-    rc.assert_awaited_once_with({})
+    asyncio.run(service.rollback("mr", "p1", 3))
+    rr.assert_awaited_once_with("p1", [])
+    rc.assert_awaited_once_with("p1", {})

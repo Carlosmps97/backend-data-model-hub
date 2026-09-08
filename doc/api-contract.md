@@ -1,6 +1,8 @@
 # Contrato de API — Data Model Hub Backend
 
-Actualizado: 2026-08-28. Referencia completa de los 132 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
+Actualizado: 2026-09-08 (doc 75: proyectos independientes). Referencia completa de los 143 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
+
+> **Alcance por proyecto (doc 75).** Cada proyecto es un universo independiente: su catálogo, sus esquemas, sus Data Standards (glosario, dominios, UDP, naming, reglas DDL), sus versiones y sus reportes. Todo lo que es de un proyecto cuelga de **`/api/projects/{project_id}/…`** (catálogo, esquemas, glosario, dominios, UDP, standards, ddl-rules, settings, versions, folders, subject-areas, counts) o exige `projectId` (snapshot de changeset, reporting, summary). Toda ruta `/api/projects/{project_id}/…` lleva la dependencia `alive_project`: si el proyecto no existe o fue borrado responde **404 `Project not found.`**; una operación sobre un changeset de un proyecto borrado responde **409 `This project was deleted.`**. Los recursos por id (`/api/catalog/tables/{id}/…`, `/api/schemas/{sid}`, `/api/subject-areas/{sa_id}`, `/api/relationships/{rid}`, `/api/views/{vid}`, `/api/changesets/{cs_id}/…`) llevan el `projectId` en el documento y el servidor lo valida. Se retiraron en el doc 75: `GET /api/me`, `POST /api/glossary/logicalize`, `PUT /api/subject-areas/{sa_id}/udp` (los UDP de canvas van por el draft), `PUT/DELETE /api/projects/{pid}` (renombrar/describir/borrar van por el draft) y `GET /api/versions/published` (ahora por proyecto).
 
 ---
 
@@ -109,6 +111,7 @@ Se aplican de dos maneras:
 
 - `require_permission("<perm>")`: dependency por endpoint; exige el permiso siempre (403 si falta). Se usa en `admin`, en las escrituras de `glossary`, en `data_standards` (apply con `standards.edit`, rollback con `rollback`), en `ddl_rules` (`/render` con `export`) y en los endpoints de `changesets` (`model.edit` / `review.decide` / `rollback`).
 - `write_guard("<perm>")`: dependency a nivel de router que gatea por método: lecturas (GET/HEAD/OPTIONS) solo requieren sesión válida; escrituras (POST/PUT/PATCH/DELETE) exigen el permiso (403 si falta o el usuario está deshabilitado). Además audita la acción (salvo los sufijos ruidosos de alta frecuencia `/layout`, `/drawings`, `/tables`, `/udp`). Se usa en `catalog` (`model.edit`), `domains` (`standards.edit`), `settings` (`standards.edit`) y, en la Parte 2, en `projects`, `folders`, `schemas`, `relationships` y `views` (`model.edit`).
+- `alive_project` (`app/features/projects/deps.py`): dependency de TODO router `/api/projects/{project_id}/…` — 404 `Project not found.` si el proyecto no existe o fue borrado (doc 75 D5).
 
 Resumen de gating por router (Parte 1):
 
@@ -116,14 +119,14 @@ Resumen de gating por router (Parte 1):
 |---|---|
 | `auth` | login y warmup públicos; logout/me requieren sesión |
 | `admin` | todos requieren `admin.manage` |
-| `identity` | `/api/me` requiere sesión; `/api/users` abierto (sin dependencia propia de auth) |
-| `catalog` | `write_guard("model.edit")`: GET abierto a sesión, escrituras con permiso |
-| `glossary` | GET/physicalize/logicalize abiertos; validate exige sesión; create/update/delete/rephysicalize requieren `standards.edit`; lock/unlock requieren `admin.manage` |
-| `domains` | `write_guard("standards.edit")`: GET e impact abiertos a sesión, escrituras con permiso |
-| `udp` | `GET /api/udp` abierto |
-| `data_standards` | snapshot/versions abiertos; apply requiere `standards.edit`; rollback requiere `rollback` |
-| `ddl_rules` | lecturas y validate/test/impact abiertos (no escriben); `/render` requiere `export` |
-| `settings` | `write_guard("standards.edit")`: GET abierto a sesión, PUT con permiso |
+| `identity` | `GET /api/users` requiere sesión (`current_principal`) |
+| `catalog` | `write_guard("model.edit")` en ambos routers (`/api/projects/{pid}/catalog` + `/api/catalog`): GET abierto a sesión, escrituras con permiso; el router por proyecto suma `alive_project` |
+| `glossary` (`/api/projects/{pid}/glossary`) | GET/physicalize abiertos; validate exige sesión; create/update/delete/rephysicalize requieren `standards.edit`; lock/unlock requieren `admin.manage` |
+| `domains` (`/api/projects/{pid}/domains`) | `write_guard("standards.edit")`: GET e impact abiertos a sesión, escrituras con permiso |
+| `udp` (`/api/projects/{pid}/udp`) | `GET` abierto |
+| `data_standards` (`/api/projects/{pid}/standards`) | snapshot/versions/summary abiertos; apply requiere `standards.edit`; rollback requiere `rollback` |
+| `ddl_rules` (`/api/projects/{pid}/ddl-rules`) | lecturas y validate/test/impact abiertos (no escriben); `/render` requiere `export` |
+| `settings` (`/api/projects/{pid}/settings`) | `write_guard("standards.edit")`: GET abierto a sesión, PUT con permiso |
 
 Nota: "abierto" significa que no exige un permiso puntual, pero igual pasa por la resolución de identidad global; con `REQUIRE_AUTH=true` sin token válido es 401 en cualquier ruta.
 
@@ -653,29 +656,9 @@ Respuesta 200 (cada entrada: `{ id, at, actor, action, target?, targetType?, met
 
 ## 5. Identity (`/api`)
 
-Prefijo del router: `/api`. Este router expone la identidad cruda del seam (distinto de `/api/auth/me`, que enriquece con rol y permisos).
+Prefijo del router: `/api`. Expone la lista de usuarios reales para asignar revisores. (`GET /api/me` se retiró en el doc 75 D14: duplicaba `GET /api/auth/me`, que es el que enriquece con rol y permisos.)
 
-### 5.1 GET /api/me
-
-Propósito: devolver el `Principal` actual, resuelto por el seam según `AUTH_MODE`/token. Requiere sesión válida (con `REQUIRE_AUTH=true` sin token es 401). No enriquece con permisos.
-
-curl:
-
-```bash
-curl -s https://api.ejemplo.com/api/me \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-Respuesta 200 (`Principal`: `{ email, username, display_name, source }`; `source` es `local | databricks | session`):
-
-```json
-{
-  "success": true,
-  "data": { "email": "ana@empresa.com", "username": "ana", "display_name": "Ana Gomez", "source": "session" }
-}
-```
-
-### 5.2 GET /api/users
+### 5.1 GET /api/users
 
 Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Requiere sesión (`current_principal`, doc 38: la whitelist es un directorio de correos y no debe ser enumerable de forma anónima); con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
 
@@ -705,19 +688,19 @@ Respuesta 200:
 
 ---
 
-## 6. Catalog (`/api/catalog`)
+## 6. Catalog (`/api/projects/{project_id}/catalog` · `/api/catalog`)
 
-Prefijo del router: `/api/catalog`. Router con `write_guard("model.edit")`: las lecturas requieren sesión; las escrituras requieren `model.edit`.
+Dos routers con `write_guard("model.edit")` (lecturas con sesión; escrituras con `model.edit`): **`/api/projects/{project_id}/catalog`** para lo que se lista/busca/crea dentro de un proyecto (`tables`, `columns`, `search`, `inventory`; lleva `alive_project`) y **`/api/catalog`** para los recursos por id (`tables/{table_id}/columns`, `tables/{table_id}/usage`, `inspect/*`).
 
-Es el pool canónico universal: tablas (`canonical_tables`) y columnas (`canonical_columns`, colección separada).
+Es el pool canónico **del proyecto** (doc 75): tablas (`canonical_tables`) y columnas (`canonical_columns`, colección separada), ambas con `projectId`. El nombre físico de tabla es único **por proyecto** (case-insensitive): `M_CLIENTE` puede existir en dos proyectos distintos.
 
-Forma de una tabla canónica en respuesta (`CanonicalTableDoc`, serializado con alias): `{ id, physicalName, logicalName, schema, description, udpValues }`. El campo `schema` es el alias de `sql_schema`; `description` es la definición funcional de la tabla (declarada en el modelo desde el doc 11 — antes se descartaba por `extra="ignore"`).
+Forma de una tabla canónica en respuesta (`CanonicalTableDoc`, serializado con alias): `{ id, projectId, physicalName, logicalName, schema, description, udpValues, … }`. El campo `schema` es el alias de `sql_schema`; `description` es la definición funcional de la tabla (declarada en el modelo desde el doc 11 — antes se descartaba por `extra="ignore"`).
 
-Forma de una columna canónica en respuesta (`CanonicalColumnDoc`): `{ id, tableId, physicalName, logicalName, parentDomainId, dataType, typeOverridden, isPrimaryKey, pkPosition, isForeignKey, isNullable, isPartition, description, ordinal, udpValues }`. `pkPosition` (doc 19 §12b) es la posición 0-based dentro de la LLAVE primaria — independiente del `ordinal` físico (Erwin ordena el bloque PK y el `PRIMARY KEY(...)` del DDL por el orden de la llave); `null` si no es PK o si la PK se marcó sin orden.
+Forma de una columna canónica en respuesta (`CanonicalColumnDoc`): `{ id, projectId, tableId, physicalName, logicalName, parentDomainId, dataType, typeOverridden, isPrimaryKey, pkPosition, isForeignKey, isNullable, isPartition, description, ordinal, udpValues, … }`. `pkPosition` (doc 19 §12b) es la posición 0-based dentro de la LLAVE primaria — independiente del `ordinal` físico (Erwin ordena el bloque PK y el `PRIMARY KEY(...)` del DDL por el orden de la llave); `null` si no es PK o si la PK se marcó sin orden.
 
-### 6.1 GET /api/catalog/tables
+### 6.1 GET /api/projects/{project_id}/catalog/tables
 
-Propósito: listar el pool de tablas. Con `q`+`limit` hace búsqueda server-side (para los modales de catálogo a gran escala); sin parámetros, la lista completa.
+Propósito: listar el pool de tablas DEL proyecto. Con `q`+`limit` hace búsqueda server-side (para los modales de catálogo a gran escala); `schema` acota a un esquema (filtro del modal Import existing, combinable con `q`); sin parámetros, la lista completa del proyecto.
 
 Query params:
 
@@ -725,11 +708,12 @@ Query params:
 |---|---|---|---|
 | `q` | string | null | búsqueda por nombre físico/lógico (contains, case-insensitive) |
 | `limit` | int | null | 1 a 500; capea el resultado y ordena por `physicalName` |
+| `schema` | string | null | sólo tablas de ese esquema |
 
 curl:
 
 ```bash
-curl -s "https://api.ejemplo.com/api/catalog/tables?q=cliente&limit=20" \
+curl -s "https://api.ejemplo.com/api/projects/p-001/catalog/tables?q=cliente&limit=20" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -745,9 +729,9 @@ Respuesta 200:
 }
 ```
 
-### 6.2 POST /api/catalog/tables
+### 6.2 POST /api/projects/{project_id}/catalog/tables
 
-Propósito: crear una tabla canónica. Requiere `model.edit`. Si no se envía `physicalName`, se deriva del `logicalName` con el motor de naming (glosario + naming_config del scope `column`, ver Glossary/Settings).
+Propósito: crear una tabla canónica en el proyecto (camino directo sin changeset; el front escribe siempre vía draft). Requiere `model.edit`. 409 si ya existe una tabla activa con ese físico en el proyecto. Si no se envía `physicalName`, se deriva del `logicalName` con el motor de naming (glosario + naming_config del scope `column`, ver Glossary/Settings).
 
 Body (`CanonicalTableBody`):
 
@@ -762,7 +746,7 @@ Body (`CanonicalTableBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/catalog/tables \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/catalog/tables \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"logicalName":"Dimension Producto","schema":"ventas","udpValues":{"udp-clasif":"NO DAC"}}'
@@ -842,9 +826,9 @@ Respuesta 201 (dataType heredado del dominio `dom-fecha`):
 }
 ```
 
-### 6.5 GET /api/catalog/columns
+### 6.5 GET /api/projects/{project_id}/catalog/columns
 
-Propósito: búsqueda global por COLUMNA (doc 29; la usa el Database Explorer en modo producción). Contains case-insensitive sobre `physicalName`/`logicalName` de `canonical_columns`, ordenada por `physicalName` (índice existente). Cada hit sale con su tabla dueña resuelta (`table` = nombre físico + `schema`) para mostrarse como `esquema.tabla`; los hits cuya tabla ya no está activa se descartan (huérfanos). Lectura (sesión). En modo draft el front NO usa este endpoint: reusa `GET /api/changesets/{cs_id}/effective/canonical_columns` con `q`+`limit`.
+Propósito: búsqueda por COLUMNA dentro del proyecto (doc 29; la usa el Database Explorer en modo producción). Contains case-insensitive sobre `physicalName`/`logicalName` de `canonical_columns`, ordenada por `physicalName` (índice existente). Cada hit sale con su tabla dueña resuelta (`table` = nombre físico + `schema`) para mostrarse como `esquema.tabla`; los hits cuya tabla ya no está activa se descartan (huérfanos). Lectura (sesión). En modo draft el front NO usa este endpoint: reusa `GET /api/changesets/{cs_id}/effective/canonical_columns` con `q`+`limit`.
 
 Query params:
 
@@ -856,7 +840,7 @@ Query params:
 curl:
 
 ```bash
-curl -s "https://api.ejemplo.com/api/catalog/columns?q=cliente&limit=50" \
+curl -s "https://api.ejemplo.com/api/projects/p-001/catalog/columns?q=cliente&limit=50" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -900,13 +884,21 @@ Respuesta 200:
 
 ---
 
-## 7. Glossary (`/api/glossary`)
+### 6.7 Buscador, inventario e inspector (docs 70 y 72)
 
-Prefijo del router: `/api/glossary`. Diccionario de abreviaturas (términos que cascadean nombres físicos) más conversión lógico/físico. Editar términos es editar estándares, así que las mutaciones requieren `standards.edit`; los endpoints de cómputo (`physicalize`/`logicalize`) y el `GET` quedan abiertos (los usa el modelador para previsualizar sin mutar); `validate` exige sesión; `lock`/`unlock` requieren `admin.manage`.
+- **GET /api/projects/{project_id}/catalog/search** — buscador del Model dentro del proyecto (⌘K): tablas, columnas y definiciones de columna, cada hit con su tabla y los canvases donde está. Query: `q` (contains CI; vacío = navegar el alcance de los filtros), `limit` (1–100, tope por grupo), `offset` (página siguiente de cada grupo), `scope` (`all | tables | columns | definitions`), `folderId` (subárbol de esa carpeta), `canvasId`, `changesetId` (overlay del draft; también `asof:<versionId>`). Sesión; `changesetId` pasa por `ensure_changeset_visible` (doc 70 §12).
+- **GET /api/projects/{project_id}/catalog/inventory** — inventario del proyecto para el Explorer en UNA request: sus tablas (con `columnCount`) y las vistas de esas tablas; `changesetId` opcional. Sesión.
+- **GET /api/catalog/inspect/tables/{table_id}** · **GET /api/catalog/inspect/views/{view_id}** — Object Inspector: tabla + columnas efectivas + relaciones + vistas + dónde se usa (o vista + tablas fuente + canvases), sin necesidad de canvas; `changesetId` opcional; 404 si no existe. Sesión.
 
-Forma de un término (`AbbreviationDoc`): `{ id, term, abbrev, scope, wordType, locked, lockedBy, lockedAt }`. `scope` es `column | table`; `wordType` es `prime | class | modifier` o `null`. Una entrada con `locked=true` es intocable para TODOS (editar/eliminar devuelve 409, tanto por CRUD directo como por `standards/apply`) hasta que un admin la desbloquee.
+---
 
-### 7.1 GET /api/glossary
+## 7. Glossary (`/api/projects/{project_id}/glossary`)
+
+Prefijo del router: `/api/projects/{project_id}/glossary` (con `alive_project`). Diccionario de abreviaturas DEL proyecto (términos que cascadean nombres físicos de ese proyecto) más conversión lógico→físico. Editar términos es editar estándares, así que las mutaciones requieren `standards.edit`; el endpoint de cómputo (`physicalize`) y el `GET` quedan abiertos (los usa el modelador para previsualizar sin mutar); `validate` exige sesión; `lock`/`unlock` requieren `admin.manage`. (`logicalize` se retiró en el doc 75 D14.)
+
+Forma de un término (`AbbreviationDoc`): `{ id, projectId, term, abbrev, scope, wordType, locked, lockedBy, lockedAt }`. `scope` es `column | table`; `wordType` es `prime | class | modifier` o `null`. Una entrada con `locked=true` es intocable para TODOS (editar/eliminar devuelve 409, tanto por CRUD directo como por `standards/apply`) hasta que un admin la desbloquee.
+
+### 7.1 GET /api/projects/{project_id}/glossary
 
 Propósito: listar términos. Sin `scope` = todos; con `scope`, solo ese.
 
@@ -919,7 +911,7 @@ Query params:
 curl:
 
 ```bash
-curl -s "https://api.ejemplo.com/api/glossary?scope=column"
+curl -s "https://api.ejemplo.com/api/projects/p-001/glossary?scope=column"
 ```
 
 Respuesta 200:
@@ -934,7 +926,7 @@ Respuesta 200:
 }
 ```
 
-### 7.2 POST /api/glossary
+### 7.2 POST /api/projects/{project_id}/glossary
 
 Propósito: crear un término. Requiere `standards.edit`.
 
@@ -950,7 +942,7 @@ Body (`AbbreviationBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"term":"Producto","abbrev":"PROD","scope":"column","wordType":"prime"}'
@@ -962,7 +954,7 @@ Respuesta 201:
 { "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PROD", "scope": "column", "wordType": "prime" } }
 ```
 
-### 7.3 PUT /api/glossary/{entry_id}
+### 7.3 PUT /api/projects/{project_id}/glossary/{entry_id}
 
 Propósito: actualizar un término. Requiere `standards.edit`. Si el término no existe, devuelve `data: null` (no lanza 404).
 
@@ -971,7 +963,7 @@ Path: `entry_id` (string). Body: `AbbreviationBody` (igual que en la creación).
 curl:
 
 ```bash
-curl -s -X PUT https://api.ejemplo.com/api/glossary/g-03 \
+curl -s -X PUT https://api.ejemplo.com/api/projects/p-001/glossary/g-03 \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"term":"Producto","abbrev":"PRD","scope":"column","wordType":"prime"}'
@@ -983,7 +975,7 @@ Respuesta 200:
 { "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PRD", "scope": "column", "wordType": "prime" } }
 ```
 
-### 7.4 DELETE /api/glossary/{entry_id}
+### 7.4 DELETE /api/projects/{project_id}/glossary/{entry_id}
 
 Propósito: eliminar (soft-delete) un término. Requiere `standards.edit`. Devuelve un bool.
 
@@ -992,7 +984,7 @@ Path: `entry_id` (string).
 curl:
 
 ```bash
-curl -s -X DELETE https://api.ejemplo.com/api/glossary/g-03 \
+curl -s -X DELETE https://api.ejemplo.com/api/projects/p-001/glossary/g-03 \
   -H "Authorization: Bearer $STD_TOKEN"
 ```
 
@@ -1002,7 +994,7 @@ Respuesta 200:
 { "success": true, "data": true }
 ```
 
-### 7.5 POST /api/glossary/physicalize
+### 7.5 POST /api/projects/{project_id}/glossary/physicalize
 
 Propósito: derivar el nombre físico de un nombre lógico, aplicando el glosario y las reglas de naming del scope. Abierto (no muta).
 
@@ -1017,7 +1009,7 @@ Body (`PhysicalizeBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary/physicalize \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary/physicalize \
   -H "Content-Type: application/json" \
   -d '{"logical":"Cliente Identificador","scope":"column"}'
 ```
@@ -1028,31 +1020,7 @@ Respuesta 200:
 { "success": true, "data": { "physical": "CLI_ID" } }
 ```
 
-### 7.6 POST /api/glossary/logicalize
-
-Propósito: operación inversa (físico a lógico) usando el diccionario completo. Abierto.
-
-Body (`LogicalizeBody`):
-
-| Campo | Tipo | Requerido |
-|---|---|---|
-| `physical` | string | sí |
-
-curl:
-
-```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary/logicalize \
-  -H "Content-Type: application/json" \
-  -d '{"physical":"CLI_ID"}'
-```
-
-Respuesta 200:
-
-```json
-{ "success": true, "data": { "logical": "Cliente Identificador" } }
-```
-
-### 7.7 POST /api/glossary/rephysicalize
+### 7.6 POST /api/projects/{project_id}/glossary/rephysicalize
 
 Propósito: re-physicalize retroactivo. Recomputa el `physicalName` de TODAS las entidades del scope a partir de su `logicalName` (glosario + naming actual). Requiere `standards.edit`. Update directo sobre las colecciones publicadas. Sin `scope`, aplica a tablas y columnas.
 
@@ -1065,7 +1033,7 @@ Body (`RephysicalizeBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary/rephysicalize \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary/rephysicalize \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -1077,7 +1045,7 @@ Respuesta 200:
 { "success": true, "data": { "updated": { "tables": 12, "columns": 340 } } }
 ```
 
-### 7.8 POST /api/glossary/validate
+### 7.7 POST /api/projects/{project_id}/glossary/validate
 
 Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados (muestra con cap de 50 filas + total). No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
 
@@ -1091,7 +1059,7 @@ Body (`ValidateTermBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary/validate \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary/validate \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"term":"Producto","scope":"column"}'
@@ -1113,41 +1081,41 @@ Respuesta 200 (`total` = conflictos de corpus + 1 si hay duplicado en el glosari
 }
 ```
 
-### 7.9 POST /api/glossary/{entry_id}/lock
+### 7.8 POST /api/projects/{project_id}/glossary/{entry_id}/lock
 
 Propósito: bloquear la entrada (solo un administrador). Una entrada bloqueada devuelve 409 en cualquier intento de edición/eliminación hasta que se desbloquee. Requiere `admin.manage`. Audita.
 
 Path: `entry_id` (string). Body: ninguno.
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/glossary/g-03/lock \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary/g-03/lock \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 Respuesta 200: la entrada con `locked=true`, `lockedBy` y `lockedAt`. Error 404 `{ "detail": "The term doesn't exist." }`.
 
-### 7.10 POST /api/glossary/{entry_id}/unlock
+### 7.9 POST /api/projects/{project_id}/glossary/{entry_id}/unlock
 
 Propósito: desbloquear la entrada. Requiere `admin.manage`. Audita. Misma forma de respuesta y errores que `lock` (con `locked=false`).
 
 ---
 
-## 8. Domains (`/api/domains`)
+## 8. Domains (`/api/projects/{project_id}/domains`)
 
-Prefijo del router: `/api/domains`. Router con `write_guard("standards.edit")`: lecturas (incluida `impact`) requieren sesión; escrituras (crear/editar/borrar/propagate) requieren `standards.edit`.
+Prefijo del router: `/api/projects/{project_id}/domains` (con `alive_project`). Router con `write_guard("standards.edit")`: lecturas (incluida `impact`) requieren sesión; escrituras (crear/editar/borrar/propagate) requieren `standards.edit`.
 
-Los Parent Domains definen un `defaultDataType` que cascadea a las columnas que los usan (respetando overrides manuales).
+Los Parent Domains son DEL proyecto (doc 75: el dominio «Codigo» puede ser `VARCHAR(30)` en un proyecto y `VARCHAR(20)` en otro) y definen un `defaultDataType` que cascadea a las columnas del proyecto que los usan (respetando overrides manuales).
 
-Forma de un dominio (`ParentDomainDoc`): `{ id, name, defaultDataType, namingTerm, description }`.
+Forma de un dominio (`ParentDomainDoc`): `{ id, projectId, name, defaultDataType, namingTerm, description, … }`.
 
-### 8.1 GET /api/domains
+### 8.1 GET /api/projects/{project_id}/domains
 
 Propósito: listar los Parent Domains (ordenados por nombre).
 
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/domains \
+curl -s https://api.ejemplo.com/api/projects/p-001/domains \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -1163,7 +1131,7 @@ Respuesta 200:
 }
 ```
 
-### 8.2 POST /api/domains
+### 8.2 POST /api/projects/{project_id}/domains
 
 Propósito: crear un dominio. Requiere `standards.edit`.
 
@@ -1179,7 +1147,7 @@ Body (`ParentDomainBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/domains \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/domains \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"Monto","defaultDataType":"DECIMAL(18,2)","namingTerm":"MTO"}'
@@ -1191,7 +1159,7 @@ Respuesta 201:
 { "success": true, "data": { "id": "d3f0...", "name": "Monto", "defaultDataType": "DECIMAL(18,2)", "namingTerm": "MTO", "description": null } }
 ```
 
-### 8.3 PUT /api/domains/{domain_id}
+### 8.3 PUT /api/projects/{project_id}/domains/{domain_id}
 
 Propósito: actualizar un dominio. Requiere `standards.edit`. Si cambia `defaultDataType`, cascadea el tipo nuevo a las columnas que aún tienen el tipo viejo y no fueron editadas a mano (`typeOverridden != true`). Si el dominio no existe, devuelve `data: null`.
 
@@ -1200,7 +1168,7 @@ Path: `domain_id` (string). Body: `ParentDomainBody`.
 curl:
 
 ```bash
-curl -s -X PUT https://api.ejemplo.com/api/domains/dom-fecha \
+curl -s -X PUT https://api.ejemplo.com/api/projects/p-001/domains/dom-fecha \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"Fecha","defaultDataType":"TIMESTAMP","namingTerm":"FEC"}'
@@ -1212,7 +1180,7 @@ Respuesta 200:
 { "success": true, "data": { "id": "dom-fecha", "name": "Fecha", "defaultDataType": "TIMESTAMP", "namingTerm": "FEC", "description": null } }
 ```
 
-### 8.4 DELETE /api/domains/{domain_id}
+### 8.4 DELETE /api/projects/{project_id}/domains/{domain_id}
 
 Propósito: eliminar (soft-delete) un dominio. Requiere `standards.edit`. Devuelve un bool.
 
@@ -1221,7 +1189,7 @@ Path: `domain_id` (string).
 curl:
 
 ```bash
-curl -s -X DELETE https://api.ejemplo.com/api/domains/dom-fecha \
+curl -s -X DELETE https://api.ejemplo.com/api/projects/p-001/domains/dom-fecha \
   -H "Authorization: Bearer $STD_TOKEN"
 ```
 
@@ -1231,7 +1199,7 @@ Respuesta 200:
 { "success": true, "data": true }
 ```
 
-### 8.5 GET /api/domains/{domain_id}/impact
+### 8.5 GET /api/projects/{project_id}/domains/{domain_id}/impact
 
 Propósito: previsualizar el impacto de propagar el tipo del dominio: cuántas columnas lo usan, cuántas se actualizarían (sin override) y cuántas se saltarían (con override). No muta nada. Lectura (abierta a sesión).
 
@@ -1240,7 +1208,7 @@ Path: `domain_id` (string).
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/domains/dom-id/impact \
+curl -s https://api.ejemplo.com/api/projects/p-001/domains/dom-id/impact \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -1261,7 +1229,7 @@ Respuesta 200:
 }
 ```
 
-### 8.6 POST /api/domains/{domain_id}/propagate
+### 8.6 POST /api/projects/{project_id}/domains/{domain_id}/propagate
 
 Propósito: aplicar el `defaultDataType` actual del dominio a todas sus columnas sin override (retroactivo, directo sobre `canonical_columns`). Requiere `standards.edit`. Si el dominio no existe o no tiene tipo, devuelve `updated: 0`.
 
@@ -1270,7 +1238,7 @@ Path: `domain_id` (string). Body: ninguno.
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/domains/dom-id/propagate \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/domains/dom-id/propagate \
   -H "Authorization: Bearer $STD_TOKEN"
 ```
 
@@ -1282,20 +1250,20 @@ Respuesta 200:
 
 ---
 
-## 9. UDP (`/api/udp`)
+## 9. UDP (`/api/projects/{project_id}/udp`)
 
-Prefijo del router: `/api/udp`. Las definiciones UDP (User Defined Properties) son etiquetas key-value con tipo, valor por defecto, valores permitidos (enum) y nivel al que aplican. Este router es solo de LECTURA y abierto; las mutaciones son versionadas vía `POST /api/standards/apply` (`udpUpsert`/`udpDelete`), igual que Glossary y Parent Domains.
+Prefijo del router: `/api/projects/{project_id}/udp` (con `alive_project`). Las definiciones UDP (User Defined Properties) son etiquetas key-value con tipo, valor por defecto, valores permitidos (enum) y nivel al que aplican; son DEL proyecto (doc 75 D10: el kit siembra el mismo catálogo fijo en cada proyecto, con ids propios). Este router es solo de LECTURA y abierto; las mutaciones son versionadas vía `POST /api/projects/{project_id}/standards/apply` (`udpUpsert`/`udpDelete`), igual que Glossary y Parent Domains.
 
-Forma de una definición (`UdpDefinitionDoc`): `{ id, name, level, dataType, defaultValue, allowedValues, description }`. `level` es `table | column`; `dataType` es `string | number | boolean | date | list`; `allowedValues` solo se usa con `dataType = list`.
+Forma de una definición (`UdpDefinitionDoc`): `{ id, projectId, name, level, view, dataType, defaultValue, allowedValues, description }`. `level` es `table | column | canvas | view`; `view` (doc 69) es la faceta `logical | physical`; `dataType` es `string | number | boolean | date | list`; `allowedValues` solo se usa con `dataType = list`.
 
-### 9.1 GET /api/udp
+### 9.1 GET /api/projects/{project_id}/udp
 
-Propósito: listar las definiciones UDP activas (ordenadas por nombre). Las usa el panel de Properties y el módulo Data Standards.
+Propósito: listar las definiciones UDP activas del proyecto (ordenadas por nombre). Las usa el panel de Properties y el módulo Data Standards.
 
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/udp
+curl -s https://api.ejemplo.com/api/projects/p-001/udp
 ```
 
 Respuesta 200:
@@ -1312,21 +1280,21 @@ Respuesta 200:
 
 ---
 
-## 10. Data Standards (`/api/standards`)
+## 10. Data Standards (`/api/projects/{project_id}/standards`)
 
-Prefijo del router: `/api/standards`. Módulo de versionado independiente de los estándares (Glossary + Parent Domains + UDP + naming + **reglas de DDL Export**, doc 30 — un solo stream `standards_versions` para todo). La lectura (`snapshot`, `versions`) es abierta; `apply` requiere `standards.edit`; `rollback` requiere el permiso `rollback` (antes `standards.edit`).
+Prefijo del router: `/api/projects/{project_id}/standards` (con `alive_project`). Módulo de versionado independiente de los estándares (Glossary + Parent Domains + UDP + naming + **reglas de DDL Export**, doc 30 — un solo stream `standards_versions` para todo), **por proyecto** (doc 75 D3): cada proyecto tiene su historial (`seq`/`label` arrancan en `v1` en cada uno), su producción de estándares y su rollback; nada cruza entre proyectos. La lectura (`snapshot`, `versions`, `summary`) es abierta; `apply` requiere `standards.edit`; `rollback` requiere el permiso `rollback`.
 
-Cada `apply`/`rollback` aplica los cambios directo a las colecciones publicadas y registra una versión append-only en `standards_versions` con snapshot completo, diff legible, impacto y autor.
+Cada `apply`/`rollback` aplica los cambios directo a las colecciones publicadas del proyecto y registra una versión append-only en `standards_versions` (con `projectId`) con snapshot completo, diff legible, impacto y autor. Un cambio de glosario/naming re-physicaliza SÓLO las tablas y columnas de ese proyecto.
 
 Forma de una versión (`StandardsVersionDoc`):
 
 ```
-{ id, seq, label, kind, title, description, author, createdAt, appliedAt,
+{ id, projectId, seq, label, kind, title, description, author, createdAt, appliedAt,
   status, diff: { added[], edited[], removed[] }, impact: { tables, columns },
   snapshot: { domains[], dict[], namingConfig{}, udp[], ddlRules[], ddlConfig{} }, revertsSeq }
 ```
 
-`kind` es uno de `glossary | udp | domain | naming | ddl | batch | baseline | rollback`. `label` es `v{seq}`. Los snapshots anteriores al doc 30 no traen `ddlRules`/`ddlConfig`; se leen como vacíos.
+`kind` es uno de `glossary | udp | domain | naming | ddl | batch | baseline | rollback | copy` (`copy` = bloques copiados de otro proyecto al crearlo, doc 75 D15). `label` es `v{seq}`, único por `(projectId, seq)`.
 
 ```mermaid
 flowchart TD
@@ -1339,14 +1307,14 @@ flowchart TD
     F --> G["ok(version)"]
 ```
 
-### 10.1 GET /api/standards/snapshot
+### 10.1 GET /api/projects/{project_id}/standards/snapshot
 
 Propósito: devolver el estado actual de estándares (dominios, términos, naming, UDP, reglas DDL + config del ruleset). Abierto.
 
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/standards/snapshot
+curl -s https://api.ejemplo.com/api/projects/p-001/standards/snapshot
 ```
 
 Respuesta 200:
@@ -1365,14 +1333,14 @@ Respuesta 200:
 }
 ```
 
-### 10.2 GET /api/standards/versions
+### 10.2 GET /api/projects/{project_id}/standards/versions
 
 Propósito: devolver el historial de versiones (más reciente primero). Abierto.
 
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/standards/versions
+curl -s https://api.ejemplo.com/api/projects/p-001/standards/versions
 ```
 
 Respuesta 200:
@@ -1382,7 +1350,7 @@ Respuesta 200:
   "success": true,
   "data": [
     {
-      "id": "v-88", "seq": 12, "label": "v12", "kind": "batch",
+      "id": "v-88", "projectId": "p-001", "seq": 12, "label": "v12", "kind": "batch",
       "title": "3 standard changes", "description": null, "author": "ana",
       "createdAt": "2026-07-06T12:00:00+00:00", "appliedAt": "2026-07-06T12:00:00+00:00",
       "status": "applied",
@@ -1395,9 +1363,9 @@ Respuesta 200:
 }
 ```
 
-### 10.3 POST /api/standards/apply
+### 10.3 POST /api/projects/{project_id}/standards/apply
 
-Propósito: aplicar un batch de cambios de estándares como UNA versión. Requiere `standards.edit`. Aplica términos (upsert/delete), naming, dominios (con cascada), definiciones UDP y reglas/config de DDL Export; re-deriva nombres físicos si cambió glosario/naming; registra la versión. Es el ÚNICO camino de mutación de las reglas DDL (el router `/api/ddl-rules` es read-only).
+Propósito: aplicar un batch de cambios de estándares del proyecto como UNA versión. Requiere `standards.edit`. Aplica términos (upsert/delete), naming, dominios (con cascada), definiciones UDP y reglas/config de DDL Export; re-deriva nombres físicos del proyecto si cambió glosario/naming; registra la versión. Es el ÚNICO camino de mutación de las reglas DDL (el router `/api/projects/{project_id}/ddl-rules` es read-only).
 
 Body (`ApplyBody`):
 
@@ -1436,7 +1404,7 @@ Guards propios del batch DDL (el estado se evalúa POST-batch: si el mismo batch
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/standards/apply \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/standards/apply \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1467,7 +1435,7 @@ Respuesta 200 (la versión creada):
 }
 ```
 
-### 10.4 POST /api/standards/rollback
+### 10.4 POST /api/projects/{project_id}/standards/rollback
 
 Propósito: restaurar el estado de estándares al snapshot de una versión objetivo (dominios, términos, naming, UDP y también reglas/config DDL), re-derivar solo lo necesario, y registrar una versión NUEVA (`kind = rollback`). Requiere el permiso `rollback` (dejó de ser `standards.edit` en el doc 27, cuando el rollback pasó a ser un permiso propio de la matriz). 404 si la versión objetivo no existe.
 
@@ -1480,7 +1448,7 @@ Body (`RollbackBody`):
 curl:
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/standards/rollback \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/standards/rollback \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"targetSeq": 12}'
@@ -1506,24 +1474,34 @@ Respuesta 200 (nueva versión de rollback):
 
 Error 404: `{ "detail": "That standards version doesn't exist." }`.
 
+### 10.5 GET /api/projects/{project_id}/standards/summary
+
+Propósito: conteos por bloque de los estándares del proyecto — lo usa el asistente «New project» para elegir qué copiar (doc 75 D15). Abierto.
+
+```bash
+curl -s https://api.ejemplo.com/api/projects/p-001/standards/summary
+```
+
+Respuesta 200: `{ "success": true, "data": { "glossary": 120, "domains": 46, "udp": 25, "rules": 8, "naming": true } }`.
+
 ---
 
-## 11. Settings (`/api/settings`)
+## 11. Settings (`/api/projects/{project_id}/settings`)
 
-Prefijo del router: `/api/settings`. Configuración de naming (separador, case y largo máximo del nombre físico) por scope. Router con `write_guard("standards.edit")`: la lectura requiere sesión; la escritura requiere `standards.edit`.
+Prefijo del router: `/api/projects/{project_id}/settings` (con `alive_project`). Configuración de naming (separador, case y largo máximo del nombre físico) por scope, DEL proyecto. Router con `write_guard("standards.edit")`: la lectura requiere sesión; la escritura requiere `standards.edit`.
 
-Hay un documento por scope (`column`, `table`) en `naming_config`; el `_id` es el scope. La lectura siembra defaults si el documento no existe (no escribe). Regla corporativa vigente: join (sin separador) + UPPER en AMBOS scopes — así se derivan los físicos reales del catálogo (p. ej. `CODCLAVESUJETOCLI`): `column -> { separator: "", case: "upper", maxLength: 150 }`, `table -> { separator: "", case: "upper", maxLength: 150 }`.
+Hay un documento por (proyecto, scope) (`column`, `table`) en `naming_config`; el `_id` es `<projectId>:<scope>`. La lectura siembra defaults si el documento no existe (no escribe). Regla corporativa vigente: join (sin separador) + UPPER en AMBOS scopes — así se derivan los físicos reales del catálogo (p. ej. `CODCLAVESUJETOCLI`): `column -> { separator: "", case: "upper", maxLength: 150 }`, `table -> { separator: "", case: "upper", maxLength: 150 }`.
 
-Forma de un doc de naming en respuesta (`NamingConfigDoc`): `{ scope, separator, case, maxLength }`. `case` es `upper | lower | camel`; `maxLength` (doc 24) es el límite de caracteres del nombre físico, aplicado al crear/renombrar en el changeset (`NameTooLongError` → 400) con grandfather de los nombres heredados. El naming config también se versiona en Data Standards (viaja en `namingConfig` de `standards/apply`).
+Forma de un doc de naming en respuesta (`NamingConfigDoc`): `{ scope, projectId, separator, case, maxLength }`. `case` es `upper | lower | camel`; `maxLength` (doc 24) es el límite de caracteres del nombre físico, aplicado al crear/renombrar en el changeset (`NameTooLongError` → 400) con grandfather de los nombres heredados. El naming config también se versiona en Data Standards (viaja en `namingConfig` de `standards/apply`).
 
-### 11.1 GET /api/settings/naming
+### 11.1 GET /api/projects/{project_id}/settings/naming
 
 Propósito: devolver la configuración de ambos scopes (con defaults sembrados si faltan).
 
 curl:
 
 ```bash
-curl -s https://api.ejemplo.com/api/settings/naming \
+curl -s https://api.ejemplo.com/api/projects/p-001/settings/naming \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -1539,7 +1517,7 @@ Respuesta 200:
 }
 ```
 
-### 11.2 PUT /api/settings/naming/{scope}
+### 11.2 PUT /api/projects/{project_id}/settings/naming/{scope}
 
 Propósito: upsertear `{ separator, case, maxLength }` para un scope. Requiere `standards.edit`. Valida el scope (`column | table`) y el case (`upper | lower | camel`); 400 si son inválidos.
 
@@ -1556,7 +1534,7 @@ Body (`NamingConfigBody`):
 curl:
 
 ```bash
-curl -s -X PUT https://api.ejemplo.com/api/settings/naming/column \
+curl -s -X PUT https://api.ejemplo.com/api/projects/p-001/settings/naming/column \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"separator":"","case":"upper","maxLength":150}'
@@ -1576,32 +1554,32 @@ Error 400 (scope o case inválido):
 
 ---
 
-## 12. DDL Export Rules (`/api/ddl-rules`)
+## 12. DDL Export Rules (`/api/projects/{project_id}/ddl-rules`)
 
-Prefijo del router: `/api/ddl-rules`. Motor de reglas del Export DDL (doc 30, 2026-07-20): reglas autorables que transforman el TEXTO SQL exportado según los valores de UDP del modelo (enmascarar columnas DAC, generar tabla `_rej`, vista técnica, tags de gobierno, TBLPROPERTIES de vacuum). Nunca tocan el modelo ni la data: los artefactos generados existen solo dentro del `.sql` exportado.
+Prefijo del router: `/api/projects/{project_id}/ddl-rules` (con `alive_project`); el ruleset es DEL proyecto (doc 75). Motor de reglas del Export DDL (doc 30, 2026-07-20): reglas autorables que transforman el TEXTO SQL exportado según los valores de UDP del modelo (enmascarar columnas DAC, generar tabla `_rej`, vista técnica, tags de gobierno, TBLPROPERTIES de vacuum). Nunca tocan el modelo ni la data: los artefactos generados existen solo dentro del `.sql` exportado.
 
-El router es **solo lectura + cómputo**: las mutaciones de reglas son VERSIONADAS vía `POST /api/standards/apply` (`rulesUpsert`/`rulesDelete`/`ddlConfigPatch`, ver 10.3), igual que Glossary/Parent Domains/UDP. La lectura y el bench del editor (`validate`/`test`/`impact`) quedan abiertos (no escriben); `POST /render` requiere el permiso `export`.
+El router es **solo lectura + cómputo**: las mutaciones de reglas son VERSIONADAS vía `POST /api/projects/{project_id}/standards/apply` (`rulesUpsert`/`rulesDelete`/`ddlConfigPatch`, ver 10.3), igual que Glossary/Parent Domains/UDP. La lectura y el bench del editor (`validate`/`test`/`impact`) quedan abiertos (no escriben); `POST /render` requiere el permiso `export`.
 
-Colecciones: `ddl_rules` (una regla por doc) y `ddl_ruleset_config` (singleton `_id='global'` con `lookups` y `functions`). El versionado vive en el stream único `standards_versions` (el snapshot suma `ddlRules` + `ddlConfig`; el rollback restaura UDPs y reglas juntos).
+Colecciones: `ddl_rules` (una regla por doc, con `projectId`) y `ddl_ruleset_config` (un doc por proyecto, `_id = projectId`, con `lookups` y `functions`). El versionado vive en el stream `standards_versions` del proyecto (el snapshot suma `ddlRules` + `ddlConfig`; el rollback restaura UDPs y reglas juntos).
 
-Forma de una regla (`DdlRuleDoc`): `{ id, name, description, kind, target, sourceArtifact, condition, udpRefs, action, appliesTo, priority, enabled, validationState, validationReport }`. `name` es un slug único entre reglas activas; `kind` es `rule | generator`; `target` (`column | table`) aplica solo a `kind=rule`; `sourceArtifact` solo a `kind=generator`; `condition` es el DSL SQL-like en forma canónica con corchetes (`columna.udp["…"] LIKE 'DAC-%'`); `action` tiene 4 formas (`expression` | `tags` | `tblproperties` | `emit`); `validationState` es `valid | invalid | stale`.
+Forma de una regla (`DdlRuleDoc`): `{ id, projectId, name, description, kind, target, sourceArtifact, condition, udpRefs, action, appliesTo, priority, enabled, validationState, validationReport }`. `name` es un slug único entre reglas activas; `kind` es `rule | generator`; `target` (`column | table`) aplica solo a `kind=rule`; `sourceArtifact` solo a `kind=generator`; `condition` es el DSL SQL-like en forma canónica con corchetes (`columna.udp["…"] LIKE 'DAC-%'`); `action` tiene 4 formas (`expression` | `tags` | `tblproperties` | `emit`); `validationState` es `valid | invalid | stale`.
 
-### 12.1 GET /api/ddl-rules
+### 12.1 GET /api/projects/{project_id}/ddl-rules
 
 Propósito: reglas activas en orden de ejecución (`priority` DESC, `name` ASC). Lectura abierta (la usan el catálogo de la pestaña "DDL Export rules" de Data Standards y el modal de Export DDL).
 
 ```bash
-curl -s https://api.ejemplo.com/api/ddl-rules -H "Authorization: Bearer $TOKEN"
+curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules -H "Authorization: Bearer $TOKEN"
 ```
 
 Respuesta 200: lista de `DdlRuleDoc` (misma forma que en `ddlRules` del snapshot de 10.1).
 
-### 12.2 GET /api/ddl-rules/config
+### 12.2 GET /api/projects/{project_id}/ddl-rules/config
 
-Propósito: config del ruleset global — lookups (mapeos valor de UDP → texto SQL, con `default`) y funciones reusables.
+Propósito: config del ruleset del proyecto — lookups (mapeos valor de UDP → texto SQL, con `default`) y funciones reusables.
 
 ```bash
-curl -s https://api.ejemplo.com/api/ddl-rules/config -H "Authorization: Bearer $TOKEN"
+curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules/config -H "Authorization: Bearer $TOKEN"
 ```
 
 Respuesta 200:
@@ -1618,12 +1596,12 @@ Respuesta 200:
 
 Semántica del lookup: un valor sin mapeo con `default: null` no emite nada; la condición VACÍA de una regla + `default` del lookup es cómo se declara el "sin valor → default" (enfoque B del doc 30 §11: el motor lee SOLO valores explícitos de UDP, jamás el `defaultValue` de la definición).
 
-### 12.3 GET /api/ddl-rules/artifacts
+### 12.3 GET /api/projects/{project_id}/ddl-rules/artifacts
 
 Propósito: catálogo de artefactos — las 2 raíces + los declarados por generadores activos (`action.emit.artifact`). No es un enum cerrado.
 
 ```bash
-curl -s https://api.ejemplo.com/api/ddl-rules/artifacts -H "Authorization: Bearer $TOKEN"
+curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules/artifacts -H "Authorization: Bearer $TOKEN"
 ```
 
 Respuesta 200:
@@ -1639,24 +1617,24 @@ Respuesta 200:
 }
 ```
 
-### 12.4 GET /api/ddl-rules/templates
+### 12.4 GET /api/projects/{project_id}/ddl-rules/templates
 
 Propósito: plantillas del picker del editor + las reglas semilla del spec, con los lookups semilla resueltos a los ids REALES de UDP de esta BD (el front las aplica vía `standards/apply`).
 
 ```bash
-curl -s https://api.ejemplo.com/api/ddl-rules/templates -H "Authorization: Bearer $TOKEN"
+curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules/templates -H "Authorization: Bearer $TOKEN"
 ```
 
 Respuesta 200: `{ "templates": [...], "seedRules": [...], "seedLookups": {...} }`.
 
-### 12.5 POST /api/ddl-rules/validate
+### 12.5 POST /api/projects/{project_id}/ddl-rules/validate
 
 Propósito: los 5 checks del bench del editor sobre la regla del body, contra el catálogo REAL de defs UDP + config + artefactos. NO guarda (el guardado versionado va por `standards/apply`, que re-valida server-side). Los 5 checks, en orden y con sus nombres de UI: `Condition syntax` · `UDP exists in catalog` · `Value allowed for UDP` · `Expression syntax (Databricks)` · `Placeholders resolved`.
 
 Body: `DdlRuleEdit` (ver 10.3).
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/ddl-rules/validate \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/validate \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"mi_regla","kind":"rule","target":"column","condition":"columna.udp[\"Clasificacion del Dato\"] = '\''DAC'\''","action":{"expression":"sha2({col}, 512)"},"appliesTo":["ddl.vista_tecnica"]}'
 ```
@@ -1679,14 +1657,14 @@ Respuesta 200:
 
 `ok: null` en un check = en espera (un check previo del que depende falló). Los errores traen `line`/`col` para subrayar en el editor, y sugerencias tipo "Did you mean" (Levenshtein sobre nombres de UDP; el caso `= 'DAC'` sugiere `LIKE 'DAC-%'`).
 
-### 12.6 POST /api/ddl-rules/test
+### 12.6 POST /api/projects/{project_id}/ddl-rules/test
 
 Propósito: correr la regla contra UNA tabla real del catálogo publicado. Devuelve solo los FRAGMENTOS generados de lo que matchea — nunca el DDL completo (eso es del export).
 
 Body (`TestBody`): `{ "rule": DdlRuleEdit, "tableId": string }`.
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/ddl-rules/test \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/test \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"rule":{"name":"enmascarar_dac","kind":"rule","target":"column","condition":"columna.udp[\"Clasificacion del Dato\"] LIKE '\''DAC-%'\''","action":{"expression":"sha2({col}, 512)"},"appliesTo":["ddl.vista_tecnica"]},"tableId":"t-001"}'
 ```
@@ -1709,21 +1687,21 @@ Respuesta 200 (`fragments` varía por tipo de acción: `{column, sql, why}` en r
 
 Errores: 404 `{ "detail": "That table doesn't exist." }`; 400 si la condición o la expresión no parsean.
 
-### 12.7 POST /api/ddl-rules/impact
+### 12.7 POST /api/projects/{project_id}/ddl-rules/impact
 
 Propósito: estimar el alcance de la regla cuando se aplique en el export — "Matches N columns across M tables" — con un barrido liviano del catálogo publicado.
 
 Body (`ImpactBody`): `{ "rule": DdlRuleEdit }`.
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/ddl-rules/impact \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/impact \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"rule":{"name":"enmascarar_dac","kind":"rule","target":"column","condition":"columna.udp[\"Clasificacion del Dato\"] LIKE '\''DAC-%'\''","action":{"expression":"sha2({col}, 512)"}}}'
 ```
 
 Respuesta 200: `{ "columns": 43, "tables": 12 }` (en generadores y reglas `target=table`, `columns` es 0 y `tables` cuenta las tablas que matchean). Error 400 si la condición no parsea.
 
-### 12.8 POST /api/ddl-rules/render
+### 12.8 POST /api/projects/{project_id}/ddl-rules/render
 
 Propósito: el puente del Export DDL (doc 30 §8). El motor es **PURO**: transforma el payload que manda el front (el DDL base generado con el estado EFECTIVO del canvas — drafts incluidos) y no lee el modelo; solo lee de BD las reglas seleccionadas, la config y los nombres de UDP/dominios. Requiere el permiso `export`. Audita `ddl.export_render` con la versión de standards usada.
 
@@ -1738,7 +1716,7 @@ Body (`RenderBody`):
 | `options` | dict | `{}` | opciones del modal (identifierCase/tableFormat/external/location/includePartitions): los artefactos generados salen espejo del CREATE físico |
 
 ```bash
-curl -s -X POST https://api.ejemplo.com/api/ddl-rules/render \
+curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/render \
   -H "Authorization: Bearer $EXPORT_TOKEN" -H "Content-Type: application/json" \
   -d '{
         "ruleIds": ["r-01", "r-07"],
@@ -1784,8 +1762,7 @@ Forma de cada pieza:
 | GET | `/api/auth/warmup/{next_b64}` | público | Warm-up SSO Databricks Apps (302 a `next`; inerte con el proxy del front) |
 | POST | `/api/auth/logout` | sesión | Logout (audita) |
 | GET | `/api/auth/me` | sesión | Usuario enriquecido (rol + permisos) |
-| GET | `/api/me` | sesión | Principal crudo |
-| GET | `/api/users` | abierto | Usuarios reales para asignar revisores (query `can=`) |
+| GET | `/api/users` | sesión | Usuarios reales para asignar revisores (query `can=`) |
 | GET | `/api/admin/users` | `admin.manage` | Listar usuarios |
 | POST | `/api/admin/users` | `admin.manage` | Crear usuario |
 | PUT | `/api/admin/users/{username}` | `admin.manage` | Actualizar usuario |
@@ -1795,43 +1772,46 @@ Forma de cada pieza:
 | DELETE | `/api/admin/roles/{key}` | `admin.manage` | Eliminar rol |
 | GET | `/api/admin/permissions` | `admin.manage` | Catálogo de permisos |
 | GET | `/api/admin/audit` | `admin.manage` | Log de auditoría |
-| GET | `/api/catalog/tables` | sesión | Listar/buscar tablas (`q`+`limit`) |
-| POST | `/api/catalog/tables` | `model.edit` | Crear tabla |
-| GET | `/api/catalog/columns` | sesión | Búsqueda global por columna (doc 29) |
+| GET | `/api/projects/{pid}/catalog/tables` | sesión | Listar/buscar tablas del proyecto (`q`+`limit`, `schema`) |
+| POST | `/api/projects/{pid}/catalog/tables` | `model.edit` | Crear tabla en el proyecto |
+| GET | `/api/projects/{pid}/catalog/columns` | sesión | Búsqueda por columna en el proyecto (doc 29) |
+| GET | `/api/projects/{pid}/catalog/search` | sesión | Buscador del Model (⌘K, doc 70 §11) |
+| GET | `/api/projects/{pid}/catalog/inventory` | sesión | Inventario del proyecto para el Explorer (doc 72) |
 | GET | `/api/catalog/tables/{table_id}/columns` | sesión | Listar columnas |
 | POST | `/api/catalog/tables/{table_id}/columns` | `model.edit` | Crear columna |
 | GET | `/api/catalog/tables/{table_id}/usage` | sesión | Canvases que usan la tabla (query `changesetId`) |
-| GET | `/api/glossary` | abierto | Listar términos (query `scope`) |
-| POST | `/api/glossary` | `standards.edit` | Crear término |
-| PUT | `/api/glossary/{entry_id}` | `standards.edit` | Actualizar término |
-| DELETE | `/api/glossary/{entry_id}` | `standards.edit` | Eliminar término |
-| POST | `/api/glossary/physicalize` | abierto | Lógico a físico |
-| POST | `/api/glossary/logicalize` | abierto | Físico a lógico |
-| POST | `/api/glossary/validate` | sesión | Validar término nuevo (duplicado + corpus) |
-| POST | `/api/glossary/rephysicalize` | `standards.edit` | Re-derivar físicos |
-| POST | `/api/glossary/{entry_id}/lock` | `admin.manage` | Bloquear entrada |
-| POST | `/api/glossary/{entry_id}/unlock` | `admin.manage` | Desbloquear entrada |
-| GET | `/api/domains` | sesión | Listar dominios |
-| POST | `/api/domains` | `standards.edit` | Crear dominio |
-| PUT | `/api/domains/{domain_id}` | `standards.edit` | Actualizar dominio (cascada) |
-| DELETE | `/api/domains/{domain_id}` | `standards.edit` | Eliminar dominio |
-| GET | `/api/domains/{domain_id}/impact` | sesión | Impacto de propagar |
-| POST | `/api/domains/{domain_id}/propagate` | `standards.edit` | Propagar tipo |
-| GET | `/api/udp` | abierto | Listar definiciones UDP |
-| GET | `/api/standards/snapshot` | abierto | Estado actual de estándares (+ `ddlRules`/`ddlConfig`) |
-| GET | `/api/standards/versions` | abierto | Historial de versiones |
-| POST | `/api/standards/apply` | `standards.edit` | Aplicar batch + versionar (incluye reglas DDL) |
-| POST | `/api/standards/rollback` | `rollback` | Restaurar versión + versionar |
-| GET | `/api/ddl-rules` | sesión | Reglas DDL activas |
-| GET | `/api/ddl-rules/config` | sesión | Lookups + functions del ruleset |
-| GET | `/api/ddl-rules/artifacts` | sesión | Catálogo de artefactos |
-| GET | `/api/ddl-rules/templates` | sesión | Plantillas + reglas semilla |
-| POST | `/api/ddl-rules/validate` | sesión | Los 5 checks (no escribe) |
-| POST | `/api/ddl-rules/test` | sesión | Regla contra una tabla real (no escribe) |
-| POST | `/api/ddl-rules/impact` | sesión | "N columns across M tables" (no escribe) |
-| POST | `/api/ddl-rules/render` | `export` | Puente puro del Export DDL |
-| GET | `/api/settings/naming` | sesión | Config de naming (ambos scopes) |
-| PUT | `/api/settings/naming/{scope}` | `standards.edit` | Upsert naming por scope |
+| GET | `/api/catalog/inspect/tables/{table_id}` · `/inspect/views/{view_id}` | sesión | Object Inspector (doc 72) |
+| GET | `/api/projects/{pid}/glossary` | abierto | Listar términos del proyecto (query `scope`) |
+| POST | `/api/projects/{pid}/glossary` | `standards.edit` | Crear término |
+| PUT | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Actualizar término |
+| DELETE | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Eliminar término |
+| POST | `/api/projects/{pid}/glossary/physicalize` | abierto | Lógico a físico |
+| POST | `/api/projects/{pid}/glossary/validate` | sesión | Validar término nuevo (duplicado + corpus) |
+| POST | `/api/projects/{pid}/glossary/rephysicalize` | `standards.edit` | Re-derivar físicos del proyecto |
+| POST | `/api/projects/{pid}/glossary/{entry_id}/lock` | `admin.manage` | Bloquear entrada |
+| POST | `/api/projects/{pid}/glossary/{entry_id}/unlock` | `admin.manage` | Desbloquear entrada |
+| GET | `/api/projects/{pid}/domains` | sesión | Listar dominios del proyecto |
+| POST | `/api/projects/{pid}/domains` | `standards.edit` | Crear dominio |
+| PUT | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Actualizar dominio (cascada) |
+| DELETE | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Eliminar dominio |
+| GET | `/api/projects/{pid}/domains/{domain_id}/impact` | sesión | Impacto de propagar |
+| POST | `/api/projects/{pid}/domains/{domain_id}/propagate` | `standards.edit` | Propagar tipo |
+| GET | `/api/projects/{pid}/udp` | abierto | Listar definiciones UDP del proyecto |
+| GET | `/api/projects/{pid}/standards/snapshot` | abierto | Estado actual de estándares del proyecto (+ `ddlRules`/`ddlConfig`) |
+| GET | `/api/projects/{pid}/standards/versions` | abierto | Historial de versiones del proyecto |
+| GET | `/api/projects/{pid}/standards/summary` | abierto | Conteos por bloque (New project · copyFrom) |
+| POST | `/api/projects/{pid}/standards/apply` | `standards.edit` | Aplicar batch + versionar (incluye reglas DDL) |
+| POST | `/api/projects/{pid}/standards/rollback` | `rollback` | Restaurar versión + versionar |
+| GET | `/api/projects/{pid}/ddl-rules` | sesión | Reglas DDL activas del proyecto |
+| GET | `/api/projects/{pid}/ddl-rules/config` | sesión | Lookups + functions del ruleset |
+| GET | `/api/projects/{pid}/ddl-rules/artifacts` | sesión | Catálogo de artefactos |
+| GET | `/api/projects/{pid}/ddl-rules/templates` | sesión | Plantillas + reglas semilla |
+| POST | `/api/projects/{pid}/ddl-rules/validate` | sesión | Los 5 checks (no escribe) |
+| POST | `/api/projects/{pid}/ddl-rules/test` | sesión | Regla contra una tabla real (no escribe) |
+| POST | `/api/projects/{pid}/ddl-rules/impact` | sesión | "N columns across M tables" (no escribe) |
+| POST | `/api/projects/{pid}/ddl-rules/render` | `export` | Puente puro del Export DDL |
+| GET | `/api/projects/{pid}/settings/naming` | sesión | Config de naming del proyecto (ambos scopes) |
+| PUT | `/api/projects/{pid}/settings/naming/{scope}` | `standards.edit` | Upsert naming por scope |
 
 Nota sobre "sesión" vs "abierto": los endpoints marcados como "sesión" usan `write_guard` (lectura sin permiso puntual) o `current_principal`, por lo que con `REQUIRE_AUTH=true` exigen token válido; los "abierto" no declaran dependencia de auth, aunque igual pasan por el pipeline global (y por CORS/rate limiting cuando aplica).
 
@@ -1887,6 +1867,7 @@ Los guards de escritura conviven en dos formas:
 
 Routers protegidos por `write_guard("model.edit")`: **projects**, **folders**, **schemas**, **relationships**, **views**.
 Router **changesets**: usa `require_permission` por endpoint — `model.edit` para editar/crear/enviar/retirar/reabrir; `review.decide` para aprobar/rechazar/decidir; `rollback` para revertir a una versión publicada.
+Toda ruta `/api/projects/{project_id}/…` lleva además `alive_project` (doc 75): 404 `Project not found.` si el proyecto no existe o fue borrado.
 Routers **reporting**, **summary**, **health**: lecturas abiertas (el login global gatea en producción); los reportes guardados usan `current_principal` para ligar al owner.
 
 ### 1.4 Errores comunes
@@ -1896,8 +1877,8 @@ Routers **reporting**, **summary**, **health**: lecturas abiertas (el login glob
 | 400 | SQL inválido, cursor inválido, campo desconocido en `/query`, nombre físico sobre `maxLength` del naming. |
 | 401 | Sin sesión válida (en producción). |
 | 403 | Falta permiso, o el actor no es el owner / no es revisor asignado. |
-| 404 | Entidad inexistente / soft-deleted (`_found` levanta 404 en vez de devolver `data: null`). |
-| 409 | Conflicto de estado o de datos (versión ya no está en draft, request ya decidido/retirado, nombre duplicado, esquema en uso, vista sin fuente). |
+| 404 | Entidad inexistente / soft-deleted (`_found` levanta 404 en vez de devolver `data: null`); proyecto inexistente o borrado (`Project not found.`). |
+| 409 | Conflicto de estado o de datos (versión ya no está en draft, request ya decidido/retirado, nombre duplicado EN EL PROYECTO, esquema en uso, vista sin fuente); el proyecto del changeset fue borrado (`This project was deleted.`); un cambio referencia una entidad de OTRO proyecto (doc 75 I2); compare entre versiones de proyectos distintos. |
 | 422 | Payload inválido (no valida contra el modelo), colección no versionada, op no permitida para el tipo de campo. |
 
 ---
@@ -1906,12 +1887,12 @@ Routers **reporting**, **summary**, **health**: lecturas abiertas (el login glob
 
 Router: `app/features/projects/router.py` — prefijo `/api`, guard `write_guard("model.edit")`.
 
-Un **Project** es el contenedor padre. Una **Subject Area** (canvas) es un módulo que referencia un subconjunto del pool universal de tablas canónicas más su layout. El modelo de datos (`models.py`):
+Un **Project** es la raíz del alcance (doc 75): todo lo demás (tablas, columnas, esquemas, relaciones, vistas, carpetas, canvases, estándares, versiones, reportes) lleva su `projectId`. Una **Subject Area** (canvas) es un módulo que referencia un subconjunto del pool de tablas canónicas DEL proyecto más su layout. El modelo de datos (`models.py`):
 
 ```python
-class ProjectDoc:
+class ProjectDoc:                  # raíz del alcance: NO lleva projectId
     id: str            # uuid4
-    name: str
+    name: str          # único global (case-insensitive)
     description: str | None
 
 class SubjectAreaDoc:
@@ -1927,7 +1908,7 @@ class SubjectAreaDoc:
 
 ### 2.1 GET /api/projects
 
-Propósito: lista todos los proyectos activos.
+Propósito: lista todos los proyectos activos, ordenados por nombre. Un proyecto borrado (soft-delete aplicado desde un draft, §8) no vuelve a aparecer.
 
 ```bash
 curl http://localhost:8000/api/projects
@@ -1943,42 +1924,38 @@ Respuesta (`data`):
 
 ### 2.2 POST /api/projects
 
-Propósito: crea un proyecto. Body `ProjectBody`:
+Propósito: crea un proyecto — la ÚNICA operación directa sobre un proyecto (doc 75 D5/D15): en una sola request crea el doc, siembra sus Data Standards (vacíos, o copiando bloques de otro proyecto) y registra el marcador de versión `v1` (con eso el módulo Model ya puede abrirlo). Si algo falla a medio camino, el proyecto se descarta. Permiso `model.edit`. Body `ProjectCreateBody`:
 
-| Campo | Tipo | Req. |
-|---|---|---|
-| `name` | string | sí |
-| `description` | string \| null | no |
+| Campo | Tipo | Req. | Notas |
+|---|---|---|---|
+| `name` | string | sí | único global (case-insensitive) |
+| `description` | string \| null | no | |
+| `copyFrom` | `{ projectId, blocks[] }` \| null | no | copia UNA VEZ (foto, sin vínculo) los bloques indicados del proyecto fuente: `glossary`, `domains`, `udp`, `naming`, `ddl` (al menos uno); queda como versión `v1 · kind=copy` de Standards del nuevo proyecto |
 
 ```bash
 curl -X POST http://localhost:8000/api/projects \
   -H "Content-Type: application/json" \
-  -d '{"name":"Ventas","description":"Modelo comercial"}'
+  -d '{"name":"Ventas","description":"Modelo comercial","copyFrom":{"projectId":"p-ddv","blocks":["glossary","domains","udp"]}}'
 ```
 
-Respuesta: `201 Created` con el proyecto creado (incluye `id` generado).
+Respuesta: `201 Created` con el proyecto creado (incluye `id` generado). Errores: **409** nombre ya usado; **404** `Source project not found.`; **422** nombre vacío o bloque desconocido.
 
-### 2.3 PUT /api/projects/{pid}
+> **Renombrar, describir y borrar** un proyecto NO tienen endpoint directo: van por un draft del propio proyecto (`PUT /api/changesets/{cs_id}/changes` con `collection: "projects"`, `entityId == cs.projectId`, `op: upsert | delete`, §8.5). El borrado se aplica recién al aprobar el request, con aviso crítico al revisor (§8.7) y cascada de soft-delete de todo lo del proyecto.
 
-Propósito: actualiza nombre/descripción. Mismo body `ProjectBody`. 404 si no existe.
+### 2.3 GET /api/projects/{project_id}/counts
+
+Propósito: conteos de activos del proyecto (`ScopeCounts`) — alimentan el diálogo «Delete project…» del Workspace y el bloque crítico del aprobador. 404 si el proyecto no existe o fue borrado.
 
 ```bash
-curl -X PUT http://localhost:8000/api/projects/p-001 \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Ventas LATAM"}'
+curl http://localhost:8000/api/projects/p-001/counts
 ```
 
-### 2.4 DELETE /api/projects/{pid}
-
-Propósito: elimina (soft-delete) el proyecto. 404 si no existe.
-
-```bash
-curl -X DELETE http://localhost:8000/api/projects/p-001
+Respuesta (`data`):
+```json
+{ "tables": 2108, "columns": 96184, "views": 1932, "relationships": 1630, "schemas": 388, "folders": 48, "canvases": 275 }
 ```
 
-Respuesta: el proyecto eliminado (o su marca) envuelto en `ok`.
-
-### 2.5 GET /api/projects/{pid}/subject-areas
+### 2.4 GET /api/projects/{pid}/subject-areas
 
 Propósito: lista los canvases del proyecto. Query opcional `folderId` para acotar a una carpeta del Model Explorer.
 
@@ -1995,7 +1972,7 @@ Respuesta (`data`):
 ]
 ```
 
-### 2.6 GET /api/projects/{project_id}/folders
+### 2.5 GET /api/projects/{project_id}/folders
 
 Ver sección 3 (folders). Existe como forma anidada equivalente a `GET /api/folders?projectId=...`.
 
@@ -2090,7 +2067,7 @@ curl -X DELETE http://localhost:8000/api/folders/f-02
 
 Router: `app/features/projects/router.py` (mismo router que projects). Guard `write_guard("model.edit")`.
 
-Un canvas = un diagrama ER. `tableIds`, `layout` y `drawings` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip).
+Un canvas = un diagrama ER. `tableIds`, `viewIds`, `layout`, `drawings` y `udpValues` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip). Existe también `PUT /api/subject-areas/{sa_id}/views` (doc 70; body `{ viewIds: [] }`, la membresía COMPLETA de vistas del canvas), hermano de `/tables`. Los UDP de canvas (`udpValues`) se editan SOLO por el draft (el `PUT …/udp` directo se retiró en el doc 75 D14). Un canvas sólo puede referenciar tablas/vistas de SU proyecto (guard I2, 409).
 
 ### 4.1 POST /api/subject-areas
 
@@ -2154,21 +2131,11 @@ Propósito: persiste la capa DRAWING (formas/texto con estilo). **Reemplaza el a
 
 No se audita.
 
-### 4.7 PUT /api/subject-areas/{sa_id}/udp
-
-Propósito: fija los valores de UDP de nivel canvas ("UDP del Modelo de Datos", F5). Body `UdpValuesBody` — el mapa COMPLETO reemplaza al anterior:
-
-```json
-{ "udpValues": { "udp-archivo-base": "MD_DDV.erwin" } }
-```
-
-Escritura gateada por `model.edit` (el `write_guard` del router); el guard genérico no la audita (sufijo `/udp`) porque el service ya audita con el verbo específico `canvas.udp.update`. 404 si el canvas no existe.
-
-### 4.8 DELETE /api/subject-areas/{sa_id}
+### 4.7 DELETE /api/subject-areas/{sa_id}
 
 Propósito: elimina el canvas. 404 si no existe.
 
-### 4.9 GET /api/subject-areas/{sa_id}/diagram
+### 4.8 GET /api/subject-areas/{sa_id}/diagram
 
 Propósito: **el diagrama completo del canvas en una sola request**. Devuelve el canvas, sus tablas, columnas, relaciones visibles (ambas puntas dentro del canvas) y las **vistas** del canvas (`showOnCanvas=true` con al menos una fuente presente), resuelto server-side en 4 queries batched (`$in`) — reemplaza el camino inviable a 15k tablas.
 
@@ -2215,11 +2182,12 @@ flowchart TD
 
 Router: `app/features/relationships/router.py` — prefijo `/api/relationships`, guard `write_guard("model.edit")`.
 
-Relación ER (PK/FK entre tablas canónicas). Modelo:
+Relación ER (PK/FK entre tablas canónicas del MISMO proyecto; `projectId` lo estampa el servidor). Modelo:
 
 ```python
 class RelationshipDoc:
     id: str
+    projectId: str
     parentTableId: str
     childTableId: str
     pairs: list[RelationshipPairDoc]  # [{parentColumnId, childColumnId, roleName?}] — min 1 (v2, doc 19)
@@ -2334,7 +2302,7 @@ Respuesta (`data`):
 
 Router: `app/features/views/router.py` — prefijo `/api/views`, guard `write_guard("model.edit")`.
 
-Vistas SQL, columna por columna y multi-fuente (docs 07b-2, 20 y 22). Modelo (aditivos del editor de vista, todos con default no-breaking):
+Vistas SQL, columna por columna y multi-fuente (docs 07b-2, 20 y 22), del proyecto de sus tablas fuente (`projectId`). Modelo (aditivos del editor de vista, todos con default no-breaking):
 
 ```python
 class ViewDoc:
@@ -2415,18 +2383,18 @@ curl -X POST http://localhost:8000/api/views/sql/parse \
 
 ## 7. Schemas
 
-Router: `app/features/schemas/router.py` — prefijo `/api/schemas`, guard `write_guard("model.edit")` (doc 18: el esquema de BD es una ENTIDAD, ya no texto libre).
+Router: `app/features/schemas/router.py` — dos prefijos con guard `write_guard("model.edit")`: `/api/projects/{project_id}/schemas` (listar/crear, con `alive_project`) y `/api/schemas/{sid}` (editar/borrar por id). Doc 18: el esquema de BD es una ENTIDAD, ya no texto libre; doc 75: es una entidad DEL proyecto (`projectId`), con nombre único **por proyecto** — el mismo nombre puede existir en dos proyectos.
 
 El GET es lectura para cualquier sesión válida: lo consumen los dropdowns de esquema y el Database Explorer, incluso con rol lector. Las escrituras exigen `model.edit` y son el camino directo SIN changeset — en sesión de edición el front escribe SIEMPRE vía changeset (cambio `collection: "schemas"` por `PUT .../changes`, o los endpoints de rename/delete del changeset, ver 8.17).
 
-Forma de un esquema: `{ id, name, description, kind }`. `kind` (doc 44) declara qué contiene el esquema — `"tables"` | `"views"` | `null` (sin clasificar): el XML de Erwin no trae ese dato, así que nace en la plataforma (la UI lo pide al crear; la migración lo deriva de los miembros; `scripts/backfill_schema_kind.py` clasifica el stock por uso real). Lo consumen los combobox de esquema de CTAS/New table para acotar a esquemas de tablas sin consultar el pool.
+Forma de un esquema: `{ id, projectId, name, description, kind }`. `kind` (doc 44) declara qué contiene el esquema — `"tables"` | `"views"` | `null` (sin clasificar): el XML de Erwin no trae ese dato, así que nace en la plataforma (la UI lo pide al crear; la migración lo deriva de los miembros; `scripts/backfill_schema_kind.py` clasifica el stock por uso real). Lo consumen los combobox de esquema de CTAS/New table para acotar a esquemas de tablas sin consultar el pool.
 
-### 7.1 GET /api/schemas
+### 7.1 GET /api/projects/{project_id}/schemas
 
-Propósito: lista los esquemas activos.
+Propósito: lista los esquemas activos del proyecto.
 
 ```bash
-curl http://localhost:8000/api/schemas
+curl http://localhost:8000/api/projects/p-001/schemas
 ```
 
 Respuesta (`data`):
@@ -2437,21 +2405,21 @@ Respuesta (`data`):
 ]
 ```
 
-### 7.2 POST /api/schemas
+### 7.2 POST /api/projects/{project_id}/schemas
 
-Propósito: crea un esquema. Body `SchemaBody` (`{ name, description?, kind? }`; `kind` ∈ `tables|views`, opcional). Respuesta `201 Created`.
+Propósito: crea un esquema en el proyecto. Body `SchemaBody` (`{ name, description?, kind? }`; `kind` ∈ `tables|views`, opcional). Respuesta `201 Created`.
 
-Errores: **422** nombre inválido o `kind` fuera del enum; **409** nombre duplicado.
+Errores: **422** nombre inválido o `kind` fuera del enum; **409** nombre duplicado en el proyecto.
 
 ```bash
-curl -X POST http://localhost:8000/api/schemas \
+curl -X POST http://localhost:8000/api/projects/p-001/schemas \
   -H "Content-Type: application/json" \
   -d '{"name":"riesgos","description":"Dominio de riesgos","kind":"tables"}'
 ```
 
 ### 7.3 PATCH /api/schemas/{sid}
 
-Propósito: actualiza (rename/descripción). Mismo body; `kind` AUSENTE significa "no tocar el vigente" (un PATCH de solo nombre no borra la clasificación). Errores: **422** nombre inválido; **409** duplicado; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá — ese camino espeja el doc efectivo completo, así que conserva `kind`.
+Propósito: actualiza (rename/descripción). Mismo body; `kind` AUSENTE significa "no tocar el vigente" (un PATCH de solo nombre no borra la clasificación). Errores: **422** nombre inválido; **409** duplicado en el proyecto del esquema; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá — ese camino espeja el doc efectivo completo, así que conserva `kind`.
 
 ### 7.4 DELETE /api/schemas/{sid}
 
@@ -2465,7 +2433,7 @@ Errores: **409** `{ "detail": "The schema has tables or views: it can't be delet
 
 Router: `app/features/changesets/router.py` — prefijo `/api/changesets`.
 
-Un **changeset** es la unidad de versionado/cambio del modelo. Es **cross-project** (`projectIds[]`). Ciclo de vida:
+Un **changeset** es la unidad de versionado/cambio del modelo y pertenece a **UN proyecto** (`projectId`, doc 75 D2): nace del estado publicado de ese proyecto, sólo puede tocar entidades de ese proyecto y publica a la producción de ese proyecto. Los `versionLabel` (`vN`) se numeran por proyecto. Ciclo de vida:
 
 ```mermaid
 stateDiagram-v2
@@ -2483,10 +2451,12 @@ Reglas clave:
 - **Unanimidad**: se aplica a producción sólo cuando **todos** los revisores asignados aprobaron. Un rechazo → `rejected`.
 - Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` / `PUT .../changes/bulk` (los endpoints de esquema de 8.17 también registran cambios, server-side).
 - Colecciones versionadas (`VERSIONED`, whitelist dura — la ESTRUCTURA también es versionada desde los docs 16 y 18): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`.
+- **Guards de proyecto (doc 75 I1/I2)**: `payload.projectId` lo estampa el servidor con el del changeset; una referencia (`tableId`, `parentTableId`/`childTableId`, `sourceTableIds`, `parentDomainId`, `folderId`, `schema`) a una entidad de OTRO proyecto es **409**; en `projects` sólo se admite la entidad `cs.projectId` (renombrar/describir/borrar el propio proyecto — crear proyectos va por `POST /api/projects`).
+- **Borrado del proyecto (D5)**: un cambio `projects/<projectId> op=delete` marca el draft como «Deletion pending» (`version_row.deletesProject = true`, `diff.impact.deletesProject`); al aprobarse, el apply cascadea el soft-delete de TODO lo del proyecto (modelo + estándares; se conservan `changesets` y `standards_versions` como historial) y desde entonces sus rutas responden 404 / sus changesets 409 `This project was deleted.`.
 - `appliedAt` se estampa recién con el apply completo: es el marcador de "esta versión está en producción". Al aplicar, cada cambio estampa además su imagen `before` (la usa el rollback y el diff de detalles).
 - **Rollback** (doc 27): `POST /{cs_id}/rollback` (permiso `rollback`) crea un DRAFT inverso que restaura el modelo al estado de esa versión publicada; el draft pasa por el flujo normal submit → review → approve.
 
-Modelo `ChangesetDoc` (campos principales): `id`, `title`, `owner`, `status` (`draft|submitted|approved|rejected`), `description`, `versionLabel` (`v1`, `v2`, ... autoincremental), `projectIds[]`, `reviewers[]`, `approvals{userId: {status, note?, at}}`, `comments[]`, timestamps (`createdAt`, `updatedAt`, `submittedAt`, `reviewedBy`, `reviewedAt`, `reviewNote`, `appliedAt`).
+Modelo `ChangesetDoc` (campos principales): `id`, `title`, `owner`, `status` (`draft|submitted|approved|rejected`), `description`, `versionLabel` (`v1`, `v2`, ... autoincremental por proyecto), `projectId`, `reviewers[]`, `approvals{userId: {status, note?, at}}`, `comments[]`, `restoredFrom` (doc 65), timestamps (`createdAt`, `updatedAt`, `submittedAt`, `reviewedBy`, `reviewedAt`, `reviewNote`, `appliedAt`). En las proyecciones (`version_row`, detalle) viaja además `deletesProject` (derivado del ledger, no persistido).
 
 ### 8.1 POST /api/changesets
 
@@ -2514,26 +2484,26 @@ curl http://localhost:8000/api/changesets
 
 ### 8.3 POST /api/changesets/snapshot
 
-Propósito: crea un **draft (working copy)** a partir del estado publicado ("Open model · snapshot"). Permiso `model.edit`. Body `SnapshotBody` — todo opcional; `versionLabel` se autogenera (`vN`) si no viene:
+Propósito: crea un **draft (working copy)** DEL proyecto a partir de su estado publicado ("Open model · proyecto · snapshot"). Permiso `model.edit`. Body `SnapshotBody` — `projectId` obligatorio; `versionLabel` se autogenera (`vN` del proyecto) si no viene:
 
 | Campo | Tipo | Nota |
 |---|---|---|
+| `projectId` | string | **requerido**; 404 `Project not found.` si no existe o fue borrado |
 | `title` | string \| null | por defecto = `versionLabel` |
 | `description` | string \| null | |
-| `versionLabel` | string \| null | autoincremental si falta |
-| `projectIds` | list[str] | chips de proyecto |
+| `versionLabel` | string \| null | autoincremental por proyecto si falta |
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/snapshot \
   -H "Content-Type: application/json" \
-  -d '{"title":"Rediseño facturación","projectIds":["p-001"]}'
+  -d '{"projectId":"p-001","title":"Rediseño facturación"}'
 ```
 
-Respuesta: `201 Created` — draft con `owner = actor`.
+Respuesta: `201 Created` — draft con `owner = actor` y `projectId`.
 
 ### 8.4 GET /api/changesets/{cs_id}
 
-Propósito: un changeset por id, enriquecido con `diff` (resumen por colección `{added, modified, removed}` con slice por ids cambiados — compat M-series para el aprobador).
+Propósito: un changeset por id, enriquecido con `diff` (resumen por colección `{added, modified, removed}` con slice por ids cambiados — compat M-series para el aprobador) y `deletesProject`.
 
 ```bash
 curl http://localhost:8000/api/changesets/cs-9
@@ -2548,7 +2518,7 @@ Propósito: registra un cambio en el working copy (upsert/delete de una entidad)
 | `collection` | string | debe estar en `VERSIONED` (422 si no) |
 | `entityId` | string | id de la entidad |
 | `op` | `"upsert"` \| `"delete"` | |
-| `payload` | dict \| null | requerido en upsert; los delete no llevan payload |
+| `payload` | dict \| null | requerido en upsert; los delete no llevan payload. `payload.projectId` lo fija el servidor (= `cs.projectId`) |
 
 ```bash
 curl -X PUT http://localhost:8000/api/changesets/cs-9/changes \
@@ -2567,8 +2537,8 @@ Respuestas de error específicas:
 |---|---|
 | 422 | Colección no versionada, o payload que no valida contra el modelo (`add_change` valida ANTES de escribir). |
 | 403 | El actor no es el owner (la working copy es personal). |
-| 409 | El changeset ya no está en `draft` (fue enviado o cerrado): hay que abrir una versión nueva. También 409 por unicidad de nombres (crear/renombrar chocaría con una entidad existente — el Save queda bloqueado acá y el publish re-chequea). |
-| 400 | Nombre físico sobre el `maxLength` del naming config (`NameTooLongError`, doc 24; los nombres heredados quedan grandfathered). |
+| 409 | El changeset ya no está en `draft` (fue enviado o cerrado): hay que abrir una versión nueva. También 409 por unicidad de nombres EN EL PROYECTO (crear/renombrar chocaría con una entidad existente — el Save queda bloqueado acá y el publish re-chequea); por referencia a una entidad de OTRO proyecto (doc 75 I2); por tocar en `projects` una entidad distinta de `cs.projectId`; o porque el proyecto del changeset fue borrado (`This project was deleted.`). |
+| 400 | Nombre físico sobre el `maxLength` del naming config del proyecto (`NameTooLongError`, doc 24; los nombres heredados quedan grandfathered). |
 
 ### 8.5b PUT /api/changesets/{cs_id}/changes/bulk
 
@@ -2635,10 +2605,13 @@ Respuesta (`data`):
   "impact": {
     "tablesTouched": 2,
     "columnsTouched": 5,
-    "affectedOtherTables": [ {"id":"t-7","name":"FACT_VENTA"} ]
+    "affectedOtherTables": [ {"id":"t-7","name":"FACT_VENTA"} ],
+    "deletesProject": { "id": "p-001", "name": "Ventas", "counts": { "tables": 12, "columns": 140, "views": 3, "relationships": 8, "schemas": 2, "folders": 1, "canvases": 2 } }
   }
 }
 ```
+
+`impact.deletesProject` sólo aparece cuando el draft borra su proyecto (doc 75 D5/D20): el revisor ve qué desaparece (conteos vivos) y la UI le exige escribir el nombre del proyecto para aprobar. La respuesta trae además `tree`/`orphans`/`structure` (jerarquía Proyecto → Folder → Canvas → Esquema → Tabla, doc 31).
 
 ### 8.8 POST /api/changesets/{cs_id}/submit
 
@@ -2649,7 +2622,6 @@ Propósito: **publish request** — asigna revisores/título/descripción y pasa
 | `title` | string \| null | |
 | `description` | string \| null | |
 | `reviewers` | list[str] \| null | `null` preserva los revisores del ciclo anterior; `[]` los borra |
-| `projectIds` | list[str] \| null | |
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/submit \
@@ -2837,7 +2809,7 @@ Router hermano en el mismo archivo — `requests_router`, prefijo `/api/requests
 
 ### 9.1 GET /api/requests
 
-Propósito: lista los **publish requests en revisión** (`status = submitted`), como filas de versión. Query opcionales:
+Propósito: lista los **publish requests en revisión** (`status = submitted`) de TODOS los proyectos, como filas de versión con `projectId` (bandeja global con chip de proyecto y filtro Project en la UI, doc 75 D20) y `deletesProject` (pill «Deletes project»). Query opcionales:
 
 | Param | Filtro |
 |---|---|
@@ -2857,7 +2829,7 @@ Respuesta (`data`, `version_row`):
   {
     "id": "cs-9", "versionLabel": "v15", "title": "Rediseño facturación",
     "owner": "carlos", "status": "submitted",
-    "projectIds": ["p-001"], "reviewers": ["ana","luis"],
+    "projectId": "p-001", "deletesProject": false, "reviewers": ["ana","luis"],
     "createdAt": "2026-07-05T10:00:00+00:00", "updatedAt": "2026-07-06T09:00:00+00:00",
     "submittedAt": "2026-07-06T09:00:00+00:00", "appliedAt": null
   }
@@ -2870,20 +2842,21 @@ Respuesta (`data`, `version_row`):
 
 Router hermano — `versions_router`, prefijo `/api/versions`.
 
-### 10.1 GET /api/versions
+### 10.1 GET /api/versions?projectId=
 
-Propósito: lista **cross-project** de versiones (filas para la tabla de Review & publish). Proyección `version_row` (sin el `changes` crudo).
+Propósito: filas de versión para Home/Review (proyección `version_row`, sin el `changes` crudo): sin `projectId`, las de TODOS los proyectos (cada fila con su `projectId` y `deletesProject`; el Home las agrupa por proyecto); con `projectId`, sólo las de ese proyecto.
 
 ```bash
 curl http://localhost:8000/api/versions
+curl "http://localhost:8000/api/versions?projectId=p-001"
 ```
 
-### 10.2 GET /api/versions/published
+### 10.2 GET /api/projects/{project_id}/versions · GET /api/projects/{project_id}/versions/published
 
-Propósito: la **versión de producción actual** — la última aplicada (fila verde). Prefiere las `approved` con `appliedAt` (apply completo confirmado); una `approved` sin `appliedAt` es un publish interrumpido y no cuenta. Devuelve `null` si no hay ninguna.
+Propósito: las versiones DEL proyecto (misma proyección que 10.1) y su **versión de producción actual** — la última aplicada (fila verde) en ese proyecto. Prefiere las `approved` con `appliedAt` (apply completo confirmado); una `approved` sin `appliedAt` es un publish interrumpido y no cuenta. Devuelve `null` si el proyecto no tiene ninguna. 404 si el proyecto no existe o fue borrado. (`GET /api/versions/published` global se retiró: no existe una producción "de la plataforma", cada proyecto tiene la suya.)
 
 ```bash
-curl http://localhost:8000/api/versions/published
+curl http://localhost:8000/api/projects/p-001/versions/published
 ```
 
 Respuesta (`data`):
@@ -2891,9 +2864,17 @@ Respuesta (`data`):
 {
   "id": "cs-8", "versionLabel": "v14", "title": "Ajuste dominios",
   "owner": "carlos", "status": "approved",
-  "projectIds": [], "reviewers": ["ana"],
-  "appliedAt": "2026-07-05T18:22:10+00:00"
+  "projectId": "p-001", "deletesProject": false, "reviewers": ["ana"],
+  "appliedAt": "2026-07-05T18:22:10+00:00", "restoredFrom": null
 }
+```
+
+### 10.3 GET /api/versions/compare · POST /api/versions/compare/details
+
+Propósito (doc 65, herramientas de versiones): diferencias **netas** entre dos versiones publicadas del MISMO proyecto (`fromId`, `toId`; cualquier orden — se normaliza a cronológico): buckets por colección + conteos + entidades irreconstruibles; `POST /compare/details` (body `{ fromId, toId, items: [{collection, entityId}] }`) devuelve el diff de campos antes→después de entidades puntuales del rango (shape del popup doc 31). Read-only. Errores: **404** versión inexistente; **409** `Both versions must be published to compare them.` · `Pick two different versions to compare.` · `Both versions must belong to the same project.`; **400** colección fuera de `VERSIONED`.
+
+```bash
+curl "http://localhost:8000/api/versions/compare?fromId=cs-8&toId=cs-12"
 ```
 
 ---
@@ -2904,20 +2885,21 @@ Dos routers comparten el prefijo `/api/reporting`:
 - `app/features/reporting/router.py` — reporte tabular por tabla/columna (pantalla pr).
 - `app/features/reporting/query/router.py` — **motor de consulta** (`QuerySpec`, catálogo, SQL, export, facets, insights, saved reports).
 
-Lecturas abiertas (el login global gatea en producción); los saved reports usan `current_principal` para ligar al owner.
+Lecturas abiertas (el login global gatea en producción); los saved reports usan `current_principal` para ligar al owner. **Todo el reporting es de UN proyecto (doc 75 D13)**: `projectId` es obligatorio en cada endpoint (query param en los GET; campo del `QuerySpec`/`SqlBody`/`SavedReportBody` en los POST) y acota tablas, columnas, vistas, relaciones, canvases, defs UDP, dominios y glosario a ese proyecto. No hay reporte cross-project.
 
 ### 11.1 GET /api/reporting/tables
 
-Propósito: filas del reporte a **nivel tabla**. Filtros opcionales:
+Propósito: filas del reporte a **nivel tabla** del proyecto. Params:
 
 | Param | Tipo | Nota |
 |---|---|---|
+| `projectId` | string | **requerido** |
 | `schema` | string | igualdad exacta sobre el schema de la tabla |
-| `projectId` | string | la tabla debe estar referenciada por algún canvas del proyecto |
+| `subjectArea` | string | canvas (nombre) |
 | `limit` | int (≥0) | acota tras ordenar (carga inicial liviana; fast-path sin filtros) |
 
 ```bash
-curl "http://localhost:8000/api/reporting/tables?schema=ventas&limit=50"
+curl "http://localhost:8000/api/reporting/tables?projectId=p-001&schema=ventas&limit=50"
 ```
 
 Cada fila (`ReportTableRow`):
@@ -2930,7 +2912,9 @@ Cada fila (`ReportTableRow`):
 }
 ```
 
-> Semántica: `columnCount` (columnas activas), `relationshipCount` (source o target; una relación auto-referencial cuenta 1), `subjectAreas` (canvases que la referencian), `projects` (proyectos de esos canvases). Al filtrar por `projectId`, las listas `subjectAreas`/`projects` de la fila siguen mostrando TODAS las referencias.
+> Semántica: `columnCount` (columnas activas), `relationshipCount` (source o target; una relación auto-referencial cuenta 1), `subjectAreas` (canvases del proyecto que la referencian), `projects` (el nombre del proyecto del reporte, en todas las filas).
+
+**GET /api/reporting/filters?projectId=** — opciones de los filtros del reporte (`{ schemas: [], subjectAreas: [] }`) del proyecto (doc 70).
 
 ### 11.2 GET /api/reporting/columns · GET /api/reporting/views
 
@@ -2938,6 +2922,7 @@ Propósito: detalle a **nivel columna** para el export por niveles. Params:
 
 | Param | Tipo | Nota |
 |---|---|---|
+| `projectId` | string | **requerido** |
 | `tableId` | string | columnas de una tabla |
 | `tableIds` | string | ids separados por coma (export acotado a un lote) |
 | `limit` | int (1–100000) | tope |
@@ -2945,7 +2930,7 @@ Propósito: detalle a **nivel columna** para el export por niveles. Params:
 Sin filtro de tabla se aplica un tope de seguridad (`limit` o `UNFILTERED_COLUMNS_CAP = 20000`) para no volcar cientos de miles de columnas.
 
 ```bash
-curl "http://localhost:8000/api/reporting/columns?tableId=t-1"
+curl "http://localhost:8000/api/reporting/columns?projectId=p-001&tableId=t-1"
 ```
 
 Cada fila (`ReportColumnRow`): `tableId`, `physicalName`, `logicalName`, `dataType`, `parentDomain` (nombre del dominio, no id), `isPrimaryKey`, `isForeignKey`, `isNullable`, `isPartition`, `description`, `ordinal`. Ordenadas por `(tableId, ordinal)`.
@@ -2954,13 +2939,14 @@ Cada fila (`ReportColumnRow`): `tableId`, `physicalName`, `logicalName`, `dataTy
 
 | Param | Tipo | Nota |
 |---|---|---|
+| `projectId` | string | **requerido** |
 | `tableIds` | string | ids separados por coma — vistas derivadas de las tablas seleccionadas (export acotado) |
 | `schema` | string | solo las vistas de ese esquema (Database Explorer) |
 
 Sin filtros aplica un tope de seguridad.
 
 ```bash
-curl "http://localhost:8000/api/reporting/views?tableIds=t-1,t-2"
+curl "http://localhost:8000/api/reporting/views?projectId=p-001&tableIds=t-1,t-2"
 ```
 
 ---
@@ -2971,6 +2957,7 @@ curl "http://localhost:8000/api/reporting/views?tableIds=t-1,t-2"
 
 ```python
 class QuerySpec:
+    projectId: str                 # REQUERIDO (doc 75): toda consulta es de UN proyecto
     from_: Literal["columns","tables","relationships","views",
                    "view_columns","models"] = "columns"  # alias "from"
     select: list[str]              # keys públicas
@@ -3005,14 +2992,15 @@ Notas de diseño relevantes para el consumidor:
 - **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — invariante de escala mantenido como contrato (a escala, un orden sin índice sería full-scan). El orden debe ir por un campo indexado (p. ej. `physicalName`).
 - **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`).
 - **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`.
-- **UDP dinámicos**: cada UDP def agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
+- **UDP dinámicos**: cada UDP def del proyecto agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
+- **Alcance**: el executor antepone `{projectId, flgactive}` a todo `$match`; el `projectId` del spec no es un filtro opcional sino el universo de la consulta.
 
 ### 11.4 GET /api/reporting/catalog
 
-Propósito: el **Field Catalog** de una vista (campos estáticos + UDP dinámicos), con ops por tipo, `enumValues`, `sortable`/`indexed`. Alimenta el query-builder y el autocompletado SQL. Query `from` (default `columns`); vista desconocida → 400.
+Propósito: el **Field Catalog** de una vista (campos estáticos + UDP dinámicos DEL proyecto), con ops por tipo, `enumValues`, `sortable`/`indexed`. Alimenta el query-builder y el autocompletado SQL. Query `projectId` (requerido) y `from` (default `columns`); vista desconocida → 400.
 
 ```bash
-curl "http://localhost:8000/api/reporting/catalog?from=columns"
+curl "http://localhost:8000/api/reporting/catalog?projectId=p-001&from=columns"
 ```
 
 Respuesta (`data`):
@@ -3042,7 +3030,7 @@ Campos estáticos por vista:
 | `relationships` | parentTableId, childTableId, parentCardinality, childCardinality, identifying |
 | `views` | name, schema, tableId, description |
 | `view_columns` | viewName, schema, outputName, sourceColumn, sourceTableId, castType, expression, description — entidad VIRTUAL (doc 22 F5): 1 fila por columna de cada vista (unwind de `views.sources`), por un camino dedicado del executor; no admite groupBy |
-| `models` | name, projectId, folderId, tableCount — entidad `models` (canvases/`subject_areas`); `tableCount` es derivado post-fetch (no filtra/agrupa) |
+| `models` | name, folderId, tableCount — entidad `models` (canvases/`subject_areas` del proyecto); `tableCount` es derivado post-fetch (no filtra/agrupa) |
 
 \* `schema` en `columns` es cross-entity (vive en la tabla): se pre-resuelve a `tableId $in [...]` y sólo soporta `= / in`. Los UDP de nivel `canvas` aparecen en la vista `models`.
 
@@ -3055,6 +3043,7 @@ Propósito: ejecuta un `QuerySpec` → filas (keyset) o grupos. Query opcional `
 curl -X POST http://localhost:8000/api/reporting/query \
   -H "Content-Type: application/json" \
   -d '{
+        "projectId":"p-001",
         "from":"columns",
         "select":["physicalName","dataType","parentDomainId"],
         "where":{"op":"and","conditions":[
@@ -3088,6 +3077,7 @@ Respuesta (`data`):
 curl -X POST http://localhost:8000/api/reporting/query \
   -H "Content-Type: application/json" \
   -d '{
+        "projectId":"p-001",
         "from":"columns",
         "groupBy":["dataType"],
         "aggregations":[{"fn":"count","as":"total"}],
@@ -3112,16 +3102,16 @@ Errores: `QueryError` → 400 (campo/cursor inválido) o 422 (op no permitida pa
 
 ### 11.6 POST /api/reporting/query/validate
 
-Propósito: **SQL-like → QuerySpec** (round-trip para el editor). Devuelve `{spec, errors}` con `{line, col, message}` para subrayar en la caja de texto. Nunca ejecuta. Body `SqlBody`:
+Propósito: **SQL-like → QuerySpec** (round-trip para el editor). Devuelve `{spec, errors}` con `{line, col, message}` para subrayar en la caja de texto. Nunca ejecuta. Body `SqlBody` (`projectId` requerido):
 
 ```json
-{ "text": "SELECT physicalName, dataType FROM columns WHERE isPrimaryKey = true ORDER BY physicalName LIMIT 100" }
+{ "projectId": "p-001", "text": "SELECT physicalName, dataType FROM columns WHERE isPrimaryKey = true ORDER BY physicalName LIMIT 100" }
 ```
 
 ```bash
 curl -X POST http://localhost:8000/api/reporting/query/validate \
   -H "Content-Type: application/json" \
-  -d '{"text":"SELECT physicalName FROM columns WHERE dataType = '\''BIGINT'\''"}'
+  -d '{"projectId":"p-001","text":"SELECT physicalName FROM columns WHERE dataType = '\''BIGINT'\''"}'
 ```
 
 Respuesta OK: `{ "spec": {…QuerySpec…}, "errors": [] }`.
@@ -3136,7 +3126,7 @@ SQL soportado (subset, sqlglot con allowlist estricto): `SELECT campos|*`, `FROM
 ```bash
 curl -X POST http://localhost:8000/api/reporting/query/sql \
   -H "Content-Type: application/json" \
-  -d '{"text":"SELECT dataType, COUNT(*) AS total FROM columns GROUP BY dataType ORDER BY total DESC LIMIT 20"}'
+  -d '{"projectId":"p-001","text":"SELECT dataType, COUNT(*) AS total FROM columns GROUP BY dataType ORDER BY total DESC LIMIT 20"}'
 ```
 
 Errores: 400 si el SQL no parsea o `FROM` es una vista desconocida; 400/422 del motor al ejecutar.
@@ -3150,7 +3140,7 @@ Propósito: **export CSV por streaming** (memoria O(1)): keyset-pagina intername
 ```bash
 curl -X POST http://localhost:8000/api/reporting/export \
   -H "Content-Type: application/json" \
-  -d '{"from":"columns","select":["physicalName","dataType"],"where":{"op":"and","conditions":[{"field":"schema","op":"eq","value":"ventas"}]}}' \
+  -d '{"projectId":"p-001","from":"columns","select":["physicalName","dataType"],"where":{"op":"and","conditions":[{"field":"schema","op":"eq","value":"ventas"}]}}' \
   -o report-columns.csv
 ```
 
@@ -3172,6 +3162,7 @@ Propósito: opciones de un campo para el **typeahead** del filtro (server-side).
 
 | Param | Tipo | Nota |
 |---|---|---|
+| `projectId` | string | **requerido** |
 | `field` | string | key del catálogo (400 si desconocida) |
 | `from` | string | vista (default `columns`) |
 | `q` | string (≤80) | filtro de búsqueda |
@@ -3180,25 +3171,26 @@ Propósito: opciones de un campo para el **typeahead** del filtro (server-side).
 Comportamiento por tipo: `enum` → `allowedValues`; campo de dominio (`hydrate="domain"`) → `{value: id, label: name}` desde `parent_domains`; resto → distinct acotado sobre el path (regex escapado, sin ReDoS).
 
 ```bash
-curl "http://localhost:8000/api/reporting/facets?field=dataType&from=columns&q=int&limit=20"
+curl "http://localhost:8000/api/reporting/facets?projectId=p-001&field=dataType&from=columns&q=int&limit=20"
 ```
 
 Respuesta (`data`): `[ {"value":"BIGINT","label":"BIGINT"}, {"value":"INT","label":"INT"} ]`.
 
 ### 11.10 Saved reports (queries guardadas)
 
-Colección `saved_reports`. Un `QuerySpec` con nombre, reutilizable y compartible. Todos usan `current_principal` (owner = usuario en sesión).
+Colección `saved_reports`. Un `QuerySpec` con nombre, reutilizable y compartible, **de un proyecto** (`projectId` en el doc, igual al `spec.projectId`; un reporte no cambia de proyecto). Todos usan `current_principal` (owner = usuario en sesión).
 
-**GET /api/reporting/reports** — lista los reportes del owner más los compartidos por otros (`shared=true`), ordenados por nombre.
+**GET /api/reporting/reports?projectId=** — lista los reportes del proyecto: los del owner más los compartidos por otros (`shared=true`), ordenados por nombre.
 
 ```bash
-curl http://localhost:8000/api/reporting/reports
+curl "http://localhost:8000/api/reporting/reports?projectId=p-001"
 ```
 
 **POST /api/reporting/reports** — crea. Body `SavedReportBody`:
 
 | Campo | Tipo | Default |
 |---|---|---|
+| `projectId` | string | requerido (422 si `spec.projectId` trae otro) |
 | `name` | string | requerido |
 | `description` | string \| null | |
 | `spec` | dict | requerido (QuerySpec serializado) |
@@ -3211,9 +3203,10 @@ El `spec` se valida como `QuerySpec` bien formado (422 si no). Respuesta `201`.
 curl -X POST http://localhost:8000/api/reporting/reports \
   -H "Content-Type: application/json" \
   -d '{
+        "projectId":"p-001",
         "name":"PKs de ventas",
         "shared":true,
-        "spec":{"from":"columns","select":["physicalName"],
+        "spec":{"projectId":"p-001","from":"columns","select":["physicalName"],
                 "where":{"op":"and","conditions":[{"field":"isPrimaryKey","op":"eq","value":true}]}}
       }'
 ```
@@ -3224,12 +3217,12 @@ curl -X POST http://localhost:8000/api/reporting/reports \
 
 ### 11.11 Insights (vistas curadas)
 
-Métricas globales calculadas con pocas agregaciones `$group` en paralelo (escala a 400k). Todas son GET.
+Métricas del proyecto calculadas con pocas agregaciones `$group` en paralelo (escala a 400k). Todas son GET con `projectId` **requerido**.
 
-**GET /api/reporting/insights/scorecard** — Model Health Scorecard.
+**GET /api/reporting/insights/scorecard?projectId=** — Model Health Scorecard del proyecto.
 
 ```bash
-curl http://localhost:8000/api/reporting/insights/scorecard
+curl "http://localhost:8000/api/reporting/insights/scorecard?projectId=p-001"
 ```
 
 Respuesta (`data`):
@@ -3254,7 +3247,7 @@ Respuesta (`data`):
 **GET /api/reporting/insights/relationships** — relaciones con ambos extremos resueltos (`schema.tabla.columna`), cardinalidad (`1:N`), flags `identifying`/`isSelfReferencing`/`crossSchema`, y un `label` legible. Query `limit` (default 2000, 1–5000).
 
 ```bash
-curl "http://localhost:8000/api/reporting/insights/relationships?limit=500"
+curl "http://localhost:8000/api/reporting/insights/relationships?projectId=p-001&limit=500"
 ```
 
 Respuesta (`data`, una fila):
@@ -3309,13 +3302,13 @@ Semántica:
 
 | Contador | Global | Por proyecto(s) |
 |---|---|---|
-| `tables` | total `canonical_tables` activas | tableIds DISTINTOS referenciados por los canvases del/los proyecto(s) |
-| `views` | total `views` | vistas cuyo `tableId` está en ese alcance (las sin `tableId` no cuentan) |
-| `relationships` | total `relationships` | relaciones con AMBAS puntas en ese alcance |
+| `tables` | total `canonical_tables` activas | `canonical_tables` con ese `projectId` |
+| `views` | total `views` | `views` con ese `projectId` |
+| `relationships` | total `relationships` | `relationships` con ese `projectId` |
 | `subjectAreas` | total `subject_areas` | canvases del/los proyecto(s) |
 | `projects` | total `projects` | nº de proyectos seleccionados |
 
-> El pool `canonical_tables` es universal (no lleva `projectId`); el alcance de un proyecto se deriva de `subject_areas.tableIds`.
+> Doc 75: cada documento lleva su `projectId`, así que los contadores por proyecto son conteos directos (antes se derivaban de `subject_areas.tableIds`).
 
 ---
 
@@ -3373,24 +3366,25 @@ Las 80 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | Método | Ruta | Sección |
 |---|---|---|
 | GET/POST | `/api/projects` | 2.1 / 2.2 |
-| PUT/DELETE | `/api/projects/{pid}` | 2.3 / 2.4 |
-| GET | `/api/projects/{pid}/subject-areas` | 2.5 |
+| GET | `/api/projects/{project_id}/counts` | 2.3 |
+| GET | `/api/projects/{pid}/subject-areas` | 2.4 |
 | GET | `/api/projects/{project_id}/folders` | 3.1 |
 | GET/POST | `/api/folders` | 3.1 / 3.3 |
 | GET/PATCH/DELETE | `/api/folders/{folder_id}` | 3.2 / 3.4 / 3.5 |
 | POST | `/api/subject-areas` | 4.1 |
-| GET/PUT/DELETE | `/api/subject-areas/{sa_id}` | 4.2 / 4.3 / 4.8 |
-| PUT | `/api/subject-areas/{sa_id}/tables` `/layout` `/drawings` `/udp` | 4.4 / 4.5 / 4.6 / 4.7 |
-| GET | `/api/subject-areas/{sa_id}/diagram` | 4.9 |
+| GET/PUT/DELETE | `/api/subject-areas/{sa_id}` | 4.2 / 4.3 / 4.7 |
+| PUT | `/api/subject-areas/{sa_id}/tables` `/views` `/layout` `/drawings` | 4.4 / 4.5 / 4.6 |
+| GET | `/api/subject-areas/{sa_id}/diagram` | 4.8 |
 | GET/POST | `/api/relationships` | 5.1 / 5.2 |
 | PUT/DELETE | `/api/relationships/{rid}` | 5.3 / 5.4 |
 | GET | `/api/relationships/impact` · `/api/relationships/links` | 5.5 / 5.6 |
 | GET/POST | `/api/views` | 6.1 / 6.2 |
 | PUT/DELETE | `/api/views/{vid}` | 6.3 / 6.4 |
-| GET/POST | `/api/schemas` | 7.1 / 7.2 |
+| GET/POST | `/api/projects/{project_id}/schemas` | 7.1 / 7.2 |
 | PATCH/DELETE | `/api/schemas/{sid}` | 7.3 / 7.4 |
 | GET/POST | `/api/changesets` | 8.2 / 8.1 |
-| POST | `/api/changesets/snapshot` | 8.3 |
+| POST | `/api/changesets/snapshot` (`projectId`) | 8.3 |
+| GET | `/api/changesets/history/{collection}/{entity_id}` | doc 51 |
 | GET | `/api/changesets/{cs_id}` | 8.4 |
 | PUT | `/api/changesets/{cs_id}/changes` | 8.5 |
 | PUT | `/api/changesets/{cs_id}/changes/bulk` | 8.5b |
@@ -3405,8 +3399,10 @@ Las 80 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | GET/DELETE | `/api/changesets/{cs_id}/uploads/{job_id}` | 8.18 |
 | POST | `/api/changesets/{cs_id}/uploads/{job_id}/apply` | 8.18 |
 | GET | `/api/requests` | 9.1 |
-| GET | `/api/versions` · `/api/versions/published` | 10.1 / 10.2 |
-| GET | `/api/reporting/tables` `/columns` `/catalog` `/facets` | 11.1 / 11.2 / 11.4 / 11.9 |
+| GET | `/api/versions?projectId=` | 10.1 |
+| GET | `/api/projects/{project_id}/versions` · `/published` | 10.2 |
+| GET/POST | `/api/versions/compare` · `/compare/details` | 10.3 |
+| GET | `/api/reporting/tables` `/filters` `/columns` `/catalog` `/facets` (todos con `projectId`) | 11.1 / 11.2 / 11.4 / 11.9 |
 | GET | `/api/reporting/views` | 11.2 |
 | POST | `/api/reporting/query` `/query/sql` `/query/validate` `/export` | 11.5 / 11.7 / 11.6 / 11.8 |
 | GET/POST | `/api/reporting/reports` | 11.10 |

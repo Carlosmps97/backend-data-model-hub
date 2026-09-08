@@ -59,6 +59,7 @@ def test_create_multifuente_sin_joinoverride_pasa(monkeypatch):
 def test_update_normaliza_antes_del_set(monkeypatch):
     mock_update = AsyncMock(return_value={"id": "v1"})
     monkeypatch.setattr(views_service.repository, "update", mock_update)
+    monkeypatch.setattr(views_service.repository, "get", AsyncMock(return_value={"id": "v1", "projectId": "p1"}))
     body = ViewBody.model_validate(
         {"name": "v", "sourceTableIds": ["a", "b"], "tableId": "viejo"})
     asyncio.run(views_service.update("v1", body))
@@ -70,6 +71,7 @@ def test_update_normaliza_antes_del_set(monkeypatch):
 def test_update_legacy_solo_tableid_materializa_sources(monkeypatch):
     mock_update = AsyncMock(return_value={"id": "v1"})
     monkeypatch.setattr(views_service.repository, "update", mock_update)
+    monkeypatch.setattr(views_service.repository, "get", AsyncMock(return_value={"id": "v1", "projectId": "p1"}))
     asyncio.run(views_service.update(
         "v1", ViewBody.model_validate({"name": "v", "tableId": "t1"})))
     sent = mock_update.await_args.args[1]
@@ -87,6 +89,7 @@ def test_update_legacy_solo_tableid_materializa_sources(monkeypatch):
 def test_update_tableid_only_showoncanvas_queda_visible_en_canvas(monkeypatch):
     mock_update = AsyncMock(return_value={"id": "v1"})
     monkeypatch.setattr(views_service.repository, "update", mock_update)
+    monkeypatch.setattr(views_service.repository, "get", AsyncMock(return_value={"id": "v1", "projectId": "p1"}))
     # PUT de cuerpo completo: tableId puesto, sourceTableIds OMITIDO.
     body = ViewBody.model_validate(
         {"name": "v", "tableId": "t1", "showOnCanvas": True})

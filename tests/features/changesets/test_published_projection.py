@@ -46,8 +46,8 @@ def test_published_pasa_la_proyeccion_al_find(monkeypatch):
         return _Db(state)
 
     monkeypatch.setattr(repository, "get_db", _get_db)
-    out = asyncio.run(repository.published("canonical_tables", projection={"physicalName": 1}))
-    assert state["calls"] == [({"flgactive": {"$ne": False}}, {"physicalName": 1})]
+    out = asyncio.run(repository.published("canonical_tables", {"projectId": "p1"}, projection={"physicalName": 1}))
+    assert state["calls"] == [({"flgactive": {"$ne": False}, "projectId": "p1"}, {"physicalName": 1})]
     assert out == [{"id": "t1", "physicalName": "A"}]
 
 

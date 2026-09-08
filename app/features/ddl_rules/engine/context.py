@@ -5,6 +5,8 @@ usando el catálogo de definiciones.
 """
 from __future__ import annotations
 
+from app.core.facets import is_logical_udp
+
 
 def _udp_by_name(udp_values: dict | None, name_by_id: dict[str, str]) -> dict:
     """{defId: valor} → {nombreUDP: valor}. Ids sin definición se ignoran.
@@ -23,7 +25,10 @@ def _udp_by_name(udp_values: dict | None, name_by_id: dict[str, str]) -> dict:
 
 
 def names_by_id(udp_defs: list[dict]) -> dict[str, str]:
-    return {d["id"]: d["name"] for d in udp_defs if d.get("id") and d.get("name")}
+    """{defId: nombre} SOLO de defs FÍSICAS (doc 69): el motor DDL nunca lee un
+    UDP de la faceta lógica — un homónimo lógico pisaría el valor físico."""
+    return {d["id"]: d["name"] for d in udp_defs
+            if d.get("id") and d.get("name") and not is_logical_udp(d)}
 
 
 def table_ctx(table: dict, name_by_id: dict[str, str]) -> dict:

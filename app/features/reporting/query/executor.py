@@ -4,6 +4,9 @@ ejecuta contra la BD e hidrata nombres (dominio, UDP, schema) en Python.
 
 Reglas de escala: pushdown de todos los filtros al $match, keyset (no skip/limit
 profundo), proyección mínima, `maxTimeMS` como circuit-breaker.
+
+Doc 75: toda consulta es de UN proyecto (`spec.projectId`): el `$match` base,
+el catálogo UDP y las hidrataciones (dominio, schema) van con `scoped`.
 """
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ import base64
 import json
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 from .compiler import Compiled, QueryError, build_match, compile_spec
 from .schema import FieldDef, build_catalog
@@ -26,14 +30,14 @@ ACTIVE = {"flgactive": {"$ne": False}}
 MAX_TIME_MS = 15000
 
 
-async def _udp_defs() -> list[dict]:
+async def _udp_defs(project_id: str) -> list[dict]:
     db = await get_db()
-    docs = await db["udp_definitions"].find(ACTIVE).to_list(None)
+    docs = await db["udp_definitions"].find(scoped(project_id, ACTIVE)).to_list(None)
     return [{**d, "id": str(d.pop("_id"))} for d in docs]
 
 
-async def get_catalog(from_: str) -> dict[str, FieldDef]:
-    return build_catalog(from_, await _udp_defs())
+async def get_catalog(from_: str, project_id: str) -> dict[str, FieldDef]:
+    return build_catalog(from_, await _udp_defs(project_id))
 
 
 def _encode_cursor(sort_val, _id) -> str:
@@ -54,10 +58,10 @@ def _decode_cursor(cur: str):
     return v
 
 
-async def _rewrite_cross_entity(node, catalog: dict[str, FieldDef]):
+async def _rewrite_cross_entity(node, catalog: dict[str, FieldDef], project_id: str):
     """Reemplaza condiciones de campos cross-entity (schema en `columns`, que vive
     en la tabla) por su equivalente NATIVO `tableId $in [...]`, pre-resolviendo
-    contra canonical_tables (barrido barato de 10k, índice de schema)."""
+    contra canonical_tables del proyecto (barrido barato de 10k, índice de schema)."""
     if node is None:
         return None
     if isinstance(node, Condition):
@@ -66,24 +70,25 @@ async def _rewrite_cross_entity(node, catalog: dict[str, FieldDef]):
             db = await get_db()
             vals = node.value if isinstance(node.value, list) else [node.value]
             if node.op in ("eq", "in"):
-                ids = [str(t["_id"]) async for t in
-                       db["canonical_tables"].find({**ACTIVE, "schema": {"$in": vals}}, {"_id": 1})]
+                ids = [str(t["_id"]) async for t in db["canonical_tables"].find(
+                    scoped(project_id, {**ACTIVE, "schema": {"$in": vals}}), {"_id": 1})]
                 return Condition(field="tableId", op="in", value=ids or ["__none__"])
             raise QueryError("Filtro por schema en columns sólo soporta = / in", code=422)
         return node
-    subs = [await _rewrite_cross_entity(c, catalog) for c in node.conditions]
+    subs = [await _rewrite_cross_entity(c, catalog, project_id) for c in node.conditions]
     return WhereGroup(op=node.op, conditions=[s for s in subs if s is not None])
 
 
-async def _hydration_maps(select: list[FieldDef], from_: str) -> dict:
-    """Mapas para resolver nombres post-fetch (una sola lectura c/u)."""
+async def _hydration_maps(select: list[FieldDef], from_: str, project_id: str) -> dict:
+    """Mapas para resolver nombres post-fetch (una sola lectura c/u, del proyecto)."""
     db, maps = await get_db(), {}
+    active = scoped(project_id, ACTIVE)
     if any(fd.hydrate == "domain" for fd in select):
         maps["domain"] = {str(d["_id"]): d.get("name")
-                          async for d in db["parent_domains"].find(ACTIVE, {"name": 1})}
+                          async for d in db["parent_domains"].find(active, {"name": 1})}
     if from_ == "columns" and any(fd.key == "schema" for fd in select):
         maps["schema"] = {str(t["_id"]): t.get("schema")
-                          async for t in db["canonical_tables"].find(ACTIVE, {"schema": 1})}
+                          async for t in db["canonical_tables"].find(active, {"schema": 1})}
     return maps
 
 
@@ -107,17 +112,17 @@ def _row(doc: dict, select: list[FieldDef], maps: dict) -> dict:
 
 
 async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
-    catalog = await get_catalog(spec.from_)
+    catalog = await get_catalog(spec.from_, spec.projectId)
     if spec.from_ == "view_columns":
         # Entidad virtual (F5): camino DEDICADO aggregate+unwind — no toca el
         # keyset genérico ni sus defensas de escala (ver _run_view_columns).
         return await _run_view_columns(spec, catalog, cursor)
-    where = await _rewrite_cross_entity(spec.where, catalog)
+    where = await _rewrite_cross_entity(spec.where, catalog, spec.projectId)
     spec2 = spec.model_copy(update={"where": where})
     compiled = compile_spec(spec2, catalog)
     db = await get_db()
     coll = db[COLL_OF[spec.from_]]
-    base_match = {**ACTIVE, **compiled.match}
+    base_match = {**scoped(spec.projectId, ACTIVE), **compiled.match}
 
     if compiled.grouped:
         pipe = [{"$match": base_match}, {"$group": compiled.group}, {"$project": compiled.project}]
@@ -142,7 +147,7 @@ async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
         base_match = {"$and": [base_match, {"$or": [
             {sort_path: {gt: cv}},
             {sort_path: cv, "_id": {"$gt": cid}}]}]}
-    maps = await _hydration_maps(compiled.select, spec.from_)
+    maps = await _hydration_maps(compiled.select, spec.from_, spec.projectId)
     proj = {**compiled.project, sort_path: 1}
     # Proyectar las FUENTES de hidratación cross-entity (schema en columns viene
     # de la tabla → necesita tableId).
@@ -204,7 +209,7 @@ async def _run_view_columns(spec: QuerySpec, catalog: dict[str, FieldDef],
             raise QueryError("Cursor inválido", code=400)
         if offset < 0:
             raise QueryError("Cursor inválido", code=400)
-    pipe: list[dict] = [{"$match": {**ACTIVE}}, {"$unwind": "$sources"}]
+    pipe: list[dict] = [{"$match": scoped(spec.projectId, ACTIVE)}, {"$unwind": "$sources"}]
     if match:
         pipe.append({"$match": match})
     pipe += [

@@ -14,7 +14,7 @@ CAT = build_catalog("columns", UDP)
 
 
 def _spec(**kw):
-    return QuerySpec.model_validate({"from": "columns", **kw})
+    return QuerySpec.model_validate({"from": "columns", "projectId": "p1", **kw})
 
 
 def test_where_traduce_a_match_con_ops():

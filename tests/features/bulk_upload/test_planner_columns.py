@@ -19,7 +19,7 @@ def _table(tid="t1", physical="CLIENTE", logical="Cliente"):
 
 
 def _col(cid, physical, logical, ordinal, pk=False, pk_pos=None, **kw):
-    doc = {"id": cid, "tableId": "t1", "physicalName": physical, "logicalName": logical,
+    doc = {"id": cid, "projectId": "p1", "tableId": "t1", "physicalName": physical, "logicalName": logical,
            "parentDomainId": None, "dataType": "STRING", "typeOverridden": False,
            "isPrimaryKey": True if pk else None, "pkPosition": pk_pos, "isForeignKey": None,
            "isNullable": not pk, "isPartition": False, "description": None, "ordinal": ordinal, "udpValues": {}}

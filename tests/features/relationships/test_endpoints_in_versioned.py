@@ -11,7 +11,7 @@ def test_relationships_and_views_versioned():
 
 def test_relationship_defaults_v2():
     from app.features.relationships.models import RelationshipDoc
-    r = RelationshipDoc(parentTableId="a", childTableId="b",
+    r = RelationshipDoc(projectId="p1", parentTableId="a", childTableId="b",
                         pairs=[{"parentColumnId": "p1", "childColumnId": "c1"}])
     assert r.identifying is False
     assert r.parentCardinality == "one"
@@ -20,7 +20,7 @@ def test_relationship_defaults_v2():
 
 def test_relationship_legacy_kwargs_se_normalizan():
     from app.features.relationships.models import RelationshipDoc
-    r = RelationshipDoc(sourceTableId="a", sourceColumnId="c1",
+    r = RelationshipDoc(projectId="p1", sourceTableId="a", sourceColumnId="c1",
                         targetTableId="b", targetColumnId="c2")
     # sin cardinalidades → ambiguo → source=hijo (convención seed)
     assert r.childTableId == "a" and r.parentTableId == "b"

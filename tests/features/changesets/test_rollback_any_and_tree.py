@@ -4,7 +4,7 @@
   componiendo los inversos de todas las versiones publicadas DESPUÉS (el inverso
   de la más cercana a la objetivo gana por entidad).
 - `build_diff_tree`: agrupa los cambios por Proyecto→Folder→Canvas→Esquema→Tabla
-  →Columnas (+Vistas) y computa `projectsAffected` real.
+  →Columnas (+Vistas).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from app.features.changesets import service
 # ── rollback a versión pasada ────────────────────────────────────────────
 
 def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
-    target = {"id": "v1", "status": "approved", "appliedAt": "2026-01-01", "versionLabel": "v1"}
+    target = {"id": "v1", "projectId": "p1", "status": "approved", "appliedAt": "2026-01-01", "versionLabel": "v1"}
     after = [  # latest→oldest (como los devuelve applied_after)
         {"id": "v3", "appliedAt": "2026-03-01", "versionLabel": "v3"},
         {"id": "v2", "appliedAt": "2026-02-01", "versionLabel": "v2"},
@@ -31,7 +31,7 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
                                            "before": {"id": "t1", "physicalName": "VIEJO"},
                                            "payload": {"physicalName": "NUEVO"}}}},
     }
-    gets = {"v1": target, "draft1": {"id": "draft1", "title": "Restore to v1"}}
+    gets = {"v1": target, "draft1": {"id": "draft1", "projectId": "p1", "title": "Restore to v1"}}
     monkeypatch.setattr(service.repository, "get", AsyncMock(side_effect=lambda cid: gets.get(cid)))
     monkeypatch.setattr(service.repository, "applied_after", AsyncMock(return_value=after))
     monkeypatch.setattr(service.repository, "changes_map",
@@ -60,19 +60,19 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
 
 
 def test_rollback_version_actual_es_empty(monkeypatch):
-    target = {"id": "v5", "status": "approved", "appliedAt": "2026-05-01"}
+    target = {"id": "v5", "projectId": "p1", "status": "approved", "appliedAt": "2026-05-01"}
     monkeypatch.setattr(service.repository, "get", AsyncMock(return_value=target))
     monkeypatch.setattr(service.repository, "applied_after", AsyncMock(return_value=[]))
     assert asyncio.run(service.rollback("v5", "ana")) == "empty"
 
 
 def test_rollback_no_publicada(monkeypatch):
-    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"id": "d1", "status": "draft"}))
+    monkeypatch.setattr(service.repository, "get", AsyncMock(return_value={"projectId": "p1", "id": "d1", "status": "draft"}))
     assert asyncio.run(service.rollback("d1", "ana")) == "not-applied"
 
 
 def test_rollback_falta_imagen_previa(monkeypatch):
-    target = {"id": "v1", "status": "approved", "appliedAt": "2026-01-01"}
+    target = {"id": "v1", "projectId": "p1", "status": "approved", "appliedAt": "2026-01-01"}
     after = [{"id": "v2", "appliedAt": "2026-02-01"}]
     # cambio sin `beforeAt` (publicado antes de la feature) → no reconstruible.
     monkeypatch.setattr(service.repository, "get", AsyncMock(return_value=target))
@@ -100,7 +100,6 @@ def test_build_diff_tree_agrupa_por_jerarquia():
     out = service.build_diff_tree(collections, changes, published, sas,
                                   [{"id": "p1", "name": "Core Banking"}],
                                   [{"id": "f1", "name": "Comercial"}])
-    assert out["projectsAffected"] == 1
     proj = out["tree"][0]
     assert proj["type"] == "project" and proj["name"] == "Core Banking"
     canvas = proj["children"][0]["children"][0]
@@ -116,7 +115,7 @@ def test_build_diff_tree_orphan_sin_canvas():
     collections = {"canonical_tables": {"added": [{"id": "t9", "name": "HUERFANA"}], "edited": [], "deleted": []}}
     changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {"physicalName": "HUERFANA", "schema": "core"}}}}
     out = service.build_diff_tree(collections, changes, {"canonical_tables": [], "canonical_columns": []}, [], [], [])
-    assert out["tree"] == [] and out["projectsAffected"] == 0
+    assert out["tree"] == []
     assert len(out["orphans"]) == 1 and out["orphans"][0]["name"] == "HUERFANA"
 
 

@@ -29,13 +29,29 @@ FIXTURE = textwrap.dedent(f"""\
   </ModelProps>
   <Domain_Groups>
    <Domain id="D-ROOT" name="&lt;root&gt;"><DomainProps><Built_In_Id>6</Built_In_Id><Name>&lt;root&gt;</Name></DomainProps></Domain>
-   <Domain id="D-COD" name="Codigo"><DomainProps><Name>Codigo</Name><Logical_Data_Type>VARCHAR(20)</Logical_Data_Type><Parent_Domain_Ref>D-ROOT</Parent_Domain_Ref><Definition>Dominio codigo</Definition></DomainProps></Domain>
+   <Domain id="D-COD" name="Codigo"><DomainProps><Name>Codigo</Name><Logical_Data_Type>VARCHAR(20)</Logical_Data_Type><Physical_Data_Type>VARCHAR(30)</Physical_Data_Type><Parent_Domain_Ref>D-ROOT</Parent_Domain_Ref><Definition>Dominio codigo</Definition></DomainProps></Domain>
   </Domain_Groups>
   <Entity_Groups>
    <Entity id="E1" name="Cliente Test">
     <EntityProps><Name>Cliente Test</Name><Physical_Name>%EntityName()</Physical_Name>
      <User_Formatted_Physical_Name>MD_CLIENTETEST</User_Formatted_Physical_Name>
      <Definition>Tabla de clientes</Definition>
+     <Is_Logical_Only>false</Is_Logical_Only>
+     <Attributes_Order_Ref_Array>
+      <Attributes_Order_Ref index="0">A2</Attributes_Order_Ref>
+      <Attributes_Order_Ref index="1">A1</Attributes_Order_Ref>
+      <Attributes_Order_Ref index="2">A3</Attributes_Order_Ref>
+     </Attributes_Order_Ref_Array>
+     <Physical_Columns_Order_Ref_Array>
+      <Physical_Columns_Order_Ref index="0">A1</Physical_Columns_Order_Ref>
+      <Physical_Columns_Order_Ref index="1">A2</Physical_Columns_Order_Ref>
+      <Physical_Columns_Order_Ref index="2">A3</Physical_Columns_Order_Ref>
+     </Physical_Columns_Order_Ref_Array>
+     <Columns_Order_Ref_Array>
+      <Columns_Order_Ref index="0">A2</Columns_Order_Ref>
+      <Columns_Order_Ref index="1">A3</Columns_Order_Ref>
+      <Columns_Order_Ref index="2">A1</Columns_Order_Ref>
+     </Columns_Order_Ref_Array>
      <UDP_Instance_Groups>
       <UDP_Instance name="Entity.Physical.Criticidad" id="UDE1">Alta</UDP_Instance>
       <UDP_Instance name="Entity.Logical.Criticidad" id="UDE2">Baja</UDP_Instance>
@@ -49,6 +65,7 @@ FIXTURE = textwrap.dedent(f"""\
       <Physical_Order>1</Physical_Order><Definition>Codigo del cliente</Definition>
       <Parent_Domain_Ref>D-COD</Parent_Domain_Ref></AttributeProps></Attribute>
      <Attribute id="A2" name="nombre"><AttributeProps><Name>nombre</Name>
+      <Is_Logical_Only>true</Is_Logical_Only><Logical_Data_Type>VARCHAR(100)</Logical_Data_Type>
       <User_Formatted_Physical_Name>NOMBRE</User_Formatted_Physical_Name>
       <Physical_Data_Type>VARCHAR(120)</Physical_Data_Type><Null_Option_Type>0</Null_Option_Type>
       <Physical_Order>2</Physical_Order></AttributeProps></Attribute>
@@ -66,6 +83,7 @@ FIXTURE = textwrap.dedent(f"""\
    </Entity>
    <Entity id="E2" name="Cuenta Test">
     <EntityProps><Name>Cuenta Test</Name><Physical_Name>MD_CUENTATEST</Physical_Name>
+     <Is_Physical_Only>true</Is_Physical_Only>
      <User_Formatted_Physical_Name>MD_CUENTATEST</User_Formatted_Physical_Name></EntityProps>
     <Attribute_Groups>
      <Attribute id="B1" name="codigo cuenta"><AttributeProps><Name>codigo cuenta</Name>
@@ -235,15 +253,34 @@ def test_dedupe_columnas_conserva_primera(model):
     assert [a.id for a in dropped] == ["A3"]
 
 
-def test_colapso_udp_logical_physical_y_valores(model):
-    collapsed = pol.collapse_udp_defs(model.udp_defs)
-    keys = set(collapsed)
-    assert "table|Criticidad" in keys and "canvas|Dominio Modelo" in keys
-    assert "View.Physical.Tipo de Vista" not in str(keys)  # nivel no soportado
-    vals = pol.resolve_udp_values(model.udp_values, collapsed)
-    # Physical (Alta) pisa Logical (Baja)
-    assert vals[("E1", "table|Criticidad")] == "Alta"
-    assert vals[("M1", "canvas|Dominio Modelo")] == "Riesgos"
+def test_udp_por_faceta_logical_y_physical_separadas(model):
+    defs = pol.udp_defs_by_view(model.udp_defs)
+    keys = set(defs)
+    assert {"table|physical|Criticidad", "table|logical|Criticidad", "canvas|physical|Dominio Modelo",
+            "view|physical|Tipo de Vista"} <= keys
+    assert not any("Subtype_Symbol" in k for k in keys)     # nivel no soportado
+    vals = pol.resolve_udp_values(model.udp_values, defs)
+    # Doc 69: cada faceta conserva SU valor (antes Physical pisaba Logical).
+    assert vals[("E1", "table|physical|Criticidad")] == "Alta"
+    assert vals[("E1", "table|logical|Criticidad")] == "Baja"
+    assert vals[("M1", "canvas|physical|Dominio Modelo")] == "Riesgos"
+
+
+def test_facetas_orden_logico_flags_y_tipo_fisico_dominio(model):
+    e1 = model.entities["E1"]
+    by_id = {a.id: a for a in e1.attributes}
+    # `attributes` queda en el orden físico de la BD (A1, A2, A3: sólo para
+    # deduplicar); el Column order de Erwin (A2, A3, A1) es la base del orden
+    # único (doc 74).
+    assert [a.id for a in e1.attributes] == ["A1", "A2", "A3"]
+    assert (by_id["A2"].column_order, by_id["A3"].column_order, by_id["A1"].column_order) == (0, 1, 2)
+    # Sin arrays de orden (E2) cae al Physical_Order.
+    assert [a.column_order for a in model.entities["E2"].attributes] == [1, 2]
+    assert by_id["A2"].logical_only is True and by_id["A1"].logical_only is False
+    assert by_id["A2"].logical_type == "VARCHAR(100)"
+    assert e1.logical_only is False and model.entities["E2"].physical_only is True
+    assert model.domains["D-COD"].physical_type == "VARCHAR(30)"
+    assert model.domains["D-COD"].data_type == "VARCHAR(20)"
 
 
 def test_ids_deterministas_y_schema_default():
@@ -326,3 +363,36 @@ def test_diagrama_resuelve_sa_con_puntos_en_el_nombre(tmp_path):
         "Party y Cuenta": "1. Party",
         "ER_Diagram_210": "<Vista Logica Completa>",
     }
+
+
+def test_column_order_cae_al_attribute_order_sin_columns_array(tmp_path):
+    """Doc 74: sin `Columns_Order_Ref_Array` el Column order nace del Attribute
+    order (así lo inicializa Erwin); el Physical_Order sólo es el último fallback."""
+    xml = textwrap.dedent(f"""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <erwin xmlns="http://www.erwin.com/dm" FileVersion="10.10" Format="erwin">
+     <Model {NS} id="M1" name="Mini"><ModelProps><Name>Mini</Name></ModelProps>
+      <Entity_Groups>
+       <Entity id="E1" name="Uno">
+        <EntityProps><Name>Uno</Name><Physical_Name>UNO</Physical_Name><User_Formatted_Physical_Name>UNO</User_Formatted_Physical_Name>
+         <Attributes_Order_Ref_Array>
+          <Attributes_Order_Ref index="0">A2</Attributes_Order_Ref>
+          <Attributes_Order_Ref index="1">A1</Attributes_Order_Ref>
+         </Attributes_Order_Ref_Array>
+        </EntityProps>
+        <Attribute_Groups>
+         <Attribute id="A1" name="a"><AttributeProps><Name>a</Name><User_Formatted_Physical_Name>A</User_Formatted_Physical_Name>
+          <Physical_Data_Type>STRING</Physical_Data_Type><Physical_Order>1</Physical_Order></AttributeProps></Attribute>
+         <Attribute id="A2" name="b"><AttributeProps><Name>b</Name><User_Formatted_Physical_Name>B</User_Formatted_Physical_Name>
+          <Physical_Data_Type>STRING</Physical_Data_Type><Physical_Order>2</Physical_Order></AttributeProps></Attribute>
+        </Attribute_Groups>
+       </Entity>
+      </Entity_Groups>
+     </Model>
+    </erwin>
+    """)
+    p = tmp_path / "mini.xml"
+    p.write_text(xml, encoding="utf-8")
+    m = ep.parse(str(p))
+    by_id = {a.id: a for a in m.entities["E1"].attributes}
+    assert (by_id["A2"].column_order, by_id["A1"].column_order) == (0, 1)

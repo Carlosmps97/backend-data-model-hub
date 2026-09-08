@@ -11,7 +11,7 @@ from app.features.views.schemas import ViewBody
 
 
 def test_view_additive_defaults():
-    v = ViewDoc.model_validate({"name": "v_cuenta"})
+    v = ViewDoc.model_validate({"projectId": "p1", "name": "v_cuenta"})
     assert v.tableId is None
     assert v.sql_schema is None
     assert v.tags == []
@@ -25,7 +25,7 @@ def test_view_additive_defaults():
 
 
 def test_view_doc_schema_alias_roundtrip():
-    raw = {
+    raw = {"projectId": "p1", 
         "id": "v1", "name": "v_cuenta", "schema": "core_v", "tableId": "t1",
         "tags": ["pii", "gold"], "filter": "estado = 'A'",
         "sources": [{"table": "cuenta", "outputAlias": "ctas", "expression": "id"}],
@@ -50,7 +50,7 @@ def test_view_doc_schema_alias_roundtrip():
 
 def test_view_doc_accepts_sql_schema_by_name():
     # populate_by_name: también acepta el nombre interno en la entrada.
-    v = ViewDoc.model_validate({"name": "v", "sql_schema": "raw_v"})
+    v = ViewDoc.model_validate({"projectId": "p1", "name": "v", "sql_schema": "raw_v"})
     assert v.sql_schema == "raw_v"
     assert v.model_dump(by_alias=True)["schema"] == "raw_v"
 

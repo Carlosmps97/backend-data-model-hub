@@ -40,7 +40,7 @@ from app.core.ratelimit import limiter
 from app.features.admin.router import router as admin_router
 from app.features.auth.router import router as auth_router
 from app.features.bulk_upload.router import router as bulk_upload_router
-from app.features.catalog.router import router as catalog_router
+from app.features.catalog.router import projects_catalog_router, router as catalog_router
 from app.features.data_standards.router import router as data_standards_router
 from app.features.ddl_rules.router import router as ddl_rules_router
 from app.features.glossary.router import router as glossary_router
@@ -49,7 +49,9 @@ from app.features.udp.router import router as udp_router
 from app.features.folders.router import router as folders_router
 from app.features.health.router import router as health_router
 from app.features.identity.router import router as identity_router
+from app.features.changesets.asof import AsOfUnavailable
 from app.features.changesets.router import (
+    project_versions_router,
     requests_router,
     router as changesets_router,
     versions_router,
@@ -58,7 +60,7 @@ from app.features.projects.router import router as projects_router
 from app.features.relationships.router import router as relationships_router
 from app.features.reporting.router import router as reporting_router
 from app.features.reporting.query.router import router as reporting_query_router
-from app.features.schemas.router import router as schemas_router
+from app.features.schemas.router import router as schemas_router, router_by_id as schemas_by_id_router
 from app.features.settings.router import router as settings_router
 from app.features.summary.router import router as summary_router
 from app.features.views.router import router as views_router
@@ -115,6 +117,14 @@ async def lifespan(app: FastAPI):
 # ─── Aplicación ─────────────────────────────────────────────────────────
 
 
+async def _asof_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    """`AsOfUnavailable` → 404 (versión inexistente) / 409 (no publicada o
+    irreconstruible), cuerpo `{detail}` como una HTTPException."""
+    reason = getattr(exc, "reason", "")
+    return JSONResponse(status_code=404 if reason == "not-found" else 409,
+                        content={"detail": str(exc)})
+
+
 def create_app() -> FastAPI:
     """Factory de la app FastAPI (CORS + middleware + routers de features)."""
     # Falla-cerrado: no arrancar en prod con el SECRET_KEY de desarrollo.
@@ -141,6 +151,11 @@ def create_app() -> FastAPI:
     # → 429 con Retry-After. Estado en memoria: ver app/core/ratelimit.py.
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # Doc 70: el snapshot `asof:<versionId>` se resuelve en el repository de
+    # changesets (una puerta para todos los lectores); si no se puede armar,
+    # el error sube desde cualquier endpoint changeset-aware → mismo shape
+    # `{detail}` de HTTPException que el front ya propaga al toast.
+    app.add_exception_handler(AsOfUnavailable, _asof_unavailable_handler)
 
     # ─── Host allowlist (solo si ALLOWED_HOSTS está definido: producción) ──
     if settings.ALLOWED_HOSTS:
@@ -276,6 +291,7 @@ def create_app() -> FastAPI:
     app.include_router(data_standards_router)
     app.include_router(ddl_rules_router)
     app.include_router(catalog_router)
+    app.include_router(projects_catalog_router)   # doc 75 D4
     app.include_router(changesets_router)
     # Carga masiva desde Excel (doc 55): jobs de validación/aplicación bajo
     # `/api/changesets/{cs}/uploads`. Va DESPUÉS del router de changesets
@@ -283,10 +299,12 @@ def create_app() -> FastAPI:
     # hermanas para que FastAPI resuelva el prefijo literal `/uploads`.
     app.include_router(bulk_upload_router)
     app.include_router(versions_router)
+    app.include_router(project_versions_router)   # doc 75 D2
     app.include_router(requests_router)
     app.include_router(projects_router)
     app.include_router(folders_router)
     app.include_router(schemas_router)
+    app.include_router(schemas_by_id_router)
     app.include_router(relationships_router)
     app.include_router(views_router)
     app.include_router(summary_router)

@@ -7,11 +7,12 @@ las definiciones; `apply_udps` calcula el mapa `udpValues` de una entidad.
 """
 from __future__ import annotations
 
+from app.core.facets import udp_view
 from app.core.naming import physicalize
 
 from .context import UploadContext
 from .datatypes import canonical_type
-from .normalize import clean_text, norm_enum, norm_key, norm_name
+from .normalize import clean_text, norm_enum, norm_key, norm_name, udp_header_facet
 from .report import ReportBuilder
 
 _BOOL_TRUE = frozenset({"true", "si", "sí", "yes", "1", "verdadero"})
@@ -21,10 +22,12 @@ _BOOL_FALSE = frozenset({"false", "no", "0", "falso"})
 class Standards:
     def __init__(self, ctx: UploadContext) -> None:
         self.ctx = ctx
-        self._defs: dict[str, dict[str, list[dict]]] = {}
+        # Doc 69: índice por (nivel, faceta) — los homónimos lógico/físico son
+        # defs distintas y la cabecera decide la faceta (`udp_header_facet`).
+        self._defs: dict[tuple[str, str], dict[str, list[dict]]] = {}
         for d in ctx.udp_defs:
             level = d.get("level") or "column"
-            self._defs.setdefault(level, {}).setdefault(norm_key(d.get("name")), []).append(d)
+            self._defs.setdefault((level, udp_view(d)), {}).setdefault(norm_key(d.get("name")), []).append(d)
         self._domains: dict[str, list[dict]] = {}
         for d in ctx.domains:
             self._domains.setdefault(norm_name(d.get("name")), []).append(d)
@@ -33,7 +36,8 @@ class Standards:
 
     # ── UDP ────────────────────────────────────────────────────────────────
     def defs_for(self, level: str, header: str) -> list[dict]:
-        return self._defs.get(level, {}).get(norm_key(header), [])
+        view, key = udp_header_facet(header)
+        return self._defs.get((level, view), {}).get(key, [])
 
     # ── Parent domains ─────────────────────────────────────────────────────
     def domain(self, name) -> dict | None:
@@ -43,6 +47,11 @@ class Standards:
     def domain_default(self, domain_id: str | None) -> str | None:
         d = self._domain_by_id.get(domain_id or "")
         return clean_text(d.get("defaultDataType")) or None if d else None
+
+    def domain_logical(self, domain_id: str | None) -> str | None:
+        """Tipo LÓGICO del dominio (doc 69), None si no lo declara."""
+        d = self._domain_by_id.get(domain_id or "")
+        return clean_text(d.get("logicalDataType")) or None if d else None
 
     # ── Naming ─────────────────────────────────────────────────────────────
     def physicalize(self, logical: str, scope: str) -> str:

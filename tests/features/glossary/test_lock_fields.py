@@ -6,7 +6,7 @@ from app.features.glossary.models import AbbreviationDoc
 
 
 def test_doc_lock_defaults():
-    d = AbbreviationDoc.model_validate({"term": "codigo", "abbrev": "COD"})
+    d = AbbreviationDoc.model_validate({"projectId": "p1", "term": "codigo", "abbrev": "COD"})
     dumped = d.model_dump()
     assert dumped["locked"] is False
     assert dumped["lockedBy"] is None
@@ -14,7 +14,7 @@ def test_doc_lock_defaults():
 
 
 def test_doc_persiste_lock():
-    d = AbbreviationDoc.model_validate({
+    d = AbbreviationDoc.model_validate({"projectId": "p1", 
         "term": "cuenta", "abbrev": "CTA", "locked": True,
         "lockedBy": "admin", "lockedAt": "2026-07-10T00:00:00+00:00",
     })

@@ -26,7 +26,7 @@ COLS = [
 ]
 BASE = {"tabla": table_ctx(TABLE, N), "modelo": {"nombre": "", "udp": {}}}
 COLS_CTX = {c["physicalName"]: column_ctx(c, N) for c in COLS}
-FULL = "core.tbl_cliente"
+FULL = "`core`.`tbl_cliente`"      # doc 71 H2: calificado como el CREATE (backticks + casing)
 
 TAGS_COL = {
     "id": "r1", "name": "tags_clasificacion", "kind": "rule", "target": "column",
@@ -67,15 +67,15 @@ def test_golden_column_tags_una_sentencia_por_columna():
     stmts, log = render.column_tag_statements([TAGS_COL], "ddl.tabla_fisica",
                                               BASE, COLS_CTX, {}, FULL)
     assert stmts == [
-        "ALTER TABLE core.tbl_cliente ALTER COLUMN nom_cliente SET TAGS ('clasificacion_dato' = 'DAC-NOMBRE');",
-        "ALTER TABLE core.tbl_cliente ALTER COLUMN num_documento SET TAGS ('clasificacion_dato' = 'DAC-DOCUMENTO');",
+        "ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `nom_cliente` SET TAGS ('clasificacion_dato' = 'DAC-NOMBRE');",
+        "ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `num_documento` SET TAGS ('clasificacion_dato' = 'DAC-DOCUMENTO');",
     ]
     assert sum(1 for e in log if e["status"] == "applied") == 2   # cod_cliente sin UDP → fuera
 
 
 def test_golden_table_tags_multipar_ordenado():
     stmts, _ = render.table_tag_statements([TAGS_TAB], "ddl.tabla_fisica", BASE, {}, FULL)
-    assert stmts == ["ALTER TABLE core.tbl_cliente SET TAGS ("
+    assert stmts == ["ALTER TABLE `core`.`tbl_cliente` SET TAGS ("
                      "'dominio_principal' = 'CLIENTES', "
                      "'estado_cloud' = 'Migracion', "
                      "'tipo_entidad' = 'Referencia');"]
@@ -141,3 +141,48 @@ def test_tags_respetan_condicion_y_artefacto():
     base2 = {"tabla": table_ctx(sin_dom, N), "modelo": {"nombre": "", "udp": {}}}
     stmts2, _ = render.table_tag_statements([TAGS_TAB], "ddl.tabla_fisica", base2, {}, FULL)
     assert stmts2 == []                               # IS NOT NULL falso
+
+
+# ── Doc 71 H1 · inyección TEXTUAL de TBLPROPERTIES ────────────────────────
+
+FRONT_CREATE = ("CREATE TABLE IF NOT EXISTS `core`.`tbl_cliente` (\n"
+                "  `cod_cliente` STRING NOT NULL COMMENT 'Codigo del cliente',\n"
+                "  `fec_alta` DATE\n"
+                ")\nUSING delta\nPARTITIONED BY (`fec_alta`)\nCOMMENT 'Maestro; de clientes'\n"
+                "LOCATION 's3://dl/warehouse/tbl_cliente';\n"
+                "ALTER TABLE `core`.`tbl_cliente` ADD CONSTRAINT `fk_x` FOREIGN KEY (`cod_cliente`) "
+                "REFERENCES `core`.`p`(`id`);\n")
+
+
+def test_tblproperties_inyeccion_textual_conserva_el_formato_del_front():
+    """El CREATE del generador del front (comentarios con `;` adentro, particiones,
+    LOCATION, ALTER FK detrás) queda byte-idéntico salvo el bloque nuevo."""
+    out, log = render.apply_tblproperties(FRONT_CREATE, [VACUUM], "ddl.tabla_fisica", BASE, CONFIG)
+    expected = FRONT_CREATE.replace(
+        "LOCATION 's3://dl/warehouse/tbl_cliente';",
+        "LOCATION 's3://dl/warehouse/tbl_cliente'\nTBLPROPERTIES (\n"
+        "  'delta.deletedFileRetentionDuration' = 'interval 90 days'\n);")
+    assert out == expected
+    assert any(e["status"] == "applied" for e in log)
+
+
+def test_tblproperties_extiende_bloque_existente_en_linea_y_multilinea():
+    one_line = CREATE_BASE.replace("USING delta;", "USING delta\nTBLPROPERTIES ('a' = 'b');")
+    out, _ = render.apply_tblproperties(one_line, [VACUUM], "ddl.tabla_fisica", BASE, CONFIG)
+    assert out.endswith("TBLPROPERTIES ('a' = 'b', 'delta.deletedFileRetentionDuration' = 'interval 90 days');")
+    multi = CREATE_BASE.replace("USING delta;", "USING delta\nTBLPROPERTIES (\n  'a' = 'b'\n);")
+    out2, _ = render.apply_tblproperties(multi, [VACUUM], "ddl.tabla_fisica", BASE, CONFIG)
+    assert out2.endswith("TBLPROPERTIES (\n  'a' = 'b',\n  'delta.deletedFileRetentionDuration' = 'interval 90 days'\n);")
+
+
+def test_tblproperties_helpers_de_texto():
+    assert render.existing_tblproperty_keys("CREATE TABLE t (a INT) TBLPROPERTIES ('x' = '1', 'y;z' = 'k);v');") == {"x", "y;z"}
+    assert render.inject_tblproperties_text("CREATE TABLE t (a INT)", [("k", "v")]) is None   # sin `;` → fallback
+    assert render.inject_tblproperties_text("CREATE TABLE t (a INT);", []) == "CREATE TABLE t (a INT);"
+
+
+def test_tags_de_columna_respetan_casing_del_export():
+    stmts, _ = render.column_tag_statements([TAGS_COL], "ddl.tabla_fisica", BASE, COLS_CTX, {},
+                                            render.full_name("core", "tbl_cliente", {"identifierCase": "upper"}),
+                                            {"identifierCase": "upper"})
+    assert stmts[0].startswith("ALTER TABLE `CORE`.`TBL_CLIENTE` ALTER COLUMN `NOM_CLIENTE` SET TAGS (")

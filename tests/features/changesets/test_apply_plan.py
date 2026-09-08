@@ -40,3 +40,19 @@ def test_apply_plan_normaliza_payloads_de_views():
     assert multi["tableId"] == "t2"                # compat: primera fuente
     assert plan[("views", "v-del")] == ("delete", None)
     assert plan[("canonical_tables", "ct-1")] == ("upsert", {"physicalName": "TBL"})
+
+
+def test_doc_models_sin_estandares_y_projects_sigue_versionado():
+    from app.features.changesets.repository import VERSIONED
+    from app.features.changesets.validation import DOC_MODELS
+    assert "parent_domains" not in DOC_MODELS and "glossary_terms" not in DOC_MODELS
+    assert "projects" in DOC_MODELS and VERSIONED[0] == "projects"
+
+
+def test_project_change_error_solo_el_propio_proyecto():
+    from app.features.changesets.validation import project_change_error
+    assert project_change_error("p1", "p1", "upsert", {"name": "DDV"}) is None
+    assert project_change_error("p1", "p1", "delete", None) is None
+    assert "another project" in project_change_error("p1", "p2", "delete", None)
+    assert "another project" in project_change_error("p1", "p2", "upsert", {"name": "x"})
+    assert "cannot change" in project_change_error("p1", "p1", "upsert", {"name": "x", "id": "p9"})

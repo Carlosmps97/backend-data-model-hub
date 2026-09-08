@@ -8,8 +8,13 @@ case-insensitive A3), defs UDP que se saltarían (A4), particiones a reasignar
 
 Correr SIEMPRE antes de `migrate --apply` en cargas incrementales.
 
+Doc 75: el cruce contra la BD es POR PROYECTO — sólo lo que ya vive en el
+proyecto destino cuenta como existente (`--project`; sin él, el nombre del
+modelo). Si el proyecto aún no existe, todo el archivo es NUEVO.
+
 Uso:
   .venv/bin/python -m scripts.erwin_migration.crosscheck a.xml [b.xml ...]
+      [--project "Nombre"]   proyecto destino (default: nombre del modelo)
       [--json salida.json]   volcado completo para automatizar
       [--no-db]              solo análisis de archivo(s) (sin conexión)
 """
@@ -48,8 +53,8 @@ class FileAnalysis:
         self.m = ep.parse(path)
         m = self.m
         self.schema_of = m.owner_schema()
-        self.collapsed = pol.collapse_udp_defs(m.udp_defs)
-        self.udp_vals = pol.resolve_udp_values(m.udp_values, self.collapsed)
+        self.defs = pol.udp_defs_by_view(m.udp_defs)      # doc 69: clave `level|view|name`
+        self.udp_vals = pol.resolve_udp_values(m.udp_values, self.defs)
         self.x_rels: Counter = Counter()
         for r in m.relationships.values():
             if r.rel_type in (ep.REL_IDENTIFYING, ep.REL_NON_IDENTIFYING,
@@ -106,29 +111,43 @@ class FileAnalysis:
 
     def unused_udp_defs(self) -> list[str]:
         used = {key for (_oid, key) in self.udp_vals}
-        return sorted(f"{e['level']}|{e['name']}"
-                      for k, e in self.collapsed.items() if k not in used)
+        return sorted(f"{e['level']}|{e['view']}|{e['name']}"
+                      for k, e in self.defs.items() if k not in used)
 
 
-def analyze_vs_db(fa: FileAnalysis, db) -> dict:
-    """Solapes y estándares del archivo contra la BD viva (veredictos R1/R2)."""
+def resolve_project_id(db, project_name: str) -> str | None:
+    """Id del proyecto ACTIVO con ese nombre, o None si aún no existe."""
+    hit = db["projects"].find_one({"name": project_name, **_ACTIVE}, {"_id": 1})
+    return hit["_id"] if hit else None
+
+
+def analyze_vs_db(fa: FileAnalysis, db, project_id: str | None) -> dict:
+    """Solapes y estándares del archivo contra la BD viva DEL PROYECTO
+    (veredictos R1/R2). `project_id=None` (proyecto inexistente) ⇒ nada
+    existe: todo el archivo es nuevo."""
     out: dict = {}
+
+    def scoped(coll: str, projection: dict) -> list[dict]:
+        if project_id is None:
+            return []
+        return list(db[coll].find({**_ACTIVE, "projectId": project_id}, projection))
+
     ex_tables = {(t.get("schema") or "").upper() + "." + (t.get("physicalName") or "").upper(): t["_id"]
-                 for t in db.canonical_tables.find(_ACTIVE, {"schema": 1, "physicalName": 1})}
+                 for t in scoped("canonical_tables", {"schema": 1, "physicalName": 1})}
     ex_views = {(v.get("schema") or "").upper() + "." + (v.get("name") or "").upper(): v["_id"]
-                for v in db.views.find(_ACTIVE, {"schema": 1, "name": 1})}
-    ex_schemas = {(s.get("name") or "").upper() for s in db.schemas.find(_ACTIVE, {"name": 1})}
+                for v in scoped("views", {"schema": 1, "name": 1})}
+    ex_schemas = {(s.get("name") or "").upper() for s in scoped("schemas", {"name": 1})}
 
     db_rel = Counter()
-    for r in db.relationships.find(_ACTIVE, {"parentTableId": 1, "childTableId": 1}):
+    for r in scoped("relationships", {"parentTableId": 1, "childTableId": 1}):
         db_rel[r.get("parentTableId")] += 1
         db_rel[r.get("childTableId")] += 1
     db_canv = Counter()
-    for sa in db.subject_areas.find(_ACTIVE, {"tableIds": 1}):
+    for sa in scoped("subject_areas", {"tableIds": 1}):
         for tid in set(sa.get("tableIds") or []):
             db_canv[tid] += 1
     db_view = Counter()
-    for v in db.views.find(_ACTIVE, {"sourceTableIds": 1}):
+    for v in scoped("views", {"sourceTableIds": 1}):
         for tid in set(v.get("sourceTableIds") or []):
             db_view[tid] += 1
 
@@ -146,7 +165,7 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
     db_cols: dict[str, list] = defaultdict(list)
     ids = sorted(set(matched_ids))
     for i in range(0, len(ids), 500):
-        for c in db.canonical_columns.find(
+        for c in db["canonical_columns"].find(
                 {**_ACTIVE, "tableId": {"$in": ids[i:i + 500]}},
                 {"tableId": 1, "physicalName": 1}):
             db_cols[c["tableId"]].append((c.get("physicalName") or "").upper())
@@ -170,7 +189,7 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
 
     # estándares
     ex_gloss = {(g.get("term") or "").upper(): (g.get("abbrev") or "")
-                for g in db.glossary_terms.find(_ACTIVE, {"term": 1, "abbrev": 1})}
+                for g in scoped("glossary_terms", {"term": 1, "abbrev": 1})}
     gl_new, gl_diff = [], []
     for g in fa.m.glossary:
         term = (g[0] or "").strip()
@@ -183,22 +202,25 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
             gl_diff.append(f"{term}: BD={ex_gloss[term.upper()]} XML={ab}")
     out["glossary"] = {"new": gl_new, "abbrevDiff": gl_diff}
 
-    ex_dom = {(d.get("name") or "").upper() for d in db.parent_domains.find(_ACTIVE, {"name": 1})}
+    ex_dom = {(d.get("name") or "").upper() for d in scoped("parent_domains", {"name": 1})}
     out["domains_new"] = sorted(d.name for d in fa.m.domains.values()
                                 if not d.builtin and not d.name.startswith("<")
                                 and d.name.upper() not in ex_dom)
 
-    ex_udp = {((u.get("name") or "").upper(), u.get("level") or ""):
-              (u.get("allowedValues") or [])
-              for u in db.udp_definitions.find(_ACTIVE, {"name": 1, "level": 1,
-                                                         "allowedValues": 1})}
+    # Doc 69: cruce por (nombre, nivel, FACETA); defs pre-doc 69 sin `view` = físicas.
+    from app.core.facets import normalize_udp_view
+    ex_udp = {}
+    for u in scoped("udp_definitions", {"name": 1, "level": 1, "view": 1, "allowedValues": 1}):
+        level = u.get("level") or ""
+        ex_udp[((u.get("name") or "").upper(), level, normalize_udp_view(level, u.get("view")))] = \
+            u.get("allowedValues") or []
     used = {key for (_oid, key) in fa.udp_vals}
     values_by_key: dict[str, set] = defaultdict(set)
     for (_oid, key), val in fa.udp_vals.items():
         values_by_key[key].add(val)
     udp_new, udp_skip, udp_merge, udp_variants = [], [], [], []
-    for k, e in fa.collapsed.items():
-        dbk = (e["name"].strip().upper(), e["level"])
+    for k, e in fa.defs.items():
+        dbk = (e["name"].strip().upper(), e["level"], e["view"])
         # los enums solo aplican a defs LIST (misma regla que migrate);
         # las de texto no convergen valores
         allowed: list[str] = []
@@ -208,16 +230,16 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
                 allowed, sorted(values_by_key.get(k, set())
                                 | ({e["default"]} if e["default"] else set())))
         if dbk not in ex_udp:
-            (udp_new if k in used else udp_skip).append(f"{e['level']}|{e['name']}")
+            (udp_new if k in used else udp_skip).append(f"{e['level']}|{e['view']}|{e['name']}")
             continue
         add = pol.merge_allowed_values(ex_udp[dbk], allowed)
         if add:
-            udp_merge.append(f"{e['level']}|{e['name']}: +{add}")
+            udp_merge.append(f"{e['level']}|{e['view']}|{e['name']}: +{add}")
         norms = {pol.norm_enum(v): v for v in ex_udp[dbk]}
         vars_ = [f"{v!r}≈{norms[pol.norm_enum(v)]!r}" for v in allowed
                  if pol.norm_enum(v) in norms and v not in ex_udp[dbk]]
         if vars_:
-            udp_variants.append(f"{e['level']}|{e['name']}: {vars_[:4]}")
+            udp_variants.append(f"{e['level']}|{e['view']}|{e['name']}: {vars_[:4]}")
     out["udp"] = {"createdWithUse": udp_new, "skippedA4": udp_skip,
                   "enumAdds": udp_merge, "caseVariantsIgnored": udp_variants}
 
@@ -238,7 +260,7 @@ def analyze_vs_db(fa: FileAnalysis, db) -> dict:
            + len(gl_new) + len(out["domains_new"]) + len(udp_new))
     t0 = time.perf_counter()
     for _ in range(3):
-        db.canonical_tables.find_one({}, {"_id": 1})
+        db["canonical_tables"].find_one({}, {"_id": 1})
     lat = (time.perf_counter() - t0) / 3
     batches = (ops + _BATCH - 1) // _BATCH
     out["load_estimate"] = {
@@ -252,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Cross-check pre-carga: XML(s) vs BD viva y entre sí (solo lectura)")
     ap.add_argument("xml", nargs="+")
+    ap.add_argument("--project", help="proyecto destino (default: nombre del modelo)")
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--no-db", action="store_true",
                     help="sin conexión: solo análisis de archivo(s)")
@@ -297,7 +320,14 @@ def main(argv: list[str] | None = None) -> int:
                   "(las que no existan en BD se saltan — A4)")
 
         if db is not None:
-            vs = analyze_vs_db(fa, db)
+            project_name = (args.project or fa.m.name or "Modelo Erwin").strip()
+            project_id = resolve_project_id(db, project_name)
+            rep["project"] = {"name": project_name, "id": project_id}
+            if project_id is None:
+                print(f"  proyecto «{project_name}»: NO existe en la BD → todo el archivo es nuevo")
+            else:
+                print(f"  proyecto «{project_name}» ({project_id[:8]}…): cruce acotado a lo que ya vive ahí")
+            vs = analyze_vs_db(fa, db, project_id)
             rep["vs_db"] = vs
             ov = vs["tables_overlap"]
             print(f"  vs BD: tablas solapadas={len(ov)} · vistas={len(vs['views_overlap'])}"

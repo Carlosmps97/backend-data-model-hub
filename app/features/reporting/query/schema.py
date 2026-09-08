@@ -119,7 +119,6 @@ _VIEW_COLUMNS = [
 # where/groupBy/agregaciones (no existe como campo en Mongo).
 _MODELS = [
     _s("name", "Model name", sortable=True, indexed=True),
-    _s("projectId", "Project id", indexed=True),
     _s("folderId", "Folder id"),
     FieldDef("tableCount", "Table count", "tableIds", type="number",
              groupable=False, hydrate="derived"),

@@ -8,19 +8,20 @@ Semántica de una fila de tabla (`GET /api/reporting/tables`):
   - relationshipCount  : nº de relaciones donde la tabla es source O target.
   - subjectAreas       : nombres de los canvases (`subject_areas`) cuyo
     `tableIds` incluye la tabla. Ordenados, sin duplicados.
-  - projects           : nombres de los proyectos que contienen alguno de esos
-    canvases (un proyecto referencia la tabla si cualquiera de sus canvases la
-    referencia). Ordenados, sin duplicados.
+  - projects           : doc 75: el reporte es de UN proyecto y toda tabla le
+    pertenece (esté o no en un canvas), así que la lista trae ese único nombre
+    (la columna se conserva en la hoja exportada).
   - udpValues          : UDPs de la tabla como {NOMBRE de la def: valor}
     (traducidos desde {defId: valor} vía `udp_definitions` — export legible).
 
-Filtros opcionales (predicado puro `_matches`), pensados para crecer:
-  - schema    : igualdad exacta sobre el schema de la tabla.
-  - projectId : la tabla debe estar referenciada por algún canvas de ese
-    proyecto (la fila se filtra; sus listas `subjectAreas`/`projects` siguen
-    mostrando TODAS las referencias, no sólo las del proyecto filtrado).
+El alcance por proyecto lo pone el repository (`scoped`); el único filtro del
+predicado puro `_matches` es `schema` (igualdad exacta).
 """
 from __future__ import annotations
+
+from app.core.facets import udp_display_names
+from app.features.projects import repository as projects_repo
+from app.features.views.membership import view_on_canvas
 
 from . import repository
 
@@ -36,20 +37,11 @@ def _index_tables_to_canvases(
     return out
 
 
-def _names_for_table(
-    table_id: str,
-    tables_to_canvases: dict[str, list[dict]],
-    projects_by_id: dict[str, str],
-) -> tuple[list[str], list[str], set[str]]:
-    """(nombres de canvases, nombres de proyectos, set de projectIds) que
-    referencian la tabla. Nombres ordenados y sin duplicados. Puro."""
+def _canvas_names(table_id: str, tables_to_canvases: dict[str, list[dict]]) -> list[str]:
+    """Nombres de los canvases que referencian la tabla, ordenados y sin
+    duplicados. Puro."""
     canvases = tables_to_canvases.get(table_id, [])
-    sa_names = sorted({(c.get("name") or "") for c in canvases if c.get("name")})
-    project_ids = {c.get("projectId") for c in canvases if c.get("projectId")}
-    proj_names = sorted(
-        {projects_by_id[pid] for pid in project_ids if pid in projects_by_id}
-    )
-    return sa_names, proj_names, project_ids
+    return sorted({(c.get("name") or "") for c in canvases if c.get("name")})
 
 
 def _udp_named(raw: dict | None, name_by_id: dict[str, str]) -> dict:
@@ -58,15 +50,10 @@ def _udp_named(raw: dict | None, name_by_id: dict[str, str]) -> dict:
     return {name_by_id.get(k, k): v for k, v in (raw or {}).items()}
 
 
-def _matches(row: dict, project_ids: set[str], filters: dict) -> bool:
-    """Predicado de filtro de una fila de tabla. Puro y extensible."""
+def _matches(row: dict, filters: dict) -> bool:
+    """Predicado de filtro de una fila de tabla (sólo `schema`). Puro."""
     schema = filters.get("schema")
-    if schema is not None and (row.get("schema") or None) != schema:
-        return False
-    project_id = filters.get("projectId")
-    if project_id is not None and project_id not in project_ids:
-        return False
-    return True
+    return schema is None or (row.get("schema") or None) == schema
 
 
 def table_rows(
@@ -88,8 +75,8 @@ def table_rows(
     """
     filters = filters or {}
     tables_to_canvases = _index_tables_to_canvases(subject_areas)
-    projects_by_id = {p["id"]: (p.get("name") or "") for p in projects}
-    udp_name_by_id = {d["id"]: (d.get("name") or d["id"]) for d in (udp_defs or [])}
+    proj_names = sorted({p.get("name") for p in projects if p.get("name")})
+    udp_name_by_id = udp_display_names(udp_defs or [])   # doc 69: «X (Logical)» para la faceta lógica
 
     col_count: dict[str, int] = column_counts or {}
 
@@ -103,9 +90,7 @@ def table_rows(
     rows: list[dict] = []
     for t in tables:
         tid = t["id"]
-        sa_names, proj_names, project_ids = _names_for_table(
-            tid, tables_to_canvases, projects_by_id
-        )
+        sa_names = _canvas_names(tid, tables_to_canvases)
         row = {
             "id": tid,
             "physicalName": t.get("physicalName"),
@@ -117,8 +102,12 @@ def table_rows(
             "projects": proj_names,
             "udpValues": _udp_named(t.get("udpValues"), udp_name_by_id),
             "description": t.get("description"),
+            # Doc 70 §4.2 — metadata COMPLETA de la tabla (docs 68/69).
+            "physicalNameOverridden": bool(t.get("physicalNameOverridden")),
+            "logicalOnly": bool(t.get("logicalOnly")),
+            "physicalOnly": bool(t.get("physicalOnly")),
         }
-        if _matches(row, project_ids, filters):
+        if _matches(row, filters):
             rows.append(row)
 
     rows.sort(key=lambda r: (r.get("physicalName") or "").lower())
@@ -136,17 +125,20 @@ def column_rows(columns: list[dict], parent_domains: list[dict],
     Ordenadas por (tableId, ordinal).
     """
     domain_name_by_id = {d["id"]: (d.get("name") or "") for d in parent_domains}
-    udp_name_by_id = {d["id"]: (d.get("name") or d["id"]) for d in (udp_defs or [])}
+    udp_name_by_id = udp_display_names(udp_defs or [])   # doc 69: «X (Logical)» para la faceta lógica
     rows: list[dict] = []
     for c in columns:
         did = c.get("parentDomainId")
         rows.append(
             {
+                "id": c.get("id"),
                 "tableId": c.get("tableId"),
                 "physicalName": c.get("physicalName"),
                 "logicalName": c.get("logicalName"),
                 "dataType": c.get("dataType"),
+                "logicalDataType": c.get("logicalDataType"),   # doc 69: faceta lógica
                 "parentDomain": domain_name_by_id.get(did) if did else None,
+                "parentDomainId": did,
                 "isPrimaryKey": bool(c.get("isPrimaryKey")),
                 "isForeignKey": bool(c.get("isForeignKey")),
                 "isNullable": c.get("isNullable", True),
@@ -154,48 +146,76 @@ def column_rows(columns: list[dict], parent_domains: list[dict],
                 "udpValues": _udp_named(c.get("udpValues"), udp_name_by_id),
                 "description": c.get("description"),
                 "ordinal": c.get("ordinal", 0),
+                # Doc 70 §4.2 — metadata COMPLETA de la columna (docs 19/68/69).
+                "pkPosition": c.get("pkPosition"),
+                "typeOverridden": bool(c.get("typeOverridden")),
+                "logicalTypeOverridden": bool(c.get("logicalTypeOverridden")),
+                "physicalNameOverridden": bool(c.get("physicalNameOverridden")),
+                "logicalOnly": bool(c.get("logicalOnly")),
+                "physicalOnly": bool(c.get("physicalOnly")),
             }
         )
     rows.sort(key=lambda r: ((r.get("tableId") or ""), r.get("ordinal") or 0))
     return rows
 
 
-async def list_table_rows(filters: dict | None = None, limit: int | None = None) -> list[dict]:
-    """Filas del reporte por tabla (todas las tablas, filtradas en Python).
+def filter_option_lists(schemas: list, subject_areas: list) -> dict:
+    """Doc 70 §4.1: listas de opciones de los filtros — strings no vacíos,
+    sin duplicados, orden case-insensitive. Puro."""
+    def _clean(values: list) -> list[str]:
+        seen = {str(v).strip() for v in values if v is not None and str(v).strip()}
+        return sorted(seen, key=lambda x: (x.lower(), x))
+    return {"schemas": _clean(schemas), "subjectAreas": _clean(subject_areas)}
+
+
+async def filter_options(project_id: str) -> dict:
+    """Universo COMPLETO de Schema / Subject area del proyecto para los combos
+    del reporte tabular (antes salían de las 50 filas de la carga inicial)."""
+    raw = await repository.filter_options(project_id)
+    return filter_option_lists(raw["schemas"], raw["subjectAreas"])
+
+
+async def _project_list(project_id: str) -> list[dict]:
+    """El único proyecto del reporte (para la columna `projects` de la fila)."""
+    project = await projects_repo.get_project(project_id)
+    return [project] if project else []
+
+
+async def list_table_rows(project_id: str, filters: dict | None = None,
+                          limit: int | None = None) -> list[dict]:
+    """Filas del reporte por tabla del proyecto (filtradas en Python).
 
     Fast-path de la carga inicial: con `limit` y SIN filtros se traen sólo las
     primeras `limit` tablas (orden físico) + sus conteos, en vez de barrer las
     10k/400k (`report_inputs_page`)."""
-    udp_defs = await repository.udp_definitions()
+    udp_defs = await repository.udp_definitions(project_id)
+    projects = await _project_list(project_id)
     if limit is not None and limit >= 0 and not (filters or {}):
-        data = await repository.report_inputs_page(limit)
-        return table_rows(
-            data["tables"], data["columnCounts"], data["relationships"],
-            data["subjectAreas"], data["projects"], filters, limit, udp_defs,
-        )
-    data = await repository.report_inputs()
+        data = await repository.report_inputs_page(project_id, limit)
+    else:
+        data = await repository.report_inputs(project_id)
     return table_rows(
-        data["tables"],
-        data["columnCounts"],
-        data["relationships"],
-        data["subjectAreas"],
-        data["projects"],
-        filters,
-        limit,
-        udp_defs,
+        data["tables"], data["columnCounts"], data["relationships"],
+        data["subjectAreas"], projects, filters, limit, udp_defs,
     )
 
 
-def view_rows(views: list[dict], table_name_by_id: dict[str, str]) -> list[dict]:
+def view_rows(views: list[dict], table_name_by_id: dict[str, str],
+              subject_areas: list[dict] | None = None) -> list[dict]:
     """Filas por vista para el export por niveles. Puro.
 
     Fuentes resueltas a `schema.tabla` legible y `columns` = detalle columna a
     columna del editor de vistas: alias de salida, tabla/columna de origen,
     casteo (`castType`) y transformación (`expression`). Se incluyen además
-    `filter` (WHERE de la vista), `joinOverride` y el `sql` completo.
+    `filter` (WHERE de la vista), `joinOverride`, el `sql` completo y
+    `canvases` (doc 70): nombres de los canvases donde la vista es miembro
+    (membresía explícita `viewIds` o regla legacy en canvases sin lista).
     """
+    sas = subject_areas or []
     rows: list[dict] = []
     for v in views:
+        canvases = sorted({(sa.get("name") or "") for sa in sas
+                           if sa.get("name") and view_on_canvas({**v, "id": v.get("id")}, sa)})
         src_ids = v.get("sourceTableIds") or ([v["tableId"]] if v.get("tableId") else [])
         cols = []
         for s in (v.get("sources") or []):
@@ -218,6 +238,7 @@ def view_rows(views: list[dict], table_name_by_id: dict[str, str]) -> list[dict]
             "filter": v.get("filter"),
             "joinOverride": v.get("joinOverride"),
             "showOnCanvas": bool(v.get("showOnCanvas")),
+            "canvases": canvases,
             "description": v.get("description"),
             "sql": v.get("sql") or None,
             "columns": cols,
@@ -233,25 +254,27 @@ UNFILTERED_COLUMNS_CAP = 20000
 UNFILTERED_VIEWS_CAP = 10000
 
 
-async def list_column_rows(table_id: str | None = None, table_ids: list[str] | None = None,
+async def list_column_rows(project_id: str, table_id: str | None = None,
+                           table_ids: list[str] | None = None,
                            limit: int | None = None) -> list[dict]:
-    """Detalle a nivel columna; todas, las de una tabla o de un lote de tablas.
-    Sin filtro de tabla se aplica un tope (`limit` o `UNFILTERED_COLUMNS_CAP`)."""
+    """Detalle a nivel columna del proyecto; todas, las de una tabla o de un
+    lote de tablas. Sin filtro de tabla se aplica un tope (`limit` o
+    `UNFILTERED_COLUMNS_CAP`)."""
     if not table_id and not table_ids:
         limit = limit or UNFILTERED_COLUMNS_CAP
-    columns = await repository.columns(table_id, table_ids, limit)
-    parent_domains = await repository.parent_domains()
-    udp_defs = await repository.udp_definitions()
+    columns = await repository.columns(project_id, table_id, table_ids, limit)
+    parent_domains = await repository.parent_domains(project_id)
+    udp_defs = await repository.udp_definitions(project_id)
     return column_rows(columns, parent_domains, udp_defs)
 
 
-async def list_view_rows(table_ids: list[str] | None = None,
+async def list_view_rows(project_id: str, table_ids: list[str] | None = None,
                          schema: str | None = None) -> list[dict]:
-    """Vistas para el export por niveles; con `table_ids`, las derivadas de
-    esas tablas; con `schema`, las de ese esquema (Database Explorer, doc 18).
-    Resuelve los nombres `schema.tabla` de TODAS las fuentes."""
+    """Vistas del proyecto para el export por niveles; con `table_ids`, las
+    derivadas de esas tablas; con `schema`, las de ese esquema (Database
+    Explorer, doc 18). Resuelve los nombres `schema.tabla` de TODAS las fuentes."""
     limit = None if (table_ids or schema) else UNFILTERED_VIEWS_CAP
-    views = await repository.views_for_tables(table_ids, limit, schema=schema)
+    views = await repository.views_for_tables(project_id, table_ids, limit, schema=schema)
     src_ids = sorted({t for v in views for t in (v.get("sourceTableIds") or [])}
                      | {v["tableId"] for v in views if v.get("tableId")})
     names = await repository.table_names(src_ids)
@@ -260,4 +283,7 @@ async def list_view_rows(table_ids: list[str] | None = None,
               else (d.get("physicalName") or tid))
         for tid, d in names.items()
     }
-    return view_rows(views, name_by_id)
+    # Doc 70: canvases que contienen alguna fuente = candidatos a membresía
+    # (una vista miembro siempre conserva ≥1 fuente en su canvas).
+    sas = await repository._subject_areas(project_id, src_ids) if src_ids else []
+    return view_rows(views, name_by_id, sas)

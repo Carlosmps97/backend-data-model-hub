@@ -12,9 +12,18 @@ class CanonicalTableDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     physicalName: str
     logicalName: str
     sql_schema: str | None = Field(default=None, alias="schema")
+    # Doc 68: físico editado a mano (o heredado de la BD real) — rephysicalize
+    # NO lo re-deriva. Espejo del patrón `typeOverridden` de columnas.
+    physicalNameOverridden: bool = False
+    # Doc 69 §4.9 (facetas): objeto que existe en UNA sola vista de Erwin
+    # (`Is_Logical_Only` / `Is_Physical_Only`). Fase 2 los gatea en canvas/DDL.
+    logicalOnly: bool = False
+    physicalOnly: bool = False
     description: str | None = None
     # UDP: valores de las etiquetas key-value asignadas a esta tabla
     # ({udpDefId: value}). Aditivo (invariante §2.6): las keys se definen en Data
@@ -26,17 +35,33 @@ class CanonicalColumnDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     tableId: str
     physicalName: str
     logicalName: str
     parentDomainId: str | None = None
     dataType: str
     typeOverridden: bool = False
+    # Doc 69 §4.9 — faceta LÓGICA del tipo: Erwin trae Logical_Data_Type y
+    # Physical_Data_Type (28-36 % de las columnas difieren: INTEGER/INT,
+    # VARCHAR(20)/VARCHAR(30), DATE/TIMESTAMP). `dataType` sigue siendo el
+    # FÍSICO. None = no informado (la UI muestra el físico como fallback).
+    logicalDataType: str | None = None
+    # Override manual del tipo lógico respecto al `logicalDataType` del dominio
+    # (espejo de `typeOverridden`, que es de la faceta física).
+    logicalTypeOverridden: bool = False
+    # Existencia en una sola faceta (Is_Logical_Only / Is_Physical_Only).
+    logicalOnly: bool = False
+    physicalOnly: bool = False
+    # Doc 68: override manual del NOMBRE físico (paridad con typeOverridden,
+    # que cubre solo el tipo). Debe existir acá Y en el TS CanonicalColumn.
+    physicalNameOverridden: bool = False
     isPrimaryKey: bool | None = None
     # Posición dentro de la LLAVE primaria (0-based; None si no es PK o si la
-    # PK se marcó a mano sin orden). Es INDEPENDIENTE del `ordinal` físico:
-    # Erwin ordena el bloque PK del diagrama y el PRIMARY KEY(...) del DDL por
-    # el orden de la llave, no por el de las columnas (doc 19 §12b).
+    # PK se marcó a mano sin orden). Es INDEPENDIENTE del `ordinal`: Erwin
+    # ordena el bloque PK del diagrama y el PRIMARY KEY(...) del DDL por el
+    # orden de la llave, no por el de las columnas (doc 19 §12b).
     pkPosition: int | None = None
     isForeignKey: bool | None = None
     # Aditivos (invariante §2.6): nulabilidad, columna de partición y
@@ -44,6 +69,9 @@ class CanonicalColumnDoc(BaseModel):
     isNullable: bool = True
     isPartition: bool = False
     description: str | None = None
+    # Orden ÚNICO de la columna en la tabla (doc 74): el mismo en el modelo
+    # lógico y en el físico — canvas, paneles, reporting y DDL ordenan por él.
+    # La migración Erwin lo hereda como «llaves primero + Column order».
     ordinal: int = 0
     # UDP: valores de las etiquetas key-value asignadas a esta columna.
     udpValues: dict[str, str] = Field(default_factory=dict)

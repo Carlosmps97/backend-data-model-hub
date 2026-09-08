@@ -66,21 +66,22 @@ def extract(model: ep.ErwinModel) -> dict[str, list[dict]]:
                          "alts": [x for x in g[2:] if x]})
 
     # Defs UDP colapsadas (Logical/Physical → una) + valores observados.
-    collapsed = pol.collapse_udp_defs(model.udp_defs)
-    udp_vals = pol.resolve_udp_values(model.udp_values, collapsed)
+    # Doc 69: una def por faceta (`level|view|name`), sin colapsar Logical/Physical.
+    defs = pol.udp_defs_by_view(model.udp_defs)
+    udp_vals = pol.resolve_udp_values(model.udp_values, defs)
     values_by_key: dict[str, set] = defaultdict(set)
     used_by: dict[str, int] = defaultdict(int)
     for (_oid, key), val in udp_vals.items():
         values_by_key[key].add(val)
         used_by[key] += 1
     udps = [
-        {"name": e["name"], "level": e["level"], "dataType": e["dataType"],
+        {"name": e["name"], "level": e["level"], "view": e["view"], "dataType": e["dataType"],
          "default": e["default"] or None,
          "allowedValues": (sorted(values_by_key.get(key, set())
                                   | ({e["default"]} if e["default"] else set()))
                            if e["dataType"] == "list" else []),
          "usedBy": used_by.get(key, 0)}
-        for key, e in sorted(collapsed.items())
+        for key, e in sorted(defs.items())
     ]
     return {"parent_domains": domains, "glossary": glossary,
             "udp_definitions": udps}

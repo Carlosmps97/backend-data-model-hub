@@ -1,4 +1,4 @@
 """Motor de naming lógico↔físico (puro). Ver `engine.py`."""
-from .engine import logicalize, physicalize
+from .engine import physicalize
 
-__all__ = ["physicalize", "logicalize"]
+__all__ = ["physicalize"]

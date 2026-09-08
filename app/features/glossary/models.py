@@ -12,6 +12,8 @@ class AbbreviationDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     term: str
     abbrev: str
     # R1c: el diccionario se parte por scope (UDP per-column vs per-table) y cada

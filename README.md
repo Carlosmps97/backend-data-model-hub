@@ -1,6 +1,6 @@
 # Data Model Hub — Backend
 
-Backend de plataforma de **Data Model Hub**, una plataforma de modelado de datos pensada para reemplazar a Erwin. Expone una API REST que administra proyectos, modelos (canvas de diagramas ER), un catálogo canónico de metadata (tablas, columnas, dominios, glosario, UDP), un flujo de gobernanza por *working copies* con aprobación (changesets), estándares de datos versionados, un motor de reporting sobre la metadata y administración de usuarios/roles (RBAC) con auditoría. Todo persiste en **Databricks Lakebase Postgres**, a través de un adaptador propio (`app/core/db/lakebase/`) que expone una superficie de consulta async con el vocabulario de operaciones/tipos de `pymongo` (`find`/`aggregate`/`bulk_write`, `ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre tablas `(id text PRIMARY KEY, doc jsonb)`.
+Backend de plataforma de **Data Model Hub**, una plataforma de modelado de datos pensada para reemplazar a Erwin. Expone una API REST que administra **proyectos independientes** (doc 75: cada proyecto tiene su catálogo, sus esquemas, sus Data Standards y sus versiones; todo documento lleva `projectId` y las rutas de proyecto cuelgan de `/api/projects/{pid}/…`), modelos (canvas de diagramas ER), un catálogo canónico de metadata por proyecto (tablas, columnas, dominios, glosario, UDP), un flujo de gobernanza por *working copies* con aprobación (changesets de un proyecto, incluido el borrado del proyecto con aviso crítico al aprobador), estándares de datos versionados por proyecto, un motor de reporting por proyecto sobre la metadata y administración de usuarios/roles (RBAC) con auditoría. Todo persiste en **Databricks Lakebase Postgres**, a través de un adaptador propio (`app/core/db/lakebase/`) que expone una superficie de consulta async con el vocabulario de operaciones/tipos de `pymongo` (`find`/`aggregate`/`bulk_write`, `ReturnDocument`, `UpdateOne`, `DuplicateKeyError`) sobre tablas `(id text PRIMARY KEY, doc jsonb)`.
 
 Este repositorio contiene **solo el backend de plataforma**. El agente de modelado conversacional vive en un servicio aparte (`app-agents-modeler`) y no forma parte de este MVP.
 
@@ -36,8 +36,7 @@ flowchart TD
     MW --> R["Routers de features (FastAPI)"]
     R --> S["Services (reglas de negocio, puros y testeables)"]
     S --> REPO["Repositories (adaptador Lakebase async)"]
-    REPO --> LAKEBASE["Databricks Lakebase Postgres (tablas id/doc jsonb, schema dmh)"]
-    AGENT["app-agents-modeler (servicio aparte)"] -->|"column_catalog"| LAKEBASE
+    REPO --> LAKEBASE["Databricks Lakebase Postgres (tablas id/doc/project_id jsonb, schema dmh)"]
 ```
 
 Cada feature respeta las mismas capas:
@@ -66,7 +65,7 @@ La lectura re-valida los documentos con Pydantic usando `extra="ignore"`. Por lo
 
 ## Modelo de datos (colecciones en Lakebase)
 
-Cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb)` en el schema `dmh` de `databricks_postgres`: el documento completo vive en `doc` y las igualdades por jsonpath se apoyan en un índice GIN `jsonb_path_ops` por tabla. El backend administra un conjunto de colecciones **disjuntas** de las del agente (que solo toca `column_catalog`).
+Cada "colección" es una tabla `(id text PRIMARY KEY, doc jsonb, project_id text GENERATED ALWAYS AS (doc->>'projectId') STORED)` en el schema `dmh` de `databricks_postgres`: el documento completo vive en `doc`, las igualdades por jsonpath se apoyan en un índice GIN `jsonb_path_ops` por tabla y el alcance por proyecto se resuelve por la columna generada `project_id` (doc 75 D19: btrees compuestos con `project_id` líder; unique `standards_versions(project_id, seq)`).
 
 ```mermaid
 erDiagram
@@ -86,22 +85,22 @@ Son **21 colecciones propias**: 19 se pre-crean al arrancar (`KNOWN_COLLECTIONS`
 
 | Colección | Contenido |
 |---|---|
-| `projects` | Proyectos de modelado. |
+| `projects` | Proyectos de modelado: la raíz del alcance (nombre único global; se crean directo y se renombran/borran por draft). |
 | `folders` | Jerarquía del Model Explorer dentro de un proyecto. |
-| `subject_areas` | Canvases (áreas temáticas): tablas incluidas + layout + drawings. |
-| `schemas` | Esquemas físicos (namespace de tablas), versionados. |
-| `canonical_tables` / `canonical_columns` | Catálogo canónico de metadata física. |
-| `relationships` | Relaciones entre tablas (parent/child + `pairs`, FK/joins). |
+| `subject_areas` | Canvases (áreas temáticas): tablas y vistas incluidas + layout + drawings. |
+| `schemas` | Esquemas físicos del proyecto (namespace de tablas; nombre único por proyecto), versionados. |
+| `canonical_tables` / `canonical_columns` | Catálogo canónico de metadata física del proyecto (físico de tabla único por proyecto). |
+| `relationships` | Relaciones entre tablas del mismo proyecto (parent/child + `pairs`, FK/joins). |
 | `views` | Vistas asociadas a tablas. |
-| `parent_domains` | Dominios padre (tipos semánticos) con cascada de propiedades. |
-| `glossary_terms` | Glosario (términos lógico/físico, fisicalización). |
-| `udp_definitions` | UDP: etiquetas key-value versionadas; sus valores se embeben en tablas/columnas (`udpValues`). |
-| `changesets` | Cabeceras de working copies (estado, revisores, decisiones). |
+| `parent_domains` | Dominios padre del proyecto (tipos semánticos) con cascada de propiedades. |
+| `glossary_terms` | Glosario del proyecto (términos lógico/físico, fisicalización). |
+| `udp_definitions` | UDP del proyecto: etiquetas key-value versionadas; sus valores se embeben en tablas/columnas (`udpValues`). |
+| `changesets` | Cabeceras de working copies de UN proyecto (`projectId`, estado, revisores, decisiones). |
 | `changeset_changes` | Un documento por cambio: el versionado por changesets trata cada cambio como su propio documento, lo que mantiene los updates JSONB chicos y permite diffs por slice. |
-| `naming_config` | Config de naming (separador/case/longitud) por scope. |
-| `standards_versions` | Versiones inmutables de Data Standards (con `seq` único — el único constraint UNIQUE del sistema). |
-| `ddl_rules` / `ddl_ruleset_config` | Reglas de transformación del DDL exportado (DDL Export Rules); se crean on-demand. |
-| `saved_reports` | Reports guardados del motor de consulta. |
+| `naming_config` | Config de naming (separador/case/longitud) por (proyecto, scope). |
+| `standards_versions` | Versiones inmutables de Data Standards por proyecto (unique `(projectId, seq)` — el único constraint UNIQUE del sistema). |
+| `ddl_rules` / `ddl_ruleset_config` | Reglas de transformación del DDL exportado (DDL Export Rules) por proyecto; se crean on-demand. |
+| `saved_reports` | Reports guardados del motor de consulta, por usuario y proyecto. |
 | `users` / `roles` | Usuarios y matriz de permisos (RBAC data-driven). |
 | `audit_log` | Auditoría de acciones (actor, acción, target, timestamp); append-only. |
 
@@ -111,29 +110,30 @@ Los índices se aseguran de forma idempotente al arrancar (`app/core/db/indexes.
 
 ## Features principales
 
-Son **19 features** (directorios en `app/features/`). Algunas exponen más de un router: `changesets` monta además `versions` y `requests`; `reporting` monta además el `query` del motor de consulta — 22 routers en total.
+Son **20 features** (directorios en `app/features/`). Algunas exponen más de un router: `changesets` monta además `versions`, `project_versions` y `requests`; `catalog` monta el router por proyecto y el router por id; `schemas` el router por proyecto y el router por id; `reporting` monta además el `query` del motor de consulta — 26 routers y 143 rutas en total. Toda ruta `/api/projects/{pid}/…` lleva `alive_project` (404 `Project not found.` si el proyecto no existe o fue borrado).
 
 | Feature | Prefijo | Qué hace |
 |---|---|---|
 | `health` | `/api/health` | Estado de la API + ping vivo a Lakebase (`db_connected`). |
 | `auth` | `/api/auth` | Login SSO heredado de Databricks (whitelist de correos, doc 38) + login por contraseña (admin), logout y `me` (sesión + permisos). |
 | `admin` | `/api/admin` | RBAC: usuarios, roles, matriz de permisos y auditoría. |
-| `identity` | `/api` | Seam de identidad (`/me`, `/users`) conmutable local/Databricks. |
-| `projects` | `/api` | Proyectos + subject areas (canvas): tablas, layout, drawings, diagrama. |
+| `identity` | `/api` | `GET /users` (usuarios reales para asignar revisores). |
+| `projects` | `/api` | Proyectos (crear directo con `copyFrom` de estándares + `v1`; `counts`) + subject areas (canvas): tablas, vistas, layout, drawings, diagrama. |
 | `folders` | `/api` | Jerarquía de carpetas del Model Explorer. |
-| `schemas` | `/api/schemas` | Esquemas físicos versionados (rename propagado, guard de uso). |
-| `catalog` | `/api/catalog` | Catálogo canónico de tablas y columnas. |
-| `relationships` | `/api/relationships` | CRUD de relaciones entre tablas. |
+| `schemas` | `/api/projects/{pid}/schemas` · `/api/schemas/{sid}` | Esquemas físicos del proyecto, versionados (rename propagado, guard de uso, unicidad por proyecto). |
+| `catalog` | `/api/projects/{pid}/catalog` · `/api/catalog` | Catálogo canónico de tablas y columnas del proyecto (search, inventory) + recursos por id (columns, usage, inspect). |
+| `relationships` | `/api/relationships` | CRUD de relaciones entre tablas del mismo proyecto. |
 | `views` | `/api/views` | CRUD de vistas por tabla. |
-| `domains` | `/api/domains` | Parent domains + impacto y propagación de cascada. |
-| `glossary` | `/api/glossary` | Glosario + fisicalización/logicalización de nombres. |
-| `udp` | `/api/udp` | Definiciones de UDP (etiquetas versionadas). |
-| `data_standards` | `/api/standards` | Snapshot/apply/rollback de estándares versionados. |
-| `ddl_rules` | `/api/ddl-rules` | Reglas de transformación del DDL exportado (+ `POST /render`). |
-| `changesets` | `/api/changesets` | Working copy + flujo de aprobación (+ `/api/versions`, `/api/requests`). |
-| `summary` | `/api/summary` | Conteos del Home. |
-| `reporting` | `/api/reporting` | Agregación tabular de metadata + motor de consulta (QuerySpec, SQL, insights, reports, export CSV). |
-| `settings` | `/api/settings` | `naming_config` por scope (separador/case/longitud). |
+| `domains` | `/api/projects/{pid}/domains` | Parent domains del proyecto + impacto y propagación de cascada. |
+| `glossary` | `/api/projects/{pid}/glossary` | Glosario del proyecto + fisicalización de nombres. |
+| `udp` | `/api/projects/{pid}/udp` | Definiciones de UDP del proyecto (etiquetas versionadas). |
+| `data_standards` | `/api/projects/{pid}/standards` | Snapshot/versions/summary/apply/rollback de los estándares del proyecto; `bootstrap_project` al crear. |
+| `ddl_rules` | `/api/projects/{pid}/ddl-rules` | Reglas de transformación del DDL exportado del proyecto (+ `POST /render`). |
+| `changesets` | `/api/changesets` | Working copy de UN proyecto + flujo de aprobación + borrado de proyecto por draft (+ `/api/versions`, `/api/projects/{pid}/versions`, `/api/requests`). |
+| `bulk_upload` | `/api/changesets/{cs_id}/uploads` | Carga masiva desde Excel al draft (doc 55). |
+| `summary` | `/api/summary` | Conteos del Home (globales o por `projectId`). |
+| `reporting` | `/api/reporting` | Agregación tabular de metadata + motor de consulta (QuerySpec, SQL, insights, reports, export CSV) — siempre de UN proyecto (`projectId`). |
+| `settings` | `/api/projects/{pid}/settings` | `naming_config` del proyecto por scope (separador/case/longitud). |
 
 ### Gobernanza: changesets (working copy + aprobación)
 
@@ -150,7 +150,7 @@ stateDiagram-v2
     Published --> [*]
 ```
 
-Reglas clave: solo el dueño edita su working copy en estado `draft`; una versión fuera de `draft` responde `409` a nuevos cambios; la colección destino debe estar en una whitelist de colecciones versionadas (`422` si no); un payload que no valida contra el modelo no entra al changeset (`422`).
+Reglas clave: solo el dueño edita su working copy en estado `draft`; una versión fuera de `draft` responde `409` a nuevos cambios; la colección destino debe estar en una whitelist de colecciones versionadas (`422` si no); un payload que no valida contra el modelo no entra al changeset (`422`); el changeset es de UN proyecto — `payload.projectId` lo estampa el servidor y una referencia a una entidad de otro proyecto responde `409` (doc 75). Un cambio `projects/<pid> delete` en el draft borra el proyecto al aprobarse (aviso crítico al revisor + cascada de soft-delete).
 
 ### Motor de reporting
 
@@ -231,27 +231,29 @@ Cada respuesta trae un header `X-Request-ID` correlacionable con los logs. Endpo
 | `GET/PUT/DELETE` | `/api/admin/roles[/{key}]` | Roles y matriz. |
 | `GET` | `/api/admin/permissions` | Catálogo de permisos. |
 | `GET` | `/api/admin/audit` | Auditoría. |
-| `GET/POST/PUT/DELETE` | `/api/projects[/{pid}]` | CRUD de proyectos. |
+| `GET/POST` | `/api/projects` | Listar / crear proyecto (con `copyFrom` de estándares; nace con `v1`). Renombrar/borrar van por draft. |
+| `GET` | `/api/projects/{pid}/counts` | Conteos de activos del proyecto (aviso crítico del borrado). |
 | `GET` | `/api/projects/{pid}/subject-areas` | Canvases del proyecto. |
 | `GET/POST/PUT/DELETE` | `/api/subject-areas[/{id}]` | CRUD de canvas. |
-| `PUT` | `/api/subject-areas/{id}/tables` `/layout` `/drawings` | Contenido/posiciones del canvas. |
+| `PUT` | `/api/subject-areas/{id}/tables` `/views` `/layout` `/drawings` | Contenido/posiciones del canvas. |
 | `GET` | `/api/subject-areas/{id}/diagram` | Diagrama en una request (overlay de changeset opcional). |
 | `GET/POST/PUT/PATCH/DELETE` | `/api/folders...` | Jerarquía de carpetas. |
-| `GET/POST/PUT/DELETE` | `/api/schemas[/{id}]` | Esquemas físicos versionados. |
-| `GET/POST` | `/api/catalog/tables[/{id}/columns]` `/columns` | Catálogo canónico. |
+| `GET/POST` · `PATCH/DELETE` | `/api/projects/{pid}/schemas` · `/api/schemas/{id}` | Esquemas físicos del proyecto, versionados. |
+| `GET/POST` | `/api/projects/{pid}/catalog/tables` `/columns` `/search` `/inventory` | Catálogo canónico del proyecto. |
+| `GET/POST` | `/api/catalog/tables/{id}/columns` `/usage` · `/api/catalog/inspect/*` | Recursos del catálogo por id. |
 | `GET/POST/PUT/DELETE` | `/api/relationships[/{id}]` | Relaciones. |
 | `GET/POST/PUT/DELETE` | `/api/views[/{id}]` | Vistas. |
-| `GET/POST/PUT/DELETE` | `/api/domains[/{id}]` + `/impact` `/propagate` | Parent domains + cascada. |
-| `GET/POST/PUT/DELETE` | `/api/glossary[/{id}]` + `/physicalize` `/logicalize` | Glosario. |
-| `GET` | `/api/udp` | Definiciones de UDP. |
-| `GET/POST` | `/api/standards/snapshot` `/versions` `/apply` `/rollback` | Data Standards. |
-| `GET/POST/PUT/DELETE` | `/api/ddl-rules...` + `/render` | Reglas de transformación del DDL exportado. |
-| `POST/GET` | `/api/changesets...` (`/snapshot`, `/{id}/changes`, `/diff`, `/submit`, `/approve`, `/reject`, ...) | Working copy + aprobación. |
-| `GET` | `/api/versions` `/api/versions/published` `/api/requests` | Versiones y solicitudes (Home/Review). |
-| `GET` | `/api/summary` | Conteos del Home. |
-| `GET` | `/api/reporting/tables` `/columns` | Agregación tabular. |
-| `GET/POST` | `/api/reporting/catalog` `/query` `/query/sql` `/export` `/insights/*` `/reports` | Motor de consulta. |
-| `GET/PUT` | `/api/settings/naming[/{scope}]` | naming_config por scope. |
+| `GET/POST/PUT/DELETE` | `/api/projects/{pid}/domains[/{id}]` + `/impact` `/propagate` | Parent domains del proyecto + cascada. |
+| `GET/POST/PUT/DELETE` | `/api/projects/{pid}/glossary[/{id}]` + `/physicalize` `/validate` `/rephysicalize` `/lock` | Glosario del proyecto. |
+| `GET` | `/api/projects/{pid}/udp` | Definiciones de UDP del proyecto. |
+| `GET/POST` | `/api/projects/{pid}/standards/snapshot` `/versions` `/summary` `/apply` `/rollback` | Data Standards del proyecto. |
+| `GET/POST` | `/api/projects/{pid}/ddl-rules...` + `/render` | Reglas de transformación del DDL exportado del proyecto. |
+| `POST/GET` | `/api/changesets...` (`/snapshot` con `projectId`, `/{id}/changes`, `/diff`, `/submit`, `/approve`, `/reject`, `/rollback`, ...) | Working copy + aprobación. |
+| `GET` | `/api/versions[?projectId=]` `/api/projects/{pid}/versions[/published]` `/api/versions/compare` `/api/requests` | Versiones (por proyecto) y solicitudes (Home/Review). |
+| `GET` | `/api/summary[?projectId=]` | Conteos del Home. |
+| `GET` | `/api/reporting/tables` `/filters` `/columns` `/views` (`projectId`) | Agregación tabular por proyecto. |
+| `GET/POST` | `/api/reporting/catalog` `/query` `/query/sql` `/export` `/facets` `/insights/*` `/reports` (`projectId`) | Motor de consulta por proyecto. |
+| `GET/PUT` | `/api/projects/{pid}/settings/naming[/{scope}]` | naming_config del proyecto por scope. |
 
 ### Ejemplos
 
@@ -352,17 +354,18 @@ backend-data-model-hub/
     core/                    # infra compartida (no depende de features)
       config.py              # settings + assert_secure_config (fail-closed)
       logging.py  ratelimit.py  audit.py  security.py  models.py
-      db/                    # client.py + indexes.py + lakebase/ (adaptador) + sync.py
+      scope.py               # alcance por proyecto (doc 75): PROJECT_SCOPED, scoped(), naming_id()
+      db/                    # client.py + indexes.py + lakebase/ (adaptador, columna project_id) + sync.py
       api/envelope.py        # ok({...})
       identity/              # seam local/databricks (Principal, dependencies)
-      naming/                # engine de fisicalización
+      naming/                # engine de fisicalización (physicalize)
       versioning/            # overlay.py (overlay + diff, puros)
     features/<x>/            # router · service · repository · schemas · models
       health · auth · admin · identity · projects · folders · schemas ·
       catalog · relationships · views · domains · glossary · udp ·
-      data_standards · ddl_rules · changesets · summary · reporting · settings
+      data_standards · ddl_rules · changesets · bulk_upload · summary · reporting · settings
   tests/                     # pytest: core, features y architecture (guardrails)
-  scripts/                   # create_admin · erwin_migration (kit XML→Lakebase)
+  scripts/                   # run_migration (one-shot por manifiesto) · create_admin · erwin_migration (kit XML→Lakebase)
   doc/                       # documentación (ver índice abajo)
   requirements.txt  requirements-dev.txt  .env.example
   app.yaml                   # command + env de runtime (Databricks Apps)
@@ -399,7 +402,7 @@ Checklist mínimo de producción, independientemente del destino:
 
 ### Consideraciones de base de datos (Databricks Lakebase Postgres)
 
-- Mismo Postgres que el agente, en el schema `dmh`, pero **colecciones disjuntas**: este backend nunca toca `column_catalog`.
+- Este backend es el único dueño del schema `dmh` (la colección `column_catalog` del antiguo agente se retiró en el doc 54).
 - El adaptador (`app/core/db/lakebase/`) abre un pool `asyncpg` en el *lifespan*; el password de cada conexión es un token OAuth de ~1 hora que la app acuña con su service principal y rota. Si la conexión falla al arranque, un task de fondo reintenta con backoff.
 - Los índices se aseguran al arrancar y son idempotentes: las igualdades por jsonpath se apoyan en el GIN `jsonb_path_ops` de cada tabla y el único constraint UNIQUE es `standards_versions.seq`. Ordenar/paginar a escala exige un índice por expresión sobre el campo (invariante de escala); los UDP usan el índice wildcard.
 - El rate limiting mantiene estado **en memoria por proceso**: en un despliegue multi-réplica conviene migrarlo a un backend Redis para que el límite sea global.

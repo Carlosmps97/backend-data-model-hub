@@ -43,7 +43,7 @@ def _patch_db(monkeypatch, by_coll):
     return seen
 
 
-REL = {"_id": "r1", "sourceTableId": "tA", "sourceColumnId": "cA", "targetTableId": "tB",
+REL = {"_id": "r1", "projectId": "p1", "sourceTableId": "tA", "sourceColumnId": "cA", "targetTableId": "tB",
        "targetColumnId": "cB", "sourceCardinality": "one", "targetCardinality": "many",
        "identifying": False, "flgactive": True}
 

@@ -122,13 +122,13 @@ def test_structured_diff_buckets_and_impact():
 def test_version_row_projection():
     cs = {
         "id": "cs1", "versionLabel": "v3", "title": "Add Chapters", "owner": "ana",
-        "status": "submitted", "projectIds": ["p1", "p2"], "reviewers": ["beto"],
+        "status": "submitted", "projectId": "p1", "reviewers": ["beto"],
         "createdAt": "t0", "updatedAt": "t1", "submittedAt": "t2",
         "changes": {"canonical_tables": {"t1": {"op": "upsert"}}},  # NO debe filtrarse
     }
     row = service.version_row(cs)
     assert row["id"] == "cs1" and row["versionLabel"] == "v3"
-    assert row["projectIds"] == ["p1", "p2"] and row["reviewers"] == ["beto"]
+    assert row["projectId"] == "p1" and row["deletesProject"] is False and row["reviewers"] == ["beto"]
     assert "changes" not in row  # la fila de versión no expone el diff crudo
 
 
@@ -188,19 +188,19 @@ def test_submit_no_reenvia_un_request_ya_submitted(monkeypatch):
     """Re-submitir un request en revisión pisaba título/revisores del envío
     anterior: ahora sólo se envía desde draft (el owner retira primero)."""
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "submitted", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "submitted", "owner": "ana"}))
     assert asyncio.run(service.submit("c1", "ana")) is None
 
 
 def test_submit_solo_el_owner(monkeypatch):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     assert asyncio.run(service.submit("c1", "beto", reviewers=["qa"])) == "forbidden"
 
 
 def test_submit_transicion_atomica_desde_draft_con_approvals_reseteado(monkeypatch):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     tr = AsyncMock(return_value={"id": "c1", "status": "submitted"})
     monkeypatch.setattr(service.repository, "transition", tr)
 
@@ -217,11 +217,11 @@ def test_submit_transicion_atomica_desde_draft_con_approvals_reseteado(monkeypat
 
 def test_reopen_solo_rejected_y_solo_owner(monkeypatch):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "submitted", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "submitted", "owner": "ana"}))
     assert asyncio.run(service.reopen("c1", "ana")) is None  # no está rejected
 
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "rejected", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "rejected", "owner": "ana"}))
     assert asyncio.run(service.reopen("c1", "beto")) == "forbidden"
 
 
@@ -229,7 +229,7 @@ def test_reopen_vuelve_a_draft_y_limpia_metadata_de_review(monkeypatch):
     """El reject NUNCA borra la versión; reopen la devuelve a draft limpia
     (decisiones y nota de rechazo fuera) para corregir y re-enviar."""
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "rejected", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "rejected", "owner": "ana"}))
     tr = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "transition", tr)
 
@@ -253,7 +253,7 @@ def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
     monkeypatch.setattr(service.repository, "apply_changes", apply)
     monkeypatch.setattr(service.repository, "changes_map", cm)
 
-    res = asyncio.run(service._apply_and_finalize("c1", {"status": "approved"}, "T1"))
+    res = asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
 
     assert res is None
     apply.assert_not_awaited()  # producción intacta: no se publicaron cambios retirados
@@ -274,7 +274,7 @@ def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
     monkeypatch.setattr(service.repository, "set_status", st)
     monkeypatch.setattr(service.repository, "capture_before_images", cap)
     monkeypatch.setattr(service.repository, "store_before_images", store)
-    res2 = asyncio.run(service._apply_and_finalize("c1", {"status": "approved"}, "T1"))
+    res2 = asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
     assert res2["appliedAt"] == "T9"
     apply2.assert_awaited_once()
     plan = apply2.await_args.args[0]
@@ -330,7 +330,7 @@ def test_apply_and_finalize_payload_invalido_revierte_y_no_aplica(monkeypatch):
     monkeypatch.setattr(service.repository, "changes_map", cm)
 
     with pytest.raises(InvalidPayloadError):
-        asyncio.run(service._apply_and_finalize("c1", {"status": "approved"}, "T1"))
+        asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
 
     apply.assert_not_awaited()  # producción intacta
     # Dos transiciones: el claim (submitted→approved) y el revert (approved→submitted).
@@ -358,7 +358,7 @@ def test_apply_and_finalize_fallo_de_apply_devuelve_a_revision(monkeypatch):
     monkeypatch.setattr(service.repository, "changes_map", cm)
 
     with pytest.raises(RuntimeError):
-        asyncio.run(service._apply_and_finalize("c1", {"status": "approved"}, "T1"))
+        asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
 
     assert tr.await_count == 2  # claim + revert
     revert_args = tr.await_args_list[1].args
@@ -406,7 +406,7 @@ def test_current_production_prefiere_applied(monkeypatch):
         {"id": "c", "status": "submitted"},
     ]
     monkeypatch.setattr(service.repository, "list_summaries", AsyncMock(return_value=rows))
-    row = asyncio.run(service.current_production())
+    row = asyncio.run(service.current_production("p1"))
     assert row["id"] == "b"
 
 
@@ -414,7 +414,7 @@ def test_add_change_es_owner_only(monkeypatch):
     """La working copy es personal: escribir cambios exige ser el owner (el
     backstop de los guards owner-only de submit/withdraw/reopen)."""
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     res = asyncio.run(service.add_change("c1", "beto", "canonical_tables", "t1", "delete", None))
     assert res == "forbidden"
 
@@ -432,7 +432,7 @@ def test_add_change_rechaza_payload_invalido_sin_escribir(monkeypatch):
     from app.features.changesets.validation import InvalidPayloadError
 
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     set_change = AsyncMock()
     monkeypatch.setattr(service.repository, "set_change", set_change)
 
@@ -447,7 +447,7 @@ def test_review_exige_revisor_asignado_en_ambas_decisiones(monkeypatch):
     reviewers[] (un no-asignado recibe 'forbidden' → 403) para approve y reject.
     Antes /approve aplicaba con una sola aprobación, salteando la unanimidad."""
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "submitted",
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "submitted",
                                                 "owner": "ana", "reviewers": ["beto"]}))
     assert asyncio.run(service.review("c1", "qa", "approve", None)) == "forbidden"
     assert asyncio.run(service.review("c1", "qa", "reject", None)) == "forbidden"

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pymongo import ReturnDocument
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 from .models import SchemaDoc
 
@@ -26,9 +27,10 @@ def _to(doc: dict) -> dict:
     return doc
 
 
-async def list_schemas() -> list[dict]:
+async def list_schemas(project_id: str) -> list[dict]:
+    """Esquemas activos DEL PROYECTO (doc 75 D6)."""
     db = await get_db()
-    docs = await db[SCHEMAS].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs = await db[SCHEMAS].find(scoped(project_id, {"flgactive": {"$ne": False}})).to_list(None)
     docs.sort(key=lambda d: (d.get("name") or "").lower())
     return [SchemaDoc.model_validate(_to(d)).model_dump() for d in docs]
 
@@ -39,23 +41,23 @@ async def get_schema(sid: str) -> dict | None:
     return SchemaDoc.model_validate(_to(doc)).model_dump() if doc else None
 
 
-async def find_by_name(name: str) -> dict | None:
-    """Esquema ACTIVO por nombre exacto case-insensitive (chequeo de unicidad:
-    el adaptador no soporta índices únicos sobre colecciones pobladas — la garantía
-    vive en el service, mismo criterio que canonical_tables)."""
+async def find_by_name(project_id: str, name: str) -> dict | None:
+    """Esquema ACTIVO del proyecto por nombre exacto case-insensitive (chequeo de
+    unicidad POR PROYECTO, doc 75 D6: el adaptador no soporta índices únicos
+    sobre colecciones pobladas — la garantía vive en el service)."""
     db = await get_db()
-    doc = await db[SCHEMAS].find_one({
+    doc = await db[SCHEMAS].find_one(scoped(project_id, {
         "flgactive": {"$ne": False},
         "name": {"$regex": f"^{re.escape(name)}$", "$options": "i"},
-    })
+    }))
     return SchemaDoc.model_validate(_to(doc)).model_dump() if doc else None
 
 
-async def usage_count(name: str) -> int:
-    """Tablas + vistas PUBLICADAS activas que usan el esquema (gate del delete
-    directo sin changeset; el flujo de changeset computa el uso EFECTIVO)."""
+async def usage_count(project_id: str, name: str) -> int:
+    """Tablas + vistas PUBLICADAS activas DEL PROYECTO que usan el esquema (gate
+    del delete directo sin changeset; el flujo de changeset computa el uso EFECTIVO)."""
     db = await get_db()
-    flt = {"flgactive": {"$ne": False}, "schema": name}
+    flt = scoped(project_id, {"flgactive": {"$ne": False}, "schema": name})
     tables = await db["canonical_tables"].count_documents(flt)
     views = await db["views"].count_documents(flt)
     return tables + views

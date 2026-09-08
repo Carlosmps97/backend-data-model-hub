@@ -281,7 +281,7 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
              "Diagramas sin shapes", "se crean como canvas vacíos", empty_diagrams)
 
     # ── Partición (política v2, doc 32b R6) ──────────────────────────────
-    udp_vals = pol.resolve_udp_values(m.udp_values, pol.collapse_udp_defs(m.udp_defs))
+    udp_vals = pol.resolve_udp_values(m.udp_values, pol.udp_defs_by_view(m.udp_defs))
     reassign = []
     for e in m.entities.values():
         vals = [(a.id, corr) for a in e.attributes
@@ -364,7 +364,7 @@ def summarize(m: ep.ErwinModel) -> dict:
         "derivaciones_tabla_vista": sum(1 for r in m.relationships.values()
                                         if r.rel_type == ep.REL_TABLE_TO_VIEW),
         "dominios_custom": sum(1 for d in m.domains.values() if not d.builtin),
-        "defs_udp_migrables": len(pol.collapse_udp_defs(m.udp_defs)),
+        "defs_udp_migrables": len(pol.udp_defs_by_view(m.udp_defs)),
         "valores_udp_explicitos": len(m.udp_values),
         "terminos_glosario": len(m.glossary),
         "schemas_con_objetos": len({v for v in schema_of.values()}),

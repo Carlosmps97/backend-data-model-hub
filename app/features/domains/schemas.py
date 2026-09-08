@@ -9,6 +9,8 @@ from app.core.datatypes import canonicalize_default_type
 class ParentDomainBody(BaseModel):
     name: str
     defaultDataType: str
+    # Doc 69: tipo LÓGICO del dominio (faceta Entidad/Atributo); opcional.
+    logicalDataType: str | None = None
     namingTerm: str | None = None  # R5b: aditivo (ver ParentDomainDoc).
     description: str | None = None
 
@@ -19,3 +21,11 @@ class ParentDomainBody(BaseModel):
     @classmethod
     def _canonicalize(cls, v: str) -> str:
         return canonicalize_default_type(v)
+
+    # Doc 69: misma homologación para el tipo lógico ('' ⇒ None).
+    @field_validator("logicalDataType")
+    @classmethod
+    def _canonicalize_logical(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return canonicalize_default_type(v) or None

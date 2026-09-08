@@ -26,9 +26,10 @@ class _FakeDb:
 def test_f1_indexes_declarados():
     db = _FakeDb()
     asyncio.run(ensure_indexes(db))
-    # §9: chequeo de duplicados de tabla por (schema, physicalName). El campo
-    # persistido es `schema` (alias del Pydantic `sql_schema`).
-    assert ("canonical_tables", (("schema", 1), ("physicalName", 1))) in db.calls
+    # Doc 75 D6/D19: chequeo de duplicados de tabla POR PROYECTO — compuesto
+    # (project_id, physicalName); el viejo (schema, physicalName) se retiró.
+    assert ("canonical_tables", (("projectId", 1), ("physicalName", 1))) in db.calls
+    assert ("canonical_tables", (("schema", 1), ("physicalName", 1))) not in db.calls
     # §8: impact busca relaciones por columna de algún par (v2, doc 19).
     assert ("relationships", (("pairs.parentColumnId", 1),)) in db.calls
     assert ("relationships", (("pairs.childColumnId", 1),)) in db.calls

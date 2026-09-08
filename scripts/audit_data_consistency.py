@@ -8,11 +8,11 @@ UDP muertas en reportes, etc. Este script deja la base en un estado que las
 reglas actuales aceptarían.
 
 Chequeos (C1–C9) y su fix:
-  C1 tablas duplicadas (schema+physicalName, case-insens, activas)
+  C1 tablas duplicadas (proyecto+physicalName, case-insens, activas — doc 75)
        → renombra los duplicados (sufijo " 2"/"_2"; conserva el primero).
   C2 columnas duplicadas dentro de una tabla (physicalName case-insens)
        → renombra los duplicados dentro de la tabla.
-  C3 glosario: duplicado exacto (term+scope, case-insens, activos)
+  C3 glosario: duplicado exacto (proyecto+term+scope, case-insens, activos)
        → desactiva los más nuevos (conserva el primero).
   C4 vistas: sourceTableIds vacío o con tablas muertas; tableId ≠ 1ª fuente;
      sources[].tableId fuera de sourceTableIds
@@ -75,13 +75,13 @@ def main():
 
     # ── Pase tablas ──────────────────────────────────────────────────────────
     tables = list(db.canonical_tables.find(
-        ACTIVE, {"_id": 1, "schema": 1, "physicalName": 1, "logicalName": 1}))
+        ACTIVE, {"_id": 1, "schema": 1, "physicalName": 1, "logicalName": 1, "projectId": 1}))
     active_tids = {t["_id"] for t in tables}
 
-    # C1 · duplicados de tabla
+    # C1 · duplicados de tabla — doc 75: el físico es único POR PROYECTO
     by_key: dict[str, list[dict]] = defaultdict(list)
     for t in tables:
-        by_key[f"{norm(t.get('schema'))}|{norm(t.get('physicalName'))}"].append(t)
+        by_key[f"{t.get('projectId')}|{norm(t.get('physicalName'))}"].append(t)
     dup_groups = {k: v for k, v in by_key.items() if len(v) > 1}
     ops = []
     for group in dup_groups.values():
@@ -90,7 +90,7 @@ def main():
                 "physicalName": f"{t.get('physicalName')}_{i}",
                 "logicalName": f"{t.get('logicalName')} {i}",
                 "updatedAt": now()}}))
-    report("C1 tablas duplicadas (schema+nombre)", sum(len(v) - 1 for v in dup_groups.values()),
+    report("C1 tablas duplicadas (proyecto+nombre)", sum(len(v) - 1 for v in dup_groups.values()),
            f"{list(dup_groups)[:3]}")
     bulk("canonical_tables", ops)
 
@@ -130,13 +130,13 @@ def main():
     bulk("canonical_columns", dead_domain_ops)
 
     # ── C3 · glosario duplicado exacto ───────────────────────────────────────
-    terms = list(db.glossary_terms.find(ACTIVE, {"_id": 1, "term": 1, "scope": 1}))
+    terms = list(db.glossary_terms.find(ACTIVE, {"_id": 1, "term": 1, "scope": 1, "projectId": 1}))
     tkey: dict[str, list[dict]] = defaultdict(list)
     for t in terms:
-        tkey[f"{norm(t.get('term'))}|{t.get('scope') or 'column'}"].append(t)
+        tkey[f"{t.get('projectId')}|{norm(t.get('term'))}|{t.get('scope') or 'column'}"].append(t)
     tdups = [t for group in tkey.values() if len(group) > 1
              for t in sorted(group, key=lambda x: x["_id"])[1:]]
-    report("C3 glosario duplicado exacto (term+scope)", len(tdups),
+    report("C3 glosario duplicado exacto (proyecto+term+scope)", len(tdups),
            f"{[t.get('term') for t in tdups[:5]]}")
     bulk("glossary_terms", [UpdateOne({"_id": t["_id"]}, {"$set": {
         "flgactive": False, "deletedAt": now()}}) for t in tdups])

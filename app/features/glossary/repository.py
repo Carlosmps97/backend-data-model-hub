@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pymongo import ReturnDocument
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 from .models import AbbreviationDoc
 
@@ -27,15 +28,16 @@ def _to_doc(doc: dict) -> dict:
     return doc
 
 
-async def list_entries(scope: str | None = None) -> list[dict]:
-    """Términos activos. `scope=None` = todos (compat); con scope, sólo ese.
+async def list_entries(project_id: str, scope: str | None = None) -> list[dict]:
+    """Términos activos DEL PROYECTO (doc 75 D3). `scope=None` = todos; con
+    scope, sólo ese.
 
     Nota de compat: docs previos a R1c no tienen `scope` persistido; al validar
     con el modelo se les asigna el default `'column'`. Por eso el filtro por
     `scope='column'` se hace EN PYTHON (post-validación) y no en la query, así
     los docs legacy sin el campo también caen en `'column'`."""
     db = await get_db()
-    docs = await db[COLL].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs = await db[COLL].find(scoped(project_id, {"flgactive": {"$ne": False}})).to_list(None)
     docs.sort(key=lambda d: (d.get("term") or "").lower())
     entries = [AbbreviationDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
     if scope is not None:
@@ -43,9 +45,10 @@ async def list_entries(scope: str | None = None) -> list[dict]:
     return entries
 
 
-async def create_entry(data: dict) -> dict:
+async def create_entry(project_id: str, data: dict) -> dict:
     db = await get_db()
-    e = AbbreviationDoc.model_validate({**data, "id": data.get("id") or str(uuid.uuid4())})
+    e = AbbreviationDoc.model_validate({**data, "projectId": project_id,
+                                        "id": data.get("id") or str(uuid.uuid4())})
     payload = e.model_dump()
     await db[COLL].insert_one(
         {"_id": e.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
@@ -87,14 +90,14 @@ async def get_entry(entry_id: str) -> dict | None:
     return AbbreviationDoc.model_validate(_to_doc(doc)).model_dump() if doc else None
 
 
-async def corpus_conflicts(pattern: str) -> tuple[list[dict], int]:
+async def corpus_conflicts(project_id: str, pattern: str) -> tuple[list[dict], int]:
     """Apariciones del patrón (frase completa) en `logicalName` de tablas y
-    columnas ACTIVAS. Devuelve (muestra cap 50, conteo total). El regex corre
+    columnas ACTIVAS DEL PROYECTO. Devuelve (muestra cap 50, conteo total). El regex corre
     case-insensitive server-side; es un scan aceptable como acción on-demand
     (botón Validar / save), no per-keystroke (riesgo medido en el doc 10)."""
     db = await get_db()
-    flt = {"logicalName": {"$regex": pattern, "$options": "i"},
-           "flgactive": {"$ne": False}}
+    flt = scoped(project_id, {"logicalName": {"$regex": pattern, "$options": "i"},
+                              "flgactive": {"$ne": False}})
     total_tables = await db[TABLES_COLL].count_documents(flt)
     total_columns = await db[COLUMNS_COLL].count_documents(flt)
 
@@ -146,14 +149,16 @@ async def set_lock(entry_id: str, locked: bool, actor: str) -> dict | None:
 # ── Re-physicalize retroactivo (R5): re-deriva physicalName desde logicalName ──
 
 
-async def entities_for_rephysicalize(scope: str) -> list[dict]:
-    """Entidades activas del scope con su `logicalName`/`physicalName` actuales
-    (proyección mínima). `scope ∈ {'table','column'}`."""
+async def entities_for_rephysicalize(project_id: str, scope: str) -> list[dict]:
+    """Entidades activas del scope DEL PROYECTO con su `logicalName`/`physicalName` actuales
+    (proyección mínima). `scope ∈ {'table','column'}`. Los físicos con override
+    manual quedan FUERA del barrido (doc 68) — mismo contrato `$ne: True` que
+    `typeOverridden` en la cascada de dominios."""
     db = await get_db()
     coll = ENTITY_COLL[scope]
     return await db[coll].find(
-        {"flgactive": {"$ne": False}},
-        {"_id": 1, "logicalName": 1, "physicalName": 1},
+        scoped(project_id, {"flgactive": {"$ne": False}, "physicalNameOverridden": {"$ne": True}}),
+        {"_id": 1, "logicalName": 1, "physicalName": 1, "physicalNameOverridden": 1},
     ).to_list(None)
 
 

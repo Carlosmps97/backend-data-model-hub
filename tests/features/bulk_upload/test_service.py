@@ -25,6 +25,7 @@ def _body(n_tables: int = 1, schema: str = "ddv") -> UploadWorkbookBody:
 
 def _ctx(schema_kind: str = "tables") -> UploadContext:
     return UploadContext(
+        project_id="p1", project_name="P",
         schemas=[{"id": "s1", "name": "ddv", "kind": schema_kind}],
         naming={s: {"scope": s, "separator": "", "case": "upper", "maxLength": 150} for s in ("table", "column")},
         glossary={"table": {}, "column": {}},
@@ -33,7 +34,7 @@ def _ctx(schema_kind: str = "tables") -> UploadContext:
 
 @pytest.fixture
 def env(monkeypatch):
-    state = {"ctx": _ctx(), "cs": {"id": "c1", "status": "draft", "owner": "ana"}, "batches": []}
+    state = {"ctx": _ctx(), "cs": {"id": "c1", "projectId": "p1", "status": "draft", "owner": "ana"}, "batches": []}
     monkeypatch.setattr(service, "registry", JobRegistry())
     monkeypatch.setattr(service.cs_service, "get", AsyncMock(side_effect=lambda cs_id: state["cs"] if cs_id == "c1" else None))
     monkeypatch.setattr(service.loader, "load_context", AsyncMock(side_effect=lambda cs_id: state["ctx"]))
@@ -72,7 +73,7 @@ def test_guards_de_changeset(env):
     async def run():
         assert await service.start_validation("c9", "ana", _body()) is None
         assert await service.start_validation("c1", "beto", _body()) == "forbidden"
-        env["cs"] = {"id": "c1", "status": "submitted", "owner": "ana"}
+        env["cs"] = {"id": "c1", "projectId": "p1", "status": "submitted", "owner": "ana"}
         assert await service.start_validation("c1", "ana", _body()) == "locked"
 
     asyncio.run(run())
@@ -114,14 +115,15 @@ def test_apply_re_valida_y_escribe_en_tandas_en_orden(env, monkeypatch):
         assert a["status"] == "applying"
         done = await _wait(a)
         assert done["status"] == "applied", done["error"]
-        # proyecto + canvas + 3 tablas = 5 cambios → tandas de 2, 2, 1, en orden de dependencia
+        # canvas + 3 tablas = 4 cambios (doc 75: el proyecto es el del changeset,
+        # nunca se crea) → tandas de 2, 2, en orden de dependencia
         colls = [ch["collection"] for _, _, items in env["batches"] for ch in items]
-        assert colls == ["projects", "subject_areas", "canonical_tables", "canonical_tables", "canonical_tables"]
-        assert [len(items) for _, _, items in env["batches"]] == [2, 2, 1]
+        assert colls == ["subject_areas", "canonical_tables", "canonical_tables", "canonical_tables"]
+        assert [len(items) for _, _, items in env["batches"]] == [2, 2]
         assert all(actor == "ana" for _, actor, _ in env["batches"])
         assert len(done["result"]["affectedCanvasIds"]) == 1
         assert done["result"]["counts"]["tables"]["create"] == 3
-        assert env["bulk"].await_count == 3
+        assert env["bulk"].await_count == 2
 
     asyncio.run(run())
 

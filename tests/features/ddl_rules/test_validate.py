@@ -192,7 +192,7 @@ def _mock_apply(monkeypatch, *, before_rules=None, udp=None):
         monkeypatch.setattr(s.rules_repo, fn, AsyncMock())
     monkeypatch.setattr(s, "current_snapshot", AsyncMock(return_value={}))
     monkeypatch.setattr(s.repository, "insert_version_next_seq",
-                        AsyncMock(side_effect=lambda f: {**f, "seq": 5, "label": "v5", "id": "v5"}))
+                        AsyncMock(side_effect=lambda pid, f: {**f, "seq": 5, "label": "v5", "id": "v5"}))
     monkeypatch.setattr(s, "audit", AsyncMock())
 
 
@@ -201,7 +201,7 @@ def test_apply_regla_nueva_invalida_400(monkeypatch):
     body = ApplyBody(rulesUpsert=[DdlRuleEdit(
         name="mala", condition='columna.udp["No Existe"] = \'x\'')])
     with pytest.raises(HTTPException) as e:
-        asyncio.run(std_service.apply("mr", body))
+        asyncio.run(std_service.apply("mr", "p1", body))
     assert e.value.status_code == 400 and "mala" in e.value.detail
     std_service.rules_repo.create_rule.assert_not_awaited()
 
@@ -213,8 +213,8 @@ def test_apply_persiste_reporte_y_udprefs_derivados(monkeypatch):
         condition='columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\'',
         action={"expression": "sha2({col}, 512)"}, appliesTo=["ddl.vista_tecnica"],
         udpRefs=[{"udpId": "hack-cliente", "level": "column"}])])   # el server NO confía en esto
-    asyncio.run(std_service.apply("mr", body))
-    saved = std_service.rules_repo.create_rule.await_args.args[0]
+    asyncio.run(std_service.apply("mr", "p1", body))
+    saved = std_service.rules_repo.create_rule.await_args.args[1]
     assert saved["validationState"] == "valid"
     assert saved["udpRefs"] == [{"udpId": "u-dac-col", "level": "column"}]  # derivado server-side
     assert saved["validationReport"]["state"] == "valid"
@@ -231,7 +231,7 @@ def test_apply_toggle_de_regla_ya_invalida_se_permite(monkeypatch):
     _mock_apply(monkeypatch, before_rules=[prev])
     body = ApplyBody(rulesUpsert=[DdlRuleEdit(**{**prev, "enabled": False,
                                                  "validationReport": {}})])
-    asyncio.run(std_service.apply("mr", body))       # no levanta
+    asyncio.run(std_service.apply("mr", "p1", body))       # no levanta
     saved = std_service.rules_repo.update_rule.await_args.args[1]
     assert saved["enabled"] is False and saved["validationState"] == "invalid"
 
@@ -251,6 +251,38 @@ def test_apply_quitar_valor_de_lista_marca_stale_las_no_tocadas(monkeypatch):
     monkeypatch.setattr(std_service.udp_repo, "create_udp", AsyncMock())
     monkeypatch.setattr(std_service.udp_repo, "update_udp", AsyncMock())
     monkeypatch.setattr(std_service.udp_repo, "delete_udp", AsyncMock())
-    asyncio.run(std_service.apply("mr", body))
+    asyncio.run(std_service.apply("mr", "p1", body))
     args = std_service.rules_repo.update_rule.await_args
     assert args.args[0] == "r1" and args.args[1]["validationState"] == "stale"
+
+
+# ── Doc 71 H4 · acción incompatible con el tipo de artefacto + add_columns ──
+
+KINDS = {"ddl.tabla_fisica": "table", "ddl.vista_negocio": "view", "ddl.vista_tecnica": "view"}
+
+
+def test_expression_sobre_tabla_y_tags_sobre_vista_avisan():
+    rep = v.validate_rule(rule(appliesTo=["ddl.tabla_fisica"],
+                               action={"expression": "sha2({col}, 512)"}), DEFS, CONFIG, ARTS, KINDS)
+    assert rep["state"] == "valid"
+    assert any("table artifact" in w and "expression" in w for w in rep["warnings"])
+    rep2 = v.validate_rule(rule(target="table", appliesTo=["ddl.vista_negocio"],
+                                action={"tags": {"x": "y"}}), DEFS, CONFIG, ARTS, KINDS)
+    assert any("view artifact" in w and "tags" in w for w in rep2["warnings"])
+    # combinación coherente: sin aviso
+    rep3 = v.validate_rule(rule(appliesTo=["ddl.vista_tecnica"],
+                                action={"expression": "sha2({col}, 512)"}), DEFS, CONFIG, ARTS, KINDS)
+    assert not any("artifact —" in w for w in rep3["warnings"])
+
+
+def test_generator_add_columns_incompletas_son_error():
+    gen = {"name": "g", "kind": "generator", "target": None, "sourceArtifact": "ddl.tabla_fisica",
+           "condition": "true", "udpRefs": [],
+           "action": {"emit": {"artifact": "ddl.tabla_rej", "type": "table",
+                               "add_columns": [{"name": "ok", "type": "STRING"}, {"name": "", "type": "STRING"},
+                                               {"name": "sin_tipo", "type": ""}]}},
+           "appliesTo": [], "priority": 200, "enabled": True}
+    rep = v.validate_rule(gen, DEFS, CONFIG, ARTS, KINDS)
+    msgs = [e["message"] for e in rep["errors"]]
+    assert rep["state"] == "invalid"
+    assert any("#2" in m for m in msgs) and any("#3" in m for m in msgs)

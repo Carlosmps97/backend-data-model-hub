@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pymongo import UpdateOne
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
+from app.core.facets import normalize_udp_view
 
 from .models import UDP_LEVELS, UDP_TYPES, UdpDefinitionDoc
 
@@ -34,21 +36,25 @@ def _clean(data: dict) -> dict:
         data["dataType"] = "string"
     if data.get("level") not in UDP_LEVELS:
         data["level"] = "column"
+    # Doc 69: faceta efectiva (view/canvas ⇒ physical; ausente ⇒ physical).
+    data["view"] = normalize_udp_view(data.get("level"), data.get("view"))
     if data.get("dataType") != "list":
         data["allowedValues"] = []
     return data
 
 
-async def list_udp() -> list[dict]:
+async def list_udp(project_id: str) -> list[dict]:
+    """Definiciones activas DEL PROYECTO (doc 75 D3)."""
     db = await get_db()
-    docs = await db[COLL].find({"flgactive": {"$ne": False}}).to_list(None)
+    docs = await db[COLL].find(scoped(project_id, {"flgactive": {"$ne": False}})).to_list(None)
     docs.sort(key=lambda d: (d.get("name") or "").lower())
     return [UdpDefinitionDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
 
-async def create_udp(data: dict) -> dict:
+async def create_udp(project_id: str, data: dict) -> dict:
     db = await get_db()
-    d = UdpDefinitionDoc.model_validate({**_clean(data), "id": data.get("id") or str(uuid.uuid4())})
+    d = UdpDefinitionDoc.model_validate({**_clean(data), "projectId": project_id,
+                                         "id": data.get("id") or str(uuid.uuid4())})
     payload = d.model_dump()
     await db[COLL].insert_one(
         {"_id": d.id, "flgactive": True, "createdAt": _now(), "updatedAt": _now(),
@@ -75,19 +81,20 @@ async def delete_udp(udp_id: str) -> bool:
     return res.modified_count > 0
 
 
-async def restore_udp(defs: list[dict]) -> None:
+async def restore_udp(project_id: str, defs: list[dict]) -> None:
     """Rollback: deja SOLO las definiciones del snapshot activas (soft-delete de
-    las que no están) y upserta las del snapshot. Espeja `restore_domains`."""
+    las que no están) y upserta las del snapshot. Espeja `restore_domains`.
+    Doc 75 I5: ACOTADO al proyecto — sin el filtro borraría las defs de los demás."""
     db = await get_db()
     keep = {d["id"] for d in defs if d.get("id")}
-    await db[COLL].update_many({"_id": {"$nin": list(keep)}, "flgactive": {"$ne": False}},
+    await db[COLL].update_many(scoped(project_id, {"_id": {"$nin": list(keep)}, "flgactive": {"$ne": False}}),
                                {"$set": {"flgactive": False, "deletedAt": _now()}})
     ops = []
     for d in defs:
         did = d.get("id")
         if not did:
             continue
-        payload = UdpDefinitionDoc.model_validate(_clean({**d, "id": did})).model_dump()
+        payload = UdpDefinitionDoc.model_validate(_clean({**d, "id": did, "projectId": project_id})).model_dump()
         ops.append(UpdateOne(
             {"_id": did},
             {"$set": {"flgactive": True, "updatedAt": _now(),

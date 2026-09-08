@@ -41,7 +41,7 @@ def test_normalize_no_muta_la_entrada():
 # ── ViewDoc ──────────────────────────────────────────────────────────────────
 
 def test_view_doc_defaults_f3():
-    v = ViewDoc.model_validate({"name": "v"})
+    v = ViewDoc.model_validate({"projectId": "p1", "name": "v"})
     assert v.sourceTableIds == []
     assert v.showOnCanvas is False
     assert v.joinOverride is None
@@ -50,13 +50,13 @@ def test_view_doc_defaults_f3():
 def test_view_doc_normaliza_legacy_en_lectura():
     # Doc de Mongo NO migrado (solo tableId): el read path materializa las
     # fuentes → el API ya expone sourceTableIds sin esperar la migración.
-    v = ViewDoc.model_validate({"name": "v", "tableId": "t1", "flgactive": True})
+    v = ViewDoc.model_validate({"projectId": "p1", "name": "v", "tableId": "t1", "flgactive": True})
     assert v.sourceTableIds == ["t1"]
     assert v.tableId == "t1"
 
 
 def test_view_doc_multi_fuente_roundtrip():
-    dumped = ViewDoc.model_validate({
+    dumped = ViewDoc.model_validate({"projectId": "p1", 
         "name": "v", "sourceTableIds": ["t1", "t2"], "showOnCanvas": True,
         "joinOverride": "t1.id = t2.cliente_id",
         "sources": [{"column": "id", "tableId": "t1",

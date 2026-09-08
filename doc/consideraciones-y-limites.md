@@ -222,7 +222,7 @@ El adaptador implementa un **alcance cerrado y fail-fast**: todo operador, stage
 - **Filtros soportados**: igualdad vía jsonpath lax (`doc @? …`, GIN-indexable), `$and/$or/$nor`, `$eq/$ne/$in/$nin`, `$gt/$gte/$lt/$lte` (strings comparados con `COLLATE "C"` para replicar el orden binario de Mongo), `$exists`, `$regex` (con `$options`).
 - **Updates soportados**: `$set`, `$setOnInsert`, `$unset`, `$inc`, `$push`; cualquier otro operador → `NotImplementedError`.
 - **Aggregation (alcance cerrado)**: stages `$match/$group/$project/$sort/$skip/$limit/$count/$unwind`; acumuladores `$sum/$avg/$min/$max/$addToSet`; expresiones `$cond/$ifNull/$eq/$gt/$in/$size/$not/$objectToArray`, más **`$add` y `$strLenCP`** (agregados 2026-07-25, cuando la primera corrida de `arrange_all.py` contra Lakebase los necesitó). La truthiness de Mongo está replicada. El **`$project` de exclusión NO está soportado** (solo proyección de inclusión).
-- **Índices**: cada tabla lleva un GIN `jsonb_path_ops` sobre `doc` (las igualdades jsonpath hacen seek ahí). El **único índice unique es `standards_versions.seq`**; su violación se traduce a `DuplicateKeyError` de pymongo, así que la app no cambió su manejo de errores.
+- **Índices**: cada tabla lleva un GIN `jsonb_path_ops` sobre `doc` (las igualdades jsonpath hacen seek ahí) y, desde el doc 75 (D19), una **columna generada `project_id`** (`GENERATED ALWAYS AS (doc->>'projectId') STORED`): una igualdad o `$in` sobre `projectId` compila a la columna (`translate.COLUMN_FIELDS`), y los índices por `projectId` son btrees sobre esa columna (líder de los compuestos). El **único índice unique es `standards_versions (project_id, seq)`**; su violación se traduce a `DuplicateKeyError` de pymongo, así que la app no cambió su manejo de errores.
 - **Credenciales**: el password de Postgres es un **token OAuth de ~60 minutos** acuñado vía SDK de Databricks; `fresh_token()` lo cachea 50 minutos (thread-safe) y el pool lo consume como callable async — cada conexión nueva recibe un token vigente.
 - **Scale-to-zero**: el compute de Lakebase se suspende por inactividad; el pool **reintenta la conexión durante el wake** en vez de fallar el primer request tras la pausa.
 - **`statement_cache_size=256`** en asyncpg (el SQL generado se repite mucho entre requests).
@@ -271,24 +271,26 @@ if code not in (48, 11000):
 
 ### 4.3 Índices declarados
 
-Los índices se declaran una sola vez a través de la superficie de colección (`core/db/indexes.py`, `ensure_indexes()` idempotente al arrancar). Las igualdades jsonpath se apoyan en el GIN `jsonb_path_ops` de cada tabla (incluido el wildcard `udpValues.$**`) y el único constraint UNIQUE es `standards_versions.seq`; la tabla siguiente es la declaración lógica de índices por colección.
+Los índices se declaran una sola vez a través de la superficie de colección (`core/db/indexes.py`, `ensure_indexes()` idempotente al arrancar; primero retira los de `RETIRED_INDEXES`). Las igualdades jsonpath se apoyan en el GIN `jsonb_path_ops` de cada tabla (incluido el wildcard `udpValues.$**`), los índices por `projectId` van sobre la columna generada `project_id` (doc 75 D19) y el único constraint UNIQUE es `standards_versions (projectId, seq)`; la tabla siguiente es la declaración lógica de índices por colección.
 
 | Colección | Índices |
 |---|---|
-| `canonical_tables` | `flgactive`, `physicalName`, compuesto `(schema, physicalName)`, `udpValues.$**` |
-| `canonical_columns` | `tableId`, `parentDomainId`, `physicalName`, `dataType`, `udpValues.$**` |
-| `changesets` | `updatedAt` (desc), `status` |
-| `changeset_changes` | compuesto `(csId, collection)` |
-| `relationships` | `flgactive`, `parentTableId`, `childTableId`, `pairs.parentColumnId`, `pairs.childColumnId` |
-| `views` | `flgactive`, `tableId`, `sourceTableIds` |
+| `canonical_tables` | `flgactive`, `physicalName`, compuesto `(projectId, physicalName)`, `udpValues.$**` |
+| `canonical_columns` | compuesto `(projectId, physicalName)`, `tableId`, `parentDomainId`, `physicalName`, `dataType`, `udpValues.$**` |
+| `changesets` | `updatedAt` (desc), `status`, compuestos `(projectId, status)` y `(projectId, appliedAt)` |
+| `changeset_changes` | compuestos `(csId, collection)` y `(collection, entityId)` |
+| `relationships` | `flgactive`, `projectId`, `parentTableId`, `childTableId`, `pairs.parentColumnId`, `pairs.childColumnId` |
+| `views` | `flgactive`, `projectId`, `tableId` (`sourceTableIds`/`viewIds` los sirve el GIN; sus btree se retiraron, doc 73 §11.2) |
 | `subject_areas` | `projectId`, `name`, `udpValues.$**` |
 | `folders` | `projectId` |
-| `schemas` | `flgactive`, `name` |
-| `naming_config` | `scope` |
+| `schemas` | `flgactive`, `name`, compuesto `(projectId, name)` |
+| `naming_config` | `scope`, `projectId` |
 | `users` | `email` |
 | `audit_log` | `at` (desc), `actor` |
-| `standards_versions` | `seq` (**unique**) |
-| `parent_domains`, `glossary_terms`, `udp_definitions`, `projects` | `flgactive` |
+| `saved_reports` | `projectId` |
+| `standards_versions` | compuesto `(projectId, seq)` (**unique**) |
+| `parent_domains`, `glossary_terms`, `udp_definitions`, `ddl_rules` | `flgactive`, `projectId` |
+| `projects` | `flgactive` |
 
 ---
 

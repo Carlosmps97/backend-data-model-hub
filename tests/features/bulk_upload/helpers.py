@@ -12,7 +12,7 @@ def naming(max_len: int = 150) -> dict[str, dict]:
 
 def ctx(**kw) -> UploadContext:
     """Contexto vacío con naming corporativo (join + UPPER, 150) y sin glosario."""
-    base = dict(naming=naming(), glossary={"table": {}, "column": {}})
+    base = dict(project_id="p1", project_name="P", naming=naming(), glossary={"table": {}, "column": {}})
     base.update(kw)
     return UploadContext(**base)
 

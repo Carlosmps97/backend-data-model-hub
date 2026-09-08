@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.core.identity import Principal, current_principal
 from app.features.auth.deps import write_guard
+from app.features.changesets.access import ensure_changeset_visible
 
 from app.core.api.envelope import ok
 
@@ -29,7 +31,9 @@ async def impact(columnId: str = Query(...), changesetId: str | None = Query(def
 
 
 @router.get("/links")
-async def links(tableId: str = Query(...), changesetId: str | None = Query(default=None)):
+async def links(tableId: str = Query(...), changesetId: str | None = Query(default=None),
+                principal: Principal = Depends(current_principal)):
+    await ensure_changeset_visible(changesetId, principal)   # doc 70 §12
     """Relaciones de una tabla en TODOS los canvases (la tabla es canónica),
     con nombres resueltos y los canvases donde cada relación es visible —
     alimenta Properties · Links (bloques del canvas actual + de otros)."""

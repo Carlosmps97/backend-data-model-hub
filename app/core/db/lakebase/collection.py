@@ -25,6 +25,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.db.lakebase.aggregate import compile_pipeline
 from app.core.db.lakebase.translate import (
+    COLUMN_FIELDS,
     Sql,
     _json_default,
     filter_sql,
@@ -51,6 +52,14 @@ def _loads(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+PROJECT_COLUMN = "project_id"
+# Doc 75 D19: columna GENERADA desde el doc — uniforme en todas las tablas del
+# schema (NULL en colecciones globales como users). Postgres la mantiene sola en
+# cada INSERT/UPDATE de `doc`; el traductor la usa para igualdad/$in de
+# `projectId` y los índices compuestos la llevan como columna líder.
+PROJECT_COLUMN_DDL = f"{PROJECT_COLUMN} text GENERATED ALWAYS AS (doc ->> 'projectId') STORED"
+_TABLE_DDL = f"(id text PRIMARY KEY, doc jsonb NOT NULL, {PROJECT_COLUMN_DDL})"
 
 # Las 19 colecciones propias. Se pre-crean al conectar; cualquier otra se
 # crea on-demand.
@@ -549,6 +558,13 @@ class PgCollection:
     async def drop(self) -> None:
         await self.database.drop_table(self.name)
 
+    async def drop_index(self, idx_name: str) -> None:
+        """Retira un índice por nombre (idempotente). Doc 73 §11.2: los btree
+        por campo sobre ARRAYS jsonb (p.ej. `viewIds`) son inútiles —el GIN de
+        la tabla ya cubre el array-contains— y revientan el límite de fila del
+        btree (2 704 bytes) con arrays grandes."""
+        await self.database.drop_field_index(self.name, idx_name)
+
 
 class LakebaseDatabase:
     """Handle de BD compatible con la superficie usada de AsyncIOMotorDatabase."""
@@ -605,14 +621,28 @@ class LakebaseDatabase:
                         "SELECT indexname FROM pg_indexes WHERE schemaname = $1", self.schema
                     )
                 }
+                with_column = {
+                    r["table_name"]
+                    for r in await conn.fetch(
+                        "SELECT table_name FROM information_schema.columns "
+                        "WHERE table_schema = $1 AND column_name = $2",
+                        self.schema, PROJECT_COLUMN,
+                    )
+                }
                 stmts: list[str] = []
                 if has_schema is None:
                     stmts.append(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
                 for name in KNOWN_COLLECTIONS:
                     if name not in tables:
                         stmts.append(
-                            f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
-                            f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
+                            f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" {_TABLE_DDL}'
+                        )
+                    elif name not in with_column:
+                        # Doc 75 D19: tabla previa sin la columna generada (sólo
+                        # si FALTA, por el ownership en Apps).
+                        stmts.append(
+                            f'ALTER TABLE "{self.schema}"."{name}" '
+                            f"ADD COLUMN IF NOT EXISTS {PROJECT_COLUMN_DDL}"
                         )
                     if f"gin_{name}" not in indexes:
                         stmts.append(
@@ -654,9 +684,19 @@ class LakebaseDatabase:
                 if exists is None:
                     await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
                     await conn.execute(
-                        f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" '
-                        f"(id text PRIMARY KEY, doc jsonb NOT NULL)"
+                        f'CREATE TABLE IF NOT EXISTS "{self.schema}"."{name}" {_TABLE_DDL}'
                     )
+                else:
+                    has_column = await conn.fetchrow(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+                        self.schema, name, PROJECT_COLUMN,
+                    )
+                    if has_column is None:   # doc 75 D19: sólo si FALTA
+                        await conn.execute(
+                            f'ALTER TABLE "{self.schema}"."{name}" '
+                            f"ADD COLUMN IF NOT EXISTS {PROJECT_COLUMN_DDL}"
+                        )
                 if has_gin is None:
                     await conn.execute(
                         f'CREATE INDEX IF NOT EXISTS "gin_{name}" ON "{self.schema}"."{name}" '
@@ -664,35 +704,59 @@ class LakebaseDatabase:
                     )
             self._ensured.add(name)
 
+    @staticmethod
+    def _index_name(table: str, fields: list[tuple[str, int]]) -> str:
+        """Nombre determinista del índice. El campo `projectId` se nombra por su
+        columna (`project_id`, doc 75 D19) para no chocar con los btree por
+        expresión legacy `ix_<t>_projectId` (que se retiran)."""
+        parts = []
+        for field, direction in fields:
+            base = COLUMN_FIELDS[field] if field in COLUMN_FIELDS \
+                else re.sub(r"[^A-Za-z0-9]+", "_", field)
+            parts.append(base + ("_d" if direction < 0 else ""))
+        return (f"ix_{table}_" + "_".join(parts))[:63]
+
+    @staticmethod
+    def _index_ddl(table: str, fields: list[tuple[str, int]], unique: bool, schema: str) -> str:
+        """DDL del índice: columna real para los campos de COLUMN_FIELDS,
+        expresión `(doc ->> campo) COLLATE "C"` para el resto. Puro."""
+        exprs: list[str] = []
+        for field, direction in fields:
+            if not re.match(r"^[A-Za-z0-9_.]+$", field):
+                raise ValueError(f"Campo de índice inválido: {field!r}")
+            if field in COLUMN_FIELDS:
+                extract = COLUMN_FIELDS[field]                       # columna generada (doc 75 D19)
+            else:
+                segs = field.split(".")
+                inner = f"(doc ->> '{field}')" if len(segs) == 1 else "(doc #>> '{" + ",".join(segs) + "}')"
+                extract = f'({inner} COLLATE "C")'
+            exprs.append(f'{extract} {"ASC" if direction >= 0 else "DESC"}')
+        uniq = "UNIQUE " if unique else ""
+        return (f'CREATE {uniq}INDEX IF NOT EXISTS "{LakebaseDatabase._index_name(table, fields)}" '
+                f'ON "{schema}"."{table}" ({", ".join(exprs)})')
+
     async def create_field_index(
         self, table: str, fields: list[tuple[str, int]], unique: bool = False
     ) -> str:
         await self.ensure_table(table)
-        exprs: list[str] = []
-        name_parts: list[str] = []
-        for field, direction in fields:
-            if not re.match(r"^[A-Za-z0-9_.]+$", field):
-                raise ValueError(f"Campo de índice inválido: {field!r}")
-            segs = field.split(".")
-            if len(segs) == 1:
-                extract = f"(doc ->> '{field}')"
-            else:
-                extract = "(doc #>> '{" + ",".join(segs) + "}')"
-            exprs.append(f'({extract} COLLATE "C") {"ASC" if direction >= 0 else "DESC"}')
-            name_parts.append(re.sub(r"[^A-Za-z0-9]+", "_", field) + ("_d" if direction < 0 else ""))
-        idx_name = f"ix_{table}_" + "_".join(name_parts)
-        idx_name = idx_name[:63]
+        idx_name = self._index_name(table, fields)
         if idx_name in self._known_indexes:
             return idx_name  # ya existe (censo de ensure_base): 0 round-trips
-        uniq = "UNIQUE " if unique else ""
+        ddl = self._index_ddl(table, fields, unique, self.schema)
         async with self._ddl_lock:
             async with self.pool.acquire() as conn:
-                await conn.execute(
-                    f'CREATE {uniq}INDEX IF NOT EXISTS "{idx_name}" '
-                    f'ON "{self.schema}"."{table}" ({", ".join(exprs)})'
-                )
+                await conn.execute(ddl)
             self._known_indexes.add(idx_name)
         return idx_name
+
+    async def drop_field_index(self, table: str, idx_name: str) -> None:
+        _check_name(table)
+        if not re.match(r"^[A-Za-z0-9_]+$", idx_name):
+            raise ValueError(f"Nombre de índice inválido: {idx_name!r}")
+        async with self._ddl_lock:
+            async with self.pool.acquire() as conn:
+                await conn.execute(f'DROP INDEX IF EXISTS "{self.schema}"."{idx_name}"')
+            self._known_indexes.discard(idx_name)
 
     async def drop_table(self, name: str) -> None:
         _check_name(name)

@@ -90,6 +90,11 @@ def test_golden_fragmentos_clave():
     out = {s["artifact"]: s for s in _run()["statements"]}
     fisica = out["ddl.tabla_fisica"]["sql"]
     assert "'delta.deletedFileRetentionDuration'='interval 90 days'" in fisica.replace(" = ", "=")
+    # doc 71 H1: el CREATE base conserva su formato — solo gana el bloque TBLPROPERTIES
+    assert fisica.startswith(BASE_SQL[:-1]) and fisica.endswith("'interval 90 days'\n);")
+    # doc 71 H2: los tags referencian la tabla/columna con el funnel del CREATE (backticks)
+    tags = [s["sql"] for s in _run()["statements"] if s["artifact"] == "ddl.tabla_fisica.tags"]
+    assert tags[0].startswith("ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `nom_cliente` SET TAGS (")
     rej = out["ddl.tabla_rej"]["sql"]
     assert "`core`.`tbl_cliente_rej`" in rej
     assert "DATE" not in rej                      # fec_alta era DATE y sale STRING (8.5)
@@ -135,7 +140,7 @@ def test_service_test_rule_fragmentos(monkeypatch):
     monkeypatch.setattr(svc.dom_repo, "list_domains", AsyncMock(return_value=[]))
     monkeypatch.setattr(svc.catalog_repo, "list_tables_by_ids", AsyncMock(return_value=[TABLE]))
     monkeypatch.setattr(svc.catalog_repo, "list_columns", AsyncMock(return_value=COLS))
-    out = asyncio.run(svc.test_rule(RULES[0], "t1"))   # enmascarar_dac
+    out = asyncio.run(svc.test_rule("p1", RULES[0], "t1"))   # enmascarar_dac
     assert out["table"] == "core.tbl_cliente"
     assert out["matched"] == 2 and out["total"] == 4
     frags = {f["column"]: f for f in out["fragments"]}
@@ -155,18 +160,18 @@ def test_service_impact_cuenta_columnas_y_tablas(monkeypatch):
                                                  "schema": "core", "udpValues": {}}]))
     cols = [{**c, "tableId": "t1", "id": f"c{i}"} for i, c in enumerate(COLS)]
     monkeypatch.setattr(svc.repository, "columns_light", AsyncMock(return_value=cols))
-    out = asyncio.run(svc.impact(RULES[0]))
+    out = asyncio.run(svc.impact("p1", RULES[0]))
     assert out == {"columns": 2, "tables": 1}
     tags_tabla = next(r for r in RULES if r["name"] == "tags_tabla")
-    out_tab = asyncio.run(svc.impact(tags_tabla))      # target table
+    out_tab = asyncio.run(svc.impact("p1", tags_tabla))      # target table
     assert out_tab == {"columns": 0, "tables": 1}      # t2 sin Dominio Principal
 
 
 def test_templates_payload_resuelve_lookup(monkeypatch):
     from app.features.ddl_rules import service as svc
     monkeypatch.setattr(svc.udp_repo, "list_udp", AsyncMock(return_value=DEFS))
-    out = asyncio.run(svc.templates_payload())
-    assert len(out["templates"]) == 6 and len(out["seedRules"]) == 8
+    out = asyncio.run(svc.templates_payload("p1"))
+    assert len(out["templates"]) == 7 and len(out["seedRules"]) == 9   # doc 73: + partitions-last
     assert out["seedLookups"]["vacuum_map"]["fromUdpId"] == "u-vac"
     assert out["seedLookups"]["dac_map"]["fromUdpId"] == "u-dac-col"
     assert out["seedLookups"]["dac_map"]["values"]["DAC-TARJETA"] == "TARJETA"
@@ -191,7 +196,7 @@ def test_service_render_export_selecciona_reglas_y_estampa_version(monkeypatch):
     desenc = next(r for r in RULES if r["name"] == "desencriptar_dac_negocio")
     body = {"ruleIds": [desenc["id"]],             # SOLO la de desencriptación
             "model": PAYLOAD["model"], "tables": PAYLOAD["tables"], "views": PAYLOAD["views"]}
-    out = asyncio.run(svc.render_export_payload("maria.rojas", body))
+    out = asyncio.run(svc.render_export_payload("maria.rojas", "p1", body))
     assert out["rulesetVersion"] == "v12" and out["applied"] >= 1
     arts = [s["artifact"] for s in out["statements"]]
     assert "ddl.tabla_rej" not in arts             # el generador no fue seleccionado

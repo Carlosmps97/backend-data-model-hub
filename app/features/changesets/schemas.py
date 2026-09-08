@@ -32,16 +32,16 @@ class CompareDetailsBody(BaseModel):
 
 
 class SnapshotBody(BaseModel):
-    """Crea un draft (working copy) a partir del estado publicado.
-    `title`/`projectIds` opcionales; `versionLabel` se autogenera si no viene."""
+    """Crea un draft (working copy) DEL PROYECTO a partir de su estado publicado
+    (doc 75 D2). `title` opcional; `versionLabel` se autogenera por proyecto."""
+    projectId: str
     title: str | None = None
     description: str | None = None
     versionLabel: str | None = None
-    projectIds: list[str] = []
 
 
 class ChangeBody(BaseModel):
-    collection: str            # parent_domains | glossary_terms | canonical_tables | canonical_columns
+    collection: str            # una de VERSIONED (projects … views)
     entityId: str
     op: Literal["upsert", "delete"]
     payload: dict[str, Any] | None = None
@@ -70,7 +70,6 @@ class SubmitBody(BaseModel):
     title: str | None = None
     description: str | None = None
     reviewers: list[str] | None = None
-    projectIds: list[str] | None = None
 
 
 class ReviewDecisionBody(BaseModel):

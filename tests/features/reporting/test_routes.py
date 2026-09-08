@@ -6,3 +6,4 @@ def test_reporting_routes_registered(client):
     paths = {r.path for r in client.app.routes}
     assert "/api/reporting/tables" in paths
     assert "/api/reporting/columns" in paths
+    assert "/api/reporting/filters" in paths      # doc 70 §4.1

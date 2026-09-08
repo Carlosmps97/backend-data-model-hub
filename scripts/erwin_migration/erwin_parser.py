@@ -65,6 +65,16 @@ class ErwinAttribute:
     domain_ref: str | None
     parent_attr_ref: str | None      # columna origen (FK o passthrough de vista)
     parent_rel_ref: str | None       # relación que la migró
+    # Doc 74: Column order de Erwin (Columns_Order_Ref_Array) — el orden que el
+    # diagrama y el Table Column Editor muestran por default. Es la base del
+    # orden ÚNICO de la plataforma (`policies.column_order`: llaves primero).
+    # Sin array cae al Attribute order (Attributes_Order_Ref_Array, que es
+    # como Erwin lo inicializa) y, sin éste, al `Physical_Order`.
+    column_order: int = 0
+    # Doc 69 (facetas): existencia en una sola vista de Erwin
+    # (Is_Logical_Only / Is_Physical_Only).
+    logical_only: bool = False
+    physical_only: bool = False
 
 
 @dataclass
@@ -82,6 +92,9 @@ class ErwinEntity:
     # del orden físico de columnas (Physical_Order).
     pk_attr_order: list[str] = field(default_factory=list)
     index_key_groups: int = 0  # IF* (inversion entries) — no se migran
+    # Doc 69 (facetas): la entidad existe en una sola vista de Erwin.
+    logical_only: bool = False
+    physical_only: bool = False
 
 
 @dataclass
@@ -124,6 +137,7 @@ class ErwinDomain:
     data_type: str             # Logical_Data_Type
     parent_ref: str | None
     definition: str
+    physical_type: str = ""    # Physical_Data_Type (doc 69; data_type = Logical_Data_Type)
 
 
 @dataclass
@@ -285,6 +299,8 @@ def parse(xml_path: str) -> ErwinModel:
                     domain_ref=_txt(p, "Parent_Domain_Ref") or None,
                     parent_attr_ref=_txt(p, "Parent_Attribute_Ref") or None,
                     parent_rel_ref=_txt(p, "Parent_Relationship_Ref") or None,
+                    logical_only=_txt(p, "Is_Logical_Only").strip() == "true",
+                    physical_only=_txt(p, "Is_Physical_Only").strip() == "true",
                 )
                 # el registro se completa al cerrar el dueño (está en el stack)
                 attrs_of.setdefault(id(owner), []).append(attr)
@@ -321,6 +337,18 @@ def parse(xml_path: str) -> ErwinModel:
             ufpn = _txt(p, "User_Formatted_Physical_Name")
             was_macro = "%" in raw
             keys = keys_of.pop(id(el), {"pk": set(), "pk_order": [], "if": 0})
+            attrs = attrs_of.pop(id(el), [])
+            # Doc 74: Column order de Erwin (Columns_Order_Ref_Array); sin array
+            # cae al Attribute order y, sin éste, al Physical_Order. El físico
+            # de la BD (_phys_sorted) sólo ordena `attributes` para deduplicar.
+            lrefs = [r.text or "" for r in el.findall(
+                "./{*}EntityProps/{*}Attributes_Order_Ref_Array/{*}Attributes_Order_Ref")]
+            lpos = {rid: i for i, rid in enumerate(lrefs)}
+            crefs = [r.text or "" for r in el.findall(
+                "./{*}EntityProps/{*}Columns_Order_Ref_Array/{*}Columns_Order_Ref")]
+            cpos = {rid: i for i, rid in enumerate(crefs)}
+            for a in attrs:
+                a.column_order = cpos.get(a.id, lpos.get(a.id, a.order))
             ent = ErwinEntity(
                 id=el.get("id") or "",
                 name=el.get("name") or _txt(p, "Name"),
@@ -328,10 +356,12 @@ def parse(xml_path: str) -> ErwinModel:
                 physical_was_macro=was_macro,
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
-                attributes=_phys_sorted(el, "EntityProps", attrs_of.pop(id(el), [])),
+                attributes=_phys_sorted(el, "EntityProps", attrs),
                 pk_attr_ids=set(keys["pk"]),
                 pk_attr_order=list(keys.get("pk_order") or []),
                 index_key_groups=keys["if"],
+                logical_only=_txt(p, "Is_Logical_Only").strip() == "true",
+                physical_only=_txt(p, "Is_Physical_Only").strip() == "true",
             )
             m.entities[ent.id] = ent
 
@@ -369,6 +399,7 @@ def parse(xml_path: str) -> ErwinModel:
                 data_type=_txt(p, "Logical_Data_Type").strip(),
                 parent_ref=_txt(p, "Parent_Domain_Ref") or None,
                 definition=_txt(p, "Definition").strip(),
+                physical_type=_txt(p, "Physical_Data_Type").strip(),
             )
             m.domains[d.id] = d
 

@@ -59,6 +59,16 @@ SEED_RULES: list[dict] = [
         "action": {"tblproperties": {"delta.deletedFileRetentionDuration": "{lookup:vacuum_map}"}},
         "appliesTo": ["ddl.tabla_fisica"], "priority": 40, "enabled": True,
     },
+    {   # doc 73 — layout de columnas: las PARTICIONES se emiten al FINAL del
+        # CREATE (el orden físico del modelo no cambia; aplica al físico y a
+        # las tablas generadas que heredan sus columnas). Sin condición: es un
+        # estándar del ruleset.
+        "name": "particiones_al_final", "kind": "rule", "target": "table",
+        "description": "Emite las columnas de partición al final del CREATE TABLE (físico y tablas generadas)",
+        "condition": "",
+        "action": {"layout": {"partitionColumns": "last"}},
+        "appliesTo": ["ddl.tabla_fisica"], "priority": 30, "enabled": True,
+    },
     {   # 8.5 — tabla de rechazos (todo STRING, sin constraints)
         "name": "tabla_rechazos", "kind": "generator",
         "description": "Tabla de rechazos derivada de la física: todo STRING",
@@ -160,6 +170,9 @@ TEMPLATES: list[dict] = [
     {"id": "governance-tags", "title": "Apply governance tags",
      "summary": "Clasificacion del Dato → SET TAGS",
      "rule": _SEED_BY_NAME["tags_clasificacion"]},
+    {"id": "partitions-last", "title": "Partition columns last",
+     "summary": "PARTITIONED BY columns are emitted at the end of the CREATE",
+     "rule": _SEED_BY_NAME["particiones_al_final"]},
     {"id": "blank", "title": "Blank rule",
      "summary": "Start from scratch and configure every field yourself.",
      "rule": {"name": "", "kind": "rule", "target": "column", "condition": "",

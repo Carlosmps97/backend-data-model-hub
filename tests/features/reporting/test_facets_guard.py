@@ -15,7 +15,7 @@ def test_facets_de_campo_derived_422(client, monkeypatch):
     # Catálogo sin UDP dinámicos (no toca DB); el estático de `models` ya trae
     # tableCount con hydrate='derived'.
     monkeypatch.setattr(ex, "_udp_defs", AsyncMock(return_value=[]))
-    resp = client.get("/api/reporting/facets", params={"field": "tableCount", "from": "models"})
+    resp = client.get("/api/reporting/facets", params={"field": "tableCount", "from": "models", "projectId": "p1"})
     assert resp.status_code == 422
     assert "calculado" in resp.json()["detail"]
 
@@ -28,7 +28,16 @@ def test_facets_de_campo_enum_sigue_funcionando(client, monkeypatch):
     monkeypatch.setattr(ex, "_udp_defs", AsyncMock(return_value=[]))
     monkeypatch.setattr(qrouter, "get_db", AsyncMock(return_value=None))
     resp = client.get("/api/reporting/facets",
-                      params={"field": "parentCardinality", "from": "relationships"})
+                      params={"field": "parentCardinality", "from": "relationships", "projectId": "p1"})
     assert resp.status_code == 200
     assert [v["value"] for v in resp.json()["data"]] == [
         "one", "many", "one-only", "zero-one", "one-many", "zero-many"]
+
+
+def test_facets_exige_project_id(client, monkeypatch):
+    # Doc 75: las facetas son de UN proyecto — sin `projectId` no hay consulta.
+    from app.features.reporting.query import executor as ex
+
+    monkeypatch.setattr(ex, "_udp_defs", AsyncMock(return_value=[]))
+    resp = client.get("/api/reporting/facets", params={"field": "dataType", "from": "columns"})
+    assert resp.status_code == 422

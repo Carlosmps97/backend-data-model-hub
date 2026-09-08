@@ -100,14 +100,14 @@ def test_impact_and_propagate_routes_registered(client):
         for r in client.app.routes
         for m in getattr(r, "methods", set()) or set()
     }
-    assert ("/api/domains/{domain_id}/impact", "GET") in paths
-    assert ("/api/domains/{domain_id}/propagate", "POST") in paths
+    assert ("/api/projects/{project_id}/domains/{domain_id}/impact", "GET") in paths
+    assert ("/api/projects/{project_id}/domains/{domain_id}/propagate", "POST") in paths
 
 
 def test_impact_declara_query_params(client):
     route = next(
         r for r in client.app.routes
-        if getattr(r, "path", None) == "/api/domains/{domain_id}/impact"
+        if getattr(r, "path", None) == "/api/projects/{project_id}/domains/{domain_id}/impact"
         and "GET" in getattr(r, "methods", set())
     )
     param_names = {p.name for p in route.dependant.query_params}

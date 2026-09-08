@@ -7,7 +7,7 @@ from app.features.changesets.service import apply_plan
 
 
 def _view_payload(**extra) -> dict:
-    return {"id": "v1", "name": "v_x", "tableId": "t1", **extra}
+    return {"id": "v1", "projectId": "p1", "name": "v_x", "tableId": "t1", **extra}
 
 
 # ── payload_error (gate del PUT /changes, bulk y del apply) ─────────────────
@@ -31,7 +31,7 @@ def test_payload_error_ignora_custom_sql_vacio_y_deletes():
 def test_payload_error_no_afecta_otras_colecciones():
     assert validation.payload_error(
         "canonical_tables", "t1", "upsert",
-        {"id": "t1", "physicalName": "M_X", "logicalName": "X"}) is None
+        {"id": "t1", "projectId": "p1", "physicalName": "M_X", "logicalName": "X"}) is None
 
 
 # ── apply_plan re-deriva customColumns ──────────────────────────────────────

@@ -111,8 +111,9 @@ def parse_from(text: str) -> str:
     return tbl.name
 
 
-def to_spec(text: str, catalog: dict[str, FieldDef], from_: str) -> QuerySpec:
-    """SQL → QuerySpec, resolviendo campos contra el catálogo ya cargado."""
+def to_spec(text: str, catalog: dict[str, FieldDef], from_: str, project_id: str) -> QuerySpec:
+    """SQL → QuerySpec del proyecto, resolviendo campos contra el catálogo ya
+    cargado."""
     stmt = sqlglot.parse(text)[0]
     select, aggs, group_by = [], [], []
     for proj in stmt.expressions:
@@ -148,6 +149,7 @@ def to_spec(text: str, catalog: dict[str, FieldDef], from_: str) -> QuerySpec:
     if stmt.args.get("limit"):
         limit = int(stmt.args["limit"].expression.name)
     return QuerySpec.model_validate({
+        "projectId": project_id,
         "from": from_, "select": select, "where": where, "groupBy": group_by,
         "aggregations": [a.model_dump(by_alias=True) for a in aggs],
         "orderBy": [o.model_dump() for o in order], "limit": min(max(limit, 1), 5000)})

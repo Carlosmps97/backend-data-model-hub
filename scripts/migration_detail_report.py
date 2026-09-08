@@ -141,7 +141,7 @@ def extract(files: list[dict]) -> dict:
                     obj_diags[tag][ref].append((d.subject_area, d.name))
 
     log("[xml] definiciones y valores UDP por archivo …")
-    collapsed_by_tag = {tag: pol.collapse_udp_defs(m.udp_defs) for tag, m in models.items()}
+    collapsed_by_tag = {tag: pol.udp_defs_by_view(m.udp_defs) for tag, m in models.items()}
     udp_vals_by_tag = {tag: pol.resolve_udp_values(m.udp_values, collapsed_by_tag[tag])
                        for tag, m in models.items()}
 
@@ -771,7 +771,8 @@ def extract(files: list[dict]) -> dict:
         present = [t for t in file_order if t in entries]
         absent = [t for t in file_order if t not in entries]
         any_e = entries[present[0]]
-        nivel = NIVEL_ES.get(any_e["level"], any_e["level"])
+        nivel = NIVEL_ES.get(any_e["level"], any_e["level"]) + (
+            " (lógico)" if any_e.get("view") == "logical" else "")   # doc 69: faceta
         resumen = any_e["dataType"] + (
             f", catálogo de {len(any_e['allowed_values'])} valores"
             if any_e["dataType"] == "list" and any_e["allowed_values"] else "")
@@ -852,6 +853,16 @@ def extract(files: list[dict]) -> dict:
     OUT["udp"] = rows
     log(f"[udp] no está en todos: {n_absent}; definición distinta: {n_diffdef}; "
         f"valor fuera de catálogo: {n_fuera}; sin uso: {len(agg)}")
+
+    # ═══ dominios en conflicto (doc 75: unión distinta por proyecto) ══════
+    rows = []
+    for tag in models:
+        for d in reports[tag]["decisions"].get("domain_conflicts", []):
+            rows.append({"proyecto": proj_of_tag[tag], "dominio": d["name"],
+                         "conservado": d["kept"], "ignorado": d["ignored"], "archivo": tag})
+    rows.sort(key=lambda r: (r["proyecto"], r["dominio"].lower(), r["archivo"]))
+    OUT["dominios"] = rows
+    log(f"[dominios] en conflicto (tipo distinto entre archivos del mismo proyecto): {len(rows)}")
 
     # ═══ meta (solo datos de los archivos, sin narrativa) ══════════════════
     OUT["meta"] = {
@@ -1008,6 +1019,12 @@ def build_excel(D: dict, out_path: str) -> None:
          "Homologar las definiciones UDP (nombre, tipo, catálogo de valores) entre los "
          "modelos, y corregir los valores que no calzan con el catálogo.",
          "Se migró la unión de definiciones; los valores se guardaron tal como venían."),
+        ("Dominios en conflicto", len(D["dominios"]), "Dominios en conflicto",
+         "El mismo parent domain viene con tipo físico DISTINTO en dos archivos del mismo "
+         "proyecto (cada proyecto tiene sus propios dominios; entre sus archivos gana el primero).",
+         "Igualar el tipo del dominio en Erwin en todos los modelos del proyecto.",
+         "Se conservó el tipo del primer archivo cargado; el otro tipo quedó registrado y no se "
+         "aplicó."),
         ("Diagramas homónimos con figuras distintas", len(D["diagramas"]),
          "Diagramas con figuras distintas",
          "El mismo diagrama (mismo identificador Erwin) existe en dos archivos con figuras "
@@ -1209,6 +1226,19 @@ def build_excel(D: dict, out_path: str) -> None:
         D["diagramas"],
         ["tipo", "proyecto", "objeto", "archivos", "detalle", "canvas"],
         wrap_cols=(5, 6))
+
+    add_sheet(
+        "Dominios en conflicto", "otro",
+        "El mismo parent domain con tipo distinto entre archivos del proyecto",
+        "Doc 75: los dominios son por proyecto y se forman como la unión DISTINTA de sus archivos: "
+        "el primer archivo cargado define el tipo; un archivo posterior con OTRO tipo para el mismo "
+        "dominio se registra acá y no se aplica. Limpieza en Erwin: igualar el tipo del dominio en "
+        "todos los modelos del proyecto.",
+        ["Proyecto", "Dominio", "Tipo conservado", "Tipo ignorado", "Archivo"],
+        [18, 34, 26, 26, 28],
+        D["dominios"],
+        ["proyecto", "dominio", "conservado", "ignorado", "archivo"],
+        center_cols=(3, 4))
 
     wb.save(out_path)
     log(f"OK → {out_path} ({os.path.getsize(out_path) // 1024} KB, {len(wb.sheetnames)} hojas)")

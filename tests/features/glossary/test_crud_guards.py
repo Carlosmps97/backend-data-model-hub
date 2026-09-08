@@ -27,7 +27,7 @@ def test_create_valida_y_crea(monkeypatch):
     _ok_validation(monkeypatch)
     created = AsyncMock(return_value={"id": "t9"})
     monkeypatch.setattr(service.repository, "create_entry", created)
-    out = asyncio.run(service.create_entry(AbbreviationBody(term="analisis", abbrev="ANL")))
+    out = asyncio.run(service.create_entry("p1", AbbreviationBody(term="analisis", abbrev="ANL")))
     assert out == {"id": "t9"}
     created.assert_awaited_once()
 
@@ -40,7 +40,7 @@ def test_create_con_conflicto_409_y_no_crea(monkeypatch):
     created = AsyncMock()
     monkeypatch.setattr(service.repository, "create_entry", created)
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.create_entry(AbbreviationBody(term="Codigo", abbrev="CD2")))
+        asyncio.run(service.create_entry("p1", AbbreviationBody(term="Codigo", abbrev="CD2")))
     assert exc.value.status_code == 409
     created.assert_not_awaited()
 
@@ -50,7 +50,7 @@ def test_update_locked_409_sin_tocar(monkeypatch):
     updated = AsyncMock()
     monkeypatch.setattr(service.repository, "update_entry", updated)
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.update_entry("t1", AbbreviationBody(term="codigo", abbrev="CD")))
+        asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="codigo", abbrev="CD")))
     assert exc.value.status_code == 409
     assert "bloqueado" in exc.value.detail
     updated.assert_not_awaited()
@@ -62,7 +62,7 @@ def test_update_mismo_termino_no_revalida(monkeypatch):
     corpus = AsyncMock(return_value=([], 0))
     monkeypatch.setattr(service.repository, "corpus_conflicts", corpus)
     monkeypatch.setattr(service.repository, "update_entry", AsyncMock(return_value={"id": "t1"}))
-    out = asyncio.run(service.update_entry("t1", AbbreviationBody(term="Codigo", abbrev="CD9")))
+    out = asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="Codigo", abbrev="CD9")))
     assert out == {"id": "t1"}
     corpus.assert_not_awaited()
 
@@ -77,14 +77,14 @@ def test_update_renombre_valida_y_409(monkeypatch):
     updated = AsyncMock()
     monkeypatch.setattr(service.repository, "update_entry", updated)
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.update_entry("t1", AbbreviationBody(term="cuenta", abbrev="CTA")))
+        asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="cuenta", abbrev="CTA")))
     assert exc.value.status_code == 409
     updated.assert_not_awaited()
 
 
 def test_update_inexistente_devuelve_none(monkeypatch):
     monkeypatch.setattr(service.repository, "get_entry", AsyncMock(return_value=None))
-    assert asyncio.run(service.update_entry("nope", AbbreviationBody(term="x", abbrev="X"))) is None
+    assert asyncio.run(service.update_entry("p1", "nope", AbbreviationBody(term="x", abbrev="X"))) is None
 
 
 def test_delete_locked_409(monkeypatch):

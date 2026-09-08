@@ -6,40 +6,43 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
 from app.features.auth.deps import require_permission
+from app.features.projects.deps import alive_project
 
 from . import service
 from .schemas import (
     AbbreviationBody,
-    LogicalizeBody,
     PhysicalizeBody,
     RephysicalizeBody,
     ValidateTermBody,
 )
 
 # Editar términos del diccionario ES editar estándares → standards.edit. Los
-# endpoints de CÓMPUTO (physicalize/logicalize) quedan abiertos (los usa el
+# endpoint de CÓMPUTO (physicalize) queda abierto (lo usa el
 # modelador para previsualizar nombres; no mutan).
-router = APIRouter(prefix="/api/glossary", tags=["glossary"])
+# Doc 75 D3/D4: glosario POR PROYECTO — prefijo `/api/projects/{project_id}/glossary`.
+router = APIRouter(prefix="/api/projects/{project_id}/glossary", tags=["glossary"],
+                   dependencies=[Depends(alive_project)])
 _std = require_permission("standards.edit")
 # Lock/unlock del glosario: SOLO admin (D4) — no alcanza standards.edit.
 _admin = require_permission("admin.manage")
 
 
 @router.get("")
-async def list_entries(scope: str | None = Query(default=None)):
-    """Lista términos. Sin `scope` = todos (compat); con `scope` = sólo ese
+async def list_entries(project_id: str, scope: str | None = Query(default=None)):
+    """Lista términos del proyecto. Sin `scope` = todos; con `scope` = sólo ese
     ('column' | 'table')."""
-    return ok(await service.list_entries(scope))
+    return ok(await service.list_entries(project_id, scope))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_entry(body: AbbreviationBody, user: dict = Depends(_std)):
-    return ok(await service.create_entry(body))
+async def create_entry(project_id: str, body: AbbreviationBody, user: dict = Depends(_std)):
+    return ok(await service.create_entry(project_id, body))
 
 
 @router.put("/{entry_id}")
-async def update_entry(entry_id: str, body: AbbreviationBody, user: dict = Depends(_std)):
-    return ok(await service.update_entry(entry_id, body))
+async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody,
+                       user: dict = Depends(_std)):
+    return ok(await service.update_entry(project_id, entry_id, body))
 
 
 @router.delete("/{entry_id}")
@@ -48,28 +51,23 @@ async def delete_entry(entry_id: str, user: dict = Depends(_std)):
 
 
 @router.post("/physicalize")
-async def physicalize_name(body: PhysicalizeBody):
+async def physicalize_name(project_id: str, body: PhysicalizeBody):
     physical = await service.physicalize_name(
-        body.logical, scope=body.scope, separator=body.separator
+        project_id, body.logical, scope=body.scope, separator=body.separator
     )
     return ok({"physical": physical})
 
 
-@router.post("/logicalize")
-async def logicalize_name(body: LogicalizeBody):
-    return ok({"logical": await service.logicalize_name(body.physical)})
-
-
 @router.post("/rephysicalize")
-async def rephysicalize(body: RephysicalizeBody, user: dict = Depends(_std)):
+async def rephysicalize(project_id: str, body: RephysicalizeBody, user: dict = Depends(_std)):
     """Re-physicalize retroactivo (R5): recomputa el `physicalName` de TODAS las
-    entidades del scope desde su `logicalName`. Sin scope ⇒ tablas y columnas.
-    Update directo (fuera de publish). Devuelve `{updated: {tables, columns}}`."""
-    return ok(await service.rephysicalize(body.scope))
+    entidades del scope DEL PROYECTO desde su `logicalName`. Sin scope ⇒ tablas y
+    columnas. Update directo (fuera de publish). Devuelve `{updated: {tables, columns}}`."""
+    return ok(await service.rephysicalize(project_id, body.scope))
 
 
 @router.post("/validate")
-async def validate_term(body: ValidateTermBody,
+async def validate_term(project_id: str, body: ValidateTermBody,
                         principal: Principal = Depends(current_principal)):
     """F2 #1: valida un término NUEVO contra el glosario del scope (duplicado
     exacto) y contra los nombres lógicos publicados (frase completa, muestra
@@ -83,7 +81,7 @@ async def validate_term(body: ValidateTermBody,
     if not term:
         return ok({"ok": True,
                    "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
-    return ok(await service.validate_term(term, body.scope))
+    return ok(await service.validate_term(project_id, term, body.scope))
 
 
 @router.post("/{entry_id}/lock")

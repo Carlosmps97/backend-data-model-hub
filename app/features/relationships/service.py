@@ -1,7 +1,10 @@
 """Negocio de `relationships` (thin) + impacto de eliminación de columna."""
 from __future__ import annotations
 
+from fastapi import HTTPException
+
 from app.core.versioning import overlay
+from app.features.catalog import repository as catalog_repo
 from app.features.changesets import repository as cs_repo
 
 from . import repository
@@ -19,7 +22,17 @@ async def list_for_table(table_id: str) -> list[dict]:
 
 
 async def create(body: RelationshipBody) -> dict:
-    return await repository.create(body.model_dump())
+    """Doc 75 I1/I2: el proyecto es el de la tabla padre; el hijo debe ser del
+    mismo proyecto (una relación jamás cruza proyectos)."""
+    data = body.model_dump()
+    parent = data.get("parentTableId") or data.get("targetTableId")
+    child = data.get("childTableId") or data.get("sourceTableId")
+    pid = await catalog_repo.project_of_table(parent) if parent else None
+    if not pid:
+        raise HTTPException(status_code=409, detail="The parent table doesn't exist.")
+    if child and await catalog_repo.project_of_table(child) != pid:
+        raise HTTPException(status_code=409, detail="Tables belong to different projects.")
+    return await repository.create({**data, "projectId": pid})
 
 
 async def update(rid: str, body: RelationshipBody) -> dict | None:

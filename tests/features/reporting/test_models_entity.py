@@ -19,7 +19,7 @@ CAT = build_catalog("models", UDP)
 
 
 def _spec(**kw):
-    return QuerySpec.model_validate({"from": "models", **kw})
+    return QuerySpec.model_validate({"from": "models", "projectId": "p1", **kw})
 
 
 def test_models_mapea_a_subject_areas_y_ordena_por_name():
@@ -28,7 +28,8 @@ def test_models_mapea_a_subject_areas_y_ordena_por_name():
 
 
 def test_catalog_models_campos_base_y_udp_canvas():
-    assert {"name", "projectId", "folderId", "tableCount", "udp.u9"} <= set(CAT)
+    assert {"name", "folderId", "tableCount", "udp.u9"} <= set(CAT)
+    assert "projectId" not in CAT                   # doc 75: la consulta ya es de un proyecto
     assert "udp.u1" not in CAT                       # level='column' NO aparece acá
     assert CAT["udp.u9"].path == "udpValues.u9"      # cubierto por el wildcard
     assert CAT["udp.u9"].enumValues == ["Riesgos", "Finanzas"]

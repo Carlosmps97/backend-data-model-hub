@@ -21,5 +21,5 @@ def test_clean_normaliza_level_desconocido_a_column():
 
 
 def test_definition_doc_roundtrip_canvas():
-    d = UdpDefinitionDoc.model_validate({"name": "Dominio funcional", "level": "canvas"})
+    d = UdpDefinitionDoc.model_validate({"projectId": "p1", "name": "Dominio funcional", "level": "canvas"})
     assert d.model_dump()["level"] == "canvas"

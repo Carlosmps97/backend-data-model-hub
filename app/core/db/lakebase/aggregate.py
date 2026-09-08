@@ -27,6 +27,13 @@ def compile_pipeline(pipeline: list[dict], base_from: str, s: Sql) -> str:
     cur = f"SELECT doc AS d FROM {base_from}"
     i = 0
     n = 0
+    # Doc 75 D19: el $match INICIAL corre sobre la TABLA (modo table): usa la
+    # columna `project_id`, la PK `id` y el GIN exactamente como un find(). Es
+    # equivalente al modo doc porque los docs se guardan completos (`_id` incl.).
+    if pipeline and isinstance(pipeline[0], dict) and set(pipeline[0]) == {"$match"}:
+        cond = filter_sql(pipeline[0]["$match"], s, doc="doc", mode="table")
+        cur = f"SELECT doc AS d FROM {base_from} WHERE {cond}"
+        i = 1
     while i < len(pipeline):
         stage = pipeline[i]
         if not isinstance(stage, dict) or len(stage) != 1:

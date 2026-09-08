@@ -1,6 +1,10 @@
 """Agregación pura del reporte (`reporting.service`)."""
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock
+
+from app.features.reporting import service
 from app.features.reporting.service import column_rows, table_rows
 
 
@@ -22,9 +26,9 @@ def _fixture():
     ]
     subject_areas = [
         {"id": "sa1", "projectId": "p1", "name": "Banking", "tableIds": ["t1", "t2"]},
-        {"id": "sa2", "projectId": "p2", "name": "Risk", "tableIds": ["t2", "t3"]},
+        {"id": "sa2", "projectId": "p1", "name": "Risk", "tableIds": ["t2", "t3"]},
     ]
-    projects = [{"id": "p1", "name": "Core Banking"}, {"id": "p2", "name": "Risk Analytics"}]
+    projects = [{"id": "p1", "name": "Core Banking"}]      # doc 75: el reporte es de UN proyecto
     return tables, column_counts, relationships, subject_areas, projects
 
 
@@ -42,11 +46,11 @@ def test_table_rows_counts_and_names():
     assert by_id["t2"]["relationshipCount"] == 2
     assert by_id["t3"]["relationshipCount"] == 1
 
-    # subjectAreas / projects = nombres que referencian la tabla (vía tableIds)
+    # subjectAreas = canvases que referencian la tabla (vía tableIds);
+    # projects = el proyecto del reporte, en TODAS las filas (doc 75).
     assert by_id["t2"]["subjectAreas"] == ["Banking", "Risk"]
-    assert by_id["t2"]["projects"] == ["Core Banking", "Risk Analytics"]
     assert by_id["t1"]["subjectAreas"] == ["Banking"]
-    assert by_id["t1"]["projects"] == ["Core Banking"]
+    assert all(r["projects"] == ["Core Banking"] for r in rows)
 
     # passthrough de campos de tabla
     assert by_id["t1"]["description"] == "Maestro de clientes"
@@ -63,16 +67,11 @@ def test_table_rows_filter_by_schema():
     assert {r["id"] for r in rows} == {"t1", "t2"}
 
 
-def test_table_rows_filter_by_project():
-    # p2 referencia t2 y t3 (canvas "Risk").
-    rows = table_rows(*_fixture(), filters={"projectId": "p2"})
-    assert {r["id"] for r in rows} == {"t2", "t3"}
-
-
-def test_table_rows_filter_combined_schema_and_project():
-    # p2 → {t2, t3}; schema=risk → {t3}. Intersección = {t3}.
-    rows = table_rows(*_fixture(), filters={"projectId": "p2", "schema": "risk"})
-    assert {r["id"] for r in rows} == {"t3"}
+def test_table_rows_ignora_filtros_desconocidos():
+    # Doc 75: el alcance por proyecto lo pone el repository; la agregación pura
+    # sólo filtra por `schema`.
+    rows = table_rows(*_fixture(), filters={"projectId": "p9"})
+    assert {r["id"] for r in rows} == {"t1", "t2", "t3"}
 
 
 def test_table_with_no_references_has_empty_lists():
@@ -103,3 +102,70 @@ def test_column_rows_resolves_domain_name_and_sorts():
     assert rows[0]["isNullable"] is True
     assert rows[0]["isForeignKey"] is False
     assert rows[0]["isPartition"] is False
+
+
+def test_table_rows_metadata_completa_doc70():
+    tables = [{"id": "t1", "physicalName": "HD_BASE", "logicalName": "base",
+               "physicalNameOverridden": True, "logicalOnly": False, "physicalOnly": True},
+              {"id": "t2", "physicalName": "PLAIN", "logicalName": "plain"}]
+    rows = {r["id"]: r for r in table_rows(tables, {}, [], [], [])}
+    assert (rows["t1"]["physicalNameOverridden"], rows["t1"]["logicalOnly"], rows["t1"]["physicalOnly"]) == (True, False, True)
+    # defaults para docs previos a los docs 68/69
+    assert (rows["t2"]["physicalNameOverridden"], rows["t2"]["logicalOnly"], rows["t2"]["physicalOnly"]) == (False, False, False)
+
+
+def test_column_rows_metadata_completa_doc70():
+    columns = [{"id": "c1", "tableId": "t1", "physicalName": "COD", "logicalName": "codigo",
+                "dataType": "VARCHAR(30)", "parentDomainId": "d1", "ordinal": 3,
+                "pkPosition": 0, "isPrimaryKey": True, "typeOverridden": True,
+                "logicalTypeOverridden": False, "physicalNameOverridden": True, "logicalOnly": True},
+               {"id": "c2", "tableId": "t1", "physicalName": "X", "logicalName": "x", "dataType": "INT", "ordinal": 4}]
+    rows = {r["id"]: r for r in column_rows(columns, [{"id": "d1", "name": "Codigo"}])}
+    c1 = rows["c1"]
+    assert c1["parentDomain"] == "Codigo" and c1["parentDomainId"] == "d1"
+    assert (c1["ordinal"], c1["pkPosition"]) == (3, 0)
+    assert "logicalOrdinal" not in c1 and "columnOrdinal" not in c1   # doc 74: un solo orden
+    assert (c1["typeOverridden"], c1["logicalTypeOverridden"], c1["physicalNameOverridden"]) == (True, False, True)
+    assert (c1["logicalOnly"], c1["physicalOnly"]) == (True, False)
+    c2 = rows["c2"]
+    assert c2["parentDomainId"] is None and c2["pkPosition"] is None
+    assert (c2["typeOverridden"], c2["physicalNameOverridden"], c2["logicalOnly"], c2["physicalOnly"]) == (False, False, False, False)
+
+
+# ── Orquestación por proyecto (doc 75) ─────────────────────────────────────
+
+
+def _wire_repo(monkeypatch):
+    calls: dict = {}
+
+    async def _inputs(project_id):
+        calls["inputs"] = project_id
+        return {"tables": [{"id": "t1", "physicalName": "A", "schema": "core"}],
+                "columnCounts": {}, "relationships": [], "subjectAreas": []}
+
+    async def _page(project_id, limit):
+        calls["page"] = (project_id, limit)
+        return {"tables": [{"id": "t1", "physicalName": "A", "schema": "core"}],
+                "columnCounts": {}, "relationships": [], "subjectAreas": []}
+
+    monkeypatch.setattr(service.repository, "report_inputs", _inputs)
+    monkeypatch.setattr(service.repository, "report_inputs_page", _page)
+    monkeypatch.setattr(service.repository, "udp_definitions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.projects_repo, "get_project",
+                        AsyncMock(return_value={"id": "p1", "name": "Core Banking"}))
+    return calls
+
+
+def test_list_table_rows_barre_el_proyecto_con_filtros(monkeypatch):
+    calls = _wire_repo(monkeypatch)
+    rows = asyncio.run(service.list_table_rows("p1", {"schema": "core"}, None))
+    assert calls == {"inputs": "p1"}
+    assert rows[0]["projects"] == ["Core Banking"]
+    service.repository.udp_definitions.assert_awaited_once_with("p1")
+
+
+def test_list_table_rows_fast_path_sin_filtros(monkeypatch):
+    calls = _wire_repo(monkeypatch)
+    rows = asyncio.run(service.list_table_rows("p1", {}, 50))
+    assert calls == {"page": ("p1", 50)}
+    assert rows[0]["projects"] == ["Core Banking"]

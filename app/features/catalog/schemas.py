@@ -10,6 +10,9 @@ class CanonicalTableBody(BaseModel):
     sql_schema: str | None = Field(default=None, alias="schema")
     description: str | None = None
     udpValues: dict[str, str] | None = None   # etiquetas UDP asignadas a la tabla
+    # Doc 69: existencia en una sola faceta (opcionales; el default lo pone el modelo).
+    logicalOnly: bool | None = None
+    physicalOnly: bool | None = None
 
 
 class CanonicalColumnBody(BaseModel):
@@ -25,3 +28,8 @@ class CanonicalColumnBody(BaseModel):
     description: str | None = None
     ordinal: int = 0
     udpValues: dict[str, str] | None = None   # etiquetas UDP asignadas a la columna
+    # Doc 69: faceta lógica (opcionales; el default lo pone el modelo).
+    logicalDataType: str | None = None
+    logicalTypeOverridden: bool | None = None
+    logicalOnly: bool | None = None
+    physicalOnly: bool | None = None

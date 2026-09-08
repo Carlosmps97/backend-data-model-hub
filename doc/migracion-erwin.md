@@ -1,6 +1,6 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-07-31 · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-09-08 (doc 75: proyectos independientes) · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
 50 MB y de **1.8 GB** — el parser es streaming: ~38 s y ~0.4 GB de RAM por
 GB de XML). Índice general de TODOS los scripts: `scripts/README.md`.
@@ -14,6 +14,20 @@ duplica, y folders/canvases homónimos del mismo proyecto se fusionan. Todos
 los archivos de una familia cargan al MISMO proyecto (`--project` explícito,
 obligatorio si ya existe). Cada carga deja un reporte JSON de decisiones en
 `migration-reports/`.
+
+**Proyectos INDEPENDIENTES (doc 75, owner 2026-09-07):** cada proyecto es un
+universo aparte — sus tablas, esquemas, relaciones, vistas, canvases,
+**estándares** (glosario, dominios, defs UDP, naming, reglas DDL) y
+**versiones**. En el kit eso significa: (1) el proyecto se resuelve PRIMERO
+(por el **manifiesto** `projects.json` de la carpeta o por el nombre del
+archivo) y todo doc nace con `projectId`; (2) los ids de plataforma son
+`uuid5("<projectId>|<Long_Id de Erwin>")` — el mismo objeto Erwin cargado en
+dos proyectos tiene ids distintos; (3) la adopción por clave natural, la
+unicidad del nombre físico y el prefetch se acotan al proyecto; (4) los
+estándares de un proyecto con varios archivos son la **unión distinta**
+(el primero gana; discrepancias → `glossary_conflicts`/`domain_conflicts` del
+reporte); (5) `seed_ddl_export_rules` y `mark_base_version` corren por
+proyecto. No hay backfill: la BD se reemplaza con el one-shot.
 
 Todos los scripts viven en `scripts/erwin_migration/` (más los auxiliares en
 `scripts/`). **Son agnósticos al archivo**: no hay nombres DDV, esquemas ni
@@ -35,7 +49,7 @@ resolvió por estructura, no por nombres.
 | Cruzar XML(s) contra la BD viva y entre sí (solapes, score, estándares, estimación) | `crosscheck` | Solo lee |
 | Sacar glosario/dominios/UDP a archivos | `extract_standards` | No |
 | Sacar tablas/columnas/vistas/relaciones/canvases a archivos | `extract_model` | No |
-| Vaciar modelo+estándares+governance ANTES de una carga limpia | `reset_for_migration` | Sí (con `--apply`) — preserva users/roles/naming_config/column_catalog/audit_log |
+| Vaciar la BD ANTES de una carga limpia (DROPea todas las tablas del schema `dmh`, incluidos usuarios/roles/auditoría; el one-shot vuelve a crear `admin`) | `reset_for_migration` | Sí (con `--apply`) |
 | Cargar el modelo REAL a la plataforma | `migrate` | Sí (con `--apply`) |
 | Ordenar los canvases después de cargar | `arrange_all` | Sí |
 | Validar consistencia después de cargar | `audit_data_consistency` | Solo lee |
@@ -43,38 +57,61 @@ resolvió por estructura, no por nombres.
 | Sembrar el ruleset base del DDL Export (8 reglas + lookups) | `seed_ddl_export_rules` | Sí (con `--apply`) |
 | Marcar la versión base `v1` al cerrar la carga (sin él la web bloquea Model) | `mark_base_version` | Sí (con `--apply`) |
 | Re-aplicar las 3 correcciones de partición del owner (solo XML DDV actual) | `fix_particiones_ddv_20260717` | Sí (con `--apply`) |
-| Volver a la VERSIÓN BASE (deshace y borra toda versión posterior a v1) | `reset_to_base_version` | Sí (con `--apply`) |
+| Volver a la VERSIÓN BASE de un proyecto (deshace y borra toda versión posterior a su v1) | `reset_to_base_version` | Sí (con `--apply`) |
+| Orquestar TODO lo anterior por carpeta (one-shot destructivo) o sumar un XML (append) | `run_migration` | Sí (con `--apply`) |
 
-**Flujo recomendado para un XML nuevo:**
+**Flujo recomendado: el orquestador `run_migration` (doc 54 + doc 75).**
+El one-shot por carpeta es DESTRUCTIVO (dropea el schema `dmh` completo) y
+encadena, por proyecto del manifiesto: `quality` (gate + glosario cruzado
+entre los archivos del proyecto) → reset → `create_admin` → `migrate` archivo
+por archivo → `audit_data_consistency` → `seed_ddl_export_rules --project` →
+`arrange_all --project` → `mark_base_version` (v1 de cada proyecto):
 ```
-quality  →  crosscheck (vs BD)  →  migrate (dry-run)
-        →  (opcional si se REEMPLAZA la BD: reset_for_migration --apply)
-        →  migrate --project "Familia" --apply
-        →  arrange_all --project "Familia"  →  audit_data_consistency
+.venv/bin/python -m scripts.run_migration --folder ../folder_data                  # plan (dry-run)
+.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force  # ejecuta
+.venv/bin/python -m scripts.run_migration --append "ruta/otro.xml" [--project "…"] --apply   # suma UN xml
 ```
-Corrido el 2026-07-16 contra el DDV real: la BD de la plataforma ES ese modelo.
-(La demo sintética y sus seeds se retiraron el 2026-07-20 — el flujo es
-únicamente XML → Lakebase.)
+`--force` sigue haciendo falta para `folder_data/` (E-REL-BROKEN ×2 en UDV
+Físico: el gate lo explica al final). `--manifest PATH` apunta a otro
+manifiesto (default `<carpeta>/projects.json`; en `--append` sólo si se pasa).
 
-**Secuencia COMPLETA en una BD vacía** (doc 35 camino A de plan-implementacion/
-— p. ej. estrenar otro workspace Databricks; desde la raíz del backend, con el
-`.env` apuntando al destino):
+**Manifiesto de proyectos (`projects.json`, doc 75 D9).** Decide a qué
+proyecto va cada archivo ANTES de tocar la BD:
+```json
+{"projects": [
+  {"name": "Modelo DDV", "files": ["Modelo de Datos DDV_FISICO/*.xml"],
+   "description": "Modelo de Datos DDV físico (CPYBCA, Otros y los demás archivos de la carpeta)"}
+]}
 ```
-0)    create_admin                     # admin/admin + los 4 roles (idempotente)
-1..N) por CADA XML de la familia (orden usado: 1º CPYBCA, 2º Otros):
-      quality → crosscheck → migrate --project "Modelo de Datos DDV_FISICO" (dry-run) → --apply
-Al final, UNA sola vez:
-      arrange_all --project "Modelo de Datos DDV_FISICO"
-      audit_data_consistency           # esperado: 0 fixables + ~176 informativos conocidos (§6)
-      seed_ddl_export_rules (dry-run) → --apply    # ruleset del DDL Export (§6b)
-      mark_base_version (dry-run) → --apply        # marcador v1 (§6c)
+- `files` son patrones glob relativos a la carpeta (recursivos con `**`);
+  varios archivos bajo un mismo `name` = UN proyecto multi-archivo (merge
+  incremental + unión distinta de estándares).
+- **Regla general** para lo que ningún patrón matchea: un archivo = un
+  proyecto con el **nombre del archivo** sin extensión (`UDV INT FISICO.xml`
+  → «UDV INT FISICO»).
+- Validación estricta (`ManifestError`, aborta antes del wipe): patrón sin
+  match, un archivo en dos entradas, nombres repetidos o que colisionan con
+  la regla general.
+- Con `folder_data/` (4 XML) el plan da **3 proyectos**: «Modelo DDV»
+  [manifest] ×2 archivos (orígenes CPYBCA / Otros), «UDV INT FISICO» y
+  «UDV INT LOGICO» [archivo]; 13 pasos con 3 gates.
+
+**Secuencia manual equivalente** (lo que el orquestador hace por dentro; útil
+para diagnosticar o para el notebook corporativo):
 ```
-El orden CPYBCA → Otros reproduce la foto actual de la BD; como los ids son
-deterministas (`uuid5` del Long_Id de Erwin), la BD nueva queda con los
-MISMOS ids que la original. A la fecha (2026-07-31) quedan ~13 XML de la
-familia por cargar al MISMO proyecto; tras toda carga que mueva estándares
-(glosario/dominios/UDP), registrar una baseline nueva de Data Standards
-ANTES de usar Restore.
+0)    create_admin                                        # admin/admin + los 4 roles (idempotente)
+1..N) por CADA proyecto y CADA uno de sus XML:
+      quality → crosscheck --project "P" → migrate --project "P" [--description "…"] (dry-run) → --apply
+Al final, por CADA proyecto:
+      arrange_all --project "P"
+      audit_data_consistency                               # esperado: 0 fixables
+      seed_ddl_export_rules --project "P" (o --all-projects) → --apply
+      mark_base_version (dry-run) → --apply                # v1 de cada proyecto activo
+```
+Como los ids son deterministas (`uuid5("<projectId>|<Long_Id>")`), re-correr
+el mismo XML al mismo proyecto actualiza en su sitio. Tras toda carga que
+mueva estándares (glosario/dominios/UDP) de un proyecto, registrar una
+baseline nueva de Data Standards EN ESE proyecto antes de usar Restore.
 
 **Plan B corporativo (Lakebase inalcanzable desde la laptop — private link):**
 la misma secuencia corre desde un cluster del PROPIO workspace (access mode
@@ -125,6 +162,8 @@ incremental.
   (score de uso de cada lado) y diff de columnas; glosario/dominios nuevos o
   distintos; enums UDP que crecerían y variantes de grafía ignoradas (A3);
   **estimación de la carga** (upserts, lotes, minutos según latencia medida).
+  Doc 75: el cruce es contra el PROYECTO destino (`--project`, default = nombre
+  del modelo); un proyecto que no existe todavía = todo nuevo.
 - Con 2+ archivos: solape de tablas entre ellos.
 
 ## 2. `extract_standards` — estándares limpios a archivos
@@ -137,8 +176,16 @@ Extrae **glosario (NSM), parent domains y definiciones UDP** del XML a JSON
 ```
 - **Salida** (default `standards_out/<xml>/`): `glossary.json`
   (`term/abbrev/alts`), `parent_domains.json` (`name/dataType/definition`),
-  `udp_definitions.json` (`name/level/dataType/default/allowedValues/usedBy`)
+  `udp_definitions.json` (`name/level/view/dataType/default/allowedValues/usedBy`)
   y `summary.json`. Con `--csv`, equivalentes abribles en Excel.
+- **Facetas (doc 69, 2026-09-05):** las defs `Entity.Logical.X` y
+  `Entity.Physical.X` de Erwin son definiciones DISTINTAS de la plataforma
+  (`view` = `logical` | `physical`; View y Model siempre físicas). La carga
+  escribe los valores de ambas facetas en el mismo `udpValues` (ids distintos)
+  y captura por columna el tipo lógico, el orden lógico y los flags
+  `Is_Logical_Only`/`Is_Physical_Only`; el `defaultDataType` del dominio es el
+  tipo FÍSICO y el lógico va en `logicalDataType`. Ver
+  `scripts/erwin_migration/README.md` § Facetas.
 - **Nota (actualizado doc 22 §7):** los `allowedValues` de UDP tipo lista se
   leen de la **lista EXPLÍCITA** del XML (`tag_Udp_Values_List`) — el catálogo
   completo de la definición, aunque un valor no se use en ninguna tabla —
@@ -173,11 +220,22 @@ muestra el plan sin abrir conexión a la BD.
 
 ```bash
 .venv/bin/python -m scripts.erwin_migration.migrate "ruta/modelo.xml" [más.xml ...] \
-    [--apply] [--project "Nombre"] [--only-sa SUBJECT_AREA] [--force]
+    [--apply] [--project "Nombre"] [--description "…"] [--only-sa SUBJECT_AREA] [--force]
 ```
 - **Jerarquía:** Modelo → proyecto · Subject Area → folder · ER_Diagram →
-  canvas. `--project` renombra el proyecto; `--only-sa` migra solo una SA
-  (pilotos); `--force` continúa aunque el gate tenga ERRORs.
+  canvas (`tableIds` + `viewIds`: las vistas dibujadas en el diagrama son
+  miembros de ese canvas, doc 70). `--project` fija el proyecto destino
+  (obligatorio si ya existe; `--description` sólo si se crea); `--only-sa`
+  migra solo una SA (pilotos); `--force` continúa aunque el gate tenga ERRORs.
+- **Proyecto PRIMERO (doc 75):** `Migrator` resuelve/crea el proyecto antes de
+  cualquier doc (`_ensure_project`), estampa `projectId` en TODO (modelo y
+  estándares), namespacea los ids (`policies.project_scoped_id`) y acota el
+  prefetch de claves naturales, la adopción y la unicidad al proyecto. Los
+  estándares se **reusan por clave natural DENTRO del proyecto** (unión
+  distinta entre archivos: el primero gana; un `abbrev` o `defaultDataType`
+  distinto en otro archivo queda en `glossary_conflicts`/`domain_conflicts` del
+  reporte y en la hoja «Dominios en conflicto» de `migration_detail_report`);
+  el `naming_config` del proyecto se siembra con `$setOnInsert`.
 - **Relaciones v2 (doc 19):** UN doc por relación Erwin con TODOS sus pares
   de columnas (`parentTableId/childTableId + pairs[]` — las FK compuestas ya
   no se parten en N docs) + `identifying` (tipo 2) y cardinalidad del hijo.
@@ -194,7 +252,8 @@ muestra el plan sin abrir conexión a la BD.
   para decisión humana. `"No Definido"` (default del UDP) no es partición.
   Las incongruencias del XML DDV actual ya tienen decisión del owner: §7.
 - **Entidad `schemas` (doc 18):** también upserta un doc por schema usado
-  (ids `sch-<name>`, reusa por nombre case-insensitive).
+  (ids `sch-<name>` namespaceados por proyecto, reusa por nombre
+  case-insensitive dentro del proyecto).
 - **Definiciones de vista (F5, doc 22):** además del físico, migra la
   definición funcional a nivel VISTA (`views.description`) y a nivel COLUMNA
   DE VISTA (`sources[].description`) — esta última **solo** cuando difiere de
@@ -208,18 +267,21 @@ muestra el plan sin abrir conexión a la BD.
   desde Erwin; los LAYOUTS de canvas trabajados en la plataforma se PRESERVAN.
   El `views.sql` (CREATE VIEW original) es referencia congelada: el Export DDL
   de la plataforma siempre genera desde la estructura (`sources`).
-- **DOS órdenes distintos (fix 2026-07-17, doc 19 §12b):**
-  1. *Orden físico de columnas* (`ordinal`): sale del array ordenado del dueño
-     (`Physical_Columns_Order_Ref_Array` — lo que Erwin muestra), con fallback
-     al `Physical_Order` numérico (puede quedar desincronizado tras
-     reordenamientos).
+- **DOS órdenes distintos (doc 19 §12b · doc 74):**
+  1. *Orden único de columnas* (`ordinal`, el mismo en el modelo lógico y el
+     físico): las llaves primarias primero, en el orden de la llave, y después
+     el resto en el Column order de Erwin (`Columns_Order_Ref_Array`; sin
+     array cae al Attribute order y, sin éste, al `Physical_Order`). Es el
+     «físico normal» que pidió el owner (PK al inicio); el orden físico de la
+     BD de Erwin (`Physical_Columns_Order_Ref_Array`) ya no se persiste.
   2. *Orden de la LLAVE* (`pkPosition`, 0-based): el orden de miembros del
      Key_Group PK. Erwin ordena el bloque PK del diagrama y el
-     `PRIMARY KEY(...)` del DDL por ESTE orden, no por el físico — la
-     plataforma hace lo mismo (canvas + Export DDL).
-- **Idempotente y NO destructivo:** ids deterministas (uuid5 del Long_Id de
-  Erwin) → re-correr el mismo archivo actualiza en su sitio. Los estándares
-  ya existentes (glosario/dominios/UDP) se **reusan por clave natural**; las
+     `PRIMARY KEY(...)` del DDL por ESTE orden — la plataforma hace lo mismo
+     (canvas + Export DDL).
+- **Idempotente y NO destructivo:** ids deterministas
+  (`uuid5("<projectId>|<Long_Id de Erwin>")`) → re-correr el mismo archivo al
+  mismo proyecto actualiza en su sitio. Los estándares ya existentes del
+  proyecto (glosario/dominios/UDP) se **reusan por clave natural**; las
   tablas/vistas en conflicto con docs creados a mano se **omiten con aviso**.
   Nunca borra datos.
 - **Rendimiento real (2026-07-25):** el XML2 "Otros" (**1.8 GB**) cargó en
@@ -254,23 +316,25 @@ físico y lógico).
 ```bash
 .venv/bin/python -m scripts.audit_data_consistency
 ```
-Chequeos C1–C10 de integridad referencial y campos requeridos sobre la BD.
-Esperado tras una migración limpia: **0 hallazgos fixables**. Con la carga
-actual (CPYBCA + Otros) el esperado es **0 fixables + ~176 informativos
-conocidos**: C10×78 particiones reasignadas, C5×9 vistas multi-fuente,
-C8b×89 grafías variantes fieles al XML.
+Chequeos C1–C10 de integridad referencial y campos requeridos sobre la BD
+(C1/C3 verifican además que cada columna/relación apunte a docs del MISMO
+`projectId`, doc 75). Esperado tras una migración limpia: **0 hallazgos
+fixables** (más los informativos conocidos: C10 particiones reasignadas, C5
+vistas multi-fuente, C8b grafías variantes fieles al XML).
 
 ## 6b. `seed_ddl_export_rules` — ruleset base del DDL Export
 
-Siembra, como UNA versión de Data Standards ("Base — DDL export rules"), las
-**8 reglas activas** del Export DDL (masking técnico, desencriptación de
-negocio `bcp_ddv_desencrypt`, tags de governance, TBLPROPERTIES de vacuum,
-cascada `_rej` + vista técnica) **más los lookups `vacuum_map`/`dac_map`**
-(doc 30 de plan-implementacion/). Aborta si ya hay reglas.
+Siembra, como UNA versión de Data Standards del proyecto ("Base — DDL export
+rules"), las **8 reglas activas** del Export DDL (masking técnico,
+desencriptación de negocio `bcp_ddv_desencrypt`, tags de governance,
+TBLPROPERTIES de vacuum, cascada `_rej` + vista técnica) **más los lookups
+`vacuum_map`/`dac_map`** (doc 30 de plan-implementacion/). Doc 75: el ruleset
+es POR PROYECTO — `--project "P"` o `--all-projects` (obligatorio uno); en un
+proyecto que ya tiene reglas se salta con aviso.
 
 ```bash
-.venv/bin/python -m scripts.seed_ddl_export_rules           # dry-run
-.venv/bin/python -m scripts.seed_ddl_export_rules --apply
+.venv/bin/python -m scripts.seed_ddl_export_rules --all-projects           # dry-run
+.venv/bin/python -m scripts.seed_ddl_export_rules --project "Modelo DDV" --apply
 ```
 - **Fix corporativo (2026-07-30, doc 36 anexo):** el kit multi-archivo NO
   crea defs UDP con usedBy=0 (política A4) y en el DDV real ninguna tabla
@@ -286,12 +350,14 @@ cascada `_rej` + vista técnica) **más los lookups `vacuum_map`/`dac_map`**
 
 NUEVO 2026-07-29. La migración escribe DIRECTO a las colecciones publicadas
 sin crear changesets, y sin una versión aplicada la web **bloquea el módulo
-Model** ("Open model" exige producción publicada). El script crea el
-changeset marcador **`v1`** (status `approved` + `appliedAt`, **0 cambios**),
-registra la baseline de Data Standards si el stream está vacío y asegura el
-permiso `rollback` en los roles. Idempotente; aborta si ya hay versiones
-aplicadas. Con una familia multi-archivo (~15 XML): TODOS los
-`migrate --apply` primero, el marcador UNA sola vez al final.
+Model** ("Open model" exige producción publicada). Doc 75: las versiones son
+POR PROYECTO — el script recorre los proyectos activos y, en cada uno que no
+tenga versiones aplicadas, crea el changeset marcador **`v1`** (status
+`approved` + `appliedAt`, **0 cambios**, `projectId` del proyecto) y registra
+la baseline de Data Standards si el stream de ese proyecto está vacío; además
+asegura el permiso `rollback` en los roles. Idempotente (un proyecto con `v1`
+se salta). Con una familia multi-archivo: TODOS los `migrate --apply` del
+proyecto primero, el marcador después (`--title` para el rótulo).
 
 ```bash
 .venv/bin/python -m scripts.mark_base_version           # dry-run
@@ -304,11 +370,23 @@ El único script NO agnóstico, a propósito: re-aplica las 3 correcciones de
 partición **decididas tabla por tabla por el owner** (doc 21 §3) sobre el DDV
 real — datos de negocio que NO están en el XML, así que **re-migrar el mismo
 XML las pisa** (el audit C10 lo avisa). Correr DESPUÉS de re-migrar
-`DDV - CPYBCA.xml`; para cualquier otro XML no aplica.
+`DDV - CPYBCA.xml`; para cualquier otro XML no aplica. Doc 75: las tablas se
+buscan en el proyecto `--project` (default «Modelo DDV»).
 
 ```bash
 .venv/bin/python -m scripts.fix_particiones_ddv_20260717           # dry-run
-.venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply
+.venv/bin/python -m scripts.fix_particiones_ddv_20260717 --project "Modelo DDV" --apply
+```
+
+## 7b. `reset_to_base_version` — volver a la v1 de un proyecto
+
+Deshace y borra toda versión posterior a `v1` **del proyecto** (`--project
+"P"`; sin él, todos los activos), dejando producción como la dejó la carga.
+Dry-run por default; `--apply` escribe.
+
+```bash
+.venv/bin/python -m scripts.reset_to_base_version --project "UDV INT FISICO"
+.venv/bin/python -m scripts.reset_to_base_version --project "UDV INT FISICO" --apply
 ```
 
 ---
@@ -321,7 +399,12 @@ XML las pisa** (el audit C10 lo avisa). Correr DESPUÉS de re-migrar
 - **`policies.py`** — políticas aprobadas de migración (doc 12): schema
   faltante → `No_Definido`, dedup de columnas (gana la 1ª), colapso de defs
   UDP Logical/Physical, mapeo de niveles UDP (Entity→table, Attribute→column,
-  Model→canvas), ids deterministas uuid5.
+  Model→canvas), ids deterministas uuid5 namespaceados por proyecto
+  (`project_scoped_id(project_id, long_id)`, doc 75).
+- **`scripts/run_migration.py`** — orquestador (doc 54/75): lee el
+  manifiesto (`ManifestError`), planifica archivos → proyectos
+  (`plan_files`/`group_by_project`), corre el gate `quality` por proyecto y
+  encadena los scripts de arriba.
 
 ## 9. Qué garantiza el agnosticismo (y sus límites)
 

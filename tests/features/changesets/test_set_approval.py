@@ -34,7 +34,7 @@ def _patch_db(monkeypatch, result):
 
 
 def test_set_approval_acepta_username_con_puntos(monkeypatch):
-    doc = {"_id": "c1", "title": "bb", "owner": "admin", "status": "submitted",
+    doc = {"_id": "c1", "projectId": "p1", "title": "bb", "owner": "admin", "status": "submitted",
            "approvals": {ACTOR: ENTRY}}
     coll = _patch_db(monkeypatch, doc)
 

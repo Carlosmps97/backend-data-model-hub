@@ -14,7 +14,7 @@ from app.features.changesets import service
 
 def _mock_repo(monkeypatch, published, changes):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=published))
     monkeypatch.setattr(service.repository, "changes_map",
                         AsyncMock(return_value={"canonical_tables": changes}))

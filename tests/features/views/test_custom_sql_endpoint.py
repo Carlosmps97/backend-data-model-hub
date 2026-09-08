@@ -38,6 +38,7 @@ def test_parse_endpoint_invalid_422():
 def test_create_deriva_custom_columns(monkeypatch):
     mock_create = AsyncMock(return_value={"id": "v1"})
     monkeypatch.setattr(views_service.repository, "create", mock_create)
+    monkeypatch.setattr(views_service.catalog_repo, "project_of_table", AsyncMock(return_value="p1"))
     body = ViewBody.model_validate({
         "name": "v", "tableId": "t1",
         "customSql": "SELECT id, UPPER(n) AS n_up FROM t1",
@@ -52,6 +53,7 @@ def test_create_deriva_custom_columns(monkeypatch):
 def test_update_limpia_custom_columns_al_volver_a_regular(monkeypatch):
     mock_update = AsyncMock(return_value={"id": "v1"})
     monkeypatch.setattr(views_service.repository, "update", mock_update)
+    monkeypatch.setattr(views_service.repository, "get", AsyncMock(return_value={"id": "v1", "projectId": "p1"}))
     body = ViewBody.model_validate({
         "name": "v", "tableId": "t1", "customSql": "   ",
         "customColumns": [{"name": "zombi"}],

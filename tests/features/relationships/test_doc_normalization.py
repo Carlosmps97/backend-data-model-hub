@@ -7,7 +7,7 @@ from app.features.relationships.models import RelationshipDoc
 
 
 def _legacy(**over) -> dict:
-    base = {
+    base = {"projectId": "p1", 
         "id": "r1",
         "sourceTableId": "tS", "sourceColumnId": "cS",
         "targetTableId": "tT", "targetColumnId": "cT",
@@ -54,7 +54,7 @@ def test_sin_cardinalidades_defaults():
 
 
 def test_v2_pasa_intacto():
-    d = RelationshipDoc.model_validate({
+    d = RelationshipDoc.model_validate({"projectId": "p1", 
         "id": "r2", "parentTableId": "tP", "childTableId": "tC",
         "pairs": [
             {"parentColumnId": "p1", "childColumnId": "c1", "roleName": "moneda_soles"},
@@ -69,5 +69,4 @@ def test_v2_pasa_intacto():
 
 def test_pairs_minimo_uno():
     with pytest.raises(Exception):
-        RelationshipDoc.model_validate(
-            {"parentTableId": "a", "childTableId": "b", "pairs": []})
+        RelationshipDoc.model_validate({"projectId": "p1", "parentTableId": "a", "childTableId": "b", "pairs": []})

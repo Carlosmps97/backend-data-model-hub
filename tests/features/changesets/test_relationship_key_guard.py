@@ -68,13 +68,15 @@ def _mock_repo(monkeypatch, published_cols, changes_map=None):
     la única llamada con datos relevantes es la de canonical_columns del padre
     (la unicidad no aplica a relationships y el slice del hijo no duplica)."""
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=published_cols))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes_map or {}))
     set_change = AsyncMock(return_value={"id": "c1", "status": "draft"})
     set_bulk = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "set_change", set_change)
     monkeypatch.setattr(service.repository, "set_changes_bulk", set_bulk)
+    # Doc 75 I2: el guard anti-cruce tiene sus propios tests (test_cross_project_guard).
+    monkeypatch.setattr(service, "_cross_project_check", AsyncMock())
     monkeypatch.setattr(service.settings_service, "get_naming_for",
                         AsyncMock(return_value={"maxLength": 0}))
     return set_change, set_bulk

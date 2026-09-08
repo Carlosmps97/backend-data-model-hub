@@ -18,7 +18,7 @@ def test_clean_conserva_level_view():
 
 
 def test_definition_doc_roundtrip_view():
-    d = UdpDefinitionDoc.model_validate({
+    d = UdpDefinitionDoc.model_validate({"projectId": "p1", 
         "name": "View Type", "level": "view", "dataType": "list",
         "allowedValues": ["Regular", "Personalizada"], "defaultValue": "Regular"})
     out = d.model_dump()

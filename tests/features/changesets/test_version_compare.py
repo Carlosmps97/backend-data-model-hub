@@ -79,9 +79,9 @@ def test_buckets_clasificacion_neta():
 
 
 HDRS = {
-    "v1": {"id": "v1", "status": "approved", "appliedAt": "2026-01-01",
+    "v1": {"id": "v1", "projectId": "p1", "status": "approved", "appliedAt": "2026-01-01",
            "versionLabel": "v1", "title": "uno"},
-    "v3": {"id": "v3", "status": "approved", "appliedAt": "2026-03-01",
+    "v3": {"id": "v3", "projectId": "p1", "status": "approved", "appliedAt": "2026-03-01",
            "versionLabel": "v3", "title": "tres"},
     "d1": {"id": "d1", "status": "draft"},
 }
@@ -106,7 +106,7 @@ def _wire(monkeypatch):
                         AsyncMock(side_effect=lambda cid: HDRS.get(cid)))
     monkeypatch.setattr(
         service.repository, "applied_after",
-        AsyncMock(side_effect=lambda at: [v for v in AFTER_V1 if v["appliedAt"] > at]))
+        AsyncMock(side_effect=lambda pid, at: [v for v in AFTER_V1 if v["appliedAt"] > at]))
     monkeypatch.setattr(service.repository, "changes_map",
                         AsyncMock(side_effect=lambda cid, cols=None: CHANGES.get(cid, {})))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=[]))

@@ -44,5 +44,5 @@ def test_lock_routes_registradas(client):
         for r in client.app.routes
         for m in getattr(r, "methods", set()) or set()
     }
-    assert ("/api/glossary/{entry_id}/lock", "POST") in paths
-    assert ("/api/glossary/{entry_id}/unlock", "POST") in paths
+    assert ("/api/projects/{project_id}/glossary/{entry_id}/lock", "POST") in paths
+    assert ("/api/projects/{project_id}/glossary/{entry_id}/unlock", "POST") in paths

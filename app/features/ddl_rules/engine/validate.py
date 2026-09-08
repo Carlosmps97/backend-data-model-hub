@@ -15,6 +15,8 @@ import re
 import sqlglot
 
 from . import conditions as cond
+from app.core.facets import physical_udp_defs
+
 from .conditions import BASE_TO_LEVEL, CondError
 
 CHECK_NAMES = ("Condition syntax", "UDP exists in catalog", "Value allowed for UDP",
@@ -66,8 +68,10 @@ def _caret_snippet(text: str, token: str) -> str:
 
 
 def _defs_by_level(udp_defs: list[dict]) -> dict[str, dict[str, dict]]:
+    """{level: {nombre: def}} SOLO con defs físicas (doc 69): una regla DDL
+    enlaza siempre el UDP de la faceta física; el homónimo lógico se ignora."""
     out: dict[str, dict[str, dict]] = {"table": {}, "column": {}, "canvas": {}}
-    for d in udp_defs:
+    for d in physical_udp_defs(udp_defs):
         out.setdefault(d.get("level") or "column", {})[d.get("name") or ""] = d
     return out
 
@@ -98,7 +102,7 @@ def recanonize(condition: str, udp_refs: list[dict], udp_defs: list[dict]) -> st
 
 
 def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
-                  artifacts: list[str]) -> dict:
+                  artifacts: list[str], artifact_kinds: dict[str, str] | None = None) -> dict:
     """Los 5 checks + extras estructurales. Devuelve:
     {state: 'valid'|'invalid', checks: [{name, ok(bool|None), detail}],
      errors: [{check, message, token?, suggestion?, snippet?, line, col}],
@@ -244,6 +248,33 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
             fail("Expression syntax (Databricks)",
                  f"Tag/property key '{str(k)[:30]}…' exceeds 256 characters.")
 
+    # Doc 73 · Column layout: acción de TABLA sobre la física, sin condición y
+    # sin mezclarse con otras acciones (es un estándar del ruleset, no una
+    # regla por UDP). Errores estructurales → check "Action" (como "Artifacts").
+    layout = action.get("layout")
+    if layout is not None:
+        def _bad(message: str, token: str | None = None) -> None:
+            errors.append({"check": "Action", "message": message, "token": token,
+                           "suggestion": None, "snippet": None, "line": 1, "col": 1})
+        allowed = {"partitionColumns": ("keep", "last")}
+        if not isinstance(layout, dict) or not layout:
+            _bad("Column layout needs at least one setting (partitionColumns: last).")
+        else:
+            for k, val in layout.items():
+                if k not in allowed:
+                    _bad(f"Unknown column layout setting '{k}'.", token=str(k))
+                elif val not in allowed[k]:
+                    _bad(f"Column layout '{k}' must be one of: {', '.join(allowed[k])}.", token=str(val))
+        if kind != "rule" or target != "table":
+            _bad("Column layout is a table rule (target: table).")
+        if (rule.get("condition") or "").strip():
+            _bad("Column layout rules apply to every physical table of the export — leave the condition empty.")
+        if any(action.get(k) for k in ("expression", "tags", "tblproperties", "emit")):
+            _bad("Column layout can't be combined with other actions in the same rule.")
+        for art in rule.get("appliesTo") or []:
+            if art != "ddl.tabla_fisica":
+                warnings.append(f"Column layout only applies to the physical table — '{art}' is ignored.")
+
     # ── 5 · Placeholders resolved ──────────────────────────────────────────
     ph_seen: list[str] = []
     target_level = BASE_TO_LEVEL.get({"column": "columna", "table": "tabla"}.get(target or "", ""), None)
@@ -311,14 +342,27 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
         checks["Placeholders resolved"]["detail"] = " ".join(dict.fromkeys(ph_seen)) or "—"
 
     # ── Estructura (fuera de los 5 checks; la UI los muestra en Error detail) ──
+    kinds = artifact_kinds or {}
     if kind == "rule":
         # Artefacto destino sin generador que lo declare = WARNING, no error:
         # se puede autorar la regla antes que su generador; hasta entonces el
         # export simplemente no la aplica ahí.
+        has_expr = bool((action.get("expression") or "").strip())
+        has_props = bool(action.get("tags") or action.get("tblproperties"))
         for art in rule.get("appliesTo") or []:
             if art not in artifacts:
                 warnings.append(f"No generator declares '{art}' yet — the rule won't "
                                 "apply there until one does.")
+                continue
+            # Doc 71 H4: acción incompatible con el TIPO del artefacto = la regla
+            # valida pero nunca emite nada ahí — se avisa.
+            k = kinds.get(art)
+            if k == "table" and has_expr and not has_props:
+                warnings.append(f"'{art}' is a table artifact — expression rules only decorate the "
+                                "SELECT of a view; nothing will be emitted there.")
+            if k == "view" and has_props and not has_expr:
+                warnings.append(f"'{art}' is a view artifact — tags and TBLPROPERTIES only apply to "
+                                "table artifacts; nothing will be emitted there.")
         if not (rule.get("appliesTo") or []):
             warnings.append("This rule has no target artifacts yet — it won't apply anywhere on export.")
     else:
@@ -338,6 +382,14 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
                            "A generator can't emit its own source artifact (cycle).",
                            "token": emit_art, "suggestion": None, "snippet": None,
                            "line": 1, "col": 1})
+        # Doc 71 H4: columnas añadidas incompletas producirían identificadores
+        # vacíos en el CREATE generado.
+        for i, extra in enumerate((action.get("emit") or {}).get("add_columns") or [], start=1):
+            if not (str(extra.get("name") or "").strip() and str(extra.get("type") or "").strip()):
+                errors.append({"check": "Artifacts", "message":
+                               f"Added column #{i} needs both a name and a type.",
+                               "token": str(extra.get("name") or "") or None, "suggestion": None,
+                               "snippet": None, "line": 1, "col": 1})
 
     state = "invalid" if errors else "valid"
     return {"state": state,

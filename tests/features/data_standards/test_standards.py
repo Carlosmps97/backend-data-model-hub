@@ -5,7 +5,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 from app.features.data_standards import service
-from app.features.data_standards.schemas import ApplyBody, DomainEdit, NamingEdit, TermEdit
+from app.features.data_standards.schemas import ApplyBody, DomainEdit, NamingEdit, TermEdit, UdpEdit
 
 
 # ── snapshot_of / build_diff (puro) ───────────────────────────────────────
@@ -17,9 +17,28 @@ def test_snapshot_of_limpia_campos():
         naming={"column": {"separator": "_", "case": "upper"}, "table": {"separator": "", "case": "upper"}},
     )
     assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
-                                   "namingTerm": None, "description": None}
+                                   "namingTerm": None, "description": None, "logicalDataType": None}
     assert "junk" not in snap["dict"][0]
     assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
+
+
+def test_snapshot_of_conserva_view_de_udp_y_tipo_logico_de_dominio():
+    # Doc 69: sin `view` en el snapshot un rollback perdería la faceta.
+    snap = service.snapshot_of(
+        domains=[{"id": "d1", "name": "Codigo", "defaultDataType": "VARCHAR(30)", "logicalDataType": "VARCHAR(20)"}],
+        terms=[], naming={},
+        udp=[{"id": "u1", "name": "Atributo Cross", "level": "column", "view": "logical", "dataType": "list",
+              "allowedValues": ["No Definido", "Si", "No"], "junk": 1}],
+    )
+    assert snap["domains"][0]["logicalDataType"] == "VARCHAR(20)"
+    assert snap["udp"][0]["view"] == "logical" and "junk" not in snap["udp"][0]
+
+
+def test_udp_edit_default_view_physical_y_domain_edit_canonicaliza_logico():
+    assert UdpEdit(name="X").view == "physical"
+    assert UdpEdit(name="X", view="logical").view == "logical"
+    d = DomainEdit(name="Monto", defaultDataType="decimal (21,4)", logicalDataType="decimal (22,4)")
+    assert (d.defaultDataType, d.logicalDataType) == ("DECIMAL(21,4)", "DECIMAL(22,4)")
 
 
 def test_build_diff_clasifica_add_edit_remove():
@@ -68,7 +87,7 @@ def _mock_apply(monkeypatch, *, before_domains=None, before_terms=None, rephys=N
                         AsyncMock(return_value={"updated": rephys or {"tables": 0, "columns": 0}}))
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={"domains": [], "dict": [], "namingConfig": {}}))
     inserted = {}
-    async def _ins(fields):  # el repo asigna seq/label; acá simulamos v17
+    async def _ins(pid, fields):  # el repo asigna seq/label; acá simulamos v17
         inserted.update(fields); return {**fields, "seq": 17, "label": "v17", "id": "v-new"}
     monkeypatch.setattr(service.repository, "insert_version_next_seq", AsyncMock(side_effect=_ins))
     monkeypatch.setattr(service, "audit", AsyncMock())
@@ -87,7 +106,7 @@ def test_apply_registra_version_con_seq_incremental_e_impacto(monkeypatch):
         termsUpsert=[TermEdit(term="dólares", abbrev="USD", scope="column")],
         domainsUpsert=[DomainEdit(id="d1", name="Importe", defaultDataType="DECIMAL(20,4)")],
     )
-    v = asyncio.run(service.apply("maria.rojas", body))
+    v = asyncio.run(service.apply("maria.rojas", "p1", body))
     assert v["seq"] == 17 and v["label"] == "v17"           # max_seq(16)+1
     assert v["author"] == "maria.rojas" and v["status"] == "applied"
     # impacto = rephys.columns (12) + dominio willUpdate (43); tables de rephys.
@@ -98,7 +117,7 @@ def test_apply_registra_version_con_seq_incremental_e_impacto(monkeypatch):
 def test_apply_sin_cambios_de_udp_no_rephysicaliza(monkeypatch):
     _mock_apply(monkeypatch, before_domains=[{"id": "d1", "name": "X", "defaultDataType": "T"}])
     body = ApplyBody(domainsDelete=["d1"])  # solo dominios → no re-deriva nombres
-    asyncio.run(service.apply("ana", body))
+    asyncio.run(service.apply("ana", "p1", body))
     service.dict_svc.rephysicalize.assert_not_awaited()
     service.dom_repo.delete_domain.assert_awaited_once()
 
@@ -123,12 +142,12 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
     monkeypatch.setattr(service.dom_svc, "propagate", AsyncMock(return_value={"updated": 5}))
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))
     inserted = {}
-    async def _ins(fields):  # el repo asigna seq/label; acá simulamos v19
+    async def _ins(pid, fields):  # el repo asigna seq/label; acá simulamos v19
         inserted.update(fields); return {**fields, "seq": 19, "label": "v19", "id": "v19"}
     monkeypatch.setattr(service.repository, "insert_version_next_seq", AsyncMock(side_effect=_ins))
     monkeypatch.setattr(service, "audit", AsyncMock())
 
-    v = asyncio.run(service.rollback("mr", 16))
+    v = asyncio.run(service.rollback("mr", "p1", 16))
     assert v["seq"] == 19 and v["kind"] == "rollback" and v["revertsSeq"] == 16
     rd.assert_awaited_once(); rdi.assert_awaited_once(); rn.assert_awaited_once()
     # impacto = rephys.columns (12) + propagate (5 × 1 dominio) ; tables rephys.
@@ -137,4 +156,4 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
 
 def test_rollback_version_inexistente_es_none(monkeypatch):
     monkeypatch.setattr(service.repository, "get_version", AsyncMock(return_value=None))
-    assert asyncio.run(service.rollback("mr", 999)) is None
+    assert asyncio.run(service.rollback("mr", "p1", 999)) is None

@@ -1,5 +1,6 @@
 """Queries guardadas (saved reports): un `QuerySpec` con nombre, reutilizable y
-compartible. Colección `saved_reports`. El spec es JSON portable chico."""
+compartible. Colección `saved_reports`. El spec es JSON portable chico.
+Doc 75: cada reporte pertenece a UN proyecto (`projectId`, igual al del spec)."""
 from __future__ import annotations
 
 import uuid
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.db.client import get_db
+from app.core.scope import scoped
 
 COLL = "saved_reports"
 
@@ -18,6 +20,7 @@ def _now() -> str:
 
 class SavedReportBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    projectId: str = Field(min_length=1)
     name: str
     description: str | None = None
     spec: dict                      # QuerySpec serializado
@@ -39,11 +42,11 @@ def _to(doc: dict) -> dict:
     return doc
 
 
-async def list_reports(owner: str) -> list[dict]:
-    """Reportes del owner + los compartidos por otros."""
+async def list_reports(owner: str, project_id: str) -> list[dict]:
+    """Reportes del proyecto: los del owner + los compartidos por otros."""
     db = await get_db()
-    docs = await db[COLL].find(
-        {"flgactive": {"$ne": False}, "$or": [{"owner": owner}, {"shared": True}]}).to_list(None)
+    docs = await db[COLL].find(scoped(project_id, {
+        "flgactive": {"$ne": False}, "$or": [{"owner": owner}, {"shared": True}]})).to_list(None)
     docs.sort(key=lambda d: (d.get("name") or "").lower())
     return [_to(d) for d in docs]
 
@@ -59,8 +62,9 @@ async def create_report(owner: str, body: SavedReportBody) -> dict:
 async def update_report(owner: str, rid: str, body: SavedReportBody) -> dict | None:
     from pymongo import ReturnDocument
     db = await get_db()
+    # Un reporte no cambia de proyecto: el filtro exige el mismo `projectId`.
     res = await db[COLL].find_one_and_update(
-        {"_id": rid, "owner": owner, "flgactive": {"$ne": False}},
+        scoped(body.projectId, {"_id": rid, "owner": owner, "flgactive": {"$ne": False}}),
         {"$set": {**body.model_dump(), "updatedAt": _now()}}, return_document=ReturnDocument.AFTER)
     return _to(res) if res else None
 

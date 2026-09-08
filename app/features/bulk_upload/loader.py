@@ -9,10 +9,12 @@ repositories de las features dueñas (invariante del store); ninguna escritura.
 """
 from __future__ import annotations
 
+from app.core.scope import scoped
 from app.core.versioning import overlay
 from app.features.changesets import repository as cs_repo
 from app.features.domains import repository as domains_repo
 from app.features.glossary import repository as glossary_repo
+from app.features.projects import repository as projects_repo
 from app.features.settings import service as settings_service
 from app.features.udp import repository as udp_repo
 
@@ -31,19 +33,24 @@ async def _effective(cs_id: str, collection: str, flt: dict | None = None,
 
 
 async def load_context(cs_id: str) -> UploadContext:
-    """Foto efectiva del changeset + Data Standards vivos."""
+    """Foto efectiva del changeset + Data Standards vivos DEL PROYECTO del
+    changeset (doc 75 D3/D6)."""
+    cs = await cs_repo.get(cs_id)
+    pid = (cs or {}).get("projectId") or ""
+    project = await projects_repo.get_project(pid) if pid else None
     ctx = UploadContext(
-        projects=await _effective(cs_id, "projects"),
-        folders=await _effective(cs_id, "folders"),
-        canvases=await _effective(cs_id, "subject_areas"),
-        schemas=await _effective(cs_id, "schemas"),
-        tables=await _effective(cs_id, "canonical_tables", projection=TABLE_PROJECTION),
-        udp_defs=await udp_repo.list_udp(),
-        domains=await domains_repo.list_domains(),
+        project_id=pid,
+        project_name=(project or {}).get("name") or "",
+        folders=await _effective(cs_id, "folders", scoped(pid)),
+        canvases=await _effective(cs_id, "subject_areas", scoped(pid)),
+        schemas=await _effective(cs_id, "schemas", scoped(pid)),
+        tables=await _effective(cs_id, "canonical_tables", scoped(pid), projection=TABLE_PROJECTION),
+        udp_defs=await udp_repo.list_udp(pid),
+        domains=await domains_repo.list_domains(pid),
     )
     for scope in _SCOPES:
-        ctx.naming[scope] = await settings_service.get_naming_for(scope)
-        entries = await glossary_repo.list_entries(scope)
+        ctx.naming[scope] = await settings_service.get_naming_for(pid, scope)
+        entries = await glossary_repo.list_entries(pid, scope)
         ctx.glossary[scope] = {e["term"]: e["abbrev"] for e in entries}
     return ctx
 

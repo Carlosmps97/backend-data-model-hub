@@ -45,7 +45,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
     """Snapshot limpio del estado de estándares. Puro."""
     return {
         "domains": [
-            {k: d.get(k) for k in ("id", "name", "defaultDataType", "namingTerm", "description")}
+            {k: d.get(k) for k in ("id", "name", "defaultDataType", "namingTerm", "description",
+                                   "logicalDataType")}   # doc 69: tipo por faceta
             for d in domains
         ],
         "dict": [
@@ -60,8 +61,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
             for scope in ("column", "table")
         },
         "udp": [
-            {k: u.get(k) for k in ("id", "name", "level", "dataType", "defaultValue",
-                                   "allowedValues", "description")}
+            {k: u.get(k) for k in ("id", "name", "level", "view", "dataType", "defaultValue",
+                                   "allowedValues", "description")}   # doc 69: faceta
             for u in (udp or [])
         ],
         # DDL Export Rules (doc 30 D1): el doc entero — el rollback restaura la
@@ -210,41 +211,43 @@ def _title_for(body, diff: dict) -> str:
 # ── Async ──────────────────────────────────────────────────────────────────
 
 
-async def current_snapshot() -> dict:
-    domains = await dom_repo.list_domains()
-    terms = await dict_repo.list_entries(None)
-    naming = await set_svc.get_naming()
-    udp = await udp_repo.list_udp()
-    ddl_rules = await rules_repo.list_rules()
-    ddl_config = await rules_repo.get_config()
+async def current_snapshot(project_id: str) -> dict:
+    """Estado actual de los estándares DEL PROYECTO (doc 75 D3)."""
+    domains = await dom_repo.list_domains(project_id)
+    terms = await dict_repo.list_entries(project_id, None)
+    naming = await set_svc.get_naming(project_id)
+    udp = await udp_repo.list_udp(project_id)
+    ddl_rules = await rules_repo.list_rules(project_id)
+    ddl_config = await rules_repo.get_config(project_id)
     return snapshot_of(domains, terms, naming, udp, ddl_rules, ddl_config)
 
 
-async def history() -> list[dict]:
-    return await repository.list_versions()
+async def history(project_id: str) -> list[dict]:
+    return await repository.list_versions(project_id)
 
 
-async def _record(actor: str, kind: str, title: str, description: str | None,
+async def _record(actor: str, project_id: str, kind: str, title: str, description: str | None,
                   diff: dict, impact: dict, reverts_seq: int | None = None) -> dict:
-    # El seq (max+1) y el reintento ante colisión concurrente los resuelve el
-    # repositorio (`insert_version_next_seq`): el índice único en seq impide dos
-    # versiones con el mismo número. El snapshot no depende del seq.
-    snapshot = await current_snapshot()
+    # El seq (max+1 DEL PROYECTO) y el reintento ante colisión concurrente los
+    # resuelve el repositorio (`insert_version_next_seq`): el índice único
+    # (project_id, seq) impide dos versiones con el mismo número. El snapshot
+    # no depende del seq.
+    snapshot = await current_snapshot(project_id)
     now = _now()
-    return await repository.insert_version_next_seq({
+    return await repository.insert_version_next_seq(project_id, {
         "kind": kind, "title": title, "description": description, "author": actor,
         "createdAt": now, "appliedAt": now, "status": "applied",
         "diff": diff, "impact": impact, "snapshot": snapshot, "revertsSeq": reverts_seq,
     })
 
 
-async def apply(actor: str, body) -> dict:
-    """Aplica el batch a las colecciones publicadas + re-deriva + registra la
-    versión. Devuelve la versión creada."""
-    before_domains = {d["id"]: d for d in await dom_repo.list_domains()}
-    before_terms = {t["id"]: t for t in await dict_repo.list_entries(None)}
-    before_udp = {u["id"]: u for u in await udp_repo.list_udp()}
-    before_rules = {r["id"]: r for r in await rules_repo.list_rules()}
+async def apply(actor: str, project_id: str, body) -> dict:
+    """Aplica el batch a las colecciones publicadas DEL PROYECTO + re-deriva +
+    registra la versión. Devuelve la versión creada."""
+    before_domains = {d["id"]: d for d in await dom_repo.list_domains(project_id)}
+    before_terms = {t["id"]: t for t in await dict_repo.list_entries(project_id, None)}
+    before_udp = {u["id"]: u for u in await udp_repo.list_udp(project_id)}
+    before_rules = {r["id"]: r for r in await rules_repo.list_rules(project_id)}
 
     # ── Guards de DDL Export Rules (doc 30) — fail-fast, sin estado a medias ──
     rules_upsert = getattr(body, "rulesUpsert", []) or []
@@ -279,7 +282,7 @@ async def apply(actor: str, body) -> dict:
     # de un lookup se BLOQUEA con la lista (spec §4). Si el mismo batch borra la
     # regla que lo referenciaba, pasa.
     udp_delete_ids = set(getattr(body, "udpDelete", []) or [])
-    ddl_config_now = await rules_repo.get_config()
+    ddl_config_now = await rules_repo.get_config(project_id)
     post_config = {
         "lookups": (ddl_patch.lookups if ddl_patch is not None and ddl_patch.lookups is not None
                     else ddl_config_now.get("lookups") or {}),
@@ -311,11 +314,12 @@ async def apply(actor: str, body) -> dict:
         post_udp = [x for x in post_udp if x.get("id") != d["id"]]
         post_udp.append(d)
     post_artifacts = [a["id"] for a in rules_svc.artifact_catalog(list(post_rules.values()))]
+    post_kinds = rules_svc.artifact_kinds(list(post_rules.values()))     # doc 71 H4
     _CORE_FIELDS = ("condition", "action", "appliesTo", "target", "kind", "sourceArtifact")
     rules_reports: list[tuple[dict, str]] = []   # (reporte, estado a persistir) por upsert
     for r in rules_upsert:
         data = r.model_dump()
-        report = ddl_validate.validate_rule(data, post_udp, post_config, post_artifacts)
+        report = ddl_validate.validate_rule(data, post_udp, post_config, post_artifacts, post_kinds)
         prev = before_rules.get(r.id) if r.id else None
         core_edited = prev is None or any(data.get(f) != prev.get(f) for f in _CORE_FIELDS)
         if report["state"] == "invalid" and core_edited:
@@ -383,10 +387,10 @@ async def apply(actor: str, body) -> dict:
                             "de aplicar."))
             claimed.add(key)
         if prev is None:  # término AÑADIDO (id nuevo o inexistente)
-            await dict_svc.ensure_term_valid(t.term, t.scope)
+            await dict_svc.ensure_term_valid(project_id, t.term, t.scope)
         elif renamed:
             # renombre de TEXTO de un término existente → valida excluyéndose.
-            await dict_svc.ensure_term_valid(t.term, t.scope, exclude_id=t.id)
+            await dict_svc.ensure_term_valid(project_id, t.term, t.scope, exclude_id=t.id)
 
     # Impacto de dominios (columnas re-tipadas): se cuenta ANTES de aplicar,
     # sobre las columnas sin override cuyo tipo cambia.
@@ -404,10 +408,10 @@ async def apply(actor: str, body) -> dict:
         if t.id and t.id in before_terms:
             await dict_repo.update_entry(t.id, {k: v for k, v in data.items() if k != "id"})
         else:
-            await dict_repo.create_entry(data)
+            await dict_repo.create_entry(project_id, data)
     # 2) naming_config.
     for scope, rule in (body.namingConfig or {}).items():
-        await set_repo.upsert(scope, rule.model_dump())
+        await set_repo.upsert(project_id, scope, rule.model_dump())
     # 3) Dominios (update cascada el tipo; create; delete).
     for did in body.domainsDelete:
         await dom_repo.delete_domain(did)
@@ -417,7 +421,7 @@ async def apply(actor: str, body) -> dict:
             await dom_repo.update_domain(d.id, {k: v for k, v in data.items() if k != "id"},
                                          cascade=True)
         else:
-            await dom_repo.create_domain(data)
+            await dom_repo.create_domain(project_id, data)
 
     # 4) Definiciones UDP (etiquetas key-value). NO cascadean nombres/tipos:
     #    solo definen las keys disponibles; los valores viven en las entidades.
@@ -428,7 +432,7 @@ async def apply(actor: str, body) -> dict:
         if u.id and u.id in before_udp:
             await udp_repo.update_udp(u.id, {k: v for k, v in data.items() if k != "id"})
         else:
-            await udp_repo.create_udp(data)
+            await udp_repo.create_udp(project_id, data)
 
     # 4b) Reglas de DDL Export (doc 30). Tampoco cascadean nada del modelo: solo
     #     definen transformaciones del texto exportado. Se persiste el resultado
@@ -448,10 +452,10 @@ async def apply(actor: str, body) -> dict:
         if r.id and r.id in before_rules:
             await rules_repo.update_rule(r.id, {k: v for k, v in data.items() if k != "id"})
         else:
-            await rules_repo.create_rule(data)
+            await rules_repo.create_rule(project_id, data)
     # 4c) Config del ruleset (lookups/functions): cada bloque no-None reemplaza.
     if ddl_patch is not None and (ddl_patch.lookups is not None or ddl_patch.functions is not None):
-        await rules_repo.set_config(lookups=ddl_patch.lookups, functions=ddl_patch.functions)
+        await rules_repo.set_config(project_id, lookups=ddl_patch.lookups, functions=ddl_patch.functions)
     # 4d) Cambios de UDP re-validan las reglas NO tocadas del batch: un valor
     #     eliminado de una lista las marca 'stale' (spec §4); un rename se
     #     re-canoniza vía udpRefs. Colección chica (docenas) — barato.
@@ -460,7 +464,7 @@ async def apply(actor: str, body) -> dict:
         for rid, prev in before_rules.items():
             if rid in touched:
                 continue
-            rep = ddl_validate.validate_rule(prev, post_udp, post_config, post_artifacts)
+            rep = ddl_validate.validate_rule(prev, post_udp, post_config, post_artifacts, post_kinds)
             new_state = ddl_validate.passive_state(rep)
             if (new_state != prev.get("validationState")
                     or rep["condition"] != prev.get("condition")):
@@ -473,24 +477,26 @@ async def apply(actor: str, body) -> dict:
     # 5) Re-derivar nombres físicos si cambió el glosario o el naming_config.
     rederived = {"tables": 0, "columns": 0}
     if body.termsUpsert or body.termsDelete or body.namingConfig:
-        rederived = (await dict_svc.rephysicalize(None))["updated"]
+        # Doc 75 D3: SÓLO las tablas/columnas de ESTE proyecto.
+        rederived = (await dict_svc.rephysicalize(project_id))["updated"]
 
     impact = {"tables": rederived["tables"], "columns": rederived["columns"] + domain_cols}
     diff = build_diff(body, before_domains, before_terms, before_udp, before_rules)
     # `kind` coaccionado al vocabulario conocido (el historial itera iconos por
     # kind; un valor arbitrario del cliente rompería el render).
     kind = body.kind if body.kind in KINDS else "batch"
-    version = await _record(actor, kind, _title_for(body, diff), body.description, diff, impact)
+    version = await _record(actor, project_id, kind, _title_for(body, diff), body.description, diff, impact)
     await audit(actor, "standards.apply", target=version["label"], target_type="standards_version",
-                meta={"impact": impact})
+                meta={"impact": impact, "projectId": project_id})
     log.info("standards applied", extra={"seq": version["seq"], "impact": impact})
     return version
 
 
-async def rollback(actor: str, target_seq: int) -> dict | None:
-    """Restaura el estado de estándares al snapshot de `target_seq`, re-deriva, y
-    registra una versión NUEVA (kind=rollback). None si la versión no existe."""
-    target = await repository.get_version(target_seq)
+async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
+    """Restaura el estado de estándares DEL PROYECTO al snapshot de `target_seq`,
+    re-deriva, y registra una versión NUEVA (kind=rollback). None si la versión
+    no existe. Doc 75 I5: todo restore va acotado al proyecto."""
+    target = await repository.get_version(project_id, target_seq)
     if target is None:
         return None
     snap = target.get("snapshot") or {}
@@ -498,7 +504,7 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     # ¿El rollback cambia el glosario o el naming_config? Solo entonces hace falta
     # re-physicalizar (a 400k columnas eso son ~seg/decenas de seg). Un rollback
     # de solo-UDP o solo-dominios NO toca nombres físicos → se evita el barrido.
-    cur = await current_snapshot()
+    cur = await current_snapshot(project_id)
 
     # D4: el restore deja `glossary_terms` EXACTAMENTE como el snapshot — sin
     # este guard pisaría/eliminaría entradas HOY bloqueadas. Solo cuenta el
@@ -518,20 +524,20 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     naming_changed = (_naming_key(snap) != _naming_key(cur))
     domains_changed = (_domains_key(snap) != _domains_key(cur))
 
-    await repository.restore_domains(snap.get("domains") or [])
-    await repository.restore_dict(snap.get("dict") or [], preserve_ids=preserve)
-    await repository.restore_naming(snap.get("namingConfig") or {})
+    await repository.restore_domains(project_id, snap.get("domains") or [])
+    await repository.restore_dict(project_id, snap.get("dict") or [], preserve_ids=preserve)
+    await repository.restore_naming(project_id, snap.get("namingConfig") or {})
     # Definiciones UDP: restaura las del snapshot (snapshots viejos sin 'udp' → []).
-    await udp_repo.restore_udp(snap.get("udp") or [])
+    await udp_repo.restore_udp(project_id, snap.get("udp") or [])
     # Reglas de DDL Export + config del ruleset (doc 30): mismo criterio —
     # snapshots pre-feature sin 'ddlRules'/'ddlConfig' dejan el catálogo vacío.
-    await rules_repo.restore_rules(snap.get("ddlRules") or [])
-    await rules_repo.restore_config(snap.get("ddlConfig") or {})
+    await rules_repo.restore_rules(project_id, snap.get("ddlRules") or [])
+    await rules_repo.restore_config(project_id, snap.get("ddlConfig") or {})
 
     # Re-derivar SOLO lo que cambió: nombres físicos si cambió glosario/naming;
     # tipos por dominio si cambiaron los dominios. Un rollback de solo-UDP no toca
     # ninguno de los dos → no barre las 400k columnas.
-    rederived = (await dict_svc.rephysicalize(None))["updated"] if naming_changed else {"tables": 0, "columns": 0}
+    rederived = (await dict_svc.rephysicalize(project_id))["updated"] if naming_changed else {"tables": 0, "columns": 0}
     domain_cols = 0
     if domains_changed:
         for d in (snap.get("domains") or []):
@@ -541,8 +547,90 @@ async def rollback(actor: str, target_seq: int) -> dict | None:
     impact = {"tables": rederived["tables"], "columns": rederived["columns"] + domain_cols}
     title = f"Rolled back to {target.get('label')}"
     diff = {"added": [], "edited": [f"Reverted standards to {target.get('label')}"], "removed": []}
-    version = await _record(actor, "rollback", title, None, diff, impact, reverts_seq=target_seq)
+    version = await _record(actor, project_id, "rollback", title, None, diff, impact, reverts_seq=target_seq)
     await audit(actor, "standards.rollback", target=target.get("label"),
-                target_type="standards_version", meta={"newVersion": version["label"], "impact": impact})
+                target_type="standards_version",
+                meta={"newVersion": version["label"], "impact": impact, "projectId": project_id})
     log.info("standards rolled back", extra={"to": target_seq, "new": version["seq"]})
     return version
+
+
+# ── Doc 75 D15: nacimiento de un proyecto (copia de bloques o baseline vacío) ──
+
+COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl")
+_UDP_KEYS = ("name", "level", "view", "dataType", "defaultValue", "allowedValues", "description")
+_DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description")
+_TERM_KEYS = ("term", "abbrev", "scope", "wordType")
+_RULE_KEYS = ("name", "description", "kind", "target", "sourceArtifact", "condition", "action",
+              "appliesTo", "priority", "enabled")
+
+
+async def summary(project_id: str) -> dict:
+    """Conteos por bloque para el asistente «New project» (doc 75 §8.3)."""
+    return {
+        "glossary": len(await dict_repo.list_entries(project_id, None)),
+        "domains": len(await dom_repo.list_domains(project_id)),
+        "udp": len(await udp_repo.list_udp(project_id)),
+        "rules": len(await rules_repo.list_rules(project_id)),
+        "naming": True,
+    }
+
+
+async def copy_standards(actor: str, target_project_id: str, source_project_id: str,
+                         blocks: list[str], source_name: str | None = None) -> dict:
+    """Copia UNA VEZ (foto, sin vínculo) los bloques pedidos del proyecto fuente al
+    destino, con ids nuevos y las referencias a UDP remapeadas. Sin el bloque
+    `udp`, las reglas que referencian UDP nacen `stale` y los lookups sin
+    `fromUdpId`. Se registra como la versión seq 1 del destino (`kind=copy`)."""
+    wanted = [b for b in blocks if b in COPY_BLOCKS]
+    if len(wanted) != len(blocks) or not wanted:
+        raise HTTPException(status_code=422,
+                            detail=f"Unknown standards block; use {', '.join(COPY_BLOCKS)}.")
+    label = source_name or source_project_id
+    udp_map: dict[str, str] = {}
+    if "udp" in wanted:
+        for u in await udp_repo.list_udp(source_project_id):
+            created = await udp_repo.create_udp(target_project_id, {k: u.get(k) for k in _UDP_KEYS})
+            udp_map[u["id"]] = created["id"]
+    if "domains" in wanted:
+        for d in await dom_repo.list_domains(source_project_id):
+            await dom_repo.create_domain(target_project_id, {k: d.get(k) for k in _DOMAIN_KEYS})
+    if "glossary" in wanted:
+        for t in await dict_repo.list_entries(source_project_id, None):
+            await dict_repo.create_entry(target_project_id, {**{k: t.get(k) for k in _TERM_KEYS},
+                                                              "locked": False, "lockedBy": None,
+                                                              "lockedAt": None})
+    if "naming" in wanted:
+        for scope, rule in (await set_svc.get_naming(source_project_id)).items():
+            await set_repo.upsert(target_project_id, scope,
+                                  {k: rule.get(k) for k in ("separator", "case", "maxLength")})
+    if "ddl" in wanted:
+        for r in await rules_repo.list_rules(source_project_id):
+            refs = [{"udpId": udp_map[x["udpId"]], "level": x["level"]}
+                    for x in (r.get("udpRefs") or []) if x.get("udpId") in udp_map]
+            lost = len(r.get("udpRefs") or []) - len(refs)
+            await rules_repo.create_rule(target_project_id, {
+                **{k: r.get(k) for k in _RULE_KEYS}, "udpRefs": refs, "updatedBy": actor,
+                "validationState": "stale" if lost else r.get("validationState", "valid"),
+                "validationReport": {} if lost else (r.get("validationReport") or {})})
+        cfg = await rules_repo.get_config(source_project_id)
+        lookups = {name: {**lk, "fromUdpId": udp_map.get((lk or {}).get("fromUdpId"))}
+                   for name, lk in (cfg.get("lookups") or {}).items()}
+        await rules_repo.set_config(target_project_id, lookups=lookups,
+                                    functions=cfg.get("functions") or [])
+    diff = {"added": [f"{b} copied from «{label}»" for b in wanted], "edited": [], "removed": []}
+    version = await _record(actor, target_project_id, "copy",
+                            f"Copied from «{label}»: {', '.join(wanted)}", None, diff,
+                            {"tables": 0, "columns": 0})
+    await audit(actor, "standards.copy", target=version["label"], target_type="standards_version",
+                meta={"projectId": target_project_id, "from": source_project_id, "blocks": wanted})
+    return version
+
+
+async def bootstrap_project(actor: str, project_id: str, copy_from: dict | None) -> dict:
+    """Versión seq 1 del proyecto nuevo: copia (D15) o baseline vacío."""
+    if copy_from:
+        return await copy_standards(actor, project_id, copy_from["projectId"],
+                                    list(copy_from["blocks"]), copy_from.get("projectName"))
+    return await _record(actor, project_id, "baseline", "Initial standards", "Empty standards.",
+                         {"added": [], "edited": [], "removed": []}, {"tables": 0, "columns": 0})

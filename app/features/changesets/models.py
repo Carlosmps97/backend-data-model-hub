@@ -5,8 +5,10 @@ Un changeset es la unidad de versionado/cambio del modelo. Empieza como `draft`
 a `submitted` al crear el *publish request* (se asignan revisores), y termina en
 `approved` (se aplica a las colecciones publicadas + cascada) o `rejected`.
 
-Es **cross-project**: un changeset puede tocar tablas de varios proyectos, por
-eso lleva `projectIds[]` (chips de proyecto en el UI).
+Pertenece a **UN proyecto** (`projectId`, doc 75 D2): todo cambio y toda
+referencia se resuelven dentro de ese proyecto. `projects` sigue versionado:
+renombrar/describir/borrar el proyecto son cambios del draft (doc 75 D5); el
+apply de un delete de proyecto cascada en `_apply_and_finalize`.
 
 Los cambios en sí NO viven en el documento del changeset: cada cambio es UN
 documento de la colección `changeset_changes` ({@link ChangeDoc}). El viejo dict
@@ -62,7 +64,8 @@ class ChangesetDoc(BaseModel):
     # ── Versionado / publish request (R1b, aditivos) ──────────────────────
     description: str | None = None
     versionLabel: str | None = None          # p.ej. "v15" (autoincremental)
-    projectIds: list[str] = Field(default_factory=list)   # cross-project chips
+    # Doc 75 D2: un changeset pertenece a UN proyecto (lo estampa el servidor).
+    projectId: str
     reviewers: list[str] = Field(default_factory=list)    # userIds asignados
     # key = userId · value = {status: 'approved'|'rejected', note?: str, at: str}
     approvals: dict[str, dict] = Field(default_factory=dict)

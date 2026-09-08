@@ -34,7 +34,7 @@ def test_apply_editar_termino_locked_409(monkeypatch):
     body = ApplyBody(termsUpsert=[TermEdit(id="t1", term="codigo", abbrev="CD2",
                                            scope="column")])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
     assert "'codigo'" in exc.value.detail
     service.dict_repo.update_entry.assert_not_awaited()
@@ -44,7 +44,7 @@ def test_apply_eliminar_termino_locked_409(monkeypatch):
     _mock(monkeypatch, before_terms=[LOCKED])
     body = ApplyBody(termsDelete=["t1"])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
     service.dict_repo.delete_entry.assert_not_awaited()
 
@@ -55,9 +55,9 @@ def test_apply_termino_agregado_valida_y_propaga_409(monkeypatch):
     _mock(monkeypatch, ensure=ensure)
     body = ApplyBody(termsUpsert=[TermEdit(term="codigo", abbrev="COD", scope="column")])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
-    ensure.assert_awaited_once_with("codigo", "column")
+    ensure.assert_awaited_once_with("p1", "codigo", "column")
     service.dict_repo.create_entry.assert_not_awaited()
 
 
@@ -82,7 +82,7 @@ def test_apply_editar_termino_no_locked_no_valida(monkeypatch):
     monkeypatch.setattr(service.repository, "insert_version_next_seq",
                         AsyncMock(return_value={"seq": 1, "label": "v1", "id": "v1"}))
     monkeypatch.setattr(service, "audit", AsyncMock())
-    asyncio.run(service.apply("ana", body))
+    asyncio.run(service.apply("ana", "p1", body))
     ensure.assert_not_awaited()
     service.dict_repo.update_entry.assert_awaited_once()
 
@@ -96,9 +96,9 @@ def test_apply_renombre_con_conflicto_409_fail_fast(monkeypatch):
     body = ApplyBody(termsUpsert=[TermEdit(id="t1", term="nuevo texto",
                                            abbrev="COD", scope="column")])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
-    ensure.assert_awaited_once_with("nuevo texto", "column", exclude_id="t1")
+    ensure.assert_awaited_once_with("p1", "nuevo texto", "column", exclude_id="t1")
     service.dict_repo.update_entry.assert_not_awaited()
     service.dict_repo.create_entry.assert_not_awaited()
     service.dict_repo.delete_entry.assert_not_awaited()
@@ -114,7 +114,7 @@ def test_apply_dos_altas_del_mismo_termino_en_el_batch_409(monkeypatch):
         TermEdit(term=" Codigo ", abbrev="CD2", scope="column"),  # normaliza: strip+lower
     ])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
     assert "codigo" in exc.value.detail.lower()
     service.dict_repo.create_entry.assert_not_awaited()
@@ -129,7 +129,7 @@ def test_apply_alta_mas_renombre_al_mismo_termino_409(monkeypatch):
         TermEdit(id="t1", term="importe", abbrev="COD", scope="column"),
     ])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(service.apply("ana", body))
+        asyncio.run(service.apply("ana", "p1", body))
     assert exc.value.status_code == 409
     service.dict_repo.create_entry.assert_not_awaited()
     service.dict_repo.update_entry.assert_not_awaited()
@@ -150,7 +150,7 @@ def test_apply_mismo_termino_en_scopes_distintos_no_choca(monkeypatch):
         TermEdit(term="codigo", abbrev="COD", scope="column"),
         TermEdit(term="codigo", abbrev="COD", scope="table"),
     ])
-    asyncio.run(service.apply("ana", body))
+    asyncio.run(service.apply("ana", "p1", body))
     assert service.dict_repo.create_entry.await_count == 2
 
 
@@ -168,6 +168,6 @@ def test_apply_edit_sin_cambio_de_texto_no_valida(monkeypatch):
     monkeypatch.setattr(service.repository, "insert_version_next_seq",
                         AsyncMock(return_value={"seq": 1, "label": "v1", "id": "v1"}))
     monkeypatch.setattr(service, "audit", AsyncMock())
-    asyncio.run(service.apply("ana", body))
+    asyncio.run(service.apply("ana", "p1", body))
     ensure.assert_not_awaited()
     service.dict_repo.update_entry.assert_awaited_once()

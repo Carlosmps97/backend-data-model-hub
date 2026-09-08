@@ -1,12 +1,14 @@
 """CRUD async de `projects` + `subject_areas`."""
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 
 from pymongo import ReturnDocument
 
 from app.core.db.client import get_db
+from app.core.scope import PROJECT_SCOPED, scoped
 
 from .models import ProjectDoc, SubjectAreaDoc
 
@@ -26,7 +28,17 @@ def _to(doc: dict) -> dict:
     return doc
 
 
+_ALIVE = {"flgactive": {"$ne": False}}
+
+
 # ── Projects ──
+async def get_project(pid: str) -> dict | None:
+    """Proyecto ACTIVO o None (borrado/inexistente). Doc 75 D5/I11."""
+    db = await get_db()
+    doc = await db[PROJECTS].find_one({"_id": pid, **_ALIVE})
+    return ProjectDoc.model_validate(_to(doc)).model_dump() if doc else None
+
+
 async def list_projects() -> list[dict]:
     db = await get_db()
     docs = await db[PROJECTS].find({"flgactive": {"$ne": False}}).to_list(None)
@@ -42,29 +54,51 @@ async def create_project(data: dict) -> dict:
     return p.model_dump()
 
 
-async def update_project(pid: str, data: dict) -> dict | None:
+async def find_by_name(name: str) -> dict | None:
+    """Proyecto ACTIVO por nombre exacto case-insensitive (unicidad global del
+    nombre, doc 75 D6)."""
     db = await get_db()
-    data = {k: v for k, v in data.items() if k not in ("id", "_id")}
-    res = await db[PROJECTS].find_one_and_update(
-        {"_id": pid, "flgactive": {"$ne": False}}, {"$set": {**data, "updatedAt": _now()}},
-        return_document=ReturnDocument.AFTER)
-    return ProjectDoc.model_validate(_to(res)).model_dump() if res else None
+    doc = await db[PROJECTS].find_one({**_ALIVE, "name": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}})
+    return ProjectDoc.model_validate(_to(doc)).model_dump() if doc else None
 
 
-async def delete_project(pid: str) -> bool:
+async def discard_project(pid: str) -> None:
+    """Retira un proyecto cuya creación falló a mitad (nunca llegó a ser visible)."""
     db = await get_db()
-    # Borra el proyecto sólo si está activo (idempotencia → 404 en el 2º delete),
-    # y cascada el soft-delete a sus canvases Y sus carpetas (antes las folders
-    # quedaban huérfanas y seguían accesibles).
-    res = await db[PROJECTS].update_one(
-        {"_id": pid, "flgactive": {"$ne": False}},
-        {"$set": {"flgactive": False, "deletedAt": _now()}})
-    if res.modified_count == 0:
-        return False
-    stamp = {"$set": {"flgactive": False, "deletedAt": _now()}}
-    await db[SUBJECT_AREAS].update_many({"projectId": pid}, stamp)
-    await db["folders"].update_many({"projectId": pid}, stamp)
-    return True
+    await db[PROJECTS].update_one({"_id": pid}, {"$set": {"flgactive": False, "deletedAt": _now()}})
+
+
+# Doc 75 D5: colecciones que se soft-deletean en cascada al aplicar el borrado
+# del proyecto. `changesets`/`standards_versions` son historial: no se tocan.
+CASCADE_COLLECTIONS: tuple[str, ...] = tuple(sorted(PROJECT_SCOPED - {"changesets", "standards_versions"}))
+_COUNT_LABELS = {"canonical_tables": "tables", "canonical_columns": "columns", "views": "views",
+                 "relationships": "relationships", "schemas": "schemas", "folders": "folders",
+                 "subject_areas": "canvases"}
+
+
+async def count_scope(pid: str) -> dict[str, int]:
+    """Conteos de activos del proyecto (aviso crítico del borrado, doc 75 D5)."""
+    db = await get_db()
+    return {label: await db[coll].count_documents({**scoped(pid), **_ALIVE})
+            for coll, label in _COUNT_LABELS.items()}
+
+
+async def cascade_delete(pid: str, cs_id: str) -> dict[str, int]:
+    """Doc 75 D5: al aplicar el changeset que borra el proyecto, soft-delete de
+    TODO lo suyo (modelo + estándares) — una `update_many` por colección.
+    Idempotente (sólo toca activos)."""
+    db = await get_db()
+    now = _now()
+    stamp = {"$set": {"flgactive": False, "deletedAt": now, "deletedIn": cs_id, "updatedAt": now}}
+    counts: dict[str, int] = {}
+    for coll in CASCADE_COLLECTIONS:
+        res = await db[coll].update_many({**scoped(pid), **_ALIVE}, stamp)
+        counts[coll] = res.modified_count
+    users = await db["users"].find({"projectIds": pid}, {"projectIds": 1}).to_list(None)
+    for u in users:
+        await db["users"].update_one({"_id": u["_id"]},
+                                     {"$set": {"projectIds": [p for p in u.get("projectIds") or [] if p != pid]}})
+    return counts
 
 
 # ── Subject Areas ──

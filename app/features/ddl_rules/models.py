@@ -42,6 +42,8 @@ class DdlRuleDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     name: str                              # slug único entre reglas activas (ej. enmascarar_dac)
     description: str | None = None
     kind: str = "rule"                     # 'rule' | 'generator'
@@ -61,12 +63,13 @@ class DdlRuleDoc(BaseModel):
 
 
 class DdlRulesetConfigDoc(BaseModel):
-    """Config del ruleset global (singleton `_id='global'`): lookups (el BUSCARV
-    de Excel, spec §6.7) y funciones reusables (spec §6.8). `scope` por-proyecto
-    queda para más adelante (spec 15.2) — hoy solo existe 'global'."""
+    """Config del ruleset de UN proyecto (doc 75 D3: `_id` == `projectId`):
+    lookups (el BUSCARV de Excel, spec §6.7) y funciones reusables (spec §6.8)."""
     model_config = DOC_CONFIG
 
-    id: str = "global"
+    id: str
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     # {nombre: {fromUdpId, fromLevel, values: {valorUdp: emitido|None}, default: str|None}}
     lookups: dict = Field(default_factory=dict)
     # [{name, params: [str], body: str}]

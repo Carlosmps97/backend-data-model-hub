@@ -1,6 +1,6 @@
 # Testing del backend — Data Model Hub
 
-> **Actualizado: 2026-08-13.**
+> **Actualizado: 2026-09-08** (doc 75: proyectos independientes — suite normal 1 141 tests, verde).
 >
 > **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
@@ -22,9 +22,9 @@ La filosofía es una pirámide clásica:
 flowchart TD
     A["Estres (historico, seeds retirados 2026-07-20)<br/>10k tablas / 400k columnas / 9k vistas / 150 canvases"]
     B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>21 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
-    L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>44 tests contra el Postgres real en schema efimero"]
-    C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts<br/>841 tests (suite normal, verde 2026-08-30) · services/models/schemas sin DB"]
+    L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>45 tests contra el Postgres real en schema efimero"]
+    C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy, sin rutas retiradas)"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 141 tests (suite normal, verde 2026-09-08) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -38,25 +38,26 @@ flowchart TD
 Principios de diseño de las pruebas:
 
 - **Unit puros con repositorios mockeados.** La lógica de negocio vive en funciones puras (`physicalize`, `overlay`, `structured_diff`, `table_rows`, `effective_permissions`, etc.) o en orquestadores async que se testean sustituyendo el `repository` por `AsyncMock` con `monkeypatch`. No se levanta ninguna base de datos.
-- **Invariantes de capas verificados por código.** Dos tests de arquitectura leen los archivos fuente y fallan si alguien filtra el store fuera de `repository.py` o si reaparecen árboles/features legacy.
-- **Integración real del adaptador.** La suite viva `tests/lakebase/test_adapter_live.py` (44 tests) pega al Postgres real de Lakebase en un schema efímero `dmh_test_<rand>` que se dropea al final; solo corre con `LAKEBASE_TESTS=1`, por eso no entra en el `pytest` normal.
+- **Invariantes de capas verificados por código.** Los tests de arquitectura leen los archivos fuente y fallan si alguien filtra el store fuera de `repository.py`, si reaparecen árboles/features legacy o si vuelven los scripts backfill y las rutas retiradas en el doc 75 (`GET /api/me`, `logicalize`).
+- **Alcance por proyecto (doc 75).** `tests/core/test_scope.py` fija el contrato de `app/core/scope.py` (`scoped`, `naming_id`, `assert_scoped_filter` → `MissingProjectError`); en `changesets`, `test_cross_project_guard.py` (referencias a entidades de otro proyecto → 409), `test_project_delete.py` (borrado por draft: `deletesProject`, cascada `cascade_delete`, 404/409 después) y `test_project_versions.py` (versiones y producción por proyecto); en `data_standards`, `test_copy_standards.py` (proyecto nuevo con `copyFrom`) y `test_scope_restore.py` (rollback acotado al proyecto); y `tests/lakebase/test_project_column.py` (puro, corre en la suite normal) cubre la traducción `projectId → project_id` del adaptador.
+- **Integración real del adaptador.** La suite viva `tests/lakebase/test_adapter_live.py` (45 tests) pega al Postgres real de Lakebase en un schema efímero `dmh_test_<rand>` que se dropea al final; solo corre con `LAKEBASE_TESTS=1`, por eso no entra en el `pytest` normal.
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-08-30):** la suite normal son **841 tests** (verde). `pytest tests/ --collect-only -q` recolecta **885** porque incluye además los **44** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-08):** la suite normal son **1 141 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 186** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
-| `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning) | 10 | 40 |
-| `tests/architecture` (invariantes de capas) | 2 | 4 |
-| `tests/features` (todas las features; incluye los 162 de `bulk_upload`, doc 55) | 95 | 722 |
-| `tests/erwin_migration` (kit de migración multi-archivo) | 5 | 51 |
-| `tests/scripts` (orquestadores de migración) | 3 | 16 |
+| `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**) | 12 | 51 |
+| `tests/architecture` (invariantes de capas + legado retirado) | 2 | 5 |
+| `tests/features` (todas las features; incluye los 192 de `bulk_upload`, doc 55) | 133 | 959 |
+| `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 89 |
+| `tests/scripts` (orquestadores: `run_migration` con manifiesto, `seed_ddl_export_rules` por proyecto, `reset_for_migration`) | 3 | 24 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
-| `tests/lakebase/test_translate.py` (traducción de updates pura, corre en la suite normal — doc 56) | 1 | 6 |
-| **Subtotal — suite normal** | **117** | **841** |
-| `tests/lakebase` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 44 |
-| **Total recolectado** | **118** | **885** |
+| `tests/lakebase/test_translate.py` + `test_project_column.py` (traducción pura; corren en la suite normal) | 2 | 11 |
+| **Subtotal — suite normal** | **162** | **1 141** |
+| `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 45 |
+| **Total recolectado** | **163** | **1 186** |
 
 La carga masiva desde Excel (`tests/features/bulk_upload/`, 12 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*` son puros (contexto armado a mano con `helpers.py`), `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
@@ -70,45 +71,59 @@ tests/
 ├── test_smoke.py                    # app.title + /api/health degradado sin DB
 ├── architecture/
 │   ├── test_store_boundary.py       # el store solo se toca desde repository.py
-│   └── test_no_legacy_features.py   # features y arboles legacy no vuelven
+│   └── test_no_legacy_features.py   # features/arboles legacy, scripts backfill y rutas retiradas (doc 75) no vuelven
 ├── core/
 │   ├── db/test_indexes.py           # indices del adaptador
 │   ├── identity/                    # provider local/databricks, dependencies, models, dev_switch (4 archivos)
-│   ├── naming/test_engine.py        # logicalize / physicalize (case, separator, longest-match)
+│   ├── naming/test_engine.py        # physicalize (case, separator, longest-match)
 │   ├── versioning/test_overlay.py   # overlay(publicado + cambios) + summarize_diff
 │   ├── test_config.py               # defaults del seam de identidad
+│   ├── test_facets.py               # contrato de facetas logico/fisico (doc 69)
 │   ├── test_indexes.py              # ensure_indexes idempotente
-│   └── test_ratelimit_key.py        # key del rate limiter = primera IP de X-Forwarded-For
-├── erwin_migration/                 # kit multi-archivo XML → Lakebase (4 archivos, 32 tests)
+│   ├── test_ratelimit_key.py        # key del rate limiter = primera IP de X-Forwarded-For
+│   └── test_scope.py                # alcance por proyecto: scoped / naming_id / assert_scoped_filter (doc 75)
+├── erwin_migration/                 # kit multi-archivo XML → Lakebase (9 archivos, 89 tests)
 │   ├── test_parser_and_quality.py   # parser streaming + gate quality
-│   ├── test_policies_merge.py       # reglas R1-R8: adopcion por clave natural, score de uso
-│   ├── test_migrate_merge.py        # migrate contra BD fake (merge incremental end-to-end)
+│   ├── test_subtype_parser_quality.py  # subcategorias supertipo/subtipo (doc 53)
+│   ├── test_policies_merge.py       # reglas R1-R8: adopcion por clave natural, score de uso, ids por proyecto
+│   ├── test_migrate_merge.py        # migrate contra BD fake (merge incremental end-to-end, proyecto primero)
+│   ├── test_migrate_facets.py       # facetas logico/fisico en la carga (doc 69)
+│   ├── test_migrate_override.py     # override fisico persistido (doc 68)
+│   ├── test_column_order.py         # orden unico de columnas (doc 74)
+│   ├── test_standard_udps.py        # catalogo FIJO de UDPs (doc 61 r2)
 │   └── test_udp_allowed_values.py   # allowedValues de UDP list completos (no truncados a lo usado)
-├── features/                        # 78 archivos · 514 tests
+├── features/                        # 133 archivos · 959 tests
 │   ├── admin/           (1)         # RBAC, guards anti-lockout, hash de password, auditoria
-│   ├── auth/            (2)         # permisos efectivos, login/lockout, token-first + warmup SSO
-│   ├── catalog/         (4)         # columnas aditivas, derivacion de tipo, search_columns, usage
-│   ├── changesets/      (16)        # politica de versionado, payloads, effective+search, duplicados,
-│   │                                # schemas versionados, diffdetail, rollback a cualquier version,
-│   │                                # lote de cambios (add_changes_bulk + set_changes_bulk, doc 39)
-│   ├── data_standards/  (3)         # diff/snapshot + apply/rollback versionado + guards de glossary/lock
-│   ├── ddl_rules/       (7)         # motor de reglas del DDL Export (incluye golden tests del render)
-│   ├── domains/         (4)         # cascada de ParentDomain (filter, impact, propagate, namingTerm)
+│   ├── auth/            (3)         # permisos efectivos, login/lockout, token-first + warmup SSO + SSO login
+│   ├── bulk_upload/     (13)        # carga masiva desde Excel (doc 55): normalize, parser, planners, loader, router
+│   ├── catalog/         (9)         # columnas aditivas, derivacion de tipo, search_columns, usage, search_model,
+│   │                                # inventory, inspect, list_tables por esquema, campos de faceta
+│   ├── changesets/      (26)        # politica de versionado, payloads, effective+search, duplicados,
+│   │                                # schemas versionados, diffdetail, rollback a cualquier version, compare,
+│   │                                # lote de cambios (doc 39), asof, historial, acceso (doc 70 §12),
+│   │                                # guard cross-project, borrado de proyecto y versiones por proyecto (doc 75)
+│   ├── data_standards/  (5)         # diff/snapshot + apply/rollback versionado + guards de glossary/lock
+│   │                                # + copia de bloques al crear proyecto + restore acotado al proyecto (doc 75)
+│   ├── ddl_rules/       (10)        # motor de reglas del DDL Export (incluye golden tests del render)
+│   ├── domains/         (6)         # cascada de ParentDomain (filter, impact, propagate, namingTerm, tipos)
 │   ├── folders/         (2)         # descendant_ids (cascada) + modelo/rutas
 │   ├── glossary/        (9)         # rephysicalize, scope/wordType, validate, lock/unlock, guards CRUD
-│   ├── identity/        (2)         # /api/me y /users (rutas)
-│   ├── projects/        (5)         # diagrama (tablas y vistas), layout, subject area aditiva + UDP
-│   ├── relationships/   (5)         # normalizacion v2 (parent/child+pairs), impact, links cross-canvas
-│   ├── reporting/       (9)         # compiler QuerySpec, seguridad del cursor, rows, facets, insights
-│   ├── schemas/         (1)         # servicio de la entidad schemas (guard de uso)
-│   ├── settings/        (1)         # naming_config por scope (defaults + validacion)
+│   ├── identity/        (1)         # /api/users (ruta)
+│   ├── projects/        (6)         # diagrama (tablas y vistas), layout, subject area aditiva + UDP,
+│   │                                # ciclo de vida (crear directo + copyFrom + v1; counts)
+│   ├── relationships/   (6)         # normalizacion v2 (parent/child+pairs), impact, links cross-canvas, subcat
+│   ├── reporting/       (13)        # compiler QuerySpec, seguridad del cursor, rows, filters, facets, insights,
+│   │                                # saved reports por proyecto
+│   ├── schemas/         (1)         # servicio de la entidad schemas (guard de uso, unicidad por proyecto)
+│   ├── settings/        (1)         # naming_config por (proyecto, scope) (defaults + validacion)
 │   ├── summary/         (2)         # contadores del Home (global + por proyecto)
-│   ├── udp/             (1)         # niveles de definiciones UDP
-│   └── views/           (6)         # vistas versionadas, multifuente, validacion, queries por canvas
+│   ├── udp/             (4)         # niveles/facetas de definiciones UDP + alcance por proyecto
+│   └── views/           (11)        # vistas versionadas, multifuente, custom SQL, validacion, queries por canvas
 ├── lakebase/
-│   ├── test_adapter_live.py         # suite VIVA del adaptador (44) — solo con LAKEBASE_TESTS=1
+│   ├── test_adapter_live.py         # suite VIVA del adaptador (45) — solo con LAKEBASE_TESTS=1
+│   ├── test_project_column.py       # traduccion projectId → columna generada project_id (5, pura — doc 75 D19)
 │   └── test_translate.py            # traduccion de updates PURA (6) — $mergeObjects (doc 56)
-└── scripts/                         # vacio (los tests de seeds se retiraron con sus scripts, 2026-07-20)
+└── scripts/                         # run_migration (manifiesto), seed_ddl_export_rules (por proyecto), reset_for_migration
 ```
 
 ---
@@ -117,24 +132,24 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 841 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
+Los 1 141 tests de la suite normal no tocan la base de datos. Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
 ```python
-from app.core.naming.engine import logicalize, physicalize
+from app.core.naming.engine import physicalize
 
 DICT = {"monto": "MTO", "deuda": "DEU", "dólares": "USD", "tipo de cambio": "TPC"}
 
 def test_physicalize_longest_match_multi_palabra():
     assert physicalize("tipo de cambio monto", DICT) == "TPC_MTO"
 
+def test_physicalize_token_no_mapeado_va_en_mayuscula():
+    assert physicalize("monto neto", DICT) == "MTO_NETO"
+
 def test_physicalize_camel_ignora_separator():
     out = physicalize("monto deuda dólares", DICT, separator="_", case="camel")
     assert out == "mtoDeuUsd"
-
-def test_logicalize_reversa():
-    assert logicalize("MTO_DEU_USD", DICT) == "monto deuda dólares"
 ```
 
 **Patrón B — orquestador async con `repository` mockeado.** El servicio conserva su lógica de guardas y máquina de estados, pero el acceso al store se reemplaza por `AsyncMock`. Ejemplo del cierre de un changeset (`tests/features/changesets/test_versioning_policy.py`), que valida que el publish **reclame el estado antes de tocar producción** (anti-condición de carrera):
@@ -161,7 +176,7 @@ def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
 
 Este mismo archivo (30 tests, el más grande) cubre además: `next_version_label` (v1 → v11, case-insensitive), `record_approval` / `approval_outcome` (unanimidad: todos aprueban / cualquiera rechaza / parcial pendiente), `structured_diff` (buckets added/edited/deleted, impacto por relaciones, detección de conflicto contra producción por timestamp), `changes_in_cycle` (excluye escrituras posteriores al submit), `apply_plan` (orden por dependencia: tablas → columnas → relaciones), y los guards owner-only de `submit` / `reopen` / `add_change`, incluyendo el gate autoritativo que **rechaza payloads inválidos** tanto en la entrada (`add_change` → 422) como en el apply (revierte el claim y levanta `InvalidPayloadError`).
 
-**El fixture `client`** (en `tests/conftest.py`) construye un `TestClient` **sin** usar el context manager, a propósito: así no se dispara el `lifespan` de la app y no se intenta conectar a la base de datos. Sirve para los smoke de rutas registradas y para `/api/me` / `/api/health`:
+**El fixture `client`** (en `tests/conftest.py`) construye un `TestClient` **sin** usar el context manager, a propósito: así no se dispara el `lifespan` de la app y no se intenta conectar a la base de datos. Sirve para los smoke de rutas registradas y para `/api/users` / `/api/health`:
 
 ```python
 @pytest.fixture
@@ -204,9 +219,9 @@ flowchart LR
 
 ### 3.3 Capas incorporadas entre 2026-07-20 y 2026-07-31
 
-- **Golden tests del motor de reglas DDL** (`tests/features/ddl_rules/`, 88 tests en 7 archivos). El motor es puro (sin BD), así que se testea entero por entrada/salida; `test_pipeline_golden.py` fija el **render determinista**: mismo contexto + mismas reglas → salida byte-identical (orden `(priority DESC, name ASC)`, tblproperties/tags en orden alfabético). Los demás archivos cubren el DSL de condiciones (allowlist AST de sqlglot), generadores con toposort, render por columna, tags/tblproperties, los 5 checks de validación y el versionado de reglas dentro de `standards_versions`.
+- **Golden tests del motor de reglas DDL** (`tests/features/ddl_rules/`, 110 tests en 10 archivos). El motor es puro (sin BD), así que se testea entero por entrada/salida; `test_pipeline_golden.py` fija el **render determinista**: mismo contexto + mismas reglas → salida byte-identical (orden `(priority DESC, name ASC)`, tblproperties/tags en orden alfabético). Los demás archivos cubren el DSL de condiciones (allowlist AST de sqlglot), generadores con toposort, render por columna, tags/tblproperties, los 5 checks de validación y el versionado de reglas dentro de `standards_versions`.
 - **Tests puros de `diffdetail`** (`tests/features/changesets/test_diffdetail.py`, 13). El diff ANTES→DESPUÉS por campo del popup de review: `before` = doc publicado (o la imagen estampada si el changeset ya fue aplicado), exclusión de ruido (`updatedAt`, `layout`, …) y resolución de referencias a NOMBRE (dominios, UDP, tablas de una relación).
-- **Merge de la migración multi-archivo** (`tests/erwin_migration/`, 32 en 4 archivos): `test_policies_merge.py` (8) valida las reglas puras de resolución — adopción por clave natural `schema + nombre físico`, conflicto → score de uso con update-in-place, alias de duplicados internos, dedup de FKs; `test_migrate_merge.py` (9) corre `migrate` completo contra una **BD fake en memoria** (merge incremental end-to-end sin Lakebase); más parser/quality (11) y allowedValues de UDP (4).
+- **Merge de la migración multi-archivo** (`tests/erwin_migration/`, hoy 89 en 9 archivos; el núcleo original): `test_policies_merge.py` (8) valida las reglas puras de resolución — adopción por clave natural `schema + nombre físico`, conflicto → score de uso con update-in-place, alias de duplicados internos, dedup de FKs; `test_migrate_merge.py` (9) corre `migrate` completo contra una **BD fake en memoria** (merge incremental end-to-end sin Lakebase); más parser/quality (11) y allowedValues de UDP (4).
 - **Key del rate limiter** (`tests/core/test_ratelimit_key.py`, 4): la key toma la **primera IP de `X-Forwarded-For`** con fallback al peer. Sin esto, detrás de los proxies de Databricks Apps el límite de login (5/minute) keyeaba por la IP del proxy y era global para todos los usuarios.
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
@@ -306,7 +321,7 @@ El runner (`run_e2e.py`) ejecuta cada escenario, siempre llama a `cleanup()` en 
 
 ## 5. Detalle de la cobertura unit por grupo
 
-### 5.1 Auth (`tests/features/auth`, 23 tests en 2 archivos)
+### 5.1 Auth (`tests/features/auth`, 41 tests en 3 archivos)
 
 Auth propia con bcrypt + JWT (HS256). `test_auth.py` (16) + `test_warmup.py` (7, el endpoint `GET /api/auth/warmup/{next_b64}`: decodificación base64url del `next` en el path y validación del destino de redirect). Cubre:
 
@@ -316,16 +331,16 @@ Auth propia con bcrypt + JWT (HS256). `test_auth.py` (16) + `test_warmup.py` (7,
 - **`current_principal` token-first:** con `Authorization: Bearer <jwt>` válido resuelve `source="session"`; token inválido → 401; sin token en modo local cae al seam de identidad; sin token con `REQUIRE_AUTH=true` → 401.
 - **Falla-cerrado de config:** `assert_secure_config()` levanta `RuntimeError` si `REQUIRE_AUTH=true` con el `SECRET_KEY` de desarrollo; en dev solo advierte.
 
-### 5.2 Admin / RBAC (`tests/features/admin`, 9 tests)
+### 5.2 Admin / RBAC (`tests/features/admin`, 12 tests)
 
 - Helpers puros: `initials`, `sanitize_permissions` (solo mantiene keys conocidas de `PERMISSIONS`).
 - `create_user` hashea el password (nunca lo guarda en claro), agrega `initials` y audita `admin.user.create`.
 - `update_user` / `upsert_role` aplican **solo los campos enviados** y sanean permisos.
 - **Guards anti-lockout (invariante: siempre ≥1 admin activo):** no se puede eliminar al último admin, ni quitar `admin.manage` del último rol admin, ni borrar un rol con usuarios asignados (levantan `AdminGuardError` → 400).
 
-### 5.3 Changesets / versionado (`tests/features/changesets`, 110 tests en 11 archivos)
+### 5.3 Changesets / versionado (`tests/features/changesets`, 224 tests en 26 archivos)
 
-Es el corazón del versionado (copy-on-write, requests, aprobaciones):
+Es el corazón del versionado (copy-on-write, requests, aprobaciones). Los archivos fundacionales:
 
 - **`test_versioning_policy.py` (30):** etiquetas de versión, aprobaciones/unanimidad, `structured_diff` con impacto y conflictos, máquina de estados (`submit`/`reopen`/`review` con guards owner-only y revisor-asignado), y el cierre atómico `_apply_and_finalize` (claim antes de aplicar, revert ante payload inválido o fallo de bulk, `current_production` prefiere la versión aplicada). Detalle en la sección 3.1.
 - **`test_record.py` (9):** validación de payloads (`payload_error` / `validate_changes`) — un upsert de columna sin `tableId`/`physicalName`/`dataType` falla con mensaje legible que nombra el campo; los `delete` no validan payload; junta errores de todas las colecciones; y `_safe_path_part` bloquea inyección de dot-path de Mongo (rechaza `a.b` y `$set`).
@@ -334,7 +349,9 @@ Es el corazón del versionado (copy-on-write, requests, aprobaciones):
 - **Guards de duplicados (`test_duplicates.py` 10 + `test_add_change_duplicates.py` 7 + `test_publish_duplicates.py` 4):** unicidad de nombre físico por schema tanto al registrar el cambio (`add_change`) como al publicar.
 - **Schemas versionados (`test_schema_versioning.py` 19 + `test_effective_schema.py` 5):** rename de esquema propagado server-side dentro del draft (conservando el `kind` del doc 44), delete con guard de uso, y filtro `schema` sobre la vista efectiva.
 - **`test_diffdetail.py` (13):** el diff ANTES→DESPUÉS por campo del review (ver sección 3.3).
-- **`test_rollback_any_and_tree.py` (7):** rollback a CUALQUIER versión aplicada (draft inverso que deshace las posteriores) y árbol jerárquico Proyecto→…→Columnas del review con `projectsAffected` real.
+- **`test_rollback_any_and_tree.py` (7):** rollback a CUALQUIER versión aplicada (draft inverso que deshace las posteriores) y árbol jerárquico Proyecto→…→Columnas del review.
+- **Proyectos independientes (doc 75):** `test_cross_project_guard.py` (I1/I2: `payload.projectId` estampado por el servidor; referencias a tablas/dominios/esquemas de otro proyecto → 409; en `projects` sólo la entidad `cs.projectId`), `test_project_delete.py` (D5: el cambio `projects/<pid> delete` marca `deletesProject`, `diff.impact.deletesProject` con conteos, `cascade_delete` al aplicar, `ProjectDeletedError` → 409 después) y `test_project_versions.py` (D2: `versionLabel` por proyecto, `list_versions(projectId)`, `current_production` del proyecto, compare sólo dentro del mismo proyecto).
+- **Resto:** `test_bulk_changes.py` (doc 39), `test_asof.py` (changeset virtual `asof:<versionId>`, doc 70), `test_entity_history.py` / `test_history_views.py` (doc 51), `test_access.py` (`versions.view_all`, doc 70 §12), `test_version_compare.py` (doc 65), `test_physical_override_stamp.py` (doc 68), `test_custom_sql_changeset.py` (doc 61), `test_relationship_key_guard.py` (doc 47), `test_published_projection.py`, `test_set_approval.py` (doc 56), `test_diffdetail_udp_facet.py` (doc 69).
 
 ### 5.4 Versioning overlay (`tests/core/versioning`, 5 tests)
 
@@ -358,67 +375,73 @@ sequenceDiagram
 
 Este flujo es exactamente el que valida el escenario E2E `s02_version_lifecycle`.
 
-### 5.5 Data Standards (`tests/features/data_standards`, 27 tests en 3 archivos)
+### 5.5 Data Standards (`tests/features/data_standards`, 37 tests en 5 archivos)
 
 Módulo de estándares versionado (dominios + diccionario + naming + reglas DDL, con historial y rollback). `test_standards.py` (6) cubre el núcleo; `test_apply_glossary_guards.py` (9) los guards del glosario en el apply (término locked → 409, términos nuevos pasan por validación); `test_rollback_lock_guard.py` (12) que el rollback jamás pisa ni elimina términos hoy bloqueados (el lock vigente nunca se revierte):
 
 - `snapshot_of` / `build_diff` (puros): limpian campos y clasifican add / edit / remove (incluye cambios de tipo de dominio como `DECIMAL(18,2) → DECIMAL(20,4)`).
 - `apply` (repos mockeados): registra una versión con `seq` incremental (`max_seq+1`) y `label` (`v17`), autor y `status="applied"`; el impacto agrega columnas de rephysicalize + `willUpdate` del dominio; un apply de solo-dominios **no** dispara el rephysicalize global.
 - `rollback`: restaura el snapshot (dominios, diccionario, naming, UDP), corre rephysicalize + propagate y registra una nueva versión `kind="rollback"` con `revertsSeq`; versión inexistente → `None`.
+- **Por proyecto (doc 75):** `test_copy_standards.py` (`bootstrap_project`/`copy_standards`: un proyecto nuevo nace vacío o copia bloques `glossary`/`domains`/`udp`/`naming`/`ddl` de otro con ids nuevos y refs a UDP remapeadas, versión `kind=copy`; bloque desconocido → 422) y `test_scope_restore.py` (el restore de un proyecto sólo toca sus colecciones y re-physicaliza sólo sus tablas/columnas).
 
-### 5.6 Domains / cascada de ParentDomain (`tests/features/domains`, 15 tests en 4 archivos)
+### 5.6 Domains / cascada de ParentDomain (`tests/features/domains`, 25 tests en 6 archivos)
 
 - `cascade_filter(domain_id)`: el filtro autoritativo que garantiza que la cascada de re-tipado solo toque columnas del dominio **sin override manual** y no soft-deleted (`typeOverridden != True`, `flgactive != False`).
 - `summarize_impact`: cuenta `willUpdate` (sin override) vs `overridden` y arma la lista plana para la UI.
 - `namingTerm` aditivo en `ParentDomain` (invariante de persistencia: declarado en el modelo → sobrevive el round-trip; default `None` no-breaking).
-- Smoke de rutas: `/api/domains/{id}/impact` (GET) y `/propagate` (POST) registradas.
+- Smoke de rutas: `/api/projects/{pid}/domains/{id}/impact` (GET) y `/propagate` (POST) registradas.
 
-### 5.7 Glossary + naming (`tests/features/glossary` 43 + `tests/core/naming` 15)
+### 5.7 Glossary + naming (`tests/features/glossary` 47 + `tests/core/naming` 13)
 
-- **Motor de naming (`core/naming`, 15):** `physicalize` con longest-match multi-palabra, tokens no mapeados en mayúscula, `case` (`upper`/`lower`/`camel`) y `separator` configurables (incluido `""` para nombres de tabla tipo `CTARIESGO`), y `logicalize` inverso. `case` inválido levanta `ValueError`.
-- **Glossary (`features/glossary`, 43 en 9 archivos):** `compute_rephysicalize` re-deriva el físico desde el `logicalName` y devuelve **solo** las entidades que cambian (usando separador/case del scope), salta las sin `logicalName`, y normaliza `_id` vs `id`; `to_mappings` arma el dict término→abbrev ignorando `scope`/`wordType`; invariantes de persistencia de `scope`/`wordType` en el modelo y el body; guards del CRUD (`test_crud_guards.py`); validación de nombres contra el glosario en sus tres capas (`test_validate_pure.py` / `test_validate_service.py` / `test_validate_route.py`); y el lock/unlock de términos (campos de lock + endpoints `/{entry_id}/lock` y `/unlock`, solo `admin.manage`).
+- **Motor de naming (`core/naming`, 13):** `physicalize` con longest-match multi-palabra, tokens no mapeados en mayúscula, `case` (`upper`/`lower`/`camel`) y `separator` configurables (incluido `""` para nombres de tabla tipo `CTARIESGO`). `case` inválido levanta `ValueError`. (`logicalize` se retiró en el doc 75 D14.)
+- **Glossary (`features/glossary`, 47 en 9 archivos):** `compute_rephysicalize` re-deriva el físico desde el `logicalName` y devuelve **solo** las entidades que cambian (usando separador/case del scope), salta las sin `logicalName`, y normaliza `_id` vs `id`; `to_mappings` arma el dict término→abbrev ignorando `scope`/`wordType`; invariantes de persistencia de `scope`/`wordType` en el modelo y el body; guards del CRUD (`test_crud_guards.py`); validación de nombres contra el glosario en sus tres capas (`test_validate_pure.py` / `test_validate_service.py` / `test_validate_route.py`); y el lock/unlock de términos (campos de lock + endpoints `/{entry_id}/lock` y `/unlock`, solo `admin.manage`).
 
-### 5.8 Reporting (`tests/features/reporting`, 37 tests en 9 archivos)
+### 5.8 Reporting (`tests/features/reporting`, 59 tests en 13 archivos)
 
 El motor de reporting traduce un `QuerySpec` a un pipeline de Mongo con whitelist:
 
 - **Compiler (`test_query_compiler.py`, 7):** `build_match` traduce operadores (`eq`, `startsWith` con `re.escape`), resuelve UDP a paths embebidos (`udp.u1` → `udpValues.u1`), rechaza campos desconocidos (400) y operadores no válidos por tipo (422). El planner rechaza ordenar por campos sin índice (422, seguro a escala) y arma `group`/`sort` para campos indexados.
 - **Seguridad del cursor (`test_query_security.py`, 3):** el cursor keyset (base64-JSON provisto por el cliente) va directo al `$match`, así que `_decode_cursor` **rechaza inyección de operadores de Mongo** (`{"$ne": null}`, `{"$regex": "(a+)+$"}` para evitar bypass y ReDoS) y cursores malformados.
 - **Agregación pura (`test_table_rows.py`, 7):** `table_rows` calcula `columnCount`, `relationshipCount` (source o target), y las listas de `subjectAreas`/`projects` que referencian cada tabla; soporta filtros por schema/proyecto y combinados. `column_rows` resuelve el nombre del dominio y ordena por `(tableId, ordinal)`.
-- **Resto (20):** entidades del modelo de reporting (`test_models_entity.py`, 9 — incluye la entidad virtual `view_columns`), filas de vistas (`test_view_rows.py`, 3), catálogo de columnas de vista (`test_view_columns_catalog.py`, 3), guard de facets con `re.escape` anti-ReDoS (`test_facets_guard.py`, 2), cobertura UDP por canvas del insight (`test_udp_coverage_canvas.py`, 2) y smoke de rutas (`test_routes.py`, 1).
+- **Resto:** entidades del modelo de reporting (`test_models_entity.py` — incluye la entidad virtual `view_columns`), filas de vistas (`test_view_rows.py`), catálogo de columnas de vista (`test_view_columns_catalog.py`), guard de facets con `re.escape` anti-ReDoS (`test_facets_guard.py`), cobertura UDP por canvas y por faceta (`test_udp_coverage_canvas.py`, `test_udp_coverage_view.py`, `test_udp_facet_names.py`), opciones de filtro del reporte (`test_filter_options.py`, doc 70), **saved reports por proyecto** (`test_saved_reports.py`, doc 75: `projectId` obligatorio e igual al del spec; un reporte no cambia de proyecto) y smoke de rutas (`test_routes.py`). Doc 75: `QuerySpec.projectId` es obligatorio y el executor antepone el alcance del proyecto a todo `$match`.
 
 ### 5.9 Resto de features
 
 | Grupo | Tests | Qué cubre |
 |-------|------:|-----------|
-| `catalog` | 12 | Campos aditivos de columna (`isNullable`/`isPartition`/`description`, round-trip) + `derive_column` (hereda tipo del dominio, respeta override manual con `typeOverridden`) + `search_columns` (búsqueda por columna del Database Explorer) + usage de tabla. |
-| `projects` | 14 | Diagrama con overlay (tablas y vistas del draft), layout, subject area aditiva y UDP de canvas. |
+| `catalog` | 46 | Campos aditivos de columna (`isNullable`/`isPartition`/`description`, round-trip) + `derive_column` (hereda tipo del dominio, respeta override manual con `typeOverridden`) + `search_columns` / `search_model` (⌘K) / `project_inventory` / `inspect` (docs 70–72) + `list_tables` por esquema + usage de tabla — todo acotado al proyecto (doc 75). |
+| `projects` | 21 | Diagrama con overlay (tablas y vistas del draft), layout, subject area aditiva y UDP de canvas + **ciclo de vida** (`test_lifecycle.py`, doc 75: crear directo con nombre único → estándares + `v1`; `copyFrom`; `counts`; sin `PUT/DELETE` directos). |
 | `folders` | 7 | `descendant_ids` (cascada transitiva, tolera ciclos sin loop infinito) + modelo/rutas. |
-| `relationships` | 24 | Normalización al shape v2 (`parent/child + pairs`, acepta payload legacy `source/target`), impacto por columna, links cross-canvas, y que `relationships`/`views` estén en `VERSIONED` (entran a changesets). |
-| `views` | 27 | Vistas versionadas: campos aditivos, multifuente (`sources[]` con descripciones por vista y columna), validación de payload y queries por canvas/tabla. |
-| `schemas` | 8 | Servicio de la entidad `schemas` (CRUD con guard de uso). |
-| `summary` | 6 | Contadores del Home: `count_global` passthrough y `count_for_project` (tablas distintas entre canvases, vistas y relaciones solo dentro del scope). |
-| `settings` | 7 | `naming_config` por scope: seeding de defaults (`_to_doc`), rutas registradas y validación (scope/case inválidos levantan `ValueError`). |
-| `udp` | 4 | Niveles de las definiciones UDP activas. |
-| `ddl_rules` | 88 | Motor de reglas del DDL Export completo, incluidos los golden tests del render determinista (detalle en la sección 3.3). |
-| `identity` | 4 | Rutas `/api/me` (local y databricks por headers `X-Forwarded-*`) y `/users`. |
+| `relationships` | 35 | Normalización al shape v2 (`parent/child + pairs`, acepta payload legacy `source/target`), impacto por columna, links cross-canvas, subcategorías (doc 53), y que `relationships`/`views` estén en `VERSIONED` (entran a changesets). |
+| `views` | 61 | Vistas versionadas: campos aditivos, multifuente (`sources[]` con descripciones por vista y columna), modo Personalizada (`customSql`, doc 61), validación de payload y queries por canvas/tabla. |
+| `schemas` | 14 | Servicio de la entidad `schemas` (CRUD con guard de uso; unicidad por proyecto, doc 75). |
+| `summary` | 5 | Contadores del Home: `count_global` passthrough y `count_for_project` (conteos directos por `projectId`, doc 75). |
+| `settings` | 8 | `naming_config` por (proyecto, scope): seeding de defaults (`_to_doc`), `_id = <pid>:<scope>`, rutas registradas y validación (scope/case inválidos levantan `ValueError`). |
+| `udp` | 13 | Niveles y facetas (`view`) de las definiciones UDP activas + alcance por proyecto. |
+| `ddl_rules` | 110 | Motor de reglas del DDL Export completo, incluidos los golden tests del render determinista (detalle en la sección 3.3). |
+| `identity` | 2 | Ruta `/api/users` (con `can=`). (`/api/me` se retiró en el doc 75 D14.) |
 | `core/identity` | 10 | Providers local/databricks, factory por `AUTH_MODE`, `current_principal`, modelos. |
 | `core/test_config` | 3 | Defaults del seam de identidad (`AUTH_MODE`, `LOCAL_DEV_USER`). |
 | `core/test_ratelimit_key` | 4 | Key del rate limiter: primera IP de `X-Forwarded-For`, fallback al peer (sección 3.3). |
+| `core/test_scope` | 6 | Alcance por proyecto (doc 75): `scoped` exige `projectId`, `naming_id`, `assert_scoped_filter` sólo acepta `projectId`/`_id`/`tableId` en colecciones de `PROJECT_SCOPED`. |
+| `core/test_facets` | 6 | Contrato de facetas lógico/físico (doc 69). |
 | `core` índices | 3 | `ensure_indexes` idempotente (`core/test_indexes.py`, 2) + índices del adaptador (`core/db/test_indexes.py`, 1). |
 
-### 5.10 Tests del kit de migración Erwin (`tests/erwin_migration`, 32 tests en 4 archivos)
+### 5.10 Tests del kit de migración Erwin (`tests/erwin_migration`, 89 tests en 9 archivos · `tests/scripts`, 24 en 3)
 
 Reemplazan desde 2026-07-24 al viejo test del seed determinista (`tests/scripts/test_seed_modeler.py`, retirado 2026-07-20 junto con su script — ver la nota de cabecera). Verifican el kit multi-archivo XML → Lakebase sin tocar la BD real:
 
-- **`test_parser_and_quality.py` (11):** el parser streaming de Erwin (`erwin_parser.py`) y el gate 1 de calidad (`quality.py`) sobre fixtures XML.
-- **`test_policies_merge.py` (8):** las reglas puras de resolución del merge (`policies.py`): adopción por clave natural `schema + nombre físico` case-insensitive, conflicto de versiones resuelto por score de uso (`2×relaciones + 1×canvases + 1×vistas`, empate → gana la existente), alias de duplicados internos y dedup de relaciones por clave natural.
-- **`test_migrate_merge.py` (9):** `migrate` completo contra una BD fake en memoria — merge incremental end-to-end: adopción con el mismo `_id`, update-in-place cuando gana la entrante, fusión de folders/canvases homónimos y reasignación de particiones por orden físico.
-- **`test_udp_allowed_values.py` (4):** los `allowedValues` de UDP tipo lista se cargan COMPLETOS desde `tag_Udp_Values_List` (no truncados a los valores usados).
+- **`test_parser_and_quality.py`** (+ `test_subtype_parser_quality.py`, doc 53): el parser streaming de Erwin (`erwin_parser.py`) y el gate 1 de calidad (`quality.py`) sobre fixtures XML.
+- **`test_policies_merge.py`:** las reglas puras de resolución del merge (`policies.py`): adopción por clave natural `schema + nombre físico` case-insensitive, conflicto de versiones resuelto por score de uso (`2×relaciones + 1×canvases + 1×vistas`, empate → gana la existente), alias de duplicados internos, dedup de relaciones por clave natural e ids namespaceados por proyecto (`project_scoped_id`, doc 75).
+- **`test_migrate_merge.py`:** `migrate` completo contra una BD fake en memoria — merge incremental end-to-end: proyecto resuelto PRIMERO y `projectId` en todo doc (doc 75), adopción con el mismo `_id` dentro del proyecto, update-in-place cuando gana la entrante, fusión de folders/canvases homónimos, unión distinta de estándares (`domain_conflicts`) y reasignación de particiones por orden físico.
+- **`test_migrate_facets.py`, `test_migrate_override.py`, `test_column_order.py`, `test_standard_udps.py`, `test_udp_allowed_values.py`:** facetas lógico/físico (doc 69), override físico persistido (doc 68), orden único de columnas (doc 74), catálogo FIJO de UDPs (doc 61 r2) y `allowedValues` completos desde `tag_Udp_Values_List`.
+- **`tests/scripts/test_run_migration.py`:** el orquestador con **manifiesto** (`projects.json`, doc 75 D9): `plan_files`/`group_by_project` (patrón → proyecto, regla general = nombre de archivo, errores `ManifestError` por patrón sin match / archivo en dos entradas / nombres repetidos), gate `quality` por proyecto y secuencia de pasos; `test_seed_ddl_export_rules.py` (`--project` / `--all-projects`, `select_projects`, skip si ya hay reglas); `test_reset_for_migration.py`.
 
 ---
 
 ## 6. E2E — harness contra el backend real
+
+> **Pendiente (doc 75, 2026-09-08):** el harness y los escenarios de `scripts/e2e/` fueron escritos contra la API anterior al doc 75 y todavía usan rutas globales (`/api/catalog/tables`, `/api/standards/apply`, `/api/domains`, `/api/versions/published`) y `projectIds` en el snapshot. Antes de volver a correrlos hay que adaptarlos al alcance por proyecto (`/api/projects/{pid}/…`, `projectId` en el snapshot, un proyecto por escenario). La prueba viva del refactor es la del §11 del doc 75 (UI), no esta suite.
 
 ### 6.1 Cómo funciona el harness (`scripts/e2e/harness.py`)
 
@@ -449,13 +472,13 @@ curl -s -X POST http://localhost:8000/api/auth/login \
 # → {"data":{"token":"<jwt>","user":{"role":"modelador","permissions":{...},"accessLevel":"edit"}}}
 
 # 2) usar el token en un endpoint gateado por RBAC
-curl -s http://localhost:8000/api/catalog/tables \
+curl -s http://localhost:8000/api/projects/p1/catalog/tables \
   -H "Authorization: Bearer <jwt>"
 
-# 3) crear un draft (requiere model.edit) — un lector recibiria 403
+# 3) crear un draft del proyecto (requiere model.edit) — un lector recibiria 403
 curl -s -X POST http://localhost:8000/api/changesets/snapshot \
   -H "Authorization: Bearer <jwt>" -H "Content-Type: application/json" \
-  -d '{"title":"mi draft","projectIds":["p1"]}'
+  -d '{"title":"mi draft","projectId":"p1"}'
 ```
 
 ```mermaid

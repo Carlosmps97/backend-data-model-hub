@@ -30,21 +30,21 @@ def test_name_error_rechaza_invalidos():
 
 def test_create_schema_valida_nombre():
     with pytest.raises(InvalidSchemaNameError):
-        asyncio.run(service.create_schema(SchemaBody(name="mal nombre")))
+        asyncio.run(service.create_schema("p1", SchemaBody(name="mal nombre")))
 
 
 def test_create_schema_rechaza_duplicado_case_insensitive(monkeypatch):
     monkeypatch.setattr(service.repository, "find_by_name",
                         AsyncMock(return_value={"id": "s1", "name": "core"}))
     with pytest.raises(DuplicateSchemaError):
-        asyncio.run(service.create_schema(SchemaBody(name="CORE")))
+        asyncio.run(service.create_schema("p1", SchemaBody(name="CORE")))
 
 
 def test_create_schema_trimea_y_delega(monkeypatch):
     monkeypatch.setattr(service.repository, "find_by_name", AsyncMock(return_value=None))
     create = AsyncMock(return_value={"id": "s1", "name": "core", "description": None})
     monkeypatch.setattr(service.repository, "create_schema", create)
-    asyncio.run(service.create_schema(SchemaBody(name="  core  ")))
+    asyncio.run(service.create_schema("p1", SchemaBody(name="  core  ")))
     assert create.await_args.args[0]["name"] == "core"
 
 
@@ -52,6 +52,8 @@ def test_update_schema_permite_mismo_id_con_mismo_nombre(monkeypatch):
     # renombrar a su PROPIO nombre (o cambiar solo description) no es duplicado
     monkeypatch.setattr(service.repository, "find_by_name",
                         AsyncMock(return_value={"id": "s1", "name": "core"}))
+    monkeypatch.setattr(service.repository, "get_schema",
+                        AsyncMock(return_value={"id": "s1", "projectId": "p1", "name": "core"}))
     upd = AsyncMock(return_value={"id": "s1", "name": "core", "description": "x"})
     monkeypatch.setattr(service.repository, "update_schema", upd)
     out = asyncio.run(service.update_schema("s1", SchemaBody(name="core", description="x")))
@@ -60,14 +62,14 @@ def test_update_schema_permite_mismo_id_con_mismo_nombre(monkeypatch):
 
 def test_delete_schema_en_uso_devuelve_in_use(monkeypatch):
     monkeypatch.setattr(service.repository, "get_schema",
-                        AsyncMock(return_value={"id": "s1", "name": "core"}))
+                        AsyncMock(return_value={"id": "s1", "projectId": "p1", "name": "core"}))
     monkeypatch.setattr(service.repository, "usage_count", AsyncMock(return_value=3))
     assert asyncio.run(service.delete_schema("s1")) == "in-use"
 
 
 def test_delete_schema_vacio_borra(monkeypatch):
     monkeypatch.setattr(service.repository, "get_schema",
-                        AsyncMock(return_value={"id": "s1", "name": "core"}))
+                        AsyncMock(return_value={"id": "s1", "projectId": "p1", "name": "core"}))
     monkeypatch.setattr(service.repository, "usage_count", AsyncMock(return_value=0))
     monkeypatch.setattr(service.repository, "delete_schema", AsyncMock(return_value=True))
     assert asyncio.run(service.delete_schema("s1")) is True
@@ -78,10 +80,10 @@ def test_delete_schema_vacio_borra(monkeypatch):
 
 def test_schema_doc_roundtrip_conserva_kind():
     from app.features.schemas.models import SchemaDoc
-    d = SchemaDoc.model_validate({"id": "s1", "name": "core_vu", "kind": "views"})
+    d = SchemaDoc.model_validate({"projectId": "p1", "id": "s1", "name": "core_vu", "kind": "views"})
     assert d.model_dump()["kind"] == "views"
     # sin kind (docs pre-doc-44): None, no desaparece la clave
-    assert SchemaDoc.model_validate({"id": "s2", "name": "core"}).model_dump()["kind"] is None
+    assert SchemaDoc.model_validate({"projectId": "p1", "id": "s2", "name": "core"}).model_dump()["kind"] is None
 
 
 def test_schema_body_rechaza_kind_invalido():
@@ -95,12 +97,14 @@ def test_create_schema_delega_kind(monkeypatch):
     create = AsyncMock(return_value={"id": "s1", "name": "core_vu",
                                      "description": None, "kind": "views"})
     monkeypatch.setattr(service.repository, "create_schema", create)
-    asyncio.run(service.create_schema(SchemaBody(name="core_vu", kind="views")))
+    asyncio.run(service.create_schema("p1", SchemaBody(name="core_vu", kind="views")))
     assert create.await_args.args[0]["kind"] == "views"
 
 
 def test_update_schema_con_kind_lo_actualiza(monkeypatch):
     monkeypatch.setattr(service.repository, "find_by_name", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.repository, "get_schema",
+                        AsyncMock(return_value={"id": "s1", "projectId": "p1", "name": "core"}))
     upd = AsyncMock(return_value={"id": "s1", "name": "core", "description": None,
                                   "kind": "tables"})
     monkeypatch.setattr(service.repository, "update_schema", upd)
@@ -111,7 +115,20 @@ def test_update_schema_con_kind_lo_actualiza(monkeypatch):
 def test_update_schema_sin_kind_no_lo_pisa(monkeypatch):
     # un PATCH que no manda kind NO debe escribirlo (preserva el valor en BD)
     monkeypatch.setattr(service.repository, "find_by_name", AsyncMock(return_value=None))
+    monkeypatch.setattr(service.repository, "get_schema",
+                        AsyncMock(return_value={"id": "s1", "projectId": "p1", "name": "core"}))
     upd = AsyncMock(return_value={"id": "s1", "name": "core", "description": None})
     monkeypatch.setattr(service.repository, "update_schema", upd)
     asyncio.run(service.update_schema("s1", SchemaBody(name="core")))
     assert "kind" not in upd.await_args.args[1]
+
+
+def test_create_schema_unico_por_proyecto(monkeypatch):
+    """Doc 75 D6: el mismo nombre de esquema puede existir en dos proyectos."""
+    monkeypatch.setattr(service.repository, "find_by_name",
+                        AsyncMock(side_effect=lambda pid, n: {"id": "s1"} if pid == "p1" else None))
+    monkeypatch.setattr(service.repository, "create_schema", AsyncMock(side_effect=lambda d: {**d, "id": "new"}))
+    with pytest.raises(DuplicateSchemaError):
+        asyncio.run(service.create_schema("p1", SchemaBody(name="core")))
+    out = asyncio.run(service.create_schema("p2", SchemaBody(name="core")))
+    assert out["projectId"] == "p2"

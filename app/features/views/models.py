@@ -29,6 +29,8 @@ class ViewDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     name: str
     sql: str = ""
     description: str | None = None

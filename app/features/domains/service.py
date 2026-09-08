@@ -12,6 +12,13 @@ def cascade_filter(domain_id: str) -> dict:
             "flgactive": {"$ne": False}}
 
 
+def logical_cascade_filter(domain_id: str) -> dict:
+    """Doc 69: cascada de la faceta LÓGICA — columnas activas del dominio sin
+    override del tipo lógico (independiente del override físico)."""
+    return {"parentDomainId": domain_id, "logicalTypeOverridden": {"$ne": True},
+            "flgactive": {"$ne": False}}
+
+
 def summarize_impact(groups: list[dict], names: dict[str, dict], models_affected: int,
                      q: str | None = None, offset: int = 0, limit: int = 200) -> dict:
     """Resumen de impacto AGRUPADO POR TABLA (F2 #2). Puro (testeable).
@@ -49,12 +56,12 @@ def summarize_impact(groups: list[dict], names: dict[str, dict], models_affected
     }
 
 
-async def list_domains() -> list[dict]:
-    return await repository.list_domains()
+async def list_domains(project_id: str) -> list[dict]:
+    return await repository.list_domains(project_id)
 
 
-async def create_domain(body: ParentDomainBody) -> dict:
-    return await repository.create_domain(body.model_dump(exclude_none=True))
+async def create_domain(project_id: str, body: ParentDomainBody) -> dict:
+    return await repository.create_domain(project_id, body.model_dump(exclude_none=True))
 
 
 async def update_domain(domain_id: str, body: ParentDomainBody) -> dict | None:
@@ -80,11 +87,11 @@ async def impact(domain_id: str, q: str | None = None,
 
 
 async def propagate(domain_id: str) -> dict:
-    """Aplica el `defaultDataType` ACTUAL del dominio a todas sus columnas SIN
-    override (update directo, retroactivo). Devuelve `{updated}`. Si el dominio
-    no existe o no tiene tipo, no actualiza nada."""
-    data_type = await repository.get_default_data_type(domain_id)
-    if not data_type:
-        return {"updated": 0}
-    updated = await repository.propagate_type(cascade_filter(domain_id), data_type)
-    return {"updated": updated}
+    """Aplica los tipos ACTUALES del dominio (físico y lógico, cada uno a las
+    columnas SIN override de ESA faceta — doc 69). Devuelve `{updated,
+    updatedLogical}`. Sin dominio o sin tipo, no actualiza nada."""
+    data_type, logical_type = await repository.get_domain_types(domain_id)
+    updated = await repository.propagate_type(cascade_filter(domain_id), data_type) if data_type else 0
+    updated_logical = (await repository.propagate_field(logical_cascade_filter(domain_id), "logicalDataType", logical_type)
+                       if logical_type else 0)
+    return {"updated": updated, "updatedLogical": updated_logical}

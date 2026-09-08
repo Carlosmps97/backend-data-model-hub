@@ -11,10 +11,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.api.envelope import ok
+from app.core.scope import ProjectDeletedError
+from app.features.projects import repository as projects_repo
+from app.features.projects.deps import alive_project
 from app.core.audit import audit
 from app.core.identity import Principal, current_principal
 from app.features.auth import repository as auth_repo
 from app.features.auth.deps import require_permission
+from app.features.changesets.access import ensure_changeset_visible
 
 from . import service
 
@@ -27,7 +31,7 @@ _can_decide = require_permission("review.decide")
 _can_rollback = require_permission("rollback")
 from .repository import VERSIONED
 from .validation import (
-    DuplicateEntityError, InvalidPayloadError, NameTooLongError,
+    CrossProjectError, DuplicateEntityError, InvalidPayloadError, NameTooLongError,
     RelationshipKeyMismatchError, SchemaInUseError)
 from .schemas import (
     ChangeBody,
@@ -58,10 +62,13 @@ async def list_all():
 
 @router.post("/snapshot", status_code=status.HTTP_201_CREATED)
 async def snapshot(body: SnapshotBody, user: dict = Depends(_can_edit)):
-    """Crea un draft (working copy) a partir del estado publicado (Open model · snapshot)."""
+    """Crea un draft (working copy) DEL PROYECTO a partir de su estado publicado
+    (Open model · snapshot). Doc 75 D2: 404 si el proyecto no existe o fue borrado."""
+    if not await projects_repo.get_project(body.projectId):
+        raise HTTPException(status_code=404, detail="Project not found.")
     return ok(
         await service.snapshot(
-            user["username"], body.title, body.description, body.projectIds, body.versionLabel
+            user["username"], body.projectId, body.title, body.description, body.versionLabel
         )
     )
 
@@ -93,6 +100,8 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
     try:
         res = await service.add_change(cs_id, user["username"], body.collection, body.entityId, body.op, body.payload,
                                        body.origin)
+    except (CrossProjectError, ProjectDeletedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DuplicateEntityError as exc:
         # Unicidad de nombres (spec 10 §9): el Save queda bloqueado ACÁ, en el
         # router — el publish queda protegido transitivamente (y re-chequeado).
@@ -132,6 +141,8 @@ async def add_changes_bulk(cs_id: str, body: ChangesBulkBody, user: dict = Depen
     try:
         res = await service.add_changes_bulk(
             cs_id, user["username"], [c.model_dump() for c in body.changes])
+    except (CrossProjectError, ProjectDeletedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DuplicateEntityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RelationshipKeyMismatchError as exc:
@@ -161,6 +172,7 @@ async def effective(
     q: str | None = Query(default=None, description="búsqueda por nombre (contains, case-insensitive)"),
     limit: int | None = Query(default=None, ge=1, le=500),
     schema: str | None = Query(default=None, description="tablas/vistas de un esquema (Database Explorer)"),
+    principal: Principal = Depends(current_principal),
 ):
     """Estado efectivo de una colección. `tableId`/`ids` acotan la respuesta a
     un slice — obligatorio en colecciones grandes (canonical_columns).
@@ -169,6 +181,7 @@ async def effective(
     if collection not in VERSIONED:
         raise HTTPException(status_code=422, detail=f"Collection not under versioning: {collection!r}.")
     id_list = [s for s in (ids.split(",") if ids else []) if s] or None
+    await ensure_changeset_visible(cs_id, principal)   # doc 70 §12
     return ok(await service.effective(cs_id, collection, table_id=tableId, ids=id_list,
                                       q=q, limit=limit, schema=schema))
 
@@ -220,8 +233,11 @@ async def submit(cs_id: str, body: SubmitBody | None = None,
             detail=f"Reviewer(s) without approval permission (review.decide): {names}. "
                    "Assign users with the reviewer or administrator role.",
         )
-    res = await service.submit(cs_id, user["username"], body.title, body.description,
-                               body.reviewers, body.projectIds)
+    try:
+        res = await service.submit(cs_id, user["username"], body.title, body.description,
+                                   body.reviewers)
+    except ProjectDeletedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can send it to review.")
     if res is None:
@@ -241,6 +257,8 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
     único de decisión — /review, /approve y /reject pasan por acá."""
     try:
         res = await service.review(cs_id, actor, decision, note)
+    except (CrossProjectError, ProjectDeletedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DuplicateEntityError as exc:
         # Carrera entre changesets (spec 10 §9): otro publish ganó el nombre.
         # El claim ya se revirtió (producción intacta); el request sigue en revisión.
@@ -299,7 +317,10 @@ async def withdraw(cs_id: str, user: dict = Depends(_can_edit)):
 async def reopen(cs_id: str, user: dict = Depends(_can_edit)):
     """Reabre un request rechazado (`rejected → draft`) para corregir y re-enviar.
     Sólo el owner; el reject nunca elimina la versión."""
-    res = await service.reopen(cs_id, user["username"])
+    try:
+        res = await service.reopen(cs_id, user["username"])
+    except ProjectDeletedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can reopen it.")
     if res is None:
@@ -316,7 +337,10 @@ async def rollback(cs_id: str, user: dict = Depends(_can_rollback)):
     rollback también se revisa, se audita y se re-valida antes de tocar
     producción (mismo estándar que Data Standards, pero con governance).
     Requiere el permiso `rollback`."""
-    res = await service.rollback(cs_id, user["username"])
+    try:
+        res = await service.rollback(cs_id, user["username"])
+    except ProjectDeletedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if res is None:
         raise HTTPException(status_code=404, detail="Version not found.")
     if res == "not-applied":
@@ -373,6 +397,8 @@ async def rename_schema(cs_id: str, schema_id: str, body: SchemaRenameBody,
         res = await service.rename_schema(cs_id, user["username"], schema_id, body.newName)
     except InvalidPayloadError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (CrossProjectError, ProjectDeletedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DuplicateEntityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     counts = _schema_change_result(res, cs_id)
@@ -420,18 +446,27 @@ async def approve(cs_id: str, user: dict = Depends(_can_decide)):
 # ── Routers hermanos: versiones (p5) y requests (Home / Review) ───────────
 
 versions_router = APIRouter(prefix="/api/versions", tags=["versions"])
+project_versions_router = APIRouter(prefix="/api/projects/{project_id}/versions", tags=["versions"],
+                                    dependencies=[Depends(alive_project)])
 
 
 @versions_router.get("")
-async def list_versions():
-    """Lista cross-project de versiones (filas para la tabla de Review & publish)."""
-    return ok(await service.list_versions())
+async def list_versions(projectId: str | None = Query(default=None)):
+    """Filas de versión para Home/Review: todas (con `projectId` por fila) o las
+    de un proyecto (doc 75 D2)."""
+    return ok(await service.list_versions(projectId))
 
 
-@versions_router.get("/published")
-async def current_production():
-    """Versión de producción actual (la última approved/aplicada — fila verde)."""
-    return ok(await service.current_production())
+@project_versions_router.get("")
+async def project_versions(project_id: str):
+    """Versiones DEL proyecto (doc 75 D2)."""
+    return ok(await service.list_versions(project_id))
+
+
+@project_versions_router.get("/published")
+async def project_production(project_id: str):
+    """Versión de producción actual DEL proyecto (la última approved/aplicada)."""
+    return ok(await service.current_production(project_id))
 
 
 def _compare_http(res):
@@ -444,6 +479,9 @@ def _compare_http(res):
     if res == "same":
         raise HTTPException(status_code=409,
                             detail="Pick two different versions to compare.")
+    if res == "different-projects":
+        raise HTTPException(status_code=409,
+                            detail="Both versions must belong to the same project.")
     return res
 
 

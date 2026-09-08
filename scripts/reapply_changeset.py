@@ -45,8 +45,6 @@ async def main() -> None:
             await repository.changes_map(cs["id"]), cs.get("submittedAt")
         )
         counts = await repository.apply_changes(service.apply_plan(changes))
-        if changes.get("parent_domains"):
-            await repository.cascade_domain_types(changes["parent_domains"])
         await repository.set_status(cs["id"], {"appliedAt": _now()})
         print(f"re-aplicado {cs['id']} ({cs.get('versionLabel')}): {counts}")
 

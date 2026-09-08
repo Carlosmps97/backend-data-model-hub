@@ -60,19 +60,38 @@ def test_view_rows_legacy_table_id_and_sort():
     assert [r["id"] for r in rows] == ["v3", "v1", "v2"]
 
 
+def test_view_rows_canvases_por_membresia_explicita_y_legacy():
+    """Doc 70: `canvases` = nombres donde la vista es miembro visible —
+    explícito por `viewIds`, o regla legacy (showOnCanvas ∧ fuente) en canvases
+    sin lista. Sin canvases → lista vacía (aditivo)."""
+    sas = [
+        {"id": "saA", "name": "Legacy", "tableIds": ["t1"], "viewIds": None},         # v1 por flag; v2 sin flag no
+        {"id": "saB", "name": "Explicit", "tableIds": ["t1", "t2"], "viewIds": ["v2"]},
+        {"id": "saC", "name": "Elsewhere", "tableIds": ["t9"], "viewIds": ["v1"]},    # sin fuente presente
+    ]
+    rows = view_rows(_views(), _NAMES, sas)
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["v1"]["canvases"] == ["Legacy"]
+    assert by_id["v2"]["canvases"] == ["Explicit"]
+    assert by_id["v3"]["canvases"] == []                    # legacy sin flag
+    assert view_rows(_views(), _NAMES)[0]["canvases"] == []  # sin canvases: aditivo
+
+
 def test_list_view_rows_filtra_por_schema(monkeypatch):
     """Database Explorer (doc 18 §5): `?schema=` baja el filtro al repository
     (server-side) y NO aplica el cap de vistas sin filtrar."""
     captured: dict = {}
 
-    async def fake_views_for_tables(table_ids=None, limit=None, schema=None):
-        captured.update(table_ids=table_ids, limit=limit, schema=schema)
+    async def fake_views_for_tables(project_id, table_ids=None, limit=None, schema=None):
+        captured.update(project_id=project_id, table_ids=table_ids, limit=limit, schema=schema)
         return [{"id": "v1", "name": "V", "schema": "core_vu",
                  "sourceTableIds": [], "sources": []}]
 
     monkeypatch.setattr(service.repository, "views_for_tables", fake_views_for_tables)
     monkeypatch.setattr(service.repository, "table_names", AsyncMock(return_value={}))
-    rows = asyncio.run(service.list_view_rows(schema="core_vu"))
+    monkeypatch.setattr(service.repository, "_subject_areas", AsyncMock(return_value=[]))
+    rows = asyncio.run(service.list_view_rows("p1", schema="core_vu"))
+    assert captured["project_id"] == "p1"
     assert captured["schema"] == "core_vu"
     assert captured["limit"] is None
     assert rows[0]["id"] == "v1"

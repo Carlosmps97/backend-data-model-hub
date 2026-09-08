@@ -59,13 +59,15 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
     """Modelo limpio del XML parseado (puro, testeable). Devuelve
     (secciones, nº de columnas duplicadas descartadas)."""
     schema_of = model.owner_schema()
-    collapsed = pol.collapse_udp_defs(model.udp_defs)
-    udp_vals = pol.resolve_udp_values(model.udp_values, collapsed)
+    defs = pol.udp_defs_by_view(model.udp_defs)
+    udp_vals = pol.resolve_udp_values(model.udp_values, defs)
     dom_name = {d.id: d.name for d in model.domains.values()}
 
     def udps_for(oid: str, level: str) -> dict[str, str]:
-        return {e["name"]: udp_vals[(oid, key)]
-                for key, e in collapsed.items()
+        # Doc 69: ambas facetas; la lógica se etiqueta «X (Logical)» para que
+        # los homónimos no colisionen en el JSON.
+        return {(f"{e['name']} (Logical)" if e["view"] == "logical" else e["name"]): udp_vals[(oid, key)]
+                for key, e in defs.items()
                 if e["level"] == level and (oid, key) in udp_vals}
 
     def schema_for(oid: str) -> str:
@@ -80,6 +82,8 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
         cols, dropped = pol.dedupe_columns(e.attributes)
         dropped_total += len(dropped)
         pk_pos = {aid: i for i, aid in enumerate(e.pk_attr_order)}
+        # Doc 74: mismo orden ÚNICO que migrate (llaves primero + Column order).
+        cols = pol.column_order(cols, e.pk_attr_ids, e.pk_attr_order)
         tables.append({
             "schema": schema_for(e.id),
             "physicalName": e.physical, "logicalName": e.name,
@@ -90,11 +94,12 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
                 "dataType": a.data_type or None, "nullable": a.nullable,
                 "isPrimaryKey": a.id in e.pk_attr_ids,
                 "pkPosition": pk_pos.get(a.id),
+                "ordinal": i,
                 "isForeignKey": bool(a.parent_attr_ref),
                 "domain": dom_name.get(a.domain_ref or "") or None,
                 "definition": a.definition or a.comment or None,
                 "udpValues": udps_for(a.id, "column"),
-            } for a in cols],
+            } for i, a in enumerate(cols)],
         })
     tables.sort(key=lambda t: (t["schema"], t["physicalName"]))
 

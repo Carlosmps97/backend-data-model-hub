@@ -12,8 +12,15 @@ class ParentDomainDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     name: str
     defaultDataType: str
+    # Doc 69 §4.9: `defaultDataType` = tipo FÍSICO por defecto (lo que emite el
+    # DDL; el kit lo siembra desde Physical_Data_Type). `logicalDataType` =
+    # Logical_Data_Type de Erwin (el dominio «Codigo» es VARCHAR(20) lógico y
+    # VARCHAR(30) físico). None = no informado.
+    logicalDataType: str | None = None
     # R5b: término de naming sugerido por el dominio (lo muestra el diseño p4).
     # Aditivo (invariante de persistencia): el seed ya lo siembra y antes se
     # descartaba al leer por `extra="ignore"`. Default None = no-breaking.

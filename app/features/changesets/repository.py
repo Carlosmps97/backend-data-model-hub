@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from pymongo import DeleteOne, ReplaceOne, ReturnDocument, UpdateOne
 
 from app.core.db.client import get_db
+from app.core.scope import assert_scoped_filter, scoped
 
+from . import asof
 from .models import ChangeDoc, ChangesetDoc
 
 COLL = "changesets"
@@ -29,6 +31,9 @@ CHANGES_COLL = "changeset_changes"
 # `schemas` ENTRÓ (2026-07-16, doc 18): el esquema de BD como entidad — crear/
 # renombrar/eliminar un esquema forma parte de la versión publicable. Va ANTES
 # de canonical_tables (las tablas lo referencian por nombre).
+# Doc 75 D5: `projects` SIGUE versionado — se crea directo (con su v1), pero
+# renombrar/describir/borrar el proyecto son cambios del draft del propio
+# proyecto; el apply de un delete de proyecto cascada en `_apply_and_finalize`.
 VERSIONED = ("projects", "folders", "subject_areas", "schemas",
              "canonical_tables", "canonical_columns", "relationships", "views")
 
@@ -69,12 +74,14 @@ async def list_all() -> list[dict]:
     return [ChangesetDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
 
-async def list_summaries() -> list[dict]:
+async def list_summaries(project_id: str | None = None) -> list[dict]:
     """Como `list_all` pero SIN los blobs `changes`/`comments` (proyección):
     las listas de versiones/requests sólo proyectan cabeceras y el `changes`
-    de un changeset grande pesa MBs — bajarlo por fila no escala."""
+    de un changeset grande pesa MBs — bajarlo por fila no escala. Con
+    `project_id` sólo las versiones de ESE proyecto (doc 75 D2)."""
     db = await get_db()
-    docs = await db[COLL].find({}, {"changes": 0, "comments": 0}).to_list(None)
+    flt = scoped(project_id) if project_id else {}
+    docs = await db[COLL].find(flt, {"changes": 0, "comments": 0}).to_list(None)
     docs.sort(key=lambda d: d.get("updatedAt") or "", reverse=True)
     return [ChangesetDoc.model_validate(_to_doc(d)).model_dump() for d in docs]
 
@@ -214,7 +221,38 @@ async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
 async def changes_map(cs_id: str, collections: list[str] | None = None) -> dict[str, dict[str, dict]]:
     """Cambios del changeset como `{collection: {entityId: {op, payload?, at}}}`
     — la forma que consumen overlay/diff/apply. `collections` acota la query
-    (usa el índice compuesto csId+collection); None = todas."""
+    (usa el índice compuesto csId+collection); None = todas.
+
+    Doc 70: `asof:<versionId>` es un changeset VIRTUAL — el inverso compuesto
+    de las versiones publicadas después de esa (`asof_changes_map`); todos los
+    lectores changeset-aware heredan el snapshot por esta única puerta."""
+    version_id = asof.asof_version_id(cs_id)
+    if version_id is not None:
+        return await asof_changes_map(version_id, collections)
+    return await _ledger_map(cs_id, collections)
+
+
+async def asof_changes_map(version_id: str, collections: list[str] | None = None) -> dict[str, dict[str, dict]]:
+    """Inverso compuesto de las versiones publicadas DESPUÉS de `version_id`
+    (doc 70 §3): producción + este mapa = estado exacto del modelo en esa
+    versión. La producción actual (sin posteriores) devuelve `{}`. Levanta
+    `AsOfUnavailable` si la versión no existe, no está publicada o alguna
+    posterior no tiene imágenes previas."""
+    target = await get(version_id)
+    if not target:
+        raise asof.AsOfUnavailable("not-found", version_id)
+    if target.get("status") != "approved" or not target.get("appliedAt"):
+        raise asof.AsOfUnavailable("not-applied", version_id)
+    later = await applied_after(target["projectId"], str(target["appliedAt"]))   # latest → oldest
+    ledgers = [await _ledger_map(v["id"], collections) for v in later]
+    composed, missing = asof.compose_inverse(ledgers)
+    if missing:
+        raise asof.AsOfUnavailable("no-before", version_id, missing)
+    return composed
+
+
+async def _ledger_map(cs_id: str, collections: list[str] | None = None) -> dict[str, dict[str, dict]]:
+    """Lector CRUDO del ledger de un changeset real (ver `changes_map`)."""
     db = await get_db()
     flt: dict = {"csId": cs_id}
     if collections is not None:
@@ -320,23 +358,23 @@ async def store_before_images(cs_id: str, befores: dict[tuple[str, str], dict | 
             {"$set": {"beforeAt": now, "before": doc}})
 
 
-async def latest_applied_id() -> str | None:
-    """Id del changeset APLICADO más reciente (máximo `appliedAt`)."""
+async def latest_applied_id(project_id: str) -> str | None:
+    """Id del changeset APLICADO más reciente DEL PROYECTO (máximo `appliedAt`)."""
     db = await get_db()
-    docs = await db[COLL].find({"status": "approved", "appliedAt": {"$ne": None}},
+    docs = await db[COLL].find(scoped(project_id, {"status": "approved", "appliedAt": {"$ne": None}}),
                                {"appliedAt": 1}).to_list(None)
     if not docs:
         return None
     return str(max(docs, key=lambda d: d.get("appliedAt") or "")["_id"])
 
 
-async def applied_after(applied_at: str) -> list[dict]:
-    """Changesets publicados DESPUÉS de `applied_at` — los que un rollback A esa
-    versión debe deshacer — del MÁS RECIENTE al más viejo. A escala un orden sin
-    índice sería full-scan ⇒ se ordena en Python (son pocas versiones)."""
+async def applied_after(project_id: str, applied_at: str) -> list[dict]:
+    """Changesets DEL PROYECTO publicados DESPUÉS de `applied_at` — los que un
+    rollback A esa versión debe deshacer — del MÁS RECIENTE al más viejo (doc
+    75 I6: jamás versiones de otro proyecto). Se ordena en Python (son pocas)."""
     db = await get_db()
     docs = await db[COLL].find(
-        {"status": "approved", "appliedAt": {"$gt": applied_at}},
+        scoped(project_id, {"status": "approved", "appliedAt": {"$gt": applied_at}}),
         {"appliedAt": 1, "versionLabel": 1}).to_list(None)
     docs.sort(key=lambda d: d.get("appliedAt") or "", reverse=True)
     return [{"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
@@ -366,7 +404,7 @@ async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
     db = await get_db()
     docs = await db[COLL].find(
         {"_id": {"$in": sorted(set(cs_ids))}},
-        {"versionLabel": 1, "title": 1, "owner": 1, "status": 1,
+        {"versionLabel": 1, "title": 1, "owner": 1, "status": 1, "projectId": 1,
          "appliedAt": 1, "reviewedBy": 1, "approvals": 1,
          "restoredFrom": 1}).to_list(None)
     out: dict[str, dict] = {}
@@ -377,13 +415,26 @@ async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-async def earliest_applied() -> dict | None:
-    """Cabecera de la versión APLICADA más VIEJA (mínimo `appliedAt`) — el
-    marcador v1 de la carga inicial en una BD migrada (doc 51: la entrada
-    sintética "Initial load" toma de acá label y fecha de fallback)."""
+async def earliest_applied(project_id: str) -> dict | None:
+    """Cabecera de la versión APLICADA más VIEJA DEL PROYECTO (mínimo `appliedAt`)
+    — el marcador v1 de la carga inicial (doc 51: la entrada sintética
+    "Initial load" toma de acá label y fecha de fallback)."""
     db = await get_db()
-    docs = await db[COLL].find({"status": "approved", "appliedAt": {"$ne": None}},
+    docs = await db[COLL].find(scoped(project_id, {"status": "approved", "appliedAt": {"$ne": None}}),
                                {"appliedAt": 1, "versionLabel": 1, "title": 1}).to_list(None)
+
+
+async def changesets_deleting_project(cs_ids: list[str]) -> set[str]:
+    """Ids de los changesets (entre `cs_ids`) que llevan un delete de `projects`
+    (doc 75 D5/D20: la bandeja marca la pill «Deletes project» sin pedir el diff).
+    Usa el prefijo del índice `(collection, entityId)`."""
+    if not cs_ids:
+        return set()
+    db = await get_db()
+    docs = await db[CHANGES_COLL].find(
+        {"collection": "projects", "op": "delete", "csId": {"$in": sorted(set(cs_ids))}},
+        {"csId": 1}).to_list(None)
+    return {str(d.get("csId")) for d in docs}
     if not docs:
         return None
     d = min(docs, key=lambda d: d.get("appliedAt") or "")
@@ -408,6 +459,7 @@ async def published(collection: str, flt: dict | None = None, limit: int | None 
     `projection` (doc 55): campos a traer cuando el llamador necesita la
     colección entera pero solo algunos campos (la carga masiva resuelve
     identidades de tablas por nombre sobre TODO el pool)."""
+    assert_scoped_filter(collection, flt)   # doc 75 D1: sin alcance no se lee
     db = await get_db()
     cursor = db[collection].find({"flgactive": {"$ne": False}, **(flt or {})}, projection)
     if limit is not None and limit > 0:
@@ -452,16 +504,3 @@ async def apply_changes(plan: list[tuple]) -> dict[str, int]:
         await db[collection].bulk_write(ops, ordered=False)
         counts[collection] = len(ops)
     return counts
-
-
-async def cascade_domain_types(domain_changes: dict) -> None:
-    """Tras aplicar dominios, re-deriva el tipo de las columnas sin override
-    (misma cascada que M1a) para cada dominio con `defaultDataType` nuevo."""
-    db = await get_db()
-    now = _now()
-    for did, ch in domain_changes.items():
-        if ch.get("op") == "upsert" and "defaultDataType" in (ch.get("payload") or {}):
-            await db["canonical_columns"].update_many(
-                {"parentDomainId": did, "typeOverridden": {"$ne": True}},
-                {"$set": {"dataType": ch["payload"]["defaultDataType"], "updatedAt": now}},
-            )

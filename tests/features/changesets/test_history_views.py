@@ -46,7 +46,7 @@ def test_historial_de_vista_resuelve_tablas_y_custom_sql(monkeypatch):
         return [{"id": "v1", "name": "v_cliente",
                  "createdAt": "2026-07-20T00:00:00+00:00"}]
 
-    async def _earliest():
+    async def _earliest(project_id=None):
         return {"id": "base", "appliedAt": "2026-07-24T00:00:00+00:00",
                 "versionLabel": "v1", "title": "Base"}
 

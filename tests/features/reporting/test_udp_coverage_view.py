@@ -41,12 +41,12 @@ def test_udp_coverage_nivel_view(monkeypatch):
                   "views": _FakeColl(count=7)})
     monkeypatch.setattr(views, "get_db", AsyncMock(return_value=db))
 
-    async def _fake_pairs(coll):
+    async def _fake_pairs(project_id, coll):
         return {"u-vt": {"Personalizada": 2}} if coll == "views" else {}
 
     monkeypatch.setattr(views, "_coverage_pairs", _fake_pairs)
 
-    rows = asyncio.run(views.udp_coverage())
+    rows = asyncio.run(views.udp_coverage("p1"))
     row = rows[0]
     assert row["level"] == "view"
     assert row["totalEntities"] == 7      # views, NO canonical_tables (10)

@@ -10,7 +10,7 @@ from app.features.reporting.query.spec import FROMS, QuerySpec
 
 def test_view_columns_is_a_valid_from():
     assert "view_columns" in FROMS
-    spec = QuerySpec.model_validate({"from": "view_columns",
+    spec = QuerySpec.model_validate({"from": "view_columns", "projectId": "p1",
                                      "select": ["viewName", "description"]})
     assert spec.from_ == "view_columns"
 

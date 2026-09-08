@@ -49,6 +49,14 @@ def render_export(payload: dict, rules: list[dict], config: dict,
     # Opciones del export del canvas: los artefactos generados salen ESPEJO del
     # físico (casing/USING/particiones/LOCATION — pedido owner 07-20).
     export_options = payload.get("options") or {}
+    # Doc 73: la regla de layout (particiones al final) la aplica el FRONT al
+    # CREATE base (`baseSql` ya llega con ese orden); acá sólo queda registrada
+    # como aplicada para el sello/log del export. Las tablas generadas emiten
+    # sus particiones al final siempre (_emit_columns).
+    if gen.layout_from_rules(run)["partitionsLast"]:
+        log += [{"rule": r.get("name"), "status": "applied", "artifact": PHYSICAL,
+                 "object": "column layout: partition columns last"}
+                for r in run if ((r.get("action") or {}).get("layout") or {}).get("partitionColumns") == "last"]
 
     statements: list[dict] = []
     cols_ctx_by_table: dict[str, dict[str, dict]] = {}
@@ -66,7 +74,9 @@ def render_export(payload: dict, rules: list[dict], config: dict,
         tid = table.get("id") or t_ctx["nombre"]
         cols_ctx_by_table[tid] = cols_ctx
         base_ctx_by_table[tid] = base_ctx
-        full = f"{t_ctx['esquema']}.{t_ctx['nombre']}" if t_ctx.get("esquema") else t_ctx["nombre"]
+        # Doc 71 H2: los ALTER … SET TAGS referencian la tabla con el MISMO
+        # funnel de identificadores del CREATE (backticks + casing del export).
+        full = render.full_name(t_ctx.get("esquema"), t_ctx["nombre"], export_options)
 
         # 1) CREATE base + TBLPROPERTIES desde UDP (spec §8.4)
         base_sql = entry.get("baseSql") or ""
@@ -76,7 +86,7 @@ def render_export(payload: dict, rules: list[dict], config: dict,
             statements.append({"artifact": PHYSICAL, "schema": t_ctx.get("esquema"),
                                "name": t_ctx["nombre"], "sql": base_sql})
         # 2) tags de columna — una sentencia por columna (spec §8.2)
-        stmts, l = render.column_tag_statements(run, PHYSICAL, base_ctx, cols_ctx, config, full)
+        stmts, l = render.column_tag_statements(run, PHYSICAL, base_ctx, cols_ctx, config, full, export_options)
         log += l
         statements += [{"artifact": f"{PHYSICAL}.tags", "schema": t_ctx.get("esquema"),
                         "name": t_ctx["nombre"], "sql": s} for s in stmts]

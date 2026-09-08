@@ -1,8 +1,9 @@
 """Tests del Migrator multi-archivo (doc 32b) contra una BD FAKE en memoria:
 adopción por clave natural (R1), conflicto por score (R2), alias de duplicados
 internos (R3), dedup de relaciones (R4), A4 (defs UDP sin uso) y fusión de
-folders/canvases homónimos (R8). Cubre la superficie real que usa el script:
-find / find_one / bulk_write(UpdateOne)."""
+folders/canvases homónimos (R8); doc 75: todo ocurre DENTRO de un proyecto
+(ids namespaceados, prefetch acotado, estándares por proyecto). Cubre la
+superficie real que usa el script: find / find_one / bulk_write(UpdateOne)."""
 from __future__ import annotations
 
 import pytest
@@ -93,43 +94,44 @@ def base_db() -> FakeDb:
     """BD viva: TAB_A y TAB_C existen (de un archivo anterior) y están MÁS
     usadas que las copias del archivo 2 (2 relaciones, 2 canvases y una vista
     para TAB_A → score 7; la copia entrante suma 6) — deben ADOPTARSE."""
+    P = {"projectId": "proj-1"}          # doc 75: todo doc de alcance lleva su proyecto
     return FakeDb({
         "canonical_tables": {
-            "tbl-1": {"_id": "tbl-1", "schema": "S1", "physicalName": "TAB_A"},
-            "tbl-3": {"_id": "tbl-3", "schema": "S1", "physicalName": "TAB_C"},
+            "tbl-1": {"_id": "tbl-1", "schema": "S1", "physicalName": "TAB_A", **P},
+            "tbl-3": {"_id": "tbl-3", "schema": "S1", "physicalName": "TAB_C", **P},
         },
         "canonical_columns": {
             "col-1": {"_id": "col-1", "tableId": "tbl-1", "physicalName": "CODA",
-                      "erwinLongId": "OLD-A1"},
+                      "erwinLongId": "OLD-A1", **P},
             "col-2": {"_id": "col-2", "tableId": "tbl-1", "physicalName": "NOMA",
-                      "erwinLongId": "OLD-A2"},
+                      "erwinLongId": "OLD-A2", **P},
             "col-5": {"_id": "col-5", "tableId": "tbl-3", "physicalName": "CODC",
-                      "erwinLongId": "OLD-C1"},
+                      "erwinLongId": "OLD-C1", **P},
         },
         "relationships": {
             "rel-1": {"_id": "rel-1", "parentTableId": "tbl-1", "childTableId": "tbl-3",
                       "pairs": [{"parentColumnId": "col-1", "childColumnId": "col-5"}],
-                      "identifying": False},
+                      "identifying": False, **P},
             "rel-2": {"_id": "rel-2", "parentTableId": "tbl-1", "childTableId": "tbl-3",
                       "pairs": [{"parentColumnId": "col-2", "childColumnId": "col-5"}],
-                      "identifying": False},
+                      "identifying": False, **P},
         },
         "views": {
             "vw-0": {"_id": "vw-0", "schema": "S1V", "name": "OTRA_VU",
-                     "sourceTableIds": ["tbl-1"]},
+                     "sourceTableIds": ["tbl-1"], **P},
         },
         "subject_areas": {
             "cv-1": {"_id": "cv-1", "name": "DIAG", "folderId": "fold-1",
-                     "projectId": "proj-1", "tableIds": ["tbl-1", "tbl-3"],
+                     "tableIds": ["tbl-1", "tbl-3"], **P,
                      "layout": {"tbl-1": {"x": 11, "y": 22}, "tbl-3": {"x": 33, "y": 44}}},
             "cv-2": {"_id": "cv-2", "name": "DIAG2", "folderId": "fold-1",
-                     "projectId": "proj-1", "tableIds": ["tbl-1"], "layout": {}},
+                     "tableIds": ["tbl-1"], "layout": {}, **P},
         },
         "folders": {
-            "fold-1": {"_id": "fold-1", "projectId": "proj-1", "name": "AREA"},
+            "fold-1": {"_id": "fold-1", "name": "AREA", **P},
         },
         "projects": {"proj-1": {"_id": "proj-1", "name": "Familia DDV"}},
-        "schemas": {"sch-S1": {"_id": "sch-S1", "name": "S1"}},
+        "schemas": {"sch-S1": {"_id": "sch-S1", "name": "S1", **P}},
     })
 
 
@@ -166,7 +168,7 @@ def modelo_archivo_2() -> ep.ErwinModel:
     m.subject_areas = [{"id": "SAX", "name": "AREA", "definition": "", "order": 0}]
     m.diagrams = [ep.ErwinDiagram(id="DGX", name="DIAG", subject_area="AREA",
                                   owner_path="Modelo.AREA",
-                                  shapes=[("E1", None), ("E4", None), ("E2", None)])]
+                                  shapes=[("E1", None), ("E4", None), ("E2", None), ("V1", None)])]
     return m
 
 
@@ -196,14 +198,96 @@ def test_adopcion_no_pisa_la_tabla_viva(corrida):
 def test_tabla_nueva_se_crea_y_cuelga_de_la_adoptada(corrida):
     db, mig = corrida
     tabs = {d["physicalName"]: d for d in db.data["canonical_tables"].values()}
-    assert "TAB_B" in tabs and tabs["TAB_B"]["_id"] == pol.platform_id("E2")
+    assert "TAB_B" in tabs and tabs["TAB_B"]["_id"] == mig.pid("E2")
     # la FK nueva TAB_A→TAB_B apunta a la tabla VIVA y su columna viva
     nuevos = [r for r in db.data["relationships"].values()
               if r["_id"] not in ("rel-1", "rel-2")]
     assert len(nuevos) == 1
     r = nuevos[0]
-    assert r["parentTableId"] == "tbl-1" and r["childTableId"] == pol.platform_id("E2")
+    assert r["parentTableId"] == "tbl-1" and r["childTableId"] == mig.pid("E2")
     assert r["pairs"][0]["parentColumnId"] == "col-1"
+
+
+# ── Doc 75 · proyecto primero, docs estampados, aislamiento ───────────────
+def test_proyecto_resuelto_antes_de_escribir_y_docs_estampados(corrida):
+    db, mig = corrida
+    assert mig.project_id == "proj-1"
+    assert mig.stats.get("proyectos creados", 0) == 0
+    for coll in ("canonical_tables", "canonical_columns", "relationships", "views",
+                 "subject_areas", "folders", "schemas", "parent_domains",
+                 "glossary_terms", "udp_definitions"):
+        for d in db.data[coll].values():
+            assert d.get("projectId") == "proj-1", (coll, d)
+    # naming_config sembrado por proyecto (un doc por scope, sin pisar)
+    assert {d["_id"] for d in db.data["naming_config"].values()} == {"proj-1:table", "proj-1:column"}
+    assert all(d["projectId"] == "proj-1" for d in db.data["naming_config"].values())
+
+
+def test_naming_config_existente_no_se_pisa(corrida):
+    db, _ = corrida
+    db.data["naming_config"]["proj-1:table"]["separator"] = "_"
+    Migrator(db, modelo_archivo_2(), "Familia DDV", None).run()
+    assert db.data["naming_config"]["proj-1:table"]["separator"] == "_"
+
+
+def test_proyecto_nuevo_se_crea_con_descripcion():
+    db = FakeDb()
+    mig = Migrator(db, modelo_archivo_2(), "Nuevo", None, description="Desde el manifiesto")
+    mig.run()
+    (proj,) = db.data["projects"].values()
+    assert proj["_id"] == mig.project_id and proj["name"] == "Nuevo"
+    assert proj["description"] == "Desde el manifiesto" and proj["flgactive"] is True
+    assert "projectId" not in proj
+    assert mig.stats["proyectos creados"] == 1
+    assert mig.project_id == pol.platform_id("project|Nuevo")
+
+
+def test_otro_proyecto_no_ve_las_tablas_del_primero():
+    """Doc 75: mismo Long_Id y misma clave natural en DOS proyectos = dos docs."""
+    db = base_db()
+    mig_b = Migrator(db, modelo_archivo_2(), "Otro proyecto", None)
+    mig_b.run()
+    assert mig_b.project_id != "proj-1"
+    assert mig_b.table_pid["E1"] == mig_b.pid("E1") != "tbl-1"          # sin adopción cross-project
+    assert mig_b.stats.get("tablas adoptadas (ya existían)", 0) == 0
+    assert mig_b.report["conflicts"] == []
+    tabs = [d for d in db.data["canonical_tables"].values() if d["physicalName"] == "TAB_A"]
+    assert {d["projectId"] for d in tabs} == {"proj-1", mig_b.project_id}   # TAB_A en A y en B
+    # el proyecto A quedó intacto (ni una relación ni un canvas suyo tocado)
+    assert set(db.data["relationships"]) >= {"rel-1", "rel-2"}
+    assert db.data["subject_areas"]["cv-1"]["tableIds"] == ["tbl-1", "tbl-3"]
+    # el mismo Long_Id da ids DISTINTOS en cada proyecto
+    mig_a = Migrator(db, modelo_archivo_2(), "Familia DDV", None)
+    assert mig_a.pid("E2") != mig_b.pid("E2")
+
+
+def test_dominio_con_tipo_distinto_entre_archivos_va_al_reporte():
+    db = FakeDb({"projects": {"proj-1": {"_id": "proj-1", "name": "Familia DDV"}},
+                 "parent_domains": {"dom-1": {"_id": "dom-1", "projectId": "proj-1", "name": "Codigo",
+                                              "defaultDataType": "VARCHAR(20)"}}})
+    m = modelo_archivo_2()
+    m.domains = {"D1": ep.ErwinDomain(id="D1", name="Codigo", builtin=False, data_type="VARCHAR(30)",
+                                      parent_ref=None, definition="", physical_type="VARCHAR(30)")}
+    mig = Migrator(db, m, "Familia DDV", None)
+    mig.run()
+    assert db.data["parent_domains"]["dom-1"]["defaultDataType"] == "VARCHAR(20)"     # el primero gana
+    assert mig.domain_pid["D1"] == "dom-1"
+    assert mig.report["domain_conflicts"] == [{"name": "Codigo", "kept": "VARCHAR(20)", "ignored": "VARCHAR(30)"}]
+    assert mig.stats["dominios en conflicto (tipo distinto)"] == 1
+    assert mig.stats["dominios reusados"] == 1
+
+
+def test_dominio_igual_entre_archivos_se_reusa_sin_conflicto():
+    db = FakeDb({"projects": {"proj-1": {"_id": "proj-1", "name": "Familia DDV"}},
+                 "parent_domains": {"dom-1": {"_id": "dom-1", "projectId": "proj-1", "name": "Codigo",
+                                              "defaultDataType": "VARCHAR(20)"}}})
+    m = modelo_archivo_2()
+    m.domains = {"D1": ep.ErwinDomain(id="D1", name="codigo", builtin=False, data_type="Varchar (20)",
+                                      parent_ref=None, definition="", physical_type="Varchar (20)")}
+    mig = Migrator(db, m, "Familia DDV", None)
+    mig.run()
+    assert mig.report["domain_conflicts"] == []
+    assert mig.stats["dominios reusados"] == 1
 
 
 # ── R4 · dedup de relaciones ──────────────────────────────────────────────
@@ -219,13 +303,13 @@ def test_copia_interna_migra_como_tabla_propia_con_sufijo(corrida):
     db, mig = corrida
     # E4 (copia de TAB_A) ya NO es alias: migra como tabla real _DUP1, con su
     # contenido intacto (lógico igual, columnas propias).
-    assert mig.table_pid["E4"] == pol.platform_id("E4") != mig.table_pid["E1"]
-    dup = db.data["canonical_tables"][pol.platform_id("E4")]
+    assert mig.table_pid["E4"] == mig.pid("E4") != mig.table_pid["E1"]
+    dup = db.data["canonical_tables"][mig.pid("E4")]
     assert dup["physicalName"] == "TAB_A_DUP1"
     assert dup["logicalName"] == "tab_a"          # solo cambia el físico
-    assert mig.col_pid["A1B"] == pol.platform_id("A1B") != "col-1"
+    assert mig.col_pid["A1B"] == mig.pid("A1B") != "col-1"
     cols_dup = [c for c in db.data["canonical_columns"].values()
-                if c.get("tableId") == pol.platform_id("E4")]
+                if c.get("tableId") == mig.pid("E4")]
     assert [c["physicalName"] for c in cols_dup] == ["CODA"]
     # reporte transparente: el mapeo exacto de renombres
     rep = mig.report["renamed_dups"][0]
@@ -248,12 +332,13 @@ def test_vista_espejo_cuelga_de_la_tabla_viva(corrida):
 def test_def_udp_basura_no_se_crea(corrida):
     from scripts.erwin_migration.standard_udps import FIXED_UDPS
     db, mig = corrida
-    # El catálogo fijo se siembra COMPLETO aunque nadie lo use…
-    defs = {(d["level"], d["name"]) for d in db.data["udp_definitions"].values()}
+    # El catálogo fijo se siembra COMPLETO aunque nadie lo use… (doc 69: una
+    # def por nivel + FACETA + nombre — los homónimos lógico/físico son dos).
+    defs = {(d["level"], d["view"], d["name"]) for d in db.data["udp_definitions"].values()}
     assert len(defs) == len(FIXED_UDPS)
-    assert ("view", "Tipo de Vista") in defs
+    assert ("view", "physical", "Tipo de Vista") in defs
     vt = next(d for d in db.data["udp_definitions"].values()
-              if d["level"] == "view")
+              if d["level"] == "view" and d["name"] == "Tipo de Vista")
     assert vt["allowedValues"] == ["Regular", "Personalizada"]
     assert vt["defaultValue"] == "Regular"
     # …y la def del XML fuera del catálogo NO se crea (al reporte).
@@ -278,10 +363,21 @@ def test_folder_y_canvas_homonimos_se_fusionan(corrida):
     assert len(db.data["subject_areas"]) == 2      # cv-1 y cv-2, sin nuevos
     # unión de tablas: las vivas + la copia _DUP (nodo propio, política
     # 2026-08-22) + TAB_B nueva — en el orden del diagrama (E1, E4, E2)
-    assert cv["tableIds"] == ["tbl-1", "tbl-3",
-                              pol.platform_id("E4"), pol.platform_id("E2")]
+    assert cv["tableIds"] == ["tbl-1", "tbl-3", mig.pid("E4"), mig.pid("E2")]
     # el layout trabajado se preserva
     assert cv["layout"]["tbl-1"] == {"x": 11, "y": 22}
+
+
+def test_canvas_siembra_membresia_de_vistas(corrida):
+    """Doc 70: la vista dibujada en el diagrama de Erwin es MIEMBRO del canvas
+    (`viewIds`), además de tener posición en el layout; el canvas sin vistas
+    queda con lista explícita vacía (no legacy None)."""
+    db, mig = corrida
+    cv = db.data["subject_areas"]["cv-1"]
+    v1 = mig.pid("V1")
+    assert cv["viewIds"] == [v1]
+    assert v1 in cv["layout"]
+    assert v1 not in cv["tableIds"]
 
 
 # ── política _DUPn (2026-08-22): correlativos, re-runs y colisión global ──
@@ -326,18 +422,20 @@ def test_sufijos_correlativos_y_rerun_estable():
     assert mig2.stats["tablas duplicadas → renombradas con sufijo _DUPn"] == 0
 
 
-def test_colision_global_entre_esquemas_tambien_sufija():
-    """Regla doc 50: el físico es único GLOBAL — un homónimo en OTRO esquema
-    de la BD también fuerza el sufijo (antes entraba como grandfather)."""
-    db = FakeDb({"canonical_tables": {
-        "tbl-x": {"_id": "tbl-x", "schema": "OTRO", "physicalName": "PARTY"}}})
+def test_colision_entre_esquemas_del_mismo_proyecto_tambien_sufija():
+    """Doc 50 + doc 75: el físico es único POR PROYECTO — un homónimo en OTRO
+    esquema del mismo proyecto también fuerza el sufijo."""
+    db = FakeDb({"projects": {"proj-f": {"_id": "proj-f", "name": "Fam"}},
+                 "canonical_tables": {
+        "tbl-x": {"_id": "tbl-x", "schema": "OTRO", "physicalName": "PARTY", "projectId": "proj-f"}}})
     m = ep.ErwinModel(name="M")
     m.entities = {"E1": entity("E1", "PARTY", [attr("A1", "E1", "COD", 1)])}
     m.hive_dbs = {"S1": ["E1"]}
     mig = Migrator(db, m, "Fam", None)
     mig.run()
 
-    mine = db.data["canonical_tables"][pol.platform_id("E1")]
+    assert mig.project_id == "proj-f"
+    mine = db.data["canonical_tables"][mig.pid("E1")]
     assert mine["physicalName"] == "PARTY_DUP1" and mine["schema"] == "S1"
     assert db.data["canonical_tables"]["tbl-x"]["physicalName"] == "PARTY"  # intacta
     rep = mig.report["renamed_dups"][0]
@@ -346,13 +444,29 @@ def test_colision_global_entre_esquemas_tambien_sufija():
     # re-run: el erwinLongId ancla el nombre — sin _DUP2
     mig2 = Migrator(db, m, "Fam", None)
     mig2.run()
-    assert db.data["canonical_tables"][pol.platform_id("E1")]["physicalName"] == "PARTY_DUP1"
+    assert db.data["canonical_tables"][mig.pid("E1")]["physicalName"] == "PARTY_DUP1"
     assert len(db.data["canonical_tables"]) == 2
 
 
+def test_homonimo_en_otro_proyecto_no_sufija():
+    """Doc 75: la unicidad es por proyecto — PARTY en otro proyecto no estorba."""
+    db = FakeDb({"projects": {"proj-z": {"_id": "proj-z", "name": "Otro"}},
+                 "canonical_tables": {
+        "tbl-x": {"_id": "tbl-x", "schema": "S1", "physicalName": "PARTY", "projectId": "proj-z"}}})
+    m = ep.ErwinModel(name="M")
+    m.entities = {"E1": entity("E1", "PARTY", [attr("A1", "E1", "COD", 1)])}
+    m.hive_dbs = {"S1": ["E1"]}
+    mig = Migrator(db, m, "Fam", None)
+    mig.run()
+    assert mig.project_id != "proj-z"
+    assert db.data["canonical_tables"][mig.pid("E1")]["physicalName"] == "PARTY"
+    assert mig.report["renamed_dups"] == []
+
+
 def test_glosario_conflicto_vs_bd_se_reporta_y_la_bd_gana():
-    db = FakeDb({"glossary_terms": {
-        "g1": {"_id": "g1", "term": "Monto", "abbrev": "MTO"}}})
+    db = FakeDb({"projects": {"proj-f": {"_id": "proj-f", "name": "Fam"}},
+                 "glossary_terms": {
+        "g1": {"_id": "g1", "term": "Monto", "abbrev": "MTO", "projectId": "proj-f"}}})
     m = ep.ErwinModel(name="M")
     m.glossary = [("Monto", "MTOS"), ("Codigo", "COD"), ("Codigo", "CODIG")]
     mig = Migrator(db, m, "Fam", None)
@@ -402,13 +516,13 @@ def test_subtipo_migra_como_subcategoria_1a1_con_simbolo_compartido():
     r9 = rels["R9"]
     assert r9["subcategory"] is True
     # el símbolo agrupa: ambas aristas comparten el MISMO subtypeSymbolId
-    assert r9["subtypeSymbolId"] == pol.platform_id("SY1")
-    assert rels["R9B"]["subtypeSymbolId"] == pol.platform_id("SY1")
+    assert r9["subtypeSymbolId"] == mig.pid("SY1")
+    assert rels["R9B"]["subtypeSymbolId"] == mig.pid("SY1")
     # ES-UN: identifying + 1:1 estricto (ignora cardinality/null_option crudos)
     assert r9["identifying"] is True
     assert (r9["parentCardinality"], r9["childCardinality"]) == ("one", "one")
-    assert r9["pairs"] == [{"parentColumnId": pol.platform_id("A1"),
-                            "childColumnId": pol.platform_id("B1"),
+    assert r9["pairs"] == [{"parentColumnId": mig.pid("A1"),
+                            "childColumnId": mig.pid("B1"),
                             "roleName": None}]
     assert mig.stats["relaciones de subcategoría (supertipo→subtipo)"] == 2
     assert mig.stats["relaciones"] == 2
@@ -424,8 +538,8 @@ def test_subtipo_sin_simbolo_usa_sintetico_y_avisa():
 
     rels = {r["erwinLongId"]: r for r in db.data["relationships"].values()}
     assert rels["R9"]["subcategory"] is True
-    assert rels["R9"]["subtypeSymbolId"] == pol.platform_id("subsym|R9")
-    assert rels["R9B"]["subtypeSymbolId"] == pol.platform_id("subsym|R9B")
+    assert rels["R9"]["subtypeSymbolId"] == mig.pid("subsym|R9")
+    assert rels["R9B"]["subtypeSymbolId"] == mig.pid("subsym|R9B")
     assert sum("símbolo sintético" in w for w in mig.warnings) == 2
 
 
@@ -465,17 +579,19 @@ def test_subcategoria_no_se_fusiona_con_identifying_de_iguales_extremos():
 
 # ── R2 · cuando el archivo está MÁS usado, gana y actualiza en su sitio ───
 def test_gana_el_archivo_actualiza_en_su_sitio_y_reusa_ids_de_columna():
+    P = {"projectId": "proj-f"}
     db = FakeDb({
+        "projects": {"proj-f": {"_id": "proj-f", "name": "Fam"}},
         "canonical_tables": {
-            "tbl-1": {"_id": "tbl-1", "schema": "S1", "physicalName": "TAB_A"}},
+            "tbl-1": {"_id": "tbl-1", "schema": "S1", "physicalName": "TAB_A", **P}},
         "canonical_columns": {
             "col-1": {"_id": "col-1", "tableId": "tbl-1", "physicalName": "CODA",
-                      "erwinLongId": "OLD-A1"},
+                      "erwinLongId": "OLD-A1", **P},
             "col-2": {"_id": "col-2", "tableId": "tbl-1", "physicalName": "OBSOLETA",
-                      "erwinLongId": "OLD-A2"}},
+                      "erwinLongId": "OLD-A2", **P}},
         "views": {
             "vw-1": {"_id": "vw-1", "schema": "S1V", "name": "TAB_A_VU",
-                     "sourceTableIds": ["tbl-1"]}},
+                     "sourceTableIds": ["tbl-1"], **P}},
     })  # la tabla viva NO se usa en nada → score BD = 1 (solo su vista espejo)
     m = ep.ErwinModel(name="M")
     e1 = entity("E1", "TAB_A", [attr("A1", "E1", "CODA", 1),
@@ -497,12 +613,38 @@ def test_gana_el_archivo_actualiza_en_su_sitio_y_reusa_ids_de_columna():
     assert t["erwinLongId"] == "E1" and t["migratedFrom"] == "erwin"
     # CODA conserva su _id vivo (las relaciones no se rompen)…
     assert db.data["canonical_columns"]["col-1"]["erwinLongId"] == "A1"
-    # …la columna nueva se crea y la ausente se retira (soft-delete)
-    assert pol.platform_id("A2") in db.data["canonical_columns"]
-    assert db.data["canonical_columns"]["col-2"]["flgactive"] is False
+    # …la columna nueva se crea y la que este archivo NO trae se CONSERVA
+    # (doc 73 D10: venía de OTRO archivo de la familia — el export lógico de
+    # UDV no trae las columnas físicas; retirarlas dejaba relaciones huérfanas)
+    assert mig.pid("A2") in db.data["canonical_columns"]
+    assert db.data["canonical_columns"]["col-2"].get("flgactive", True) is not False
+    assert mig.stats["columnas de otro archivo conservadas (tabla actualizada por uso)"] == 1
     # la vista espejo sigue la suerte de su tabla: actualizada EN vw-1
     assert db.data["views"]["vw-1"]["erwinLongId"] == "V1"
     assert mig.stats["tablas actualizadas (ganó el archivo por uso)"] == 1
+
+
+def test_rerun_del_mismo_archivo_si_retira_las_columnas_ausentes():
+    """Doc 73 D10: el saneo de columnas sigue vivo para el RE-RUN del mismo
+    archivo (misma entidad Erwin ⇒ mismo pid): lo que ya no viene, se retira."""
+    pid = pol.project_scoped_id("proj-f", "E1")
+    P = {"projectId": "proj-f"}
+    db = FakeDb({
+        "projects": {"proj-f": {"_id": "proj-f", "name": "Fam"}},
+        "canonical_tables": {pid: {"_id": pid, "schema": "S1", "physicalName": "TAB_A", "erwinLongId": "E1", **P}},
+        "canonical_columns": {
+            "c-a1": {"_id": "c-a1", "tableId": pid, "physicalName": "CODA", "erwinLongId": "A1", **P},
+            "c-a9": {"_id": "c-a9", "tableId": pid, "physicalName": "OBSOLETA", "erwinLongId": "A9", **P}},
+    })
+    m = ep.ErwinModel(name="M")
+    m.entities = {"E1": entity("E1", "TAB_A", [attr("A1", "E1", "CODA", 1)], pk=("A1",))}
+    m.hive_dbs = {"S1": ["E1"]}
+    mig = Migrator(db, m, "Fam", None)
+    mig.run()
+    assert db.data["canonical_columns"]["c-a1"].get("flgactive", True) is not False
+    assert db.data["canonical_columns"]["c-a9"]["flgactive"] is False
+    assert mig.stats["columnas migradas retiradas (ya no están en el XML)"] == 1
+    assert "columnas de otro archivo conservadas (tabla actualizada por uso)" not in mig.stats
 
 
 # ── Doc 54 §9 · capa de carpeta por archivo de origen ─────────────────────

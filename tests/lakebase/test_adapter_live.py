@@ -666,3 +666,23 @@ def test_drop_and_recreate(coll):
     seed(coll, [{"_id": "d1"}])
     run(coll.drop())
     assert run(coll.count_documents({})) == 0  # re-ensure lazy: tabla vacía
+
+
+# ─── Doc 75 D19: columna generada `project_id` ───────────────────────────
+
+
+def test_project_column_generada_y_filtro(db, coll):
+    run(coll.insert_one({"_id": "x1", "projectId": "pA", "name": "a"}))
+    run(coll.insert_one({"_id": "x2", "name": "sin proyecto"}))
+    assert [d["_id"] for d in run(coll.find({"projectId": "pA"}).to_list(None))] == ["x1"]
+    assert [d["_id"] for d in run(coll.find({"projectId": {"$in": ["pA", "pZ"]}}).to_list(None))] == ["x1"]
+    assert run(coll.count_documents({"projectId": {"$ne": "pA"}})) == 1
+
+    async def _raw():
+        async with db.pool.acquire() as conn:
+            return await conn.fetch(
+                f'SELECT id, project_id FROM "{db.schema}"."{coll.name}" ORDER BY id')
+    assert [(r["id"], r["project_id"]) for r in run(_raw())] == [("x1", "pA"), ("x2", None)]
+    # Un índice compuesto con la columna líder se crea sin error y con el nombre nuevo.
+    assert run(db.create_field_index(coll.name, [("projectId", 1), ("name", 1)])) == \
+        f"ix_{coll.name}_project_id_name"

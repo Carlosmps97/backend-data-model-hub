@@ -12,11 +12,35 @@
 """
 from __future__ import annotations
 
+import re
+
 import sqlglot
 from sqlglot import exp
 
 from . import conditions as cond
 from .expressions import RenderError, build_expression, expand_template
+
+
+# ── Identificadores (doc 71 H2): UN solo funnel para todo el archivo ────────
+# El CREATE del front sale con backticks + `identifierCase`; los ALTER … SET
+# TAGS y los artefactos generados usan el MISMO criterio (antes los tags iban
+# crudos y el archivo mezclaba dos estilos).
+
+
+def _case(s: str, mode: str) -> str:
+    return s.lower() if mode == "lower" else s.upper() if mode == "upper" else s
+
+
+def ident(s: str, options: dict | None = None) -> str:
+    """Identificador backtickeado con el casing de las opciones del export
+    (`identifierCase`: as-is | lower | upper)."""
+    case = (options or {}).get("identifierCase") or "as-is"
+    return f"`{_case(str(s), case)}`"
+
+
+def full_name(schema: str | None, name: str, options: dict | None = None) -> str:
+    """`\`schema\`.\`name\`` (o solo el nombre) con el casing del export."""
+    return f"{ident(schema, options)}.{ident(name, options)}" if schema else ident(name, options)
 
 
 def run_order(rules: list[dict]) -> list[dict]:
@@ -172,10 +196,12 @@ def _eval_rule_condition(rule: dict, ctx: dict, parsed: dict) -> bool:
 
 def column_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
                           cols_ctx_by_name: dict[str, dict], config: dict,
-                          table_full: str) -> tuple[list[str], list[dict]]:
+                          table_full: str, options: dict | None = None) -> tuple[list[str], list[dict]]:
     """Tags de gobierno por COLUMNA (spec §8.2): Databricks NO admite varias
     columnas en un ALTER — sale UNA sentencia por columna, pares ordenados.
-    `cols_ctx_by_name` debe venir en orden de columna (dict ordenado)."""
+    `cols_ctx_by_name` debe venir en orden de columna (dict ordenado).
+    `table_full` ya viene calificado (`full_name`); la columna se emite con el
+    mismo `ident()` (doc 71 H2)."""
     log: list[dict] = []
     stmts: list[str] = []
     lookups = config.get("lookups") or {}
@@ -206,7 +232,7 @@ def column_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
         for k, v in pairs:               # la primera regla (mayor prioridad) gana la key
             seen.setdefault(k, v)
         body = ", ".join(f"{_lit(k)} = {_lit(v)}" for k, v in sorted(seen.items()))
-        stmts.append(f"ALTER TABLE {table_full} ALTER COLUMN {col_name} SET TAGS ({body});")
+        stmts.append(f"ALTER TABLE {table_full} ALTER COLUMN {ident(col_name, options)} SET TAGS ({body});")
     return stmts, log
 
 
@@ -246,11 +272,86 @@ def table_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
     return [f"ALTER TABLE {table_full} SET TAGS ({body});"], log
 
 
+def _scan_end(sql: str, start: int, stop_char: str) -> int:
+    """Índice del primer `stop_char` a partir de `start` FUERA de comillas
+    simples (con '' escapado) y backticks; -1 si no hay."""
+    i, n = start, len(sql)
+    quote: str | None = None
+    while i < n:
+        ch = sql[i]
+        if quote:
+            if ch == quote:
+                if quote == "'" and i + 1 < n and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                quote = None
+        elif ch in ("'", "`"):
+            quote = ch
+        elif ch == stop_char:
+            return i
+        i += 1
+    return -1
+
+
+def _tblproperties_block(stmt: str) -> tuple[int, int] | None:
+    """(open_paren_idx, close_paren_idx) del bloque `TBLPROPERTIES (…)` del
+    statement, o None si no tiene."""
+    m = re.search(r"\bTBLPROPERTIES\s*\(", stmt, re.IGNORECASE)
+    if not m:
+        return None
+    open_idx = m.end() - 1
+    # cierre: primer ')' fuera de comillas después del '(' (los valores no
+    # anidan paréntesis; si lo hicieran, el fallback sqlglot toma el relevo).
+    close_idx = _scan_end(stmt, open_idx + 1, ")")
+    return (open_idx, close_idx) if close_idx > open_idx else None
+
+
+def existing_tblproperty_keys(sql: str) -> set[str]:
+    """Keys ya presentes en el bloque TBLPROPERTIES del primer statement."""
+    end = _scan_end(sql, 0, ";")
+    stmt = sql if end < 0 else sql[:end + 1]
+    blk = _tblproperties_block(stmt)
+    if not blk:
+        return set()
+    inner = stmt[blk[0] + 1:blk[1]]
+    return {m.group(1).replace("''", "'") for m in re.finditer(r"'((?:[^']|'')*)'\s*=", inner)}
+
+
+def inject_tblproperties_text(sql: str, pairs: list[tuple[str, str]]) -> str | None:
+    """Doc 71 H1 — inyección TEXTUAL de pares en el `CREATE` base (primer
+    statement): si ya hay bloque `TBLPROPERTIES (…)` los agrega dentro; si no,
+    añade el bloque justo antes del `;`. Todo lo demás queda byte-idéntico (el
+    formato del generador del front se conserva). None si el texto no tiene la
+    forma esperada (sin `;` de cierre) → el llamador cae al fallback sqlglot."""
+    if not pairs:
+        return sql
+    end = _scan_end(sql, 0, ";")
+    if end < 0:
+        return None
+    stmt, rest = sql[:end + 1], sql[end + 1:]
+    items = [f"{_lit(k)} = {_lit(v)}" for k, v in pairs]
+    blk = _tblproperties_block(stmt)
+    if blk:
+        open_idx, close_idx = blk
+        inner = stmt[open_idx + 1:close_idx]
+        if "\n" in inner:
+            new_inner = inner.rstrip() + ",\n  " + ",\n  ".join(items) + "\n"
+        else:
+            new_inner = inner.rstrip() + ", " + ", ".join(items)
+        return stmt[:open_idx + 1] + new_inner + stmt[close_idx:] + rest
+    body = stmt[:-1].rstrip()
+    return f"{body}\nTBLPROPERTIES (\n  " + ",\n  ".join(items) + "\n);" + rest
+
+
 def apply_tblproperties(sql: str, rules: list[dict], artifact: str, base_ctx: dict,
                         config: dict) -> tuple[str, list[dict]]:
     """TBLPROPERTIES desde UDP (spec §8.4): inserta los pares DENTRO del
     `CREATE TABLE` base. Una key ya presente en el base NO se pisa (lo del
-    modeler manda) — se reporta. Sin pares → SQL intacto."""
+    modeler manda) — se reporta. Sin pares → SQL intacto.
+
+    Doc 71 H1: la inyección es TEXTUAL (`inject_tblproperties_text`) — el CREATE
+    conserva el formato del generador del front y solo gana el bloque; sqlglot
+    queda como fallback si el texto no tiene la forma esperada."""
     log: list[dict] = []
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
@@ -273,8 +374,25 @@ def apply_tblproperties(sql: str, rules: list[dict], artifact: str, base_ctx: di
         pairs.extend(new)
     if not pairs:
         return sql, log
-    # El base de una tabla puede traer VARIOS statements (CREATE + ALTER … FK):
-    # se parsea la lista, se decora el CREATE y se re-emite todo.
+    seen_txt: dict[str, str] = {}
+    for k, v in pairs:
+        seen_txt.setdefault(k, v)
+    existing_txt = existing_tblproperty_keys(sql)
+    kept: list[tuple[str, str]] = []
+    for k, v in sorted(seen_txt.items()):
+        if k in existing_txt:
+            log.append({"rule": None, "status": "skipped",
+                        "reason": f"TBLPROPERTIES key '{k}' already set on the base CREATE — kept as-is"})
+        else:
+            kept.append((k, v))
+    if not kept:
+        return sql, log
+    injected = inject_tblproperties_text(sql, kept)
+    if injected is not None:
+        return injected, log
+    # Fallback: el base de una tabla puede traer VARIOS statements (CREATE +
+    # ALTER … FK) o una forma no reconocida: se parsea la lista, se decora el
+    # CREATE y se re-emite todo con sqlglot.
     try:
         stmts = [s for s in sqlglot.parse(sql, read="databricks") if s is not None]
     except Exception:
@@ -295,9 +413,7 @@ def apply_tblproperties(sql: str, rules: list[dict], artifact: str, base_ctx: di
     added = False
     for k, v in sorted(seen.items()):
         if k in existing:
-            log.append({"rule": None, "status": "skipped",
-                        "reason": f"TBLPROPERTIES key '{k}' already set on the base CREATE — kept as-is"})
-            continue
+            continue                      # ya reportado arriba (existing_txt)
         props.append("expressions", exp.Property(this=exp.Literal.string(k),
                                                  value=exp.Literal.string(v)))
         added = True

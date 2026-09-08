@@ -128,6 +128,7 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
         if cp.pk:
             cp.fields["pkPosition"] = base + pk_index
             pk_index += 1
+        cp.fields["projectId"] = ctx.project_id            # doc 75 I1
         _close(cp, rb, tp)
     return plans
 
@@ -208,6 +209,14 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
             rb.error(SHEET_COLUMNS, "missing-required",
                      "TIPO_DATO or PARENT_DOMAIN is required to create a column.", row=r.row, column="TIPO_DATO")
     type_overridden = bool(domain_id and dom_default and data_type and norm_type(data_type) != norm_type(dom_default))
+    # Doc 69: faceta LÓGICA del tipo — hereda del dominio (o se conserva si la
+    # columna existe y el dominio no cambió); sin UI de edición en Fase 1.
+    if existing is not None and not domain_changed:
+        logical_type = existing.get("logicalDataType")
+        logical_overridden = bool(existing.get("logicalTypeOverridden"))
+    else:
+        logical_type = std.domain_logical(domain_id)
+        logical_overridden = False
 
     description = clean_text(r.description) or None
     if existing is not None and description is None:
@@ -232,6 +241,10 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         "isNullable": is_nullable, "isPartition": is_partition, "description": description,
         "ordinal": int(existing.get("ordinal") or 0) if existing is not None else 0,
         "udpValues": udp_values,
+        # Doc 69: campos de faceta (el update conserva los existentes).
+        "logicalDataType": logical_type, "logicalTypeOverridden": logical_overridden,
+        "logicalOnly": bool((existing or {}).get("logicalOnly")),
+        "physicalOnly": bool((existing or {}).get("physicalOnly")),
     }
     return cp
 

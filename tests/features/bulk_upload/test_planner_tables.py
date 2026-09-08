@@ -8,7 +8,7 @@ from .helpers import by_coll, codes, ctx, naming, parsed, seq_ids, trow
 
 
 def _existing(tid="t1", physical="CLIENTE", logical="Cliente", schema="ddv", description=None, udp=None):
-    return {"id": tid, "physicalName": physical, "logicalName": logical, "schema": schema,
+    return {"id": tid, "projectId": "p1", "physicalName": physical, "logicalName": logical, "schema": schema,
             "description": description, "udpValues": udp or {}}
 
 
@@ -42,7 +42,9 @@ def test_identidad_por_fisico_ci_actualiza_con_doc_completo():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", physical="cliente", description="Def")]), c)
     ch = _table_change(plan)
     assert ch["entityId"] == "t1"
-    assert ch["payload"] == {"id": "t1", "physicalName": "cliente", "logicalName": "Cliente", "schema": "ddv",
+    assert ch["payload"] == {"id": "t1", "projectId": "p1", "physicalName": "cliente", "logicalName": "Cliente", "schema": "ddv",
+                             "physicalNameOverridden": False,
+                             "logicalOnly": False, "physicalOnly": False,   # doc 69 (facetas)
                              "description": "Def", "udpValues": {}}
     assert codes(plan, "warning") == ["rename", "existing-table"]   # físico cambia de grafía
     assert plan.report["summary"]["tables"] == {"create": 0, "update": 1, "unchanged": 0}

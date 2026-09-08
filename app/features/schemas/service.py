@@ -32,19 +32,19 @@ def name_error(name: str) -> str | None:
     return None
 
 
-async def list_schemas() -> list[dict]:
-    return await repository.list_schemas()
+async def list_schemas(project_id: str) -> list[dict]:
+    return await repository.list_schemas(project_id)
 
 
-async def create_schema(body: SchemaBody) -> dict:
+async def create_schema(project_id: str, body: SchemaBody) -> dict:
     err = name_error(body.name)
     if err:
         raise InvalidSchemaNameError(err)
     name = body.name.strip()
-    if await repository.find_by_name(name):
+    if await repository.find_by_name(project_id, name):
         raise DuplicateSchemaError(f"Ya existe el esquema {name}")
     return await repository.create_schema(
-        {"name": name, "description": body.description, "kind": body.kind})
+        {"projectId": project_id, "name": name, "description": body.description, "kind": body.kind})
 
 
 async def update_schema(sid: str, body: SchemaBody) -> dict | None:
@@ -53,8 +53,11 @@ async def update_schema(sid: str, body: SchemaBody) -> dict | None:
     err = name_error(body.name)
     if err:
         raise InvalidSchemaNameError(err)
+    cur = await repository.get_schema(sid)
+    if cur is None:
+        return None
     name = body.name.strip()
-    dup = await repository.find_by_name(name)
+    dup = await repository.find_by_name(cur["projectId"], name)   # unicidad DENTRO del proyecto
     if dup and dup["id"] != sid:
         raise DuplicateSchemaError(f"Ya existe el esquema {name}")
     data: dict = {"name": name, "description": body.description}
@@ -71,6 +74,6 @@ async def delete_schema(sid: str) -> bool | str:
     cur = await repository.get_schema(sid)
     if cur is None:
         return False
-    if await repository.usage_count(cur["name"]):
+    if await repository.usage_count(cur["projectId"], cur["name"]):
         return "in-use"
     return await repository.delete_schema(sid)

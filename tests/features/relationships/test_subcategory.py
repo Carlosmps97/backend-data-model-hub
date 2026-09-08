@@ -15,7 +15,7 @@ from app.features.relationships.models import RelationshipDoc
 
 
 def _base(**over) -> dict:
-    d = {"parentTableId": "T1", "childTableId": "T2",
+    d = {"projectId": "p1", "parentTableId": "T1", "childTableId": "T2",
          "pairs": [{"parentColumnId": "c1", "childColumnId": "c2"}]}
     d.update(over)
     return d
@@ -49,7 +49,7 @@ class TestSubcategoryShape:
         assert r.identifying is True and r.childCardinality == "one-many"
 
     def test_payload_v1_legacy_sigue_normalizando(self):
-        r = RelationshipDoc.model_validate({
+        r = RelationshipDoc.model_validate({"projectId": "p1", 
             "sourceTableId": "H", "sourceColumnId": "hc",
             "targetTableId": "P", "targetColumnId": "pc",
             "sourceCardinality": "zero-many", "targetCardinality": "one"})

@@ -24,7 +24,7 @@ def test_publish_duplicates_detecta_conflicto_con_publicado(monkeypatch):
     })
     changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {
         "physicalName": "cliente", "logicalName": "n", "schema": "CORE"}}}}
-    errors = asyncio.run(service._publish_duplicates(changes))
+    errors = asyncio.run(service._publish_duplicates("p1", changes))
     assert errors == ["Table cliente already exists (schema core)"]
 
 
@@ -35,7 +35,7 @@ def test_publish_duplicates_cross_schema_conflicta(monkeypatch):
     })
     changes = {"canonical_tables": {"t9": {"op": "upsert", "payload": {
         "physicalName": "m_cliente", "logicalName": "n", "schema": "B"}}}}
-    errors = asyncio.run(service._publish_duplicates(changes))
+    errors = asyncio.run(service._publish_duplicates("p1", changes))
     assert errors == ["Table m_cliente already exists (schema A)"]
 
 
@@ -52,7 +52,7 @@ def test_publish_duplicates_homonimo_legacy_sin_rename_pasa(monkeypatch):
     monkeypatch.setattr(service.repository, "published", _pub)
     changes = {"canonical_tables": {"t2": {"op": "upsert", "payload": {
         "physicalName": "M_CLIENTE", "logicalName": "c b editada", "schema": "B"}}}}
-    assert asyncio.run(service._publish_duplicates(changes)) == []
+    assert asyncio.run(service._publish_duplicates("p1", changes)) == []
 
 
 def test_publish_duplicates_sin_conflictos(monkeypatch):
@@ -63,7 +63,7 @@ def test_publish_duplicates_sin_conflictos(monkeypatch):
         "canonical_columns": {"c9": {"op": "upsert", "payload": {
             "tableId": "t9", "physicalName": "ID", "logicalName": "id", "dataType": "BIGINT"}}},
     }
-    assert asyncio.run(service._publish_duplicates(changes)) == []
+    assert asyncio.run(service._publish_duplicates("p1", changes)) == []
 
 
 def test_publish_duplicates_columna_contra_publicado(monkeypatch):
@@ -73,7 +73,7 @@ def test_publish_duplicates_columna_contra_publicado(monkeypatch):
     })
     changes = {"canonical_columns": {"c9": {"op": "upsert", "payload": {
         "tableId": "t1", "physicalName": "id_cta", "logicalName": "x", "dataType": "STRING"}}}}
-    assert asyncio.run(service._publish_duplicates(changes)) == [
+    assert asyncio.run(service._publish_duplicates("p1", changes)) == [
         "Column id_cta already exists in this table"]
 
 
@@ -87,17 +87,17 @@ def test_apply_and_finalize_revierte_claim_ante_duplicados(monkeypatch):
     monkeypatch.setattr(service.repository, "transition", fake_transition)
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value={
         "canonical_tables": {"t9": {"op": "upsert", "payload": {
-            "physicalName": "cta", "logicalName": "cuenta", "schema": "CORE"}}},
+            "projectId": "p1", "physicalName": "cta", "logicalName": "cuenta", "schema": "CORE"}}},
     }))
     _pub_by_collection(monkeypatch, {
-        "canonical_tables": [{"id": "t1", "physicalName": "CTA", "logicalName": "cuenta", "schema": "core"}],
+        "canonical_tables": [{"id": "t1", "projectId": "p1", "physicalName": "CTA", "logicalName": "cuenta", "schema": "core"}],
     })
     apply_mock = AsyncMock()
     monkeypatch.setattr(service.repository, "apply_changes", apply_mock)
 
     with pytest.raises(DuplicateEntityError):
         asyncio.run(service._apply_and_finalize(
-            "c1", {"status": "approved"}, submitted_at="2026-01-01T00:00:00+00:00"))
+            {"id": "c1", "projectId": "p1"}, {"status": "approved"}, submitted_at="2026-01-01T00:00:00+00:00"))
 
     assert ("submitted", "approved") in transitions   # claim
     assert ("approved", "submitted") in transitions   # revert (como el gate 422)

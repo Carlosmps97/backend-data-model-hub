@@ -19,7 +19,7 @@ from . import service
 # entidades (tablas, columnas, vistas, relaciones, proyectos, canvases, estándares).
 # "/udp" se excluye porque su service ya audita con verbo específico
 # ('canvas.udp.update') — auditar acá duplicaría la entrada.
-_NO_AUDIT = ("/layout", "/drawings", "/tables", "/udp")
+_NO_AUDIT = ("/layout", "/drawings", "/tables")
 
 
 def write_guard(perm: str):

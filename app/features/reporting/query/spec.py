@@ -48,6 +48,7 @@ class OrderBy(BaseModel):
 
 class QuerySpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    projectId: str = Field(min_length=1)      # doc 75: toda consulta es de UN proyecto
     from_: Literal[FROMS] = Field(default="columns", alias="from")  # type: ignore[valid-type]
     select: list[str] = Field(default_factory=list)
     where: WhereGroup | None = None

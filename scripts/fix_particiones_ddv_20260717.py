@@ -21,9 +21,12 @@ el DDL emite PARTITIONED BY en orden físico). Idempotente; sin `--apply` es
 dry-run. OJO: si se re-migra el MISMO XML sin corregir los UDP en Erwin, el
 re-run pisa udpValues/ordinales y el audit C10 volverá a marcar estas tablas.
 
+Doc 75: las tablas y la UDP `Particion` se buscan DENTRO del proyecto
+(`--project`, default «Modelo DDV» — el proyecto del manifiesto del one-shot).
+
 Uso:
   .venv/bin/python -m scripts.fix_particiones_ddv_20260717           # dry-run
-  .venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply
+  .venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply [--project "Modelo DDV"]
 """
 from __future__ import annotations
 
@@ -67,24 +70,31 @@ def _now() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--apply", action="store_true", help="escribir en la BD (sin esto: dry-run)")
+    ap.add_argument("--project", default="Modelo DDV", help="proyecto donde viven las tablas del DDV")
     args = ap.parse_args()
 
     load_dotenv()
     from app.core.db.sync import get_sync_db
     db = get_sync_db()
 
-    udp = db.udp_definitions.find_one({"name": "Particion", "level": "column", **ACTIVE}, {"_id": 1})
+    proj = db.projects.find_one({"name": args.project, **ACTIVE}, {"_id": 1})
+    if not proj:
+        print(f"No existe el proyecto «{args.project}» — nada que corregir.")
+        return 1
+    project_id = proj["_id"]
+    udp = db.udp_definitions.find_one(
+        {"name": "Particion", "level": "column", "projectId": project_id, **ACTIVE}, {"_id": 1})
     if not udp:
-        print("No existe la udp_definition 'Particion' (level=column) — nada que corregir.")
+        print(f"No existe la udp_definition 'Particion' (level=column) en «{args.project}» — nada que corregir.")
         return 1
     pid = udp["_id"]
     tag = "APPLY" if args.apply else "DRY-RUN"
-    print(f"[{tag}] correcciones de partición (decisión owner 2026-07-17)")
+    print(f"[{tag}] correcciones de partición (decisión owner 2026-07-17) en «{args.project}»")
 
     problemas = 0
     for cor in CORRECCIONES:
         t = db.canonical_tables.find_one(
-            {"physicalName": cor["tabla"], **ACTIVE}, {"_id": 1, "schema": 1})
+            {"projectId": project_id, "physicalName": cor["tabla"], **ACTIVE}, {"_id": 1, "schema": 1})
         print(f"\n■ {cor['tabla']} — {cor['detalle']}")
         if not t:
             print("  ✗ tabla no encontrada en BD — corrección OMITIDA")

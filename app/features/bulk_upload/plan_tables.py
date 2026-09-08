@@ -59,11 +59,12 @@ def resolve_identity(index: TableIndex, logical: str, physical: str,
 
 
 def table_doc(tid: str, physical: str, logical: str, schema: str | None,
-              description: str | None, udp_values: dict[str, str]) -> dict:
-    """Doc COMPLETO (invariante del overlay) con la forma persistida (`schema`)."""
+              description: str | None, udp_values: dict[str, str], project_id: str) -> dict:
+    """Doc COMPLETO (invariante del overlay) con la forma persistida (`schema`)
+    y el proyecto del changeset (doc 75 I1)."""
     return CanonicalTableDoc.model_validate({
-        "id": tid, "physicalName": physical, "logicalName": logical, "schema": schema,
-        "description": description, "udpValues": udp_values,
+        "id": tid, "projectId": project_id, "physicalName": physical, "logicalName": logical,
+        "schema": schema, "description": description, "udpValues": udp_values,
     }).model_dump(by_alias=True)
 
 
@@ -84,13 +85,14 @@ def plan_tables(parsed: ParsedWorkbook, ctx, std: Standards, schemas, udp_map: d
     max_len = std.max_len("table")
 
     for r in parsed.tables:
-        plans.append(_plan_row(r, index, std, schemas, udp_map, rb, new_id, seen_phys, seen_logical, max_len))
+        plans.append(_plan_row(r, index, std, schemas, udp_map, rb, new_id, seen_phys, seen_logical, max_len,
+                               ctx.project_id))
     return plans
 
 
 def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: dict[str, dict],
               rb: ReportBuilder, new_id: Callable[[], str], seen_phys: dict[str, int],
-              seen_logical: dict[str, int], max_len: int) -> TablePlan:
+              seen_logical: dict[str, int], max_len: int, project_id: str = "") -> TablePlan:
     canvas = ({"project": r.project, "space": r.space, "subject": r.subject, "diagram": r.diagram}
               if any((r.project, r.space, r.subject, r.diagram)) else None)
     logical = clean_text(r.logical)
@@ -161,7 +163,10 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
         plan.action = "error"
         return plan
 
-    plan.doc = table_doc(tid, physical, logical, schema, description, udp_values)
+    plan.doc = table_doc(tid, physical, logical, schema, description, udp_values, project_id)
+    if existing is not None:   # doc 69: flags de faceta se conservan en el update
+        plan.doc["logicalOnly"] = bool(existing.get("logicalOnly"))
+        plan.doc["physicalOnly"] = bool(existing.get("physicalOnly"))
     if existing is None:
         plan.action = "create"
         return plan

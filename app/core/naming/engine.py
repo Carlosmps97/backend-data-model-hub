@@ -76,11 +76,3 @@ def physicalize(
         return head.lower() + "".join(s[:1].upper() + s[1:].lower() for s in tail)
     transform = str.upper if case == "upper" else str.lower
     return separator.join(transform(s) for s in segments)
-
-
-def logicalize(physical: str, mappings: dict[str, str]) -> str:
-    """Reversa de `physicalize`: 'MTO_DEU_USD' → 'monto deuda dólares'.
-    Abreviaturas no conocidas → en minúscula tal cual."""
-    rev = {v.upper(): k for k, v in mappings.items()}
-    parts = [p for p in physical.split("_") if p]
-    return " ".join(rev.get(p.upper(), p.lower()) for p in parts)

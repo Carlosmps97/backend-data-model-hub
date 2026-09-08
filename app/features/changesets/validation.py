@@ -19,8 +19,6 @@ from pydantic import ValidationError
 
 from app.features.catalog.models import CanonicalColumnDoc, CanonicalTableDoc
 from app.features.folders.models import FolderDoc
-from app.features.glossary.models import AbbreviationDoc
-from app.features.domains.models import ParentDomainDoc
 from app.features.projects.models import ProjectDoc, SubjectAreaDoc
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas.models import SchemaDoc
@@ -29,8 +27,6 @@ from app.features.views.models import ViewDoc
 
 # Colección versionada → modelo de documento (espeja VERSIONED del repository).
 DOC_MODELS = {
-    "parent_domains": ParentDomainDoc,
-    "glossary_terms": AbbreviationDoc,
     "projects": ProjectDoc,
     "folders": FolderDoc,
     "subject_areas": SubjectAreaDoc,
@@ -40,6 +36,57 @@ DOC_MODELS = {
     "relationships": RelationshipDoc,
     "views": ViewDoc,
 }
+
+
+def project_change_error(cs_project_id: str, entity_id: str, op: str, payload: dict | None) -> str | None:
+    """Doc 75 D5: un draft sólo puede renombrar/describir/borrar SU proyecto. Puro."""
+    if entity_id != cs_project_id:
+        return "This working copy can't modify another project"
+    if op == "upsert" and payload and payload.get("id") not in (None, entity_id):
+        return "A project change cannot change the project id"
+    return None
+
+
+class CrossProjectError(ValueError):
+    """Referencia a una entidad de OTRO proyecto (doc 75 I2). Router → 409."""
+
+
+REFERENCE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "canonical_columns": (("tableId", "canonical_tables"),),
+    "relationships": (("parentTableId", "canonical_tables"), ("childTableId", "canonical_tables")),
+    "views": (("sourceTableIds", "canonical_tables"),),
+    "subject_areas": (("tableIds", "canonical_tables"), ("viewIds", "views"), ("folderId", "folders")),
+    "folders": (("parentFolderId", "folders"),),
+}
+
+_LABEL = {"canonical_tables": "Table", "views": "View", "folders": "Folder"}
+
+
+def collect_refs(collection: str, payload: dict | None) -> dict[str, set[str]]:
+    """{colección referida: ids} de un upsert. Puro."""
+    out: dict[str, set[str]] = {}
+    for field, coll in REFERENCE_FIELDS.get(collection, ()):
+        raw = (payload or {}).get(field)
+        ids = raw if isinstance(raw, list) else ([raw] if raw else [])
+        for i in ids:
+            if i:
+                out.setdefault(coll, set()).add(str(i))
+    return out
+
+
+def cross_project_error(project_id: str, refs: dict[str, set[str]],
+                        owners: dict[str, dict[str, str | None]]) -> str | None:
+    """Primer conflicto legible o None. `owners[coll][id]` = projectId del doc
+    efectivo (pendiente del changeset o publicado) o None si no existe. Puro."""
+    for coll, ids in refs.items():
+        for i in sorted(ids):
+            owner = (owners.get(coll) or {}).get(i)
+            label = _LABEL.get(coll, coll)
+            if owner is None:
+                return f"{label} {i} doesn't exist in this project"
+            if owner != project_id:
+                return f"{label} {i} belongs to another project"
+    return None
 
 
 class InvalidPayloadError(ValueError):

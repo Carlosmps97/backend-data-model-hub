@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.features.relationships.service import impact_rows
 
-REL = {"id": "r1", "parentTableId": "tA", "childTableId": "tB",
+REL = {"id": "r1", "projectId": "p1", "parentTableId": "tA", "childTableId": "tB",
        "pairs": [{"parentColumnId": "cA", "childColumnId": "cB", "roleName": None}],
        "parentCardinality": "one", "childCardinality": "many", "identifying": False}
 CANVASES = [
@@ -87,12 +87,12 @@ def test_column_impact_overlay_del_changeset(monkeypatch):
     monkeypatch.setattr(service.cs_repo, "changes_map", AsyncMock(return_value={
         "relationships": {
             "r1": {"op": "delete"},
-            "r2": {"op": "upsert", "payload": {
+            "r2": {"op": "upsert", "payload": {"projectId": "p1", 
                 "sourceTableId": "tA", "sourceColumnId": "cA",
                 "targetTableId": "tC", "targetColumnId": "cC",
                 "sourceCardinality": "one", "targetCardinality": "many"}},
         },
-        "canonical_tables": {"tC": {"op": "upsert", "payload": {
+        "canonical_tables": {"tC": {"op": "upsert", "payload": {"projectId": "p1", 
             "physicalName": "PRODUCTO", "logicalName": "producto"}}},
     }))
     monkeypatch.setattr(service.cs_repo, "published", AsyncMock(return_value=[]))

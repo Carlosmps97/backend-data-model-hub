@@ -21,7 +21,7 @@ def test_search_columns_resuelve_tabla_y_esquema(monkeypatch):
     ])
     monkeypatch.setattr(service.repository, "list_tables_by_ids", by_ids)
 
-    out = asyncio.run(service.search_columns("cod_cli", 50))
+    out = asyncio.run(service.search_columns("p1", "cod_cli", 50))
     assert [c["id"] for c in out] == ["c1", "c2"]          # orden del repo (physicalName)
     assert out[0]["table"] == "M_CLIENTE" and out[0]["schema"] == "ddv_cliente"
     assert out[1]["table"] == "H_RIESGO" and out[1]["schema"] == "ddv_riesgo"
@@ -39,25 +39,29 @@ def test_search_columns_descarta_huerfanas_de_tabla_inactiva(monkeypatch):
     monkeypatch.setattr(service.repository, "list_tables_by_ids", AsyncMock(return_value=[
         {"id": "t1", "physicalName": "M_CUENTA", "schema": "ddv_cuenta"},
     ]))
-    out = asyncio.run(service.search_columns("saldo", 50))
+    out = asyncio.run(service.search_columns("p1", "saldo", 50))
     assert [c["id"] for c in out] == ["c1"]
 
 
 def test_endpoint_columns_contrato_http(monkeypatch):
-    """GET /api/catalog/columns: `q` es obligatorio (422 sin él) y la respuesta
+    """GET /api/projects/{pid}/catalog/columns: `q` es obligatorio (422 sin él) y la respuesta
     va en el envelope {success, data}."""
     from starlette.testclient import TestClient
 
     from app.main import app
 
+    from app.features.projects.deps import alive_project
+
+    app.dependency_overrides[alive_project] = lambda project_id: project_id
     client = TestClient(app, raise_server_exceptions=False)
-    assert client.get("/api/catalog/columns").status_code == 422  # sin q
+    assert client.get("/api/projects/p1/catalog/columns").status_code == 422  # sin q
 
     monkeypatch.setattr(service, "search_columns", AsyncMock(return_value=[
         {"id": "c1", "tableId": "t1", "physicalName": "COD_CLIENTE",
          "logicalName": None, "dataType": "STRING", "table": "M_CLIENTE", "schema": "ddv"},
     ]))
-    r = client.get("/api/catalog/columns?q=cod&limit=10")
+    r = client.get("/api/projects/p1/catalog/columns?q=cod&limit=10")
+    app.dependency_overrides.pop(alive_project, None)
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True

@@ -72,6 +72,10 @@ def test_origin_solo_aflora_en_created():
 
 
 def _wire(monkeypatch, *, changes, headers, published, earliest, users=None):
+    # Doc 75: cabeceras y docs publicados llevan SIEMPRE su proyecto.
+    headers = {k: {"projectId": "p1", **v} for k, v in headers.items()}
+    published = [{"projectId": "p1", **d} for d in published]
+
     async def _changes(collection, entity_id):
         return changes
 
@@ -81,7 +85,7 @@ def _wire(monkeypatch, *, changes, headers, published, earliest, users=None):
     async def _published(collection, flt=None, **kw):
         return published
 
-    async def _earliest():
+    async def _earliest(project_id=None):
         return earliest
 
     async def _users():

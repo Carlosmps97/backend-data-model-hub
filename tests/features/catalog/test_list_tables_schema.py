@@ -1,4 +1,4 @@
-"""`GET /api/catalog/tables?schema=X` (modal "New table · Import existing").
+"""`GET /api/projects/{pid}/catalog/tables?schema=X` (modal "New table · Import existing").
 
 El filtro por esquema debe llegar al backend: el repository lo pone en el filtro
 Mongo (junto a `q`), el service lo reenvía y el router acepta el query param.
@@ -54,13 +54,13 @@ def _patch_db(monkeypatch, by_coll):
     return seen
 
 
-CORE_T = {"_id": "t1", "physicalName": "CLIENTE", "logicalName": "cliente", "schema": "CORE"}
+CORE_T = {"_id": "t1", "projectId": "p1", "physicalName": "CLIENTE", "logicalName": "cliente", "schema": "CORE"}
 
 
 def test_repo_pone_schema_en_el_filtro(monkeypatch):
     """`schema` entra al filtro Mongo por igualdad (no client-side)."""
     seen = _patch_db(monkeypatch, {"canonical_tables": [CORE_T]})
-    out = asyncio.run(repository.list_tables(q=None, limit=50, schema="CORE"))
+    out = asyncio.run(repository.list_tables("p1", q=None, limit=50, schema="CORE"))
     assert [t["id"] for t in out] == ["t1"]
     assert seen[0]["schema"] == "CORE"
 
@@ -69,7 +69,7 @@ def test_repo_combina_schema_y_q(monkeypatch):
     """Con `schema` + `q` el filtro lleva AMBOS (esquema por igualdad y nombre
     por regex `$or`) — buscar por nombre dentro del esquema."""
     seen = _patch_db(monkeypatch, {"canonical_tables": [CORE_T]})
-    asyncio.run(repository.list_tables(q="clie", limit=50, schema="CORE"))
+    asyncio.run(repository.list_tables("p1", q="clie", limit=50, schema="CORE"))
     assert seen[0]["schema"] == "CORE"
     assert "$or" in seen[0]  # regex de nombre físico/lógico
 
@@ -77,12 +77,12 @@ def test_repo_combina_schema_y_q(monkeypatch):
 def test_repo_sin_schema_no_agrega_filtro(monkeypatch):
     """Sin `schema` el filtro no incluye la clave (contrato original)."""
     seen = _patch_db(monkeypatch, {"canonical_tables": [CORE_T]})
-    asyncio.run(repository.list_tables(q=None, limit=50))
+    asyncio.run(repository.list_tables("p1", q=None, limit=50))
     assert "schema" not in seen[0]
 
 
 def test_endpoint_tables_reenvia_schema_al_service(monkeypatch):
-    """GET /api/catalog/tables?q=..&limit=..&schema=.. reenvía los 3 al service
+    """GET /api/projects/{pid}/catalog/tables?q=..&limit=..&schema=.. reenvía los 3 al service
     (antes `schema` no era query param y el filtro no llegaba al backend)."""
     from starlette.testclient import TestClient
 
@@ -91,8 +91,12 @@ def test_endpoint_tables_reenvia_schema_al_service(monkeypatch):
     spy = AsyncMock(return_value=[CORE_T | {"id": "t1"}])
     monkeypatch.setattr(service, "list_tables", spy)
 
+    from app.features.projects.deps import alive_project
+
+    app.dependency_overrides[alive_project] = lambda project_id: project_id
     client = TestClient(app, raise_server_exceptions=False)
-    r = client.get("/api/catalog/tables?q=clie&limit=50&schema=CORE")
+    r = client.get("/api/projects/p1/catalog/tables?q=clie&limit=50&schema=CORE")
+    app.dependency_overrides.pop(alive_project, None)
     assert r.status_code == 200
     assert r.json()["success"] is True
-    spy.assert_awaited_once_with("clie", 50, "CORE")
+    spy.assert_awaited_once_with("p1", "clie", 50, "CORE")

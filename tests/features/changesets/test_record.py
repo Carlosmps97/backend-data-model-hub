@@ -10,7 +10,7 @@ from app.features.changesets.validation import payload_error, validate_changes
 
 
 def test_upsert_valido_pasa():
-    payload = {"tableId": "t1", "physicalName": "ID_CTA", "logicalName": "id cuenta",
+    payload = {"projectId": "p1", "tableId": "t1", "physicalName": "ID_CTA", "logicalName": "id cuenta",
                "dataType": "BIGINT", "ordinal": 0}
     assert payload_error("canonical_columns", "c1", "upsert", payload) is None
 
@@ -34,7 +34,7 @@ def test_relationship_requiere_extremos():
 
 
 def test_tabla_acepta_alias_schema():
-    payload = {"physicalName": "CTA", "logicalName": "cuenta", "schema": "core"}
+    payload = {"projectId": "p1", "physicalName": "CTA", "logicalName": "cuenta", "schema": "core"}
     assert payload_error("canonical_tables", "t1", "upsert", payload) is None
 
 

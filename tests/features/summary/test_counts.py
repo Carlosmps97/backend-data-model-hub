@@ -1,7 +1,12 @@
-"""Agregación pura de los contadores del Home (`summary.service`)."""
+"""Contadores del Home (`summary.service`): global puro + por proyecto (doc 75
+D6: conteos directos por projectId, repositorio mockeado)."""
 from __future__ import annotations
 
-from app.features.summary.service import count_for_project, count_global
+import asyncio
+from unittest.mock import AsyncMock
+
+from app.features.summary import service
+from app.features.summary.service import count_global
 
 
 def test_count_global_passthrough():
@@ -14,48 +19,32 @@ def test_count_global_passthrough():
     }
 
 
-def test_count_for_project_distinct_tables_across_canvases():
-    # t1 aparece en dos canvases → cuenta 1 (DISTINTAS).
-    subject_areas = [
-        {"tableIds": ["t1", "t2"]},
-        {"tableIds": ["t1", "t3"]},
-    ]
-    out = count_for_project(subject_areas, views=[], relationships=[])
-    assert out["tables"] == 3  # {t1, t2, t3}
-    assert out["subjectAreas"] == 2
-    assert out["projects"] == 1
+def _scoped(monkeypatch, data: dict[tuple[str, str], int]):
+    calls: list[tuple[str, str]] = []
+
+    async def _count(project_id, collection):
+        calls.append((project_id, collection))
+        return data.get((project_id, collection), 0)
+    monkeypatch.setattr(service.repository, "count_scoped", _count)
+    return calls
 
 
-def test_count_for_project_views_only_within_scope():
-    subject_areas = [{"tableIds": ["t1", "t2"]}]
-    views = [
-        {"tableId": "t1"},   # dentro
-        {"tableId": "t2"},   # dentro
-        {"tableId": "t9"},   # fuera del proyecto
-        {"tableId": None},   # vista sin tabla → no cuenta
-    ]
-    out = count_for_project(subject_areas, views=views, relationships=[])
-    assert out["views"] == 2
+def test_count_for_project_cuenta_por_project_id(monkeypatch):
+    calls = _scoped(monkeypatch, {("p1", "canonical_tables"): 3, ("p1", "views"): 2,
+                                  ("p1", "relationships"): 1, ("p1", "subject_areas"): 4})
+    out = asyncio.run(service.count_for_project("p1"))
+    assert out == {"tables": 3, "views": 2, "relationships": 1, "subjectAreas": 4, "projects": 1}
+    assert {c[0] for c in calls} == {"p1"}
 
 
-def test_count_for_project_relationships_need_both_ends_inside():
-    subject_areas = [{"tableIds": ["t1", "t2", "t3"]}]
-    relationships = [
-        {"parentTableId": "t1", "childTableId": "t2"},  # ambas dentro → cuenta
-        {"parentTableId": "t1", "childTableId": "t9"},  # una fuera → no cuenta
-        {"parentTableId": "t8", "childTableId": "t9"},  # ambas fuera → no cuenta
-        {"parentTableId": "t2", "childTableId": "t3"},  # ambas dentro → cuenta
-    ]
-    out = count_for_project(subject_areas, views=[], relationships=relationships)
-    assert out["relationships"] == 2
+def test_summary_varios_proyectos_suma_y_cuenta_proyectos(monkeypatch):
+    _scoped(monkeypatch, {("p1", "canonical_tables"): 3, ("p2", "canonical_tables"): 5,
+                          ("p2", "views"): 1})
+    out = asyncio.run(service.summary(["p1", "p2", "p1"]))       # dedup
+    assert out == {"tables": 8, "views": 1, "relationships": 0, "subjectAreas": 0, "projects": 2}
 
 
-def test_count_for_project_empty():
-    out = count_for_project([], views=[{"tableId": "t1"}], relationships=[])
-    assert out == {
-        "tables": 0,
-        "views": 0,
-        "relationships": 0,
-        "subjectAreas": 0,
-        "projects": 1,
-    }
+def test_summary_global_usa_count_active(monkeypatch):
+    monkeypatch.setattr(service.repository, "count_active", AsyncMock(side_effect=[10, 4, 7, 3, 2]))
+    assert asyncio.run(service.summary(None)) == {"tables": 10, "views": 4, "relationships": 7,
+                                                   "subjectAreas": 3, "projects": 2}

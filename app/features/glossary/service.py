@@ -17,7 +17,7 @@ import re
 from fastapi import HTTPException
 
 from app.core.audit import audit
-from app.core.naming import logicalize, physicalize
+from app.core.naming import physicalize
 from app.features.settings import service as settings_service
 
 from . import repository
@@ -29,18 +29,19 @@ def to_mappings(entries: list[dict]) -> dict[str, str]:
     return {e["term"]: e["abbrev"] for e in entries}
 
 
-async def list_entries(scope: str | None = None) -> list[dict]:
-    return await repository.list_entries(scope)
+async def list_entries(project_id: str, scope: str | None = None) -> list[dict]:
+    return await repository.list_entries(project_id, scope)
 
 
-async def create_entry(body: AbbreviationBody) -> dict:
+async def create_entry(project_id: str, body: AbbreviationBody) -> dict:
     # Enforcement F2 #1: el término nuevo no puede duplicar el glosario del
-    # scope ni aparecer como frase completa en los nombres lógicos publicados.
-    await ensure_term_valid(body.term, body.scope)
-    return await repository.create_entry(body.model_dump())
+    # scope ni aparecer como frase completa en los nombres lógicos publicados
+    # (del proyecto, doc 75 D3).
+    await ensure_term_valid(project_id, body.term, body.scope)
+    return await repository.create_entry(project_id, body.model_dump())
 
 
-async def update_entry(entry_id: str, body: AbbreviationBody) -> dict | None:
+async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody) -> dict | None:
     existing = await repository.get_entry(entry_id)
     if existing is None:
         return None
@@ -53,7 +54,7 @@ async def update_entry(entry_id: str, body: AbbreviationBody) -> dict | None:
     # el wordType no dispara el chequeo de corpus). Se excluye a sí mismo del
     # chequeo de duplicados.
     if body.term.strip().lower() != (existing.get("term") or "").strip().lower():
-        await ensure_term_valid(body.term, body.scope, exclude_id=entry_id)
+        await ensure_term_valid(project_id, body.term, body.scope, exclude_id=entry_id)
     return await repository.update_entry(entry_id, body.model_dump())
 
 
@@ -68,24 +69,21 @@ async def delete_entry(entry_id: str) -> bool:
 
 
 async def physicalize_name(
+    project_id: str,
     logical: str,
     scope: str | None = None,
     separator: str | None = None,
 ) -> str:
-    """Físico de `logical` con las reglas del scope (default 'column').
+    """Físico de `logical` con las reglas del scope (default 'column') DEL
+    PROYECTO (doc 75 D3).
 
     Usa SÓLO los términos de `scope`. Resuelve separador/case desde
     `naming_config[scope]`; un `separator` explícito gana sobre la config."""
     eff_scope = scope or "column"
-    cfg = await settings_service.get_naming_for(eff_scope)
-    mappings = to_mappings(await repository.list_entries(eff_scope))
+    cfg = await settings_service.get_naming_for(project_id, eff_scope)
+    mappings = to_mappings(await repository.list_entries(project_id, eff_scope))
     sep = separator if separator is not None else cfg["separator"]
     return physicalize(logical, mappings, separator=sep, case=cfg["case"])
-
-
-async def logicalize_name(physical: str) -> str:
-    mappings = to_mappings(await repository.list_entries())
-    return logicalize(physical, mappings)
 
 
 # ── Validación de términos (F2 #1): glosario + corpus de nombres lógicos ──
@@ -118,23 +116,24 @@ def find_glossary_duplicate(term: str, entries: list[dict],
     return None
 
 
-async def validate_term(term: str, scope: str, exclude_id: str | None = None) -> dict:
+async def validate_term(project_id: str, term: str, scope: str, exclude_id: str | None = None) -> dict:
     """Contrato del POST /api/glossary/validate (F2 #1). Chequeo 1: duplicado
     exacto case-insensitive en el glosario del scope. Chequeo 2: frase completa
     contigua en los nombres lógicos publicados (muestra cap 50 + total).
     `total` = corpus + 1 si hay duplicado."""
-    entries = await repository.list_entries(scope)
+    entries = await repository.list_entries(project_id, scope)
     dup = find_glossary_duplicate(term, entries, exclude_id)
-    corpus, corpus_total = await repository.corpus_conflicts(corpus_regex(term))
+    corpus, corpus_total = await repository.corpus_conflicts(project_id, corpus_regex(term))
     total = corpus_total + (1 if dup else 0)
     return {"ok": total == 0,
             "conflicts": {"glossaryDuplicate": dup, "corpus": corpus, "total": total}}
 
 
-async def ensure_term_valid(term: str, scope: str, exclude_id: str | None = None) -> None:
+async def ensure_term_valid(project_id: str, term: str, scope: str,
+                            exclude_id: str | None = None) -> None:
     """Enforcement server-side: 409 si el término tiene conflictos. La regla
     vive acá (writes del router); el botón Validar del front es cortesía."""
-    result = await validate_term(term, scope, exclude_id)
+    result = await validate_term(project_id, term, scope, exclude_id)
     if not result["ok"]:
         total = result["conflicts"]["total"]
         raise HTTPException(
@@ -169,13 +168,13 @@ def compute_rephysicalize(
     """Puro/testeable: dada la lista de entidades del scope y sus reglas de
     naming, devuelve `[(id, new_physical)]` SÓLO para las que cambian.
 
-    Re-deriva el físico de TODAS desde su `logicalName` (consistencia global del
-    glossary: no hay flag de override de físico). Entidades sin `logicalName` se
-    saltan (no se puede derivar)."""
+    Re-deriva el físico desde `logicalName` — EXCEPTO las entidades con
+    `physicalNameOverridden` (doc 68): un físico custom manda sobre la regla.
+    Entidades sin `logicalName` se saltan (no se puede derivar)."""
     out: list[tuple[str, str]] = []
     for e in entities:
         logical = e.get("logicalName")
-        if not logical:
+        if not logical or e.get("physicalNameOverridden"):
             continue
         new_physical = physicalize(logical, mappings, separator=separator, case=case)
         if new_physical != e.get("physicalName"):
@@ -183,28 +182,56 @@ def compute_rephysicalize(
     return out
 
 
-async def _rephysicalize_scope(scope: str) -> int:
-    """Recomputa el físico de todas las entidades de `scope` con la config y los
-    términos de ESE scope. Update directo. Devuelve el nº actualizado."""
-    cfg = await settings_service.get_naming_for(scope)
-    mappings = to_mappings(await repository.list_entries(scope))
-    entities = await repository.entities_for_rephysicalize(scope)
+async def naming_rules(project_id: str, scope: str) -> tuple[dict[str, str], str, str]:
+    """Reglas de naming vigentes del scope DEL PROYECTO: (mappings, separator, case).
+    Un solo par de lecturas para derivar N nombres (doc 68: el estampado del
+    override en changesets las carga UNA vez por lote)."""
+    cfg = await settings_service.get_naming_for(project_id, scope)
+    mappings = to_mappings(await repository.list_entries(project_id, scope))
+    return mappings, cfg["separator"], cfg["case"]
+
+
+def is_physical_override(payload: dict, mappings: dict[str, str],
+                         separator: str, case: str) -> bool:
+    """¿El físico del payload es un override manual? Puro (doc 68).
+
+    True si el payload ya viene marcado, o si `physicalName` difiere del
+    derivado de `logicalName` con las reglas vigentes. Sin lógico o sin físico
+    no hay con qué comparar: manda el flag del payload. El OR nunca degrada un
+    custom a derivable; a lo sumo conserva como override un nombre que hoy
+    coincide con una derivación vieja (se corrige vaciando el físico)."""
+    if payload.get("physicalNameOverridden"):
+        return True
+    logical = str(payload.get("logicalName") or "").strip()
+    physical = str(payload.get("physicalName") or "").strip()
+    if not logical or not physical:
+        return False
+    return physicalize(logical, mappings, separator=separator, case=case) != physical
+
+
+async def _rephysicalize_scope(project_id: str, scope: str) -> int:
+    """Recomputa el físico de todas las entidades de `scope` DEL PROYECTO con la
+    config y los términos de ESE scope. Update directo. Devuelve el nº actualizado."""
+    cfg = await settings_service.get_naming_for(project_id, scope)
+    mappings = to_mappings(await repository.list_entries(project_id, scope))
+    entities = await repository.entities_for_rephysicalize(project_id, scope)
     updates = compute_rephysicalize(entities, mappings, cfg["separator"], cfg["case"])
     return await repository.update_physical_names(scope, updates)
 
 
-async def rephysicalize(scope: str | None = None) -> dict:
-    """Re-deriva el `physicalName` de TODAS las entidades del scope a partir de
-    su `logicalName` (engine + naming_config + términos del scope). Retroactivo,
-    directo sobre las colecciones publicadas (fuera de publish/changeset).
+async def rephysicalize(project_id: str, scope: str | None = None) -> dict:
+    """Re-deriva el `physicalName` de TODAS las entidades del scope DEL PROYECTO
+    a partir de su `logicalName` (engine + naming_config + términos del scope).
+    Retroactivo, directo sobre las colecciones publicadas (fuera de publish/changeset).
+    Doc 75 D3: un cambio de glosario de UDV jamás re-deriva DDV.
 
     `scope='table'` → canonical_tables; `'column'` → canonical_columns; sin
     scope → ambos. Devuelve `{updated: {tables, columns}}` (0 en el scope que no
-    se tocó). Re-deriva TODOS por consistencia global del glossary; no existe
-    flag de override del físico."""
+    se tocó). Los físicos con `physicalNameOverridden` NO se tocan (doc 68):
+    el override manual predomina sobre la regla del glossary."""
     scopes = (scope,) if scope else _REPHYS_SCOPES
     counts = {"tables": 0, "columns": 0}
     key = {"table": "tables", "column": "columns"}
     for sc in scopes:
-        counts[key[sc]] = await _rephysicalize_scope(sc)
+        counts[key[sc]] = await _rephysicalize_scope(project_id, sc)
     return {"updated": counts}

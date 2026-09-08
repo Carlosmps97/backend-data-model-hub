@@ -13,10 +13,11 @@
 # MAGIC   (recursivo, espejando subcarpetas) y deja la plataforma como un primer
 # MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja +
 # MAGIC   `admin`/`admin`, migra archivo por archivo (SECUENCIAL a proposito),
-# MAGIC   siembra las data functions, hace el layout y marca la version base v1.
-# MAGIC   El proyecto destino de cada archivo sale del `<Locator>` del Mart
-# MAGIC   (`Mart://Mart/<Proyecto>/<Dominio>/<Modelo>`); sin Locator, el nombre
-# MAGIC   del archivo.
+# MAGIC   siembra las data functions, hace el layout y marca la version base v1
+# MAGIC   de cada proyecto. El proyecto destino de cada archivo lo decide el
+# MAGIC   MANIFIESTO `projects.json` en la carpeta raiz (doc 75: p. ej. todos los
+# MAGIC   DDV → «Modelo DDV»); sin entrada en el manifiesto, el nombre del
+# MAGIC   archivo (un XML = un proyecto).
 # MAGIC - **append** (no destructivo): baja UN archivo y lo SUMA a la BD viva
 # MAGIC   (sin reset, sin admin, sin seeds, sin marcador).
 # MAGIC
@@ -58,7 +59,7 @@ dbutils.widgets.dropdown("modo", "one-shot", ["one-shot", "append"],
 dbutils.widgets.text("archivo_append", "",
                      "5. (append) Ruta del .xml dentro del container")
 dbutils.widgets.text("append_project", "",
-                     "6. (append) Proyecto destino (vacio = auto)")
+                     "6. (append) Proyecto destino (vacio = nombre del archivo)")
 dbutils.widgets.text("base_title", "Base - Migración Erwin (XML)",
                      "7. (one-shot) Titulo de la version base v1")
 dbutils.widgets.dropdown("force", "no", ["no", "si"],
@@ -160,7 +161,7 @@ if MODO == "one-shot":
     print(f"wipe     : {'CONFIRMADO - se borra TODO' if CONFIRMAR_WIPE else 'no confirmado (solo dry-run)'}")
 else:
     print(f"archivo  : {adls(ARCHIVO_APPEND)}")
-    print(f"proyecto : {APPEND_PROJECT or '(auto: Locator del Mart o nombre del archivo)'}")
+    print(f"proyecto : {APPEND_PROJECT or '(auto: nombre del archivo)'}")
 print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
 
 # COMMAND ----------
@@ -170,7 +171,8 @@ print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
 # MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Se baja al disco local
 # MAGIC del driver — en one-shot, TODA la carpeta recursivamente, espejando las
 # MAGIC subcarpetas (asi dos archivos homonimos de distintas subcarpetas no se
-# MAGIC pisan). Requiere access mode **Dedicated**.
+# MAGIC pisan) mas el manifiesto `projects.json` de la raiz, si existe. Requiere
+# MAGIC access mode **Dedicated**.
 
 # COMMAND ----------
 
@@ -217,6 +219,12 @@ if MODO == "one-shot":
         rel = f.path[len(base_uri):] if f.path.startswith(base_uri) else f.name
         bajar(f.path, os.path.join(LOCAL_ROOT, *rel.split("/")))
     print(f"\n{len(files)} XML materializados bajo {LOCAL_ROOT}")
+    # Doc 75: el manifiesto de proyectos vive en la raiz de la carpeta.
+    manifest = [f for f in dbutils.fs.ls(base_uri) if f.name == "projects.json"]
+    if manifest:
+        bajar(manifest[0].path, os.path.join(LOCAL_ROOT, "projects.json"))
+    else:
+        print("sin projects.json en la raiz: cada XML sera un proyecto con el nombre del archivo")
     TARGET = LOCAL_ROOT
 else:
     TARGET = bajar(adls(ARCHIVO_APPEND),
@@ -330,10 +338,12 @@ else:
 
 # MAGIC %md
 # MAGIC ## 7. DRY-RUN del orquestador
-# MAGIC Imprime el plan completo SIN ejecutar nada: archivos descubiertos con su
-# MAGIC proyecto destino (Locator del Mart o nombre de archivo), los pasos con
-# MAGIC sus comandos exactos y — en one-shot — los conteos actuales de la BD
-# MAGIC (todo lo que se borraria). REVISAR ESTO antes de la celda 8.
+# MAGIC Imprime el plan completo SIN ejecutar nada: archivos agrupados por
+# MAGIC proyecto segun `projects.json` de la carpeta (regla general: nombre del
+# MAGIC archivo), un gate de calidad por proyecto, los pasos con sus comandos
+# MAGIC exactos y — en one-shot — los conteos actuales de la BD (todo lo que se
+# MAGIC borraria). Un manifiesto invalido aborta aqui, antes de tocar la BD.
+# MAGIC REVISAR ESTO antes de la celda 8.
 
 # COMMAND ----------
 
@@ -351,8 +361,9 @@ run("-m", "scripts.run_migration", *ARGS)
 
 # MAGIC %md
 # MAGIC ## 8. EJECUTAR
-# MAGIC - **one-shot**: exige el widget `confirmar_wipe = si` (doble candado: el
-# MAGIC   gate de calidad corre primero y, si falla sin `force`, no se borra nada).
+# MAGIC - **one-shot**: exige el widget `confirmar_wipe = si` (doble candado: los
+# MAGIC   gates de calidad — uno por proyecto — corren primero y, si alguno falla
+# MAGIC   sin `force`, no se borra nada).
 # MAGIC - **append**: corre directo (no borra nada).
 # MAGIC
 # MAGIC La salida completa de cada paso se streamea aqui; el resumen queda en

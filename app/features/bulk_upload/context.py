@@ -9,7 +9,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class UploadContext:
-    projects: list[dict] = field(default_factory=list)
+    # Doc 75: la carga masiva vive DENTRO del proyecto del changeset — el
+    # workbook no puede crear proyectos ni referir a otro (`project-mismatch`).
+    project_id: str = ""
+    project_name: str = ""
     folders: list[dict] = field(default_factory=list)
     canvases: list[dict] = field(default_factory=list)       # subject_areas
     schemas: list[dict] = field(default_factory=list)

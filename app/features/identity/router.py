@@ -1,9 +1,8 @@
 """Endpoints de identidad.
 
-GET /api/me    → el `Principal` actual, resuelto por el seam
-                 (`app.core.identity`) según `AUTH_MODE`.
-GET /api/users → lista fija de usuarios simulados (`{id, name, initials}`) para
-                 el switch de actor y la asignación de revisores (modo local).
+GET /api/users → usuarios activos (`{id, name, initials}`) para asignar
+                 revisores (fallback a la lista simulada en dev sin seed).
+(`GET /api/me` se retiró en el doc 75: duplicaba `GET /api/auth/me`.)
 """
 from __future__ import annotations
 
@@ -16,11 +15,6 @@ from app.features.auth import repository as auth_repo
 from .users import _initials, list_users
 
 router = APIRouter(prefix="/api", tags=["identity"])
-
-
-@router.get("/me", summary="Identidad del usuario en sesión.")
-async def me(principal: Principal = Depends(current_principal)):
-    return ok(principal.model_dump())
 
 
 @router.get("/users", summary="Usuarios reales (id/name/initials) para asignar revisores.")

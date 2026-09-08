@@ -6,27 +6,31 @@ ONE-SHOT (destructivo) — deja la plataforma como un primer deployment:
   .venv/bin/python -m scripts.run_migration --folder "ruta/carpeta"          # dry-run
   .venv/bin/python -m scripts.run_migration --folder "ruta/carpeta" --apply [--force]
   Descubre TODOS los .xml (recursivo, orden determinista por subruta) y corre:
-  quality de TODOS (gate + glosario cruzado entre archivos) → reset
-  DESTRUCTIVO → create_admin (4 roles de caja + admin/admin) → migrate
-  archivo por archivo → audit → seed_ddl_export_rules ("data functions") →
-  arrange_all → mark_base_version (v1, título parametrizable).
+  quality POR PROYECTO (gate + glosario cruzado sólo entre los archivos que
+  se unen en un mismo proyecto) → reset DESTRUCTIVO → create_admin (4 roles
+  de caja + admin/admin) → migrate archivo por archivo → audit →
+  seed_ddl_export_rules ("data functions", en todos los proyectos) →
+  arrange_all → mark_base_version (v1 de cada proyecto, título parametrizable).
 
 APPEND (no destructivo) — suma UN archivo sobre la base viva:
   .venv/bin/python -m scripts.run_migration --append "ruta/modelo.xml" --apply
   quality → crosscheck (vs BD) → migrate → audit → arrange del proyecto.
   Sin reset, sin admin, sin seeds, sin marcador (v1 ya existe).
 
-Proyecto destino por archivo (pedido owner 2026-08-22): se extrae del
-`<Locator>` del propio XML — `erwin://Mart://Mart/<Proyecto>/<Dominio>/<Modelo>`,
-las 3 capas del Mart de Erwin (proyecto / dominio / modelo). Archivos del
-MISMO proyecto Mart comparten proyecto en la plataforma (familia, como el
-DDV). Si el XML no trae Locator (modelo nunca guardado en Mart), fallback:
-nombre del archivo sin extensión. `--project` (solo --append) fuerza un
-destino explícito.
+Proyecto destino por archivo (doc 75 D9): lo decide el MANIFIESTO
+`<carpeta>/projects.json` — `{"projects": [{"name", "files": [patrones
+relativos a la carpeta], "description"?}]}` — y, para los archivos que ningún
+patrón matchea, la regla general: el nombre del archivo sin extensión (un XML =
+un proyecto). Sólo el manifiesto une varios XML en un proyecto (p. ej. los DDV
+en «Modelo DDV»); dos archivos que caerían al mismo nombre sin estar unidos
+por el manifiesto son un error, no un merge silencioso. El manifiesto se
+valida contra los archivos reales ANTES de tocar la BD. Del `<Locator>` del
+XML sólo se conservan dominio y modelo (capas del Mart) como origen
+informativo. `--project` (solo --append) fuerza un destino explícito.
 
-El apply es SECUENCIAL a propósito (no configurable): la unicidad global de
-nombres físicos (política `_DUPn`) depende del prefetch que cada archivo hace
-contra la BD al empezar; en paralelo se correría con fotos desactualizadas.
+El apply es SECUENCIAL a propósito (no configurable): la unicidad de nombres
+físicos POR PROYECTO (política `_DUPn`) depende del prefetch que cada archivo
+hace contra la BD al empezar; en paralelo se correría con fotos desactualizadas.
 
 Manejo de fallas por paso:
   - quality (gate)        → detiene TODO antes de borrar nada (salvo --force)
@@ -42,6 +46,7 @@ con la salida streameada COMPLETA — nada se resume ni se oculta.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -60,6 +65,14 @@ _PY = sys.executable
 _LOCATOR_RE = re.compile(rb"<Locator>([^<]{1,600})</Locator>")
 _PEEK_CHUNK = 8 * 1024 * 1024
 _PEEK_CAP = 64 * 1024 * 1024
+
+MANIFEST_NAME = "projects.json"
+_MANIFEST_KEYS = {"name", "files", "description"}
+
+
+class ManifestError(ValueError):
+    """Manifiesto inválido o inconsistente con los archivos: se aborta ANTES de
+    tocar la BD (un typo en un patrón convertiría los 31 DDV en 31 proyectos)."""
 
 
 # ── Descubrimiento y proyecto destino (lógica pura, testeable) ───────────────
@@ -91,33 +104,109 @@ def read_locator(path: Path, cap: int = _PEEK_CAP,
     return None
 
 
-def plan_files(files: list[Path], root: Path, locator_of=read_locator) -> list[dict]:
-    """Plan por archivo: proyecto destino (Locator del Mart o nombre del
-    archivo), dominio y modelo. `locator_of` es inyectable para tests."""
+def _glob_re(pattern: str) -> re.Pattern:
+    """Glob relativo a la raíz: `*`/`?` no cruzan `/`, `**/` sí; case-insensitive."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$", re.IGNORECASE)
+
+
+def load_manifest(path: Path | None) -> dict:
+    """`{"projects": [{name, files[], description?}]}` (doc 75 D9). Sin archivo →
+    sin entradas: cada XML es un proyecto con el nombre del archivo. Estricto:
+    claves desconocidas, `name` vacío o repetido, `files` vacío → ManifestError."""
+    if path is None or not path.is_file():
+        return {"projects": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"{path}: JSON inválido ({exc})") from exc
+    if (not isinstance(data, dict) or set(data) != {"projects"}
+            or not isinstance(data["projects"], list)):
+        raise ManifestError(f'{path}: se espera {{"projects": [...]}}')
+    seen: set[str] = set()
+    for i, entry in enumerate(data["projects"]):
+        if not isinstance(entry, dict):
+            raise ManifestError(f"{path}: entrada {i} no es un objeto")
+        extra = set(entry) - _MANIFEST_KEYS
+        if extra:
+            raise ManifestError(f"{path}: entrada {i}: claves desconocidas {sorted(extra)}")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise ManifestError(f"{path}: entrada {i}: 'name' vacío")
+        if name.lower() in seen:
+            raise ManifestError(f"{path}: nombre de proyecto repetido «{name}»")
+        seen.add(name.lower())
+        files = entry.get("files")
+        if (not isinstance(files, list) or not files
+                or not all(isinstance(f, str) and f.strip() for f in files)):
+            raise ManifestError(f"{path}: «{name}»: 'files' debe ser una lista de patrones no vacía")
+    return data
+
+
+def plan_files(files: list[Path], root: Path, manifest: dict,
+               locator_of=read_locator) -> list[dict]:
+    """Proyecto destino por archivo: la entrada del manifiesto que lo matchea o,
+    si ninguna, el nombre del archivo (doc 75 D9). Dominio y modelo salen del
+    Locator del Mart (informativos). Valida el manifiesto contra los archivos
+    REALES: cualquier ambigüedad → ManifestError. `locator_of` es inyectable."""
+    rels = {f: str(f.relative_to(root)).replace(os.sep, "/") for f in files}
+    assigned: dict[Path, dict] = {}
+    for entry in manifest.get("projects", []):
+        name = entry["name"].strip()
+        for pattern in entry["files"]:
+            rx = _glob_re(pattern.strip())
+            hits = [f for f in files if rx.match(rels[f])]
+            if not hits:
+                raise ManifestError(f"«{name}»: el patrón {pattern!r} no matchea ningún .xml bajo {root}")
+            for f in hits:
+                prev = assigned.get(f)
+                if prev is not None and prev["name"].strip() != name:
+                    raise ManifestError(f"{rels[f]}: matchea dos entradas del manifiesto "
+                                        f"(«{prev['name'].strip()}» y «{name}»)")
+                assigned[f] = entry
     plans = []
     for f in files:
         loc = locator_of(f)
         parsed = parse_locator(loc) if loc else None
-        if parsed:
-            plans.append({"path": f, "rel": str(f.relative_to(root)),
-                          "project": parsed["project"],
-                          "domain": parsed["domain"],
-                          "model": parsed["model"], "source": "locator"})
-        else:
-            plans.append({"path": f, "rel": str(f.relative_to(root)),
-                          "project": f.stem.strip(), "domain": "",
-                          "model": f.stem.strip(), "source": "archivo"})
+        entry = assigned.get(f)
+        plans.append({
+            "path": f, "rel": rels[f],
+            "project": entry["name"].strip() if entry else f.stem.strip(),
+            "description": ((entry.get("description") or "").strip() or None) if entry else None,
+            "domain": parsed["domain"] if parsed else "",
+            "model": parsed["model"] if parsed else f.stem.strip(),
+            "source": "manifest" if entry else "archivo",
+        })
+    by_name: dict[str, list[dict]] = {}
+    for p in plans:
+        by_name.setdefault(p["project"].lower(), []).append(p)
+    for group in by_name.values():
+        if len(group) > 1 and any(p["source"] == "archivo" for p in group):
+            raise ManifestError(f"nombre de proyecto repetido «{group[0]['project']}»: "
+                                + ", ".join(p["rel"] for p in group)
+                                + " — declara la unión en el manifiesto o renombra el archivo")
     return plans
 
 
-def filename_collisions(plans: list[dict]) -> dict[str, list[str]]:
-    """Proyectos derivados del NOMBRE DE ARCHIVO que se repiten: esos archivos
-    migrarían al MISMO proyecto (merge de familia). Se avisa, no se bloquea."""
-    by: dict[str, list[str]] = {}
+def group_by_project(plans: list[dict]) -> list[tuple[str, list[dict]]]:
+    """[(proyecto, [planes])] en orden de primera aparición."""
+    groups: dict[str, list[dict]] = {}
     for p in plans:
-        if p["source"] == "archivo":
-            by.setdefault(p["project"].lower(), []).append(p["rel"])
-    return {k: v for k, v in by.items() if len(v) > 1}
+        groups.setdefault(p["project"], []).append(p)
+    return list(groups.items())
 
 
 # ── Pasos del pipeline (construcción pura, testeable) ────────────────────────
@@ -127,50 +216,69 @@ def filename_collisions(plans: list[dict]) -> dict[str, list[str]]:
 #        check = validación: igual que core (falla visible, no detiene)
 #        info  = informativo: warning, no afecta el exit code
 
-def oneshot_steps(plans: list[dict], *, force: bool, base_title: str) -> list[dict]:
-    xmls = [str(p["path"]) for p in plans]
-    steps = [
-        {"name": "quality (gate + glosario cruzado)", "klass": "gate",
-         "cmd": [_PY, "-m", "scripts.erwin_migration.quality", *xmls]},
+def _quality_cmd(xmls: list[str], quality_json: str | None) -> list[str]:
+    """`--json` va ANTES de los archivos: los .xml siguen siendo los últimos args."""
+    extra = ["--json", quality_json] if quality_json else []
+    return [_PY, "-m", "scripts.erwin_migration.quality", *extra, *xmls]
+
+
+def _migrate_cmd(p: dict, force: bool) -> list[str]:
+    cmd = [_PY, "-m", "scripts.erwin_migration.migrate", str(p["path"]),
+           "--project", p["project"]]
+    if p.get("description"):
+        cmd += ["--description", p["description"]]
+    cmd.append("--apply")
+    if force:
+        cmd.append("--force")
+    return cmd
+
+
+def _quality_json_of(quality_json: str | None, n: int) -> str | None:
+    """Un reporte JSON del gate por proyecto: `<base>-<n>.json`."""
+    return f"{quality_json[:-5]}-{n}.json" if quality_json else None
+
+
+def oneshot_steps(plans: list[dict], *, force: bool, base_title: str,
+                  quality_json: str | None = None) -> list[dict]:
+    steps = []
+    for n, (project, group) in enumerate(group_by_project(plans), start=1):
+        steps.append({"name": f"quality «{project}» (gate + glosario cruzado del proyecto)",
+                      "klass": "gate",
+                      "cmd": _quality_cmd([str(p["path"]) for p in group],
+                                          _quality_json_of(quality_json, n))})
+    steps += [
         {"name": "reset DESTRUCTIVO (borra todo el schema)", "klass": "abort",
          "cmd": [_PY, "-m", "scripts.reset_for_migration", "--apply"]},
         {"name": "create_admin (4 roles de caja + admin/admin)", "klass": "abort",
          "cmd": [_PY, "scripts/create_admin.py"]},
     ]
     for p in plans:
-        cmd = [_PY, "-m", "scripts.erwin_migration.migrate", str(p["path"]),
-               "--project", p["project"], "--apply"]
-        if force:
-            cmd.append("--force")
         steps.append({"name": f"migrate {p['rel']} → «{p['project']}»",
-                      "klass": "core", "cmd": cmd})
+                      "klass": "core", "cmd": _migrate_cmd(p, force)})
     steps += [
         {"name": "audit_data_consistency", "klass": "check",
          "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
-        {"name": "seed_ddl_export_rules (data functions)", "klass": "core",
-         "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--apply"]},
+        {"name": "seed_ddl_export_rules (data functions, por proyecto)", "klass": "core",
+         "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]},
         {"name": "arrange_all (layout ELK, todos los canvases)", "klass": "info",
          "cmd": [_PY, "scripts/arrange_all.py"]},
-        {"name": "mark_base_version (v1)", "klass": "core",
+        {"name": "mark_base_version (v1 de cada proyecto)", "klass": "core",
          "cmd": [_PY, "-m", "scripts.mark_base_version", "--apply",
                  "--title", base_title]},
     ]
     return steps
 
 
-def append_steps(plan: dict, *, force: bool) -> list[dict]:
+def append_steps(plan: dict, *, force: bool, quality_json: str | None = None) -> list[dict]:
     xml = str(plan["path"])
-    mig = [_PY, "-m", "scripts.erwin_migration.migrate", xml,
-           "--project", plan["project"], "--apply"]
-    if force:
-        mig.append("--force")
     return [
         {"name": "quality (gate)", "klass": "gate",
-         "cmd": [_PY, "-m", "scripts.erwin_migration.quality", xml]},
-        {"name": "crosscheck vs BD viva", "klass": "info",
-         "cmd": [_PY, "-m", "scripts.erwin_migration.crosscheck", xml]},
+         "cmd": _quality_cmd([xml], quality_json)},
+        {"name": f"crosscheck vs BD viva del proyecto «{plan['project']}»", "klass": "info",
+         "cmd": [_PY, "-m", "scripts.erwin_migration.crosscheck",
+                 "--project", plan["project"], xml]},
         {"name": f"migrate {plan['rel']} → «{plan['project']}»", "klass": "core",
-         "cmd": mig},
+         "cmd": _migrate_cmd(plan, force)},
         {"name": "audit_data_consistency", "klass": "check",
          "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
         {"name": f"arrange_all del proyecto «{plan['project']}»", "klass": "info",
@@ -216,6 +324,58 @@ def execute(steps: list[dict], *, force: bool) -> list[dict]:
     return results
 
 
+def gate_error_summary(report: list[dict], max_items: int = 5) -> list[str]:
+    """Líneas legibles con los ERROR del reporte JSON de `quality` (por archivo +
+    glosario cruzado): qué detuvo el gate, sin releer 4 600 líneas de salida.
+    Puro (testeable)."""
+    out: list[str] = []
+    for entry in report:
+        if "findings" in entry:
+            base = os.path.basename(str(entry.get("file") or ""))
+            for x in entry["findings"]:
+                if x.get("severity") != "ERROR":
+                    continue
+                out.append(f"  [ERROR] {x['code']} — {x['title']}  ({x['count']}) · {base}")
+                out.append(f"          acción: {x.get('action', '')}")
+                items = list(x.get("items") or x.get("samples") or [])
+                out += [f"          · {i}" for i in items[:max_items]]
+                if len(items) > max_items:
+                    out.append(f"          · … y {len(items) - max_items} más")
+        conflicts = (entry.get("crossFile") or {}).get("glossaryConflicts") or []
+        if conflicts:
+            out.append(f"  [ERROR] E-GLOSSARY-XFILE-CONFLICT — mismo término con abreviatura "
+                       f"distinta entre archivos  ({len(conflicts)})")
+            out += [f"          · {c.get('term')}" for c in conflicts[:max_items]]
+    return out
+
+
+def _gate_reports(quality_json: str) -> list[str]:
+    """Reportes JSON del gate de este run: el del append (`<base>.json`) o los
+    de cada proyecto del one-shot (`<base>-<n>.json`), en orden."""
+    return sorted(glob.glob(f"{quality_json[:-5]}-*.json")) + (
+        [quality_json] if os.path.isfile(quality_json) else [])
+
+
+def _print_gate_help(quality_json: str) -> None:
+    """Tras un gate fallido SIN --force: qué falló y cómo seguir."""
+    print(f"\n{'─' * 72}\nEl gate de calidad detuvo el run ANTES de borrar nada: la BD sigue intacta.")
+    lines: list[str] = []
+    for report in _gate_reports(quality_json):
+        try:
+            with open(report, encoding="utf-8") as fh:
+                lines += gate_error_summary(json.load(fh))
+        except (OSError, ValueError):
+            continue
+    if lines:
+        print("Errores que exigen una decisión:")
+        print("\n".join(lines))
+    else:
+        print("(no encontré el reporte JSON del gate — revisa la salida de quality arriba)")
+    print("\nPara hacer borrón y cuenta nueva OMITIENDO esos objetos (migrate los salta y los reporta),\n"
+          "repite el mismo comando agregando --force. Los ERROR son residuos del XML de Erwin\n"
+          "(referencias a objetos que ya no existen en el archivo), no algo que se arregle en la plataforma.")
+
+
 def _print_summary(results: list[dict]) -> None:
     print(f"\n{'═' * 72}\nRESUMEN DEL RUN")
     for r in results:
@@ -233,6 +393,7 @@ def _write_summary(mode: str, plans: list[dict], results: list[dict],
             "mode": mode, "startedAt": started,
             "finishedAt": datetime.now(timezone.utc).isoformat(),
             "files": [{"rel": p["rel"], "project": p["project"],
+                       "description": p.get("description"),
                        "domain": p["domain"], "model": p["model"],
                        "source": p["source"]} for p in plans],
             "steps": [{"name": r["name"], "rc": r["rc"], "estado": r["estado"],
@@ -243,19 +404,20 @@ def _write_summary(mode: str, plans: list[dict], results: list[dict],
 
 def _print_plan(title: str, plans: list[dict], steps: list[dict]) -> None:
     print(f"{'═' * 72}\n{title}\n{'═' * 72}")
-    print(f"\nARCHIVOS ({len(plans)}) — proyecto destino por archivo:")
+    print(f"\nARCHIVOS ({len(plans)}) — proyecto destino por archivo "
+          f"(manifest = {MANIFEST_NAME}; archivo = nombre del .xml):")
     for p in plans:
         mb = p["path"].stat().st_size / 1e6
-        dom = f" · dominio: {p['domain']}" if p["domain"] else ""
+        origin = f" · origen: {p['domain']} / {p['model']}" if p["domain"] else f" · origen: {p['model']}"
         print(f"  {p['rel']}  ({mb:,.0f} MB)")
-        print(f"      → proyecto «{p['project']}» [{p['source']}]{dom}"
-              f" · modelo: {p['model']}")
-    cols = filename_collisions(plans)
-    if cols:
-        print("\n⚠ AVISO: proyectos derivados del nombre de archivo REPETIDOS "
-              "(migrarían al MISMO proyecto, como familia):")
-        for k, rels in sorted(cols.items()):
-            print(f"    «{k}»: {', '.join(rels)}")
+        print(f"      → proyecto «{p['project']}» [{p['source']}]{origin}")
+    groups = group_by_project(plans)
+    print(f"\nPROYECTOS ({len(groups)}):")
+    for project, group in groups:
+        desc = next((g["description"] for g in group if g.get("description")), None)
+        print(f"  «{project}»" + (f" — {desc}" if desc else ""))
+        for g in group:
+            print(f"      · {g['rel']}")
     print(f"\nPASOS ({len(steps)}):")
     for i, st in enumerate(steps, 1):
         print(f"  {i:2}. [{st['klass']:<5}] {st['name']}")
@@ -276,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="continuar aunque el gate de calidad tenga ERRORs "
                          "(migrate omite los objetos con error)")
     ap.add_argument("--project", help="(solo --append) proyecto destino explícito")
+    ap.add_argument("--manifest", help=f"manifiesto de proyectos (default en --folder: "
+                                       f"<carpeta>/{MANIFEST_NAME}; en --append sólo si se pasa)")
     ap.add_argument("--base-title", default="Base - Migración Erwin (XML)",
                     help="(one-shot) título del marcador de versión base v1")
     args = ap.parse_args(argv)
@@ -289,6 +453,10 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(ROOT / ".env")   # los subprocesos heredan os.environ
 
     started = datetime.now(timezone.utc).isoformat()
+    # Reporte JSON del gate: con él, un run detenido explica al final QUÉ lo detuvo.
+    os.makedirs(os.path.join(str(ROOT), "migration-reports"), exist_ok=True)
+    quality_json = os.path.join(str(ROOT), "migration-reports",
+                                f"quality-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json")
 
     if args.folder:
         root = Path(args.folder).expanduser()
@@ -299,8 +467,17 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print(f"⛔ No hay .xml bajo {root} (búsqueda recursiva).")
             return 2
-        plans = plan_files(files, root)
-        steps = oneshot_steps(plans, force=args.force, base_title=args.base_title)
+        mpath = Path(args.manifest).expanduser() if args.manifest else root / MANIFEST_NAME
+        if args.manifest and not mpath.is_file():
+            print(f"⛔ No existe el manifiesto: {mpath}")
+            return 2
+        try:
+            plans = plan_files(files, root, load_manifest(mpath))
+        except ManifestError as exc:
+            print(f"⛔ Manifiesto: {exc}")
+            return 2
+        steps = oneshot_steps(plans, force=args.force, base_title=args.base_title,
+                              quality_json=quality_json)
         _print_plan("ONE-SHOT (DESTRUCTIVO) — plan", plans, steps)
         if not args.apply:
             print("\nConteos actuales de la BD (esto es lo que se borraría):")
@@ -314,11 +491,19 @@ def main(argv: list[str] | None = None) -> int:
         if not xml.is_file():
             print(f"⛔ No existe el archivo: {xml}")
             return 2
-        plans = plan_files([xml], xml.parent)
+        mpath = Path(args.manifest).expanduser() if args.manifest else None
+        if mpath is not None and not mpath.is_file():
+            print(f"⛔ No existe el manifiesto: {mpath}")
+            return 2
+        try:
+            plans = plan_files([xml], xml.parent, load_manifest(mpath))
+        except ManifestError as exc:
+            print(f"⛔ Manifiesto: {exc}")
+            return 2
         if args.project:
             plans[0]["project"] = args.project.strip()
             plans[0]["source"] = "--project"
-        steps = append_steps(plans[0], force=args.force)
+        steps = append_steps(plans[0], force=args.force, quality_json=quality_json)
         _print_plan("APPEND (no destructivo) — plan", plans, steps)
         if not args.apply:
             print("\nDRY-RUN — nada ejecutado. Repite con --apply.")
@@ -326,6 +511,9 @@ def main(argv: list[str] | None = None) -> int:
 
     results = execute(steps, force=args.force)
     _print_summary(results)
+    gate_failed = any(r["klass"] == "gate" and r.get("rc") not in (0, None) for r in results)
+    if gate_failed and not args.force:
+        _print_gate_help(quality_json)
     out = _write_summary("one-shot" if args.folder else "append",
                          plans, results, started)
     print(f"\nResumen del run: {out}")

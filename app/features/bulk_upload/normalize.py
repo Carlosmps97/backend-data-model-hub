@@ -48,15 +48,29 @@ def norm_name(value) -> str:
     return norm_ci(strip_accents(clean_text(value)))
 
 
-def norm_key(value) -> str:
-    """Clave de matching de cabeceras/nombres de UDP (ver docstring del módulo).
-    Prefijo `udp` opcional; devuelve palabras significativas en minúsculas."""
+def _udp_words(value) -> list[str]:
     text = strip_accents(clean_text(value)).lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
     words = [w for w in text.split() if w not in _STOPWORDS]
     if words and words[0] == "udp":
         words = words[1:]
-    return " ".join(words)
+    return words
+
+
+def norm_key(value) -> str:
+    """Clave de matching de cabeceras/nombres de UDP (ver docstring del módulo).
+    Prefijo `udp` opcional; devuelve palabras significativas en minúsculas."""
+    return " ".join(_udp_words(value))
+
+
+def udp_header_facet(value) -> tuple[str, str]:
+    """Cabecera `UDP_*` → (faceta, clave). Doc 69: `UDP_LOGICAL_<x>` apunta a la
+    def LÓGICA (Entidad/Atributo); cualquier otra cabecera a la física
+    (plantilla histórica intacta)."""
+    words = _udp_words(value)
+    if words and words[0] == "logical":
+        return "logical", " ".join(words[1:])
+    return "physical", " ".join(words)
 
 
 def norm_enum(value) -> str:

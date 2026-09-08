@@ -1,4 +1,6 @@
-"""Endpoints de `reporting` (tabla de metadata + detalle por columna, pr)."""
+"""Endpoints de `reporting` (tabla de metadata + detalle por columna, pr).
+Doc 75: el reporte es de UN proyecto — `projectId` obligatorio en todas las
+lecturas."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
@@ -12,19 +14,26 @@ router = APIRouter(prefix="/api/reporting", tags=["reporting"])
 
 @router.get("/tables")
 async def report_tables(
+    projectId: str = Query(min_length=1),
     schema: str | None = Query(default=None),
-    projectId: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=0),
 ):
-    """Filas del reporte por tabla. Filtros opcionales por `schema` y
-    `projectId`; `limit` acota la cantidad (carga inicial liviana del front)."""
-    filters = {"schema": schema, "projectId": projectId}
-    filters = {k: v for k, v in filters.items() if v is not None}
-    return ok(await service.list_table_rows(filters, limit))
+    """Filas del reporte por tabla del proyecto. Filtro opcional por `schema`;
+    `limit` acota la cantidad (carga inicial liviana del front)."""
+    filters = {"schema": schema} if schema is not None else {}
+    return ok(await service.list_table_rows(projectId, filters, limit))
+
+
+@router.get("/filters")
+async def report_filters(projectId: str = Query(min_length=1)):
+    """Doc 70 §4.1: universo completo de los filtros del reporte tabular
+    (esquemas de tablas activas y canvases del proyecto) — sin tope."""
+    return ok(await service.filter_options(projectId))
 
 
 @router.get("/columns")
 async def report_columns(
+    projectId: str = Query(min_length=1),
     tableId: str | None = Query(default=None),
     tableIds: str | None = Query(default=None, description="ids separados por coma (export acotado)"),
     limit: int | None = Query(default=None, ge=1, le=100000),
@@ -33,11 +42,12 @@ async def report_columns(
     export a las tablas seleccionadas; sin filtros se aplica un tope de seguridad
     (`limit` o el cap por defecto) para no volcar cientos de miles de columnas."""
     id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
-    return ok(await service.list_column_rows(tableId, id_list, limit))
+    return ok(await service.list_column_rows(projectId, tableId, id_list, limit))
 
 
 @router.get("/views")
 async def report_views(
+    projectId: str = Query(min_length=1),
     tableIds: str | None = Query(default=None, description="ids separados por coma (export acotado)"),
     schema: str | None = Query(default=None, description="solo las vistas de este esquema (Database Explorer)"),
 ):
@@ -47,4 +57,4 @@ async def report_views(
     tablas seleccionadas; `schema` a las de un esquema (Database Explorer);
     sin filtros aplica un tope de seguridad."""
     id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
-    return ok(await service.list_view_rows(id_list, schema=schema))
+    return ok(await service.list_view_rows(projectId, id_list, schema=schema))

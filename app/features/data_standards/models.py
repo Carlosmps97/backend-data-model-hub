@@ -20,13 +20,15 @@ from app.core.models import DOC_CONFIG
 # 'glossary' = ex-'udp' (glosario de términos/abreviaturas que cascadea nombres
 # físicos). 'udp' se reserva para el NUEVO User Defined Properties (etiquetas).
 # 'ddl' = DDL Export Rules (doc 30).
-KINDS = ("glossary", "udp", "domain", "naming", "ddl", "batch", "baseline", "rollback")
+KINDS = ("glossary", "udp", "domain", "naming", "ddl", "batch", "baseline", "rollback", "copy")
 
 
 class StandardsVersionDoc(BaseModel):
     model_config = DOC_CONFIG
 
     id: str                       # uuid
+    # Doc 75 D1: alcance por proyecto — obligatorio, lo estampa el servidor.
+    projectId: str
     seq: int                      # orden monotónico; label = f"v{seq}"
     label: str
     kind: str = "batch"

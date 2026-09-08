@@ -4,12 +4,18 @@ SIN `--apply` es un dry-run: parsea, corre el gate de calidad y muestra el
 plan (no abre conexión a la BD). Con `--apply` escribe en la BD (Lakebase)
 (patrón "Erwin one-shot": directo a colecciones publicadas, sin changeset).
 
-Idempotente: los ids de plataforma son deterministas (uuid5 del Long_Id de
-Erwin), así que re-correr el mismo archivo (o una versión nueva del mismo
-modelo) actualiza en su sitio. Documentos preexistentes con la misma clave
-natural pero OTRO id se resuelven con las políticas multi-archivo (doc 32b,
-owner 2026-07-24) — un modelo Erwin viene partido en ~15 archivos y el
-solapamiento es el flujo NORMAL:
+Doc 75 (proyectos independientes): el PROYECTO se resuelve PRIMERO (por nombre;
+se crea si no existe) y todo lo demás vive dentro de él — cada doc de alcance
+lleva `projectId`, el prefetch/adopción/unicidad de nombres se acotan al
+proyecto y los estándares (dominios, glosario, defs UDP, naming) se siembran
+POR PROYECTO. Los ids de plataforma son deterministas y NAMESPACEADOS por
+proyecto (uuid5 de `<projectId>|<Long_Id de Erwin>`), así que re-correr el
+mismo archivo (o una versión nueva del mismo modelo) actualiza en su sitio,
+mientras que el mismo GUID en otro proyecto es otro documento. Documentos
+preexistentes del proyecto con la misma clave natural pero OTRO id se
+resuelven con las políticas multi-archivo (doc 32b, owner 2026-07-24) — un
+modelo Erwin viene partido en ~15 archivos y el solapamiento es el flujo
+NORMAL:
 
   - ADOPCIÓN (R1): tabla/vista cuya clave natural (schema+nombre) ya existe
     se mapea al doc VIVO — las relaciones/vistas/canvases del archivo se
@@ -24,10 +30,12 @@ solapamiento es el flujo NORMAL:
   - Columnas duplicadas (R5): gana la de MÁS metadata (`column_score`).
   - Partición (R6): PART_nn siempre se marca; el orden efectivo es el físico
     (correlativos incongruentes = reasignados, al reporte).
-  - Estándares: glosario/dominios/defs UDP se REUSAN por clave natural; los
-    enums convergen case-insensitive (A3); defs sin uso y sin presencia en
-    BD NO se crean. (Doc 61 r2: las defs UDP son un CATÁLOGO FIJO —
-    `--keep-unused-udp-defs` quedó DEPRECADO, se acepta y se ignora.)
+  - Estándares (por proyecto): glosario/dominios/defs UDP se REUSAN por clave
+    natural dentro del proyecto — unión DISTINTA entre los archivos que lo
+    componen: el primero en llegar gana y una discrepancia (abreviatura o
+    tipo de dominio distinto) va al reporte, nunca se pisa en silencio. (Doc
+    61 r2: las defs UDP son un CATÁLOGO FIJO — `--keep-unused-udp-defs` quedó
+    DEPRECADO, se acepta y se ignora.)
 
 Rendimiento: escrituras BUFFEREADAS por colección y despachadas con
 `bulk_write` (el adaptador Lakebase las ejecuta en 2 round-trips por lote) +
@@ -37,13 +45,16 @@ tomada (adopciones, conflictos con score, alias, dedups, reasignaciones).
 
 Jerarquía: Modelo → proyecto · Subject Area → folder · ER_Diagram → canvas.
 Los N archivos de una familia cargan al MISMO proyecto (R8) — pásalo SIEMPRE
-con `--project`; si el proyecto ya existe y no lo pasaste, el script ABORTA
-(nada de fusiones silenciosas). Folders y canvases homónimos se reusan.
+con `--project` (el one-shot lo toma del manifiesto `projects.json`); si el
+proyecto ya existe y no lo pasaste, el script ABORTA (nada de fusiones
+silenciosas). `--description` describe el proyecto si se crea. Folders y
+canvases homónimos del proyecto se reusan.
 
 Uso:
   .venv/bin/python -m scripts.erwin_migration.migrate modelo.xml [más.xml ...]
       [--apply]                  escribir (sin esto: dry-run)
       [--project "Nombre"]       proyecto destino (obligatorio si ya existe)
+      [--description "Texto"]    descripción del proyecto si se crea
       [--only-sa CPYBCAPYM]      migrar solo canvases/folders de esa SA
       [--force]                  continuar aunque el gate tenga ERRORs
       [--report ruta.json]       reporte de decisiones (default: migration-reports/)
@@ -61,6 +72,15 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from pymongo import UpdateOne
+
+# Motor de naming REAL del backend (app.core.naming es PURO, sin config/BD):
+# el estampado del override (doc 68) debe derivar EXACTAMENTE igual que el
+# rephysicalize retroactivo — un espejo local driftearía.
+from app.core.datatypes import canonicalize_default_type
+from app.core.facets import normalize_udp_view
+from app.core.naming import physicalize
+from app.core.scope import PROJECT_SCOPED, naming_id
+from app.features.settings.models import DEFAULTS as NAMING_DEFAULTS
 
 from . import erwin_parser as ep
 from . import policies as pol
@@ -83,7 +103,7 @@ def _norm_type(t: str) -> str:
 class Migrator:
     def __init__(self, db, model: ep.ErwinModel, project_name: str | None,
                  only_sa: str | None, keep_unused_udp_defs: bool = False,
-                 source_folder: str | None = None):
+                 source_folder: str | None = None, description: str | None = None):
         self.db = db
         self.m = model
         self.project_name = project_name or model.name or "Modelo Erwin"
@@ -93,16 +113,22 @@ class Migrator:
         # Mart o nombre del archivo) que agrupa las SAs de ESTE archivo.
         # None = plano (comportamiento previo; lo usan los tests).
         self.source_folder = (source_folder or "").strip() or None
-        self.schema_of = model.owner_schema()
-        self.attr_idx = model.attr_index()
+        self.description = (description or "").strip() or None
         self.stats: Counter = Counter()
         self.warnings: list[str] = []
         self.report: dict[str, list] = {
             "adopted": [], "conflicts": [], "renamed_dups": [], "rels_reused": [],
             "cols_dropped": [], "partitions_reassigned": [],
             "views_discarded": [], "udp_defs_skipped": [], "glossary_conflicts": [],
-            "udp_values_unmatched": [],
+            "domain_conflicts": [], "udp_values_unmatched": [],
         }
+        self._buf: dict[str, list[UpdateOne]] = defaultdict(list)
+        self.ops_flushed = 0
+        # Doc 75: el proyecto PRIMERO — es el namespace de ids y el alcance de
+        # todo lo que sigue (prefetch, unicidad, estándares).
+        self.project_id = self._ensure_project()
+        self.schema_of = model.owner_schema()
+        self.attr_idx = model.attr_index()
         # mapas Erwin id → id de plataforma FINAL (puede ser un doc preexistente)
         self.domain_pid: dict[str, str] = {}
         self.udp_pid: dict[str, str] = {}      # clave colapsada → def id plataforma
@@ -115,23 +141,44 @@ class Migrator:
         # el `kind` del doc de schema. Mixto → tables gana.
         self.schemas_tables: set[str] = set()
         self.schemas_views: set[str] = set()
-        self.collapsed = pol.collapse_udp_defs(model.udp_defs)
-        self.udp_vals = pol.resolve_udp_values(model.udp_values, self.collapsed)
+        # Doc 69: una def por (nivel, faceta, nombre) — clave `level|view|name`.
+        self.defs = pol.udp_defs_by_view(model.udp_defs)
+        self.udp_vals = pol.resolve_udp_values(model.udp_values, self.defs)
         # veredicto por tabla EXISTENTE en conflicto ("xml"|"db") — las vistas
         # espejo siguen la suerte de su tabla fuente (R2).
         self.table_verdicts: dict[str, str] = {}
         # columnas escritas/adoptadas por dueño Erwin: PHYS.upper → col pid
         self._cols_by_owner: dict[str, dict[str, str]] = {}
         self._stale_scope: dict[str, set[str]] = {}  # table pid escrito → cpids vigentes
-        self._buf: dict[str, list[UpdateOne]] = defaultdict(list)
-        self.ops_flushed = 0
         self._xml_usage()
         self._prefetch()
+
+    # ---------- proyecto (doc 75) ----------
+    def pid(self, long_id: str) -> str:
+        """Id de plataforma del proyecto para un Long_Id (o clave) de Erwin."""
+        return pol.project_scoped_id(self.project_id, long_id)
+
+    def _ensure_project(self) -> str:
+        """Proyecto destino por NOMBRE: se reusa el vivo o se crea (id
+        determinista por nombre). Es la única escritura fuera del alcance."""
+        existing = self.db.projects.find_one({"name": self.project_name, **_ACTIVE}, {"_id": 1})
+        if existing:
+            return existing["_id"]
+        proj_id = pol.platform_id(f"project|{self.project_name}")
+        self._upsert("projects", proj_id, {
+            "name": self.project_name,
+            "description": self.description or f"Migrado de Erwin — {self.m.name}"})
+        self._flush("projects")
+        self.stats["proyectos creados"] += 1
+        return proj_id
 
     # ---------- infraestructura de escritura (bufferizada) ----------
     def _upsert(self, coll: str, pid: str, doc: dict) -> None:
         """$set idempotente por _id; createdAt/flgactive solo al insertar.
-        Bufferizado: el adaptador ejecuta cada lote en 2 round-trips."""
+        Bufferizado: el adaptador ejecuta cada lote en 2 round-trips. Doc 75:
+        todo doc de una colección de alcance lleva `projectId`."""
+        if coll in PROJECT_SCOPED:
+            doc = {**doc, "projectId": self.project_id}
         self._buf[coll].append(UpdateOne(
             {"_id": pid},
             {"$set": {**doc, **_STAMP, "updatedAt": _now()},
@@ -139,6 +186,19 @@ class Migrator:
             upsert=True))
         if len(self._buf[coll]) >= _BATCH:
             self._flush(coll)
+
+    def _physical_override(self, logical: str, physical: str, scope: str) -> bool:
+        """Doc 68: ¿el físico real difiere del derivado por la regla vigente
+        del scope? True ⇒ se estampa `physicalNameOverridden` y el
+        rephysicalize retroactivo del Glosario NO lo pisa. Sin lógico o sin
+        físico no hay derivación posible (el barrido los salta) ⇒ False."""
+        logical = (logical or "").strip()
+        physical = (physical or "").strip()
+        if not logical or not physical:
+            return False
+        sep, case = self.naming_cfg[scope]
+        return physicalize(logical, self.gloss_scope.get(scope) or {},
+                           separator=sep, case=case) != physical
 
     def _soft_delete(self, coll: str, pid: str) -> None:
         self._buf[coll].append(UpdateOne(
@@ -184,67 +244,96 @@ class Migrator:
 
     # ---------- prefetch (mata las consultas por-doc) ----------
     def _prefetch(self) -> None:
+        """Foto en memoria de lo que YA existe en el PROYECTO (doc 75: nada de
+        otro proyecto entra al censo, la adopción ni el dedup)."""
         db = self.db
+        active = {**_ACTIVE, "projectId": self.project_id}
         self.ex_tables: dict[tuple[str, str], dict] = {}
-        # Política _DUPn (2026-08-22): el físico es único GLOBAL (doc 50) →
-        # censo global de nombres tomados + continuidad por erwinLongId para
+        # Política _DUPn (2026-08-22): el físico es único POR PROYECTO (doc 50 +
+        # doc 75) → censo de nombres tomados + continuidad por erwinLongId para
         # que los re-runs conserven el sufijo asignado (sin ratchet _DUPn+1).
-        self.taken_global: set[str] = set()
+        self.taken: set[str] = set()
         self.ex_by_erwin: dict[str, dict] = {}
-        for t in db.canonical_tables.find(_ACTIVE, {"schema": 1, "physicalName": 1,
-                                                    "erwinLongId": 1}):
+        for t in db.canonical_tables.find(active, {"schema": 1, "physicalName": 1,
+                                                   "erwinLongId": 1}):
             phys = t.get("physicalName") or ""
             key = ((t.get("schema") or "").upper(), phys.upper())
             self.ex_tables[key] = {"_id": t["_id"]}
             if phys:
-                self.taken_global.add(phys.upper())
+                self.taken.add(phys.upper())
             if t.get("erwinLongId"):
                 self.ex_by_erwin[t["erwinLongId"]] = {
                     "_id": t["_id"], "physicalName": phys,
                     "schema": t.get("schema") or ""}
         self.ex_views: dict[tuple[str, str], str] = {}
-        for v in db.views.find(_ACTIVE, {"schema": 1, "name": 1}):
+        for v in db.views.find(active, {"schema": 1, "name": 1}):
             self.ex_views[((v.get("schema") or "").upper(),
                            (v.get("name") or "").upper())] = v["_id"]
         self.ex_schemas: dict[str, str] = {
             (s.get("name") or "").upper(): s["_id"]
-            for s in db.schemas.find(_ACTIVE, {"name": 1})}
-        self.ex_domains: dict[str, str] = {
-            (d.get("name") or "").upper(): d["_id"]
-            for d in db.parent_domains.find(_ACTIVE, {"name": 1})}
+            for s in db.schemas.find(active, {"name": 1})}
+        # NOMBRE → {_id, defaultDataType}: el tipo sirve para detectar el mismo
+        # dominio con tipo DISTINTO en otro archivo del proyecto (al reporte).
+        self.ex_domains: dict[str, dict] = {
+            (d.get("name") or "").upper(): {"_id": d["_id"],
+                                            "defaultDataType": d.get("defaultDataType") or ""}
+            for d in db.parent_domains.find(active, {"name": 1, "defaultDataType": 1})}
         # term.upper() → abbrev vigente (para detectar conflictos de glosario
         # entre archivos/corridas — política 2026-08-22: la BD nunca se pisa,
         # pero la discrepancia SÍ se reporta).
-        self.ex_gloss: dict[str, str] = {
-            (g.get("term") or "").upper(): (g.get("abbrev") or "").strip()
-            for g in db.glossary_terms.find(_ACTIVE, {"term": 1, "abbrev": 1})}
-        self.ex_udp: dict[tuple[str, str], dict] = {}
-        for u in db.udp_definitions.find(_ACTIVE, {"name": 1, "level": 1, "allowedValues": 1}):
-            self.ex_udp[((u.get("name") or "").upper(), u.get("level") or "")] = {
+        self.ex_gloss: dict[str, str] = {}
+        # Doc 68: mappings por SCOPE para derivar físicos como el backend
+        # (`list_entries`: docs sin `scope` persistido caen en 'column').
+        self.gloss_scope: dict[str, dict[str, str]] = {"table": {}, "column": {}}
+        for g in db.glossary_terms.find(active, {"term": 1, "abbrev": 1, "scope": 1}):
+            term = (g.get("term") or "").strip()
+            if not term:
+                continue
+            abbrev = (g.get("abbrev") or "").strip()
+            self.ex_gloss[term.upper()] = abbrev
+            self.gloss_scope.setdefault(g.get("scope") or "column", {})[term] = abbrev
+        # naming_config del PROYECTO por scope (separator, case) — default
+        # corporativo join+UPPER (app/features/settings/models.DEFAULTS; la
+        # config del proyecto, si existe, manda).
+        self.naming_cfg: dict[str, tuple[str, str]] = {
+            sc: (cfg["separator"], cfg["case"]) for sc, cfg in NAMING_DEFAULTS.items()}
+        for n in db.naming_config.find({"projectId": self.project_id}):
+            sc = n.get("scope")
+            if sc in self.naming_cfg:
+                cur = self.naming_cfg[sc]
+                self.naming_cfg[sc] = (
+                    n["separator"] if n.get("separator") is not None else cur[0],
+                    n.get("case") or cur[1])
+        # Doc 69: reuso por (nombre, nivel, FACETA) — las defs pre-doc 69 sin
+        # `view` son físicas (normalize_udp_view).
+        self.ex_udp: dict[tuple[str, str, str], dict] = {}
+        for u in db.udp_definitions.find(active, {"name": 1, "level": 1, "view": 1, "allowedValues": 1}):
+            level = u.get("level") or ""
+            self.ex_udp[((u.get("name") or "").upper(), level, normalize_udp_view(level, u.get("view")))] = {
                 "_id": u["_id"], "allowedValues": u.get("allowedValues") or []}
         # uso en BD (score del lado existente) + material del dedup de relaciones
         self.db_rel_count: Counter = Counter()
         self.db_rels_raw: list[dict] = []
-        for r in db.relationships.find(_ACTIVE, {"parentTableId": 1, "childTableId": 1,
-                                                 "pairs": 1, "identifying": 1}):
+        for r in db.relationships.find(active, {"parentTableId": 1, "childTableId": 1,
+                                                "pairs": 1, "identifying": 1}):
             self.db_rel_count[r.get("parentTableId")] += 1
             self.db_rel_count[r.get("childTableId")] += 1
             self.db_rels_raw.append(r)
         self.db_canv_count: Counter = Counter()
         self.db_canvases: list[dict] = []
-        for sa in db.subject_areas.find(_ACTIVE, {"name": 1, "folderId": 1, "projectId": 1,
-                                                  "tableIds": 1, "layout": 1, "udpValues": 1}):
+        for sa in db.subject_areas.find(active, {"name": 1, "folderId": 1, "projectId": 1,
+                                                 "tableIds": 1, "layout": 1, "udpValues": 1}):
             for tid in set(sa.get("tableIds") or []):
                 self.db_canv_count[tid] += 1
             self.db_canvases.append(sa)
         self.db_view_count: Counter = Counter()
-        for v in db.views.find(_ACTIVE, {"sourceTableIds": 1}):
+        for v in db.views.find(active, {"sourceTableIds": 1}):
             for tid in set(v.get("sourceTableIds") or []):
                 self.db_view_count[tid] += 1
         # clave con el padre (doc 54 §9): los homónimos solo se reúsan DENTRO
         # de la misma capa de origen, ya no entre archivos distintos.
         self.ex_folders: dict[tuple[str, str, str], str] = {}
-        for f in db.folders.find(_ACTIVE, {"projectId": 1, "parentFolderId": 1, "name": 1}):
+        for f in db.folders.find(active, {"projectId": 1, "parentFolderId": 1, "name": 1}):
             self.ex_folders[(f.get("projectId") or "", f.get("parentFolderId") or "",
                              (f.get("name") or "").upper())] = f["_id"]
 
@@ -253,22 +342,32 @@ class Migrator:
         # dominios padre (solo custom; los builtin de Erwin no aportan).
         # Reuso por nombre case-insensitive vía cache (cero round-trips).
         # Doc 62: el default se HOMOLOGA a la grafía canónica de la plataforma
-        # (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`). Import perezoso:
-        # app está en el path donde corre la migración (backend root/notebook).
-        from app.core.datatypes import canonicalize_default_type
+        # (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`).
+        # Doc 75: unión DISTINTA entre los archivos del proyecto — el primero
+        # gana; el mismo nombre con tipo distinto va al reporte, no se pisa.
         for d in self.m.domains.values():
             if d.builtin or d.name.startswith("<"):
                 continue
-            existing = self.ex_domains.get(d.name.strip().upper())
-            pid = existing or pol.platform_id(d.id)
+            name_key = d.name.strip().upper()
+            # Doc 69: default = tipo FÍSICO (lo que emite el DDL); el lógico
+            # va aparte. Sin Physical_Data_Type cae al lógico (modelos viejos).
+            phys_type = canonicalize_default_type(d.physical_type or d.data_type) or "STRING"
+            existing = self.ex_domains.get(name_key)
+            pid = existing["_id"] if existing else self.pid(d.id)
             self.domain_pid[d.id] = pid
             if existing:
                 self.stats["dominios reusados"] += 1
+                kept = existing["defaultDataType"]
+                if kept and _norm_type(kept) != _norm_type(phys_type):
+                    self.report["domain_conflicts"].append(
+                        {"name": d.name, "kept": kept, "ignored": phys_type})
+                    self.stats["dominios en conflicto (tipo distinto)"] += 1
                 continue
-            self.ex_domains[d.name.strip().upper()] = pid
+            self.ex_domains[name_key] = {"_id": pid, "defaultDataType": phys_type}
             self._upsert("parent_domains", pid, {
                 "name": d.name,
-                "defaultDataType": canonicalize_default_type(d.data_type) or "STRING",
+                "defaultDataType": phys_type,
+                "logicalDataType": canonicalize_default_type(d.data_type) or None,
                 "namingTerm": None, "description": d.definition or None,
                 "erwinLongId": d.id})
             self.stats["dominios creados"] += 1
@@ -307,7 +406,8 @@ class Migrator:
                     self.stats["glosario reusado"] += 1
                 continue
             self.ex_gloss[key] = abbrev
-            self._upsert("glossary_terms", pol.platform_id(f"gloss|{key}"), {
+            self.gloss_scope["column"][term] = abbrev
+            self._upsert("glossary_terms", self.pid(f"gloss|{key}"), {
                 "term": term, "abbrev": abbrev, "scope": "column",
                 "wordType": None, "locked": False})
             self.stats["glosario creado"] += 1
@@ -320,34 +420,46 @@ class Migrator:
         # cuando las defs venían del XML). Las defs del XML solo se MAPEAN a
         # las fijas (nombre case-insensitive) para asociar valores; fuera del
         # catálogo → no se crean (al reporte).
-        self.udp_fixed: dict[str, dict] = {}   # clave colapsada → def FIJA
-        fixed_pid: dict[tuple[str, str], str] = {}
+        self.udp_fixed: dict[str, dict] = {}   # clave `level|view|name` → def FIJA
+        fixed_pid: dict[tuple[str, str, str], str] = {}
         for fx in std_udps.FIXED_UDPS:
-            lookup_key = (fx["name"].strip().upper(), fx["level"])
+            lookup_key = (fx["name"].strip().upper(), fx["level"], fx["view"])
             existing = self.ex_udp.get(lookup_key)
-            pid = (existing["_id"] if existing
-                   else pol.platform_id(f"udpfix|{fx['level']}|{fx['name']}"))
-            fixed_pid[(fx["level"], pol.norm_enum(fx["name"]))] = pid
+            # Ids deterministas dentro del proyecto (doc 75: cada proyecto tiene
+            # su catálogo); las lógicas (doc 69) llevan el segmento `logical`.
+            fresh = (self.pid(f"udpfix|{fx['level']}|{fx['name']}") if fx["view"] == "physical"
+                     else self.pid(f"udpfix|{fx['level']}|logical|{fx['name']}"))
+            pid = existing["_id"] if existing else fresh
+            fixed_pid[(fx["level"], fx["view"], pol.norm_enum(fx["name"]))] = pid
             allowed = list(fx["allowedValues"])
             self._upsert("udp_definitions", pid, {
-                "name": fx["name"], "level": fx["level"],
+                "name": fx["name"], "level": fx["level"], "view": fx["view"],
                 "dataType": fx["dataType"], "defaultValue": fx["defaultValue"],
                 "allowedValues": allowed,
-                "description": fx.get("description") or "Estándar fijo (doc 61)"})
+                "description": fx.get("description") or "Estándar fijo (doc 61/69)"})
             self.ex_udp[lookup_key] = {"_id": pid, "allowedValues": allowed}
             self.stats["defs UDP fijas sembradas"] += 1
         lk = std_udps.fixed_lookup()
-        for key, entry in self.collapsed.items():
-            fx = lk.get((entry["level"], pol.norm_enum(entry["name"])))
+        for key, entry in self.defs.items():
+            fx = lk.get((entry["level"], entry["view"], pol.norm_enum(entry["name"])))
             if not fx:
                 self.report["udp_defs_skipped"].append(
-                    {"name": entry["name"], "level": entry["level"],
+                    {"name": entry["name"], "level": entry["level"], "view": entry["view"],
                      "dataType": entry["dataType"],
                      "motivo": "fuera del catálogo fijo"})
                 self.stats["defs UDP del XML fuera del catálogo fijo"] += 1
                 continue
-            self.udp_pid[key] = fixed_pid[(fx["level"], pol.norm_enum(fx["name"]))]
+            self.udp_pid[key] = fixed_pid[(fx["level"], fx["view"], pol.norm_enum(fx["name"]))]
             self.udp_fixed[key] = fx
+
+        # naming_config del proyecto (doc 75): se SIEMBRA con los defaults
+        # corporativos sólo si no existe — la config viva del proyecto manda.
+        for scope, cfg in NAMING_DEFAULTS.items():
+            self._buf["naming_config"].append(UpdateOne(
+                {"_id": naming_id(self.project_id, scope)},
+                {"$setOnInsert": {**cfg, "scope": scope, "projectId": self.project_id,
+                                  "flgactive": True, "createdAt": _now(), "updatedAt": _now()}},
+                upsert=True))
 
     def _udp_values_for(self, erwin_id: str, level: str) -> dict[str, str]:
         """Valores UDP de una entidad contra el CATÁLOGO FIJO (doc 61 r2):
@@ -366,9 +478,10 @@ class Migrator:
                 self.stats["valores UDP sin match (quedan en default)"] += 1
                 if len(self.report["udp_values_unmatched"]) < 200:
                     self.report["udp_values_unmatched"].append(
-                        {"udp": fx["name"], "level": level, "valor": raw})
+                        {"udp": fx["name"], "level": level, "view": fx["view"], "valor": raw})
                 continue
             out[self.udp_pid[key]] = val
+            self.stats[f"valores UDP asociados ({fx['view']})"] += 1
         return out
 
     # ---------- tablas (R1/R2/_DUPn/R5/R6) ----------
@@ -376,17 +489,17 @@ class Migrator:
         """Nombres EFECTIVOS por entidad (política 2026-08-22, reemplaza el
         alias R3): TODAS las copias se migran como tablas reales; los
         homónimos reciben sufijo correlativo `_DUPn` (contenido intacto — solo
-        cambia el físico) para no violar la unicidad GLOBAL del físico
-        (doc 50) y conservar la metadata de cada duplicado para revisión del
-        equipo. Reglas, deterministas para el mismo archivo:
+        cambia el físico) para no violar la unicidad del físico POR PROYECTO
+        (doc 50 + doc 75) y conservar la metadata de cada duplicado para
+        revisión del equipo. Reglas, deterministas para el mismo archivo:
 
         1. CONTINUIDAD: una tabla ya migrada (mismo erwinLongId + schema en
            BD) conserva el físico con el que quedó — re-runs sin ratchet.
         2. En cada grupo homónimo (schema+físico) conserva el nombre limpio la
            copia de MÁS USO (score R2; empate → 1ª del archivo), que además es
            la que adopta/actualiza el doc vivo homónimo si existe (R1/R2).
-        3. El resto — y cualquier colisión GLOBAL con la BD (otro esquema) —
-           toma el primer `_DUPn` libre, en orden de archivo.
+        3. El resto — y cualquier colisión con la BD del proyecto (otro
+           esquema) — toma el primer `_DUPn` libre, en orden de archivo.
         """
         eff: dict[str, str] = {}
         claimed: set[str] = set()
@@ -423,14 +536,14 @@ class Migrator:
                 up = e.physical.upper()
                 # Conserva el crudo el PRIMERO en reclamarlo (el keeper) cuando
                 # es su doc vivo homónimo (nat_live ⇒ adopción/score R1/R2) o
-                # el nombre está libre GLOBALMENTE; el resto va a `_DUPn`.
-                if up not in claimed and (nat_live or up not in self.taken_global):
+                # el nombre está libre en el proyecto; el resto va a `_DUPn`.
+                if up not in claimed and (nat_live or up not in self.taken):
                     eff[e.id] = e.physical
                     claimed.add(up)
                     continue
                 k = 1
                 while f"{e.physical}_DUP{k}".upper() in claimed \
-                        or f"{e.physical}_DUP{k}".upper() in self.taken_global:
+                        or f"{e.physical}_DUP{k}".upper() in self.taken:
                     k += 1
                 suffixed = f"{e.physical}_DUP{k}"
                 eff[e.id] = suffixed
@@ -474,7 +587,7 @@ class Migrator:
         for e in entities:
             schema = pol.schema_or_default(self.schema_of.get(e.id))
             nat_key = f"{schema}.{eff[e.id]}".upper()
-            own_pid = pol.platform_id(e.id)
+            own_pid = self.pid(e.id)
             existing_id = matched.get(e.id)
 
             if existing_id and existing_id != own_pid:
@@ -512,8 +625,14 @@ class Migrator:
             self.table_pid[e.id] = pid
             self.schemas_used.add(schema)
             self.schemas_tables.add(schema)
+            t_override = self._physical_override(e.name, eff[e.id], "table")
+            if t_override:
+                self.stats["tablas con físico custom (override)"] += 1
             self._upsert("canonical_tables", pid, {
                 "physicalName": eff[e.id], "logicalName": e.name,
+                "physicalNameOverridden": t_override,
+                # Doc 69: existencia en una sola faceta de Erwin.
+                "logicalOnly": e.logical_only, "physicalOnly": e.physical_only,
                 "schema": schema,
                 "description": e.definition or e.comment or None,
                 "udpValues": self._udp_values_for(e.id, "table"),
@@ -530,8 +649,11 @@ class Migrator:
             self.stats["columnas duplicadas descartadas"] += len(dropped)
 
             pk_pos = {aid: i for i, aid in enumerate(e.pk_attr_order)}
+            # Doc 74: orden ÚNICO de la plataforma — llaves primero (orden de la
+            # llave) + resto en el Column order de Erwin; `ordinal` = índice.
+            cols = pol.column_order(cols, e.pk_attr_ids, e.pk_attr_order)
             # Partición v2 (R6): PART_nn SIEMPRE marca; incongruencias =
-            # reasignadas por orden físico, al reporte.
+            # reasignadas por el orden de columnas, al reporte.
             part_vals = [(a.id, corr) for a in cols
                          if (corr := pol.partition_correlative(
                              self.udp_vals.get((a.id, pol.PARTITION_UDP_KEY)))) is not None]
@@ -539,7 +661,7 @@ class Migrator:
             if reassigned:
                 self.report["partitions_reassigned"].append(
                     {"table": nat_key, "detail": reassigned})
-                self.stats["tablas con partición reasignada por orden físico"] += 1
+                self.stats["tablas con partición reasignada por orden de columnas"] += 1
             elif part_ids:
                 self.stats["tablas con partición nativa"] += 1
 
@@ -548,19 +670,36 @@ class Migrator:
             for i, a in enumerate(cols):
                 # estabilidad: si la tabla ya existía, la columna homónima
                 # CONSERVA su _id (las relaciones vivas no se rompen)
-                cpid = self.ex_cols.get((pid, a.physical.upper())) or pol.platform_id(a.id)
+                cpid = self.ex_cols.get((pid, a.physical.upper())) or self.pid(a.id)
                 self.col_pid[a.id] = cpid
                 owner_cols[a.physical.upper()] = cpid
                 current_cpids.add(cpid)
                 dom_pid = self.domain_pid.get(a.domain_ref or "")
                 dom = self.m.domains.get(a.domain_ref or "")
-                overridden = bool(dom_pid and dom
-                                  and _norm_type(dom.data_type) != _norm_type(a.data_type))
+                # Doc 69: override POR FACETA — físico de la columna vs físico del
+                # dominio, lógico vs lógico (canonizados: INT ≡ INTEGER). Antes se
+                # comparaba el FÍSICO de la columna con el LÓGICO del dominio
+                # (VARCHAR(30) vs VARCHAR(20)) ⇒ miles de falsos overrides.
+                dom_phys = canonicalize_default_type(dom.physical_type or dom.data_type) if dom else ""
+                dom_log = canonicalize_default_type(dom.data_type) if dom else ""
+                col_phys = canonicalize_default_type(a.data_type)
+                col_log = canonicalize_default_type(a.logical_type) or None
+                overridden = bool(dom_pid and dom and dom_phys and col_phys != dom_phys)
+                log_overridden = bool(dom_pid and dom and dom_log and col_log and col_log != dom_log)
+                if col_log and col_log != col_phys:
+                    self.stats["columnas con tipo lógico ≠ físico"] += 1
+                c_override = self._physical_override(a.name, a.physical, "column")
+                if c_override:
+                    self.stats["columnas con físico custom (override)"] += 1
                 self._upsert("canonical_columns", cpid, {
                     "tableId": pid, "physicalName": a.physical,
+                    "physicalNameOverridden": c_override,
                     "logicalName": a.name, "parentDomainId": dom_pid,
                     "dataType": a.data_type or "STRING",
                     "typeOverridden": overridden,
+                    "logicalDataType": col_log,
+                    "logicalTypeOverridden": log_overridden,
+                    "logicalOnly": a.logical_only, "physicalOnly": a.physical_only,
                     "isPrimaryKey": a.id in e.pk_attr_ids,
                     "pkPosition": pk_pos.get(a.id),
                     "isForeignKey": bool(a.parent_attr_ref),
@@ -571,7 +710,19 @@ class Migrator:
                     "erwinLongId": a.id})
                 self.stats["columnas"] += 1
             self._cols_by_owner[e.id] = owner_cols
-            self._stale_scope[pid] = current_cpids
+            # Doc 73 §11.3 (D10): el saneo «columnas que ya no están en el XML»
+            # aplica SOLO al re-run del MISMO archivo (misma entidad Erwin ⇒ mismo
+            # pid). Si la tabla viene de OTRO archivo de la familia y este gana
+            # por uso, sus columnas se actualizan/suman pero las que este archivo
+            # no trae se CONSERVAN: el export lógico de UDV no trae las columnas
+            # físicas (retiraba 424 y dejaba 12 relaciones huérfanas).
+            if existing_id and existing_id != own_pid:
+                kept = sum(1 for (tid, _n), cid in self.ex_cols.items()
+                           if tid == pid and cid not in current_cpids)
+                if kept:
+                    self.stats["columnas de otro archivo conservadas (tabla actualizada por uso)"] += kept
+            else:
+                self._stale_scope[pid] = current_cpids
         # (El alias R3 murió con la política _DUPn 2026-08-22: cada copia es
         # una tabla real con sus columnas — sus relaciones/canvases la siguen
         # por su propio id de entidad, sin re-apuntar nada.)
@@ -660,7 +811,7 @@ class Migrator:
                         f"se agrupa en símbolo sintético propio")
                     sym_eid = f"subsym|{r.id}"
                 extra = {"subcategory": True,
-                         "subtypeSymbolId": pol.platform_id(sym_eid),
+                         "subtypeSymbolId": self.pid(sym_eid),
                          # ES-UN (doc 53): 1:1 estricto; la PK del padre migra
                          # como PK del hijo → identifying, como en Erwin.
                          "parentCardinality": "one",
@@ -674,7 +825,7 @@ class Migrator:
                          "parentCardinality": pol.map_parent_cardinality(r.null_option),
                          "childCardinality": pol.map_cardinality(r.cardinality),
                          "identifying": r.rel_type == ep.REL_IDENTIFYING}
-            self._upsert("relationships", pol.platform_id(r.id), {
+            self._upsert("relationships", self.pid(r.id), {
                 "parentTableId": parent_t, "childTableId": child_t,
                 "pairs": rel_pairs, **extra, "erwinLongId": r.id})
             self.stats["relaciones"] += 1
@@ -714,7 +865,7 @@ class Migrator:
                 self.stats["vistas omitidas (sin fuente — política R7)"] += 1
                 continue
             schema = pol.schema_or_default(self.schema_of.get(v.id))
-            own_pid = pol.platform_id(v.id)
+            own_pid = self.pid(v.id)
             existing_id = self.ex_views.get((schema.upper(), v.name.upper()))
             if existing_id and existing_id != own_pid:
                 # la vista espejo sigue la suerte de su TABLA fuente (R2);
@@ -785,37 +936,30 @@ class Migrator:
                 self.view_pid[loser_id] = self.view_pid[winner_id]
 
     def schema_docs(self) -> None:
-        """Entidad `schemas` (doc 18): un doc por nombre de schema usado.
-        Reusa por nombre case-insensitive (cache); ids `sch-<name>`. El `kind`
-        (doc 44) se deriva de los MIEMBROS (tablas/vistas) porque el XML no lo
-        trae; mixto → tables. Un schema YA existente no se re-clasifica acá —
-        eso es del backfill (`scripts/backfill_schema_kind.py`)."""
+        """Entidad `schemas` (doc 18): un doc por nombre de schema usado EN EL
+        PROYECTO (doc 75: esquemas aislados por proyecto, id namespaceado).
+        Reusa por nombre case-insensitive (cache). El `kind` (doc 44) se deriva
+        de los MIEMBROS (tablas/vistas) porque el XML no lo trae; mixto →
+        tables. Un schema YA existente no se re-clasifica acá."""
         for name in sorted(self.schemas_used):
             if name.upper() in self.ex_schemas:
                 self.stats["schemas reusados"] += 1
                 continue
-            self.ex_schemas[name.upper()] = f"sch-{name}"
+            sid = self.pid(f"schema|{name}")
+            self.ex_schemas[name.upper()] = sid
             kind = ("tables" if name in self.schemas_tables
                     else "views" if name in self.schemas_views else None)
             doc: dict = {"name": name, "description": None}
             if kind:
                 doc["kind"] = kind
                 self.stats[f"schemas creados como {kind}"] += 1
-            self._upsert("schemas", f"sch-{name}", doc)
+            self._upsert("schemas", sid, doc)
             self.stats["schemas creados"] += 1
 
     def canvases(self) -> None:
-        # proyecto (reusar por nombre — R8: los N archivos de una familia van
-        # al MISMO proyecto; el guard de main() exige --project si ya existe)
-        existing = self.db.projects.find_one(
-            {"name": self.project_name, **_ACTIVE}, {"_id": 1})
-        proj_id = existing["_id"] if existing else pol.platform_id(
-            f"project|{self.project_name}")
-        if not existing:
-            self._upsert("projects", proj_id, {
-                "name": self.project_name,
-                "description": f"Migrado de Erwin — {self.m.name}"})
-            self.stats["proyectos creados"] += 1
+        # El proyecto ya está resuelto (doc 75: `_ensure_project`, antes de
+        # cualquier escritura de alcance).
+        proj_id = self.project_id
 
         # UDP de nivel canvas definidos a nivel Model → a todos los canvases
         model_udp: dict[str, str] = {}
@@ -834,8 +978,8 @@ class Migrator:
         src_fid: str | None = None
         if self.source_folder:
             src_key = (proj_id, "", self.source_folder.upper())
-            src_fid = self.ex_folders.get(src_key) or pol.platform_id(
-                f"srcfolder|{self.project_name}|{self.source_folder.upper()}")
+            src_fid = self.ex_folders.get(src_key) or self.pid(
+                f"srcfolder|{self.source_folder.upper()}")
             if src_key not in self.ex_folders:
                 self.ex_folders[src_key] = src_fid
                 self._upsert("folders", src_fid, {
@@ -850,9 +994,10 @@ class Migrator:
             # R8: folder homónimo del mismo proyecto Y la misma capa de origen
             # → se REUSA, sin re-escribirlo (conserva su orden).
             hit = self.ex_folders.get((proj_id, src_fid or "", sa["name"].upper()))
-            fid = hit or pol.platform_id(f"folder|{sa['id']}")
+            own_fid = self.pid(f"folder|{sa['id']}")
+            fid = hit or own_fid
             folder_pid[sa["name"]] = fid
-            if hit and hit != pol.platform_id(f"folder|{sa['id']}"):
+            if hit and hit != own_fid:
                 self.stats["folders reusados (homónimos de otro archivo)"] += 1
                 continue
             self.ex_folders[(proj_id, src_fid or "", sa["name"].upper())] = fid
@@ -867,7 +1012,7 @@ class Migrator:
         for d in self.m.diagrams:
             if self.only_sa and d.subject_area != self.only_sa:
                 continue
-            table_ids, layout = [], {}
+            table_ids, view_ids, layout = [], [], {}
             ordered = list(dict.fromkeys(ref for ref, _a in d.shapes))
             ents = [r for r in ordered if r in self.table_pid]
             vws = [r for r in ordered if r in self.view_pid]
@@ -881,8 +1026,13 @@ class Migrator:
                 layout[pid] = {"x": 40 + (n % 4) * 480, "y": 40 + (n // 4) * 360}
                 if ref in self.table_pid:
                     table_ids.append(pid)
+                else:
+                    # doc 70: la vista es MIEMBRO del canvas donde Erwin la
+                    # dibuja (antes sólo aportaba layout y la visibilidad la
+                    # daba el flag global showOnCanvas).
+                    view_ids.append(pid)
             fid = folder_pid.get(d.subject_area)
-            own_cid = pol.platform_id(d.id)
+            own_cid = self.pid(d.id)
             prev = canvases_by_id.get(own_cid)
             merged = canvases_by_key.get((fid or "", d.name.upper()))
             doc_udp = dict(model_udp)
@@ -891,6 +1041,7 @@ class Migrator:
                 # FUSIONA: unión de tablas, layout existente intacto.
                 cid = merged["_id"]
                 table_ids = list(dict.fromkeys((merged.get("tableIds") or []) + table_ids))
+                view_ids = list(dict.fromkeys((merged.get("viewIds") or []) + view_ids))
                 layout = {**layout, **(merged.get("layout") or {})}
                 doc_udp = {**(merged.get("udpValues") or {}), **model_udp}
                 self.stats["canvases fusionados (homónimos de otro archivo)"] += 1
@@ -904,7 +1055,7 @@ class Migrator:
             self._upsert("subject_areas", cid, {
                 "projectId": proj_id,
                 "folderId": fid,
-                "name": d.name, "tableIds": table_ids, "layout": layout,
+                "name": d.name, "tableIds": table_ids, "viewIds": view_ids, "layout": layout,
                 "drawings": [], "udpValues": doc_udp,
                 "erwinLongId": d.id})
             self.stats["canvases"] += 1
@@ -923,13 +1074,13 @@ class Migrator:
 def _dry_run_plan(m: ep.ErwinModel, project: str | None) -> None:
     """Plan sin BD: volumetría + lo que las políticas multi-archivo harían
     DENTRO del archivo (los cruces contra BD los da `crosscheck`)."""
-    collapsed = pol.collapse_udp_defs(m.udp_defs)
+    defs = pol.udp_defs_by_view(m.udp_defs)
     schema_of = m.owner_schema()
     print("\nDRY-RUN (sin --apply no se escribe nada). Plan:")
     print(f"  proyecto: {project or m.name}")
     print(f"  folders={len(m.subject_areas)} canvases={len(m.diagrams)} "
           f"tablas={len(m.entities)} vistas={len(m.views)} "
-          f"defsUDP={len(collapsed)} glosario={len(m.glossary)} "
+          f"defsUDP={len(defs)} (por faceta) glosario={len(m.glossary)} "
           f"dominios={sum(1 for d in m.domains.values() if not d.builtin)}")
     dup_t = Counter(f"{pol.schema_or_default(schema_of.get(e.id))}.{e.physical}".upper()
                     for e in m.entities.values())
@@ -937,7 +1088,7 @@ def _dry_run_plan(m: ep.ErwinModel, project: str | None) -> None:
     if dups:
         print(f"  duplicados internos de tabla: {dups} copias → se migran TODAS "
               "con sufijo _DUPn (política 2026-08-22; detalle en el reporte)")
-    udp_vals = pol.resolve_udp_values(m.udp_values, collapsed)
+    udp_vals = pol.resolve_udp_values(m.udp_values, defs)
     reassign = 0
     for e in m.entities.values():
         vals = [(a.id, c) for a in e.attributes
@@ -958,6 +1109,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="escribir en la BD (sin esto: dry-run)")
     ap.add_argument("--project", help="nombre de proyecto destino (obligatorio "
                                       "si el proyecto ya existe — R8)")
+    ap.add_argument("--description", help="descripción del proyecto si se crea "
+                                          "(viene del manifiesto projects.json)")
     ap.add_argument("--only-sa", help="migrar solo canvases de esta subject area")
     ap.add_argument("--force", action="store_true",
                     help="continuar aunque el gate de calidad tenga ERRORs")
@@ -1019,7 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
         t1 = time.perf_counter()
         mig = Migrator(db, m, args.project, args.only_sa,
                        keep_unused_udp_defs=args.keep_unused_udp_defs,
-                       source_folder=source)
+                       source_folder=source, description=args.description)
         mig.run()
         elapsed = time.perf_counter() - t1
         print(f"\nRESULTADO ({elapsed:.1f}s · {mig.ops_flushed:,} escrituras en "
@@ -1037,7 +1190,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{stem}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json")
         os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
         with open(out, "w", encoding="utf-8") as fh:
-            json.dump({"file": path, "project": project_name, "at": _now(),
+            json.dump({"file": path, "project": project_name, "projectId": mig.project_id,
+                       "at": _now(),
                        "durationSeconds": round(elapsed, 1),
                        "stats": dict(mig.stats), "decisions": mig.report,
                        "warnings": mig.warnings}, fh, ensure_ascii=False, indent=1)

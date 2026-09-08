@@ -7,14 +7,14 @@ from app.features.views.schemas import ViewBody
 
 
 def test_view_doc_custom_fields_defaults():
-    v = ViewDoc.model_validate({"name": "v_x"})
+    v = ViewDoc.model_validate({"projectId": "p1", "name": "v_x"})
     assert v.customSql is None
     assert v.customColumns == []
     assert v.udpValues == {}
 
 
 def test_view_doc_custom_fields_roundtrip():
-    raw = {
+    raw = {"projectId": "p1", 
         "name": "v_x",
         "customSql": "SELECT a AS b FROM t",
         "customColumns": [{"name": "b", "expression": "a"}],

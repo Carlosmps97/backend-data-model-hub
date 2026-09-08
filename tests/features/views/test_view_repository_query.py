@@ -26,3 +26,9 @@ def test_tableid_tiene_precedencia_sobre_tableids():
     # Contrato actual del router: `tableId` puntual gana al CSV `tableIds`.
     q = build_query(table_id="t1", table_ids=["t2"])
     assert q["$or"] == [{"sourceTableIds": "t1"}, {"tableId": "t1"}]
+
+
+def test_build_query_con_proyecto_acota():
+    """Doc 75 D6: listar sin tabla exige proyecto; el filtro lo lleva."""
+    assert build_query(project_id="p1") == {"flgactive": {"$ne": False}, "projectId": "p1"}
+    assert build_query(table_id="t1", project_id="p1")["projectId"] == "p1"

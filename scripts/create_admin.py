@@ -27,8 +27,11 @@ for _s in (sys.stdout, sys.stderr):
 # desde Admin; acá solo se asegura que los 4 roles EXISTAN con su default.
 _ROLE_GRANTS: dict[str, tuple[str, str, set[str]]] = {
     "administrador": ("Administrador", "Control total · gestiona usuarios", set()),  # set() → todos
+    # doc 70 §12: el modelador puede PEDIR un rollback (crea un draft que pasa
+    # por revisión — la seguridad está en el approve), comparar y ver detalles;
+    # `versions.view_all` (ver drafts ajenos en el canvas) queda solo en admin.
     "modelador": ("Modelador", "Crea y edita tablas · envía a revisión",
-                  {"model.view", "model.edit", "export"}),
+                  {"model.view", "model.edit", "export", "rollback"}),
     "revisor": ("Revisor", "Aprueba o rechaza solicitudes",
                 {"model.view", "review.decide", "publish", "rollback", "export"}),
     "lector": ("Lector", "Solo lectura · exporta metadata", {"model.view", "export"}),

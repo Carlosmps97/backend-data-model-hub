@@ -27,13 +27,15 @@ from app.features.changesets.validation import DuplicateEntityError, InvalidPayl
 
 def _mock_repo(monkeypatch, published=None, changes_map=None, max_length=150):
     monkeypatch.setattr(service.repository, "get",
-                        AsyncMock(return_value={"id": "c1", "status": "draft", "owner": "ana"}))
+                        AsyncMock(return_value={"projectId": "p1", "id": "c1", "status": "draft", "owner": "ana"}))
     published_mock = AsyncMock(return_value=published or [])
     monkeypatch.setattr(service.repository, "published", published_mock)
     changes_map_mock = AsyncMock(return_value=changes_map or {})
     monkeypatch.setattr(service.repository, "changes_map", changes_map_mock)
     bulk = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "set_changes_bulk", bulk)
+    # Doc 75 I2: el guard anti-cruce tiene sus propios tests (test_cross_project_guard).
+    monkeypatch.setattr(service, "_cross_project_check", AsyncMock())
     monkeypatch.setattr(service.settings_service, "get_naming_for",
                         AsyncMock(return_value={"maxLength": max_length}))
     return bulk, published_mock, changes_map_mock
@@ -245,7 +247,7 @@ class _FakeDb:
 
 def _patch_db(monkeypatch, *, draft_at_touch=True, draft_at_recheck=True, prev_docs=()):
     state = {
-        "parent": {"_id": "c1", "title": "t", "owner": "ana", "status": "draft",
+        "parent": {"_id": "c1", "projectId": "p1", "title": "t", "owner": "ana", "status": "draft",
                    "createdAt": "2026-08-13T00:00:00+00:00", "updatedAt": "2026-08-13T00:00:00+00:00"},
         "draft_at_touch": draft_at_touch, "draft_at_recheck": draft_at_recheck,
         "prev_docs": list(prev_docs),

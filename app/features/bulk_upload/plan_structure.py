@@ -33,6 +33,7 @@ class SchemaResolver:
     def __init__(self, ctx, rb: ReportBuilder, new_id: Callable[[], str]) -> None:
         self._rb = rb
         self._new_id = new_id
+        self._project_id = ctx.project_id
         self._by_name: dict[str, dict] = {}
         for s in ctx.schemas:
             self._by_name.setdefault(norm_name(s.get("name")), s)
@@ -56,7 +57,8 @@ class SchemaResolver:
                            f"Schema name '{raw}' is invalid: letters, digits and underscore, starting with a letter.",
                            row=row, column="ESQUEMA")
             return None
-        doc = {"id": self._new_id(), "name": raw, "description": None, "kind": "tables"}
+        doc = {"id": self._new_id(), "projectId": self._project_id, "name": raw,
+               "description": None, "kind": "tables"}
         self._created[key] = doc
         return raw
 
@@ -73,9 +75,10 @@ class StructurePlanner:
     def __init__(self, ctx, rb: ReportBuilder, new_id: Callable[[], str]) -> None:
         self._rb = rb
         self._new_id = new_id
-        self._projects: dict[str, dict] = {}
-        for p in ctx.projects:
-            self._projects.setdefault(norm_name(p.get("name")), p)
+        # Doc 75: el proyecto es el del changeset; el workbook sólo puede
+        # nombrarlo (columna PROJECT) — nunca crear otro ni referir a otro.
+        self._project_id = ctx.project_id
+        self._project_name = ctx.project_name
         self._folders: dict[tuple[str, str, str], dict] = {}
         self._siblings: dict[tuple[str, str], int] = {}
         for f in ctx.folders:
@@ -86,23 +89,19 @@ class StructurePlanner:
         for c in ctx.canvases:
             key = (str(c.get("projectId")), str(c.get("folderId") or ""), norm_name(c.get("name")))
             self._canvases.setdefault(key, {"doc": c, "new": False, "added": []})
-        self._new_projects: list[dict] = []
         self._new_folders: list[dict] = []
-        self._used_projects: set[str] = set()
         self._used_folders: set[str] = set()
         self._touched_canvases: dict[str, dict] = {}
 
     # ── Resolución ─────────────────────────────────────────────────────────
-    def _project(self, name: str) -> str:
-        key = norm_name(name)
-        hit = self._projects.get(key)
-        if hit is None:
-            hit = {"id": self._new_id(), "name": clean_text(name), "description": None}
-            self._projects[key] = hit
-            self._new_projects.append(hit)
-        else:
-            self._used_projects.add(hit["id"])
-        return str(hit["id"])
+    def _project(self, name: str, row: int) -> str | None:
+        """El PROJECT de la hoja debe ser el del changeset (doc 75 D8/D12)."""
+        if norm_name(name) != norm_name(self._project_name):
+            self._rb.error(SHEET_TABLES, "project-mismatch",
+                           f"PROJECT '{clean_text(name)}' doesn't match the version's project "
+                           f"'{self._project_name}'.", row=row, column="PROJECT")
+            return None
+        return self._project_id
 
     def _folder(self, project_id: str, parent_id: str | None, name: str) -> str:
         key = (project_id, parent_id or "", norm_name(name))
@@ -141,7 +140,9 @@ class StructurePlanner:
                                "PROJECT is required to place the table in a space, subject or diagram.",
                                row=tp.row, column="PROJECT")
             return
-        project_id = self._project(project)
+        project_id = self._project(project, tp.row)
+        if project_id is None:
+            return
         folder_id: str | None = None
         if space:
             folder_id = self._folder(project_id, None, space)
@@ -155,8 +156,7 @@ class StructurePlanner:
             state["added"].append(tid)
 
     def changes(self) -> list[dict]:
-        out = [_upsert("projects", p["id"], dict(p)) for p in self._new_projects]
-        out += [_upsert("folders", f["id"], dict(f)) for f in self._new_folders]
+        out = [_upsert("folders", f["id"], dict(f)) for f in self._new_folders]
         for state in self._touched_canvases.values():
             if not state["new"] and not state["added"]:
                 continue
@@ -174,7 +174,7 @@ class StructurePlanner:
         for state in self._touched_canvases.values():
             canvases["create" if state["new"] else ("update" if state["added"] else "unchanged")] += 1
         return {
-            "projects": {"create": len(self._new_projects), "update": 0, "unchanged": len(self._used_projects)},
+            "projects": {"create": 0, "update": 0, "unchanged": 1 if self._touched_canvases or self._new_folders or self._used_folders else 0},
             "folders": {"create": len(self._new_folders), "update": 0, "unchanged": len(self._used_folders)},
             "canvases": canvases,
         }

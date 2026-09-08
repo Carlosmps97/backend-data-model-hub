@@ -5,6 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.identity import Principal, current_principal
 from app.features.auth.deps import write_guard
+from app.features.changesets.access import ensure_changeset_visible
+
+from .deps import alive_project
+from .service import DuplicateProjectError
 
 
 def _found(x, what: str = "Resource"):
@@ -20,10 +24,10 @@ from . import service
 from .schemas import (
     DrawingsBody,
     LayoutBody,
-    ProjectBody,
+    ProjectCreateBody,
     SubjectAreaBody,
     TablesBody,
-    UdpValuesBody,
+    ViewsBody,
 )
 
 router = APIRouter(prefix="/api", tags=["projects"],
@@ -36,18 +40,19 @@ async def list_projects():
 
 
 @router.post("/projects", status_code=status.HTTP_201_CREATED)
-async def create_project(body: ProjectBody):
-    return ok(await service.create_project(body))
+async def create_project(body: ProjectCreateBody, principal: Principal = Depends(current_principal)):
+    """Doc 75 D5/D15: la ÚNICA operación directa sobre proyectos. Renombrar,
+    describir y borrar van por un draft del propio proyecto."""
+    try:
+        return ok(await service.create_project(principal.username, body))
+    except DuplicateProjectError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.put("/projects/{pid}")
-async def update_project(pid: str, body: ProjectBody):
-    return ok(_found(await service.update_project(pid, body), "Project"))
-
-
-@router.delete("/projects/{pid}")
-async def delete_project(pid: str):
-    return ok(_found(await service.delete_project(pid), "Project"))
+@router.get("/projects/{project_id}/counts")
+async def project_counts(project_id: str = Depends(alive_project)):
+    """Conteos de activos del proyecto (diálogo «Delete project…», doc 75 D5)."""
+    return ok(await service.scope_counts(project_id))
 
 
 @router.get("/projects/{pid}/subject-areas")
@@ -70,6 +75,13 @@ async def set_tables(sa_id: str, body: TablesBody):
     return ok(_found(await service.set_tables(sa_id, body.tableIds), "Canvas"))
 
 
+@router.put("/subject-areas/{sa_id}/views")
+async def set_views(sa_id: str, body: ViewsBody):
+    """Doc 70: membresía de vistas del canvas (lista completa; camino DIRECTO
+    sin changeset — el front en edición registra el doc completo al draft)."""
+    return ok(_found(await service.set_views(sa_id, body.viewIds), "Canvas"))
+
+
 @router.put("/subject-areas/{sa_id}/layout")
 async def set_layout(sa_id: str, body: LayoutBody):
     return ok(_found(await service.set_layout(sa_id, body.layout), "Canvas"))
@@ -78,14 +90,6 @@ async def set_layout(sa_id: str, body: LayoutBody):
 @router.put("/subject-areas/{sa_id}/drawings")
 async def set_drawings(sa_id: str, body: DrawingsBody):
     return ok(_found(await service.set_drawings(sa_id, body.drawings), "Canvas"))
-
-
-@router.put("/subject-areas/{sa_id}/udp")
-async def set_udp(sa_id: str, body: UdpValuesBody,
-                  principal: Principal = Depends(current_principal)):
-    """F5 — UDP del Modelo de Datos. Escritura gateada por `model.edit` (el
-    write_guard del router); audita 'canvas.udp.update' desde el service."""
-    return ok(_found(await service.set_udp_values(sa_id, body.udpValues, principal.username), "Canvas"))
 
 
 @router.delete("/subject-areas/{sa_id}")
@@ -99,7 +103,9 @@ async def get_subject_area(sa_id: str):
 
 
 @router.get("/subject-areas/{sa_id}/diagram")
-async def diagram(sa_id: str, changesetId: str | None = Query(default=None)):
+async def diagram(sa_id: str, changesetId: str | None = Query(default=None),
+                  principal: Principal = Depends(current_principal)):
+    await ensure_changeset_visible(changesetId, principal)   # doc 70 §12
     """Diagrama del canvas en una request. Con `changesetId`, el overlay del
     working copy se computa server-side (modo edición/visor)."""
     return ok(_found(await service.diagram(sa_id, changeset_id=changesetId), "Canvas"))

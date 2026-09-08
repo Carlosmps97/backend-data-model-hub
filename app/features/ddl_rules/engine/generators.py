@@ -20,6 +20,36 @@ from .expressions import RenderError, expand_template
 ROOTS = ("ddl.tabla_fisica", "ddl.vista_negocio")
 
 
+# ── Doc 73 · Column layout ───────────────────────────────────────────────────
+# Decisión del owner (2026-09-06): las particiones se DISTRIBUYEN desde las
+# reglas del DDL, no cambiando el orden físico del modelo. La única acción de
+# `layout` hoy es `partitionColumns: 'last'`: las columnas de partición se
+# emiten al final del CREATE (físico y artefactos tabla que heredan sus
+# columnas). Es un estándar del ruleset: sin condición, sin UDPs.
+
+def layout_from_rules(rules: list[dict]) -> dict:
+    """{'partitionsLast': bool} a partir de las reglas que CORREN (kind='rule',
+    target='table', `action.layout`, appliesTo ∋ ddl.tabla_fisica)."""
+    out = {"partitionsLast": False}
+    for r in rules:
+        if (r.get("kind") or "rule") != "rule" or r.get("target") != "table":
+            continue
+        lay = (r.get("action") or {}).get("layout") or {}
+        if lay.get("partitionColumns") == "last" and "ddl.tabla_fisica" in (r.get("appliesTo") or []):
+            out["partitionsLast"] = True
+    return out
+
+
+def layout_columns(cols: list[dict], options: dict | None = None) -> list[dict]:
+    """Orden de EMISIÓN de las columnas del CREATE físico ({name, partition,
+    …}): con `partitionsLast` las de partición van al final (estable) — espejo
+    exacto de `tableDDL` en el front (src/features/ddl/generators.ts), que es
+    quien emite el CREATE base. Puro; sin la opción, copia en el mismo orden."""
+    if not (options or {}).get("partitionsLast"):
+        return list(cols)
+    return [c for c in cols if not c.get("partition")] + [c for c in cols if c.get("partition")]
+
+
 def generators_of(rules: list[dict]) -> list[dict]:
     return [r for r in rules if r.get("kind") == "generator"]
 
@@ -71,7 +101,9 @@ def _emit_columns(emit: dict, source_cols: list[dict]) -> list[dict]:
     """Columnas del artefacto: hereda las de la fuente (flag de partición
     incluido — el _rej debe particionar IGUAL que la física) + las añadidas.
     Orden (pedido owner 07-20): heredadas sin partición → añadidas → columnas
-    de PARTICIÓN al final (las added siempre quedan antes de las particiones)."""
+    de PARTICIÓN al final (las added siempre quedan antes de las particiones).
+    Doc 71 H5: una añadida HOMÓNIMA de una heredada la reemplaza en su lugar
+    (una sola definición por nombre) en vez de duplicar la columna."""
     spec = emit.get("columns") or {}
     inherit = spec.get("inherit", "all")
     force = (spec.get("force_type") or "").strip()
@@ -84,9 +116,17 @@ def _emit_columns(emit: dict, source_cols: list[dict]) -> list[dict]:
         col = {"name": c["name"], "type": force or c.get("type") or "STRING",
                "partition": bool(c.get("partition"))}
         (parts if col["partition"] else plain).append(col)
-    added = [{"name": extra.get("name"), "type": extra.get("type") or "STRING",
-              "partition": False}
-             for extra in emit.get("add_columns") or []]
+    added: list[dict] = []
+    inherited = {c["name"]: c for c in plain + parts}
+    for extra in emit.get("add_columns") or []:
+        name = (extra.get("name") or "").strip()
+        if not name:
+            continue
+        col = {"name": name, "type": (extra.get("type") or "STRING").strip() or "STRING", "partition": False}
+        if name in inherited:
+            inherited[name]["type"] = col["type"]      # override en su lugar
+        else:
+            added.append(col)
     return plain + added + parts
 
 
@@ -128,10 +168,6 @@ def emit_for_table(gen: dict, produced: dict[str, dict], base_ctx: dict,
     }
 
 
-def _case(s: str, mode: str) -> str:
-    return s.lower() if mode == "lower" else s.upper() if mode == "upper" else s
-
-
 def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
                  options: dict | None = None) -> str:
     """SQL del artefacto generado — ESPEJO del export del canvas (pedido owner
@@ -140,10 +176,8 @@ def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
     p.ej. `…/TBL_X_rej`) cuando el export es external. Solo cambian el nombre
     (sufijo del emit) y los tipos forzados. Determinista (spec §7.6)."""
     o = options or {}
-    case = o.get("identifierCase") or "as-is"
-    ident = lambda s: f"`{_case(str(s), case)}`"                     # noqa: E731 — espejo de ident() del front
-    full = (f"{ident(art['schema'])}.{ident(art['name'])}"
-            if art.get("schema") else ident(art["name"]))
+    ident = lambda s: render.ident(s, o)                             # noqa: E731 — mismo funnel (doc 71 H2)
+    full = render.full_name(art.get("schema"), art["name"], o)
     cols = art.get("columns") or []
     if art.get("kind") == "table":
         meta = source_cols_meta or {}
@@ -179,15 +213,30 @@ def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
     return f"CREATE OR REPLACE VIEW {full} AS\nSELECT\n  {proj}\nFROM {src_full};"
 
 
+def artifact_cols_ctx(art: dict, cols_ctx_by_name: dict[str, dict]) -> dict[str, dict]:
+    """Contexto `columna.*` de un artefacto TABLA generado (doc 71 H3): las
+    heredadas conservan el contexto de la física (UDP, dominio, nulable…) con el
+    TIPO del artefacto; las añadidas nacen sin UDP. Orden del artefacto. Puro."""
+    out: dict[str, dict] = {}
+    for i, c in enumerate(art.get("columns") or []):
+        base = cols_ctx_by_name.get(c["name"]) or {
+            "nombre": c["name"], "nulable": True, "pk": False, "orden": i,
+            "comentario": None, "dominio": None, "udp": {},
+        }
+        out[c["name"]] = {**base, "nombre": c["name"], "tipo": c.get("type") or ""}
+    return out
+
+
 def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
                    base_ctx: dict, cols_ctx_by_name: dict[str, dict],
                    config: dict, options: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Cascada completa para UNA tabla física: ejecuta los generadores en orden
-    topológico y decora las VISTAS generadas con las reglas de columna que las
-    tengan en `appliesTo`. `options` = opciones del export del canvas
-    (identifierCase/tableFormat/external/location/includePartitions) para que
-    los artefactos generados salgan ESPEJO del físico. Devuelve (statements,
-    log): statements = [{artifact, name, schema, sql, generator}]."""
+    topológico, decora las VISTAS generadas con las reglas de columna que las
+    tengan en `appliesTo` y (doc 71 H3) aplica TBLPROPERTIES y SET TAGS a las
+    TABLAS generadas que alguna regla nombre. `options` = opciones del export
+    del canvas (identifierCase/tableFormat/external/location/includePartitions)
+    para que los artefactos generados salgan ESPEJO del físico. Devuelve
+    (statements, log): statements = [{artifact, name, schema, sql, generator}]."""
     runnable_rules, log = render.runnable(rules)
     gens_ordered, unreachable = generator_order(runnable_rules)
     for g in unreachable:
@@ -199,10 +248,14 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
         "ddl.tabla_fisica": {
             "schema": base_ctx.get("tabla", {}).get("esquema"),
             "name": base_ctx.get("tabla", {}).get("nombre"),
+            # Orden FÍSICO explícito (no el de llegada, doc 73 O2). Las tablas
+            # generadas emiten SIEMPRE sus particiones al final (_emit_columns,
+            # pedido owner 07-20); la regla `layout` del doc 73 alinea el CREATE
+            # físico con ese mismo criterio.
             "columns": [{"name": c.get("physicalName") or c.get("name"),
                          "type": c.get("dataType") or c.get("type") or "STRING",
                          "partition": bool(c.get("isPartition"))}
-                        for c in table_cols],
+                        for c in sorted(table_cols, key=lambda x: (x.get("ordinal") or 0))],
         },
     }
     meta = {(c.get("physicalName") or c.get("name")): {
@@ -219,12 +272,29 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
             continue
         produced[art["artifact"]] = art
         sql = artifact_sql(art, meta, options)
+        extra_stmts: list[dict] = []
         if art["kind"] == "view":
             sql, sub_log = render.decorate_view_sql(
                 sql, art["artifact"], runnable_rules, config, base_ctx, cols_ctx_by_name)
             log.extend(sub_log)
+        else:
+            # Doc 71 H3: la tabla generada también recibe las reglas de tabla
+            # que la nombren (TBLPROPERTIES dentro del CREATE; tags aparte).
+            sql, sub_log = render.apply_tblproperties(sql, runnable_rules, art["artifact"], base_ctx, config)
+            log.extend(sub_log)
+            art_ctx = artifact_cols_ctx(art, cols_ctx_by_name)
+            full_art = render.full_name(art.get("schema"), art["name"], options)
+            c_stmts, l_c = render.column_tag_statements(
+                runnable_rules, art["artifact"], base_ctx, art_ctx, config, full_art, options)
+            t_stmts, l_t = render.table_tag_statements(
+                runnable_rules, art["artifact"], base_ctx, config, full_art)
+            log.extend(l_c); log.extend(l_t)
+            extra_stmts = [{"artifact": f"{art['artifact']}.tags", "schema": art["schema"],
+                            "name": art["name"], "sql": s, "generator": gen.get("name")}
+                           for s in c_stmts + t_stmts]
         log.append({"rule": gen.get("name"), "status": "applied",
                     "artifact": art["artifact"], "object": f"{art['schema']}.{art['name']}"})
         statements.append({"artifact": art["artifact"], "schema": art["schema"],
                            "name": art["name"], "sql": sql, "generator": gen.get("name")})
+        statements.extend(extra_stmts)
     return statements, log
