@@ -28,6 +28,11 @@ from .engine.expressions import RenderError, build_expression, expand_template
 from .models import ROOT_ARTIFACTS
 from .templates import SEED_LOOKUPS, SEED_RULES, TEMPLATES
 
+# Doc 76 D9: el bench «Test» del editor muestra los fragmentos con el MISMO
+# perfil de casing que el export por default (identificadores en minúscula);
+# el export real usa las opciones del modal.
+BENCH_OPTIONS = {"identifierCase": "lower"}
+
 
 async def list_rules(project_id: str) -> list[dict]:
     return await repository.list_rules(project_id)
@@ -153,8 +158,9 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
         ctx = column_ctx(c, n_by_id, domains)
         cols_ctx[ctx["nombre"]] = ctx
     full = f"{t_ctx['esquema']}.{t_ctx['nombre']}" if t_ctx.get("esquema") else t_ctx["nombre"]
-    # Los fragmentos de tags salen calificados como en el export (doc 71 H2).
-    full_ident = engine_render.full_name(t_ctx.get("esquema"), t_ctx["nombre"])
+    # Los fragmentos de tags salen calificados como en el export (doc 71 H2),
+    # con el casing por default del export (doc 76 D9).
+    full_ident = engine_render.full_name(t_ctx.get("esquema"), t_ctx["nombre"], BENCH_OPTIONS)
     artifact = (rule.get("appliesTo") or ["ddl.tabla_fisica"])[0]
     # Doc 76 D5: el fragmento respeta el TIPO del artefacto destino (ALTER
     # TABLE | ALTER VIEW). El bench muestra el objeto con el nombre de la tabla
@@ -162,7 +168,8 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     obj_kind = artifact_kinds(await repository.list_rules(project_id)).get(artifact) \
         or ("view" if "vista" in artifact else "table")
     base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
-                "artefacto": engine_render.artifact_ctx(t_ctx.get("esquema"), t_ctx["nombre"], obj_kind)}
+                "artefacto": engine_render.artifact_ctx(t_ctx.get("esquema"), t_ctx["nombre"], obj_kind,
+                                                        BENCH_OPTIONS)}
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     fragments: list[dict] = []
@@ -233,14 +240,19 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                 if action.get("exclude") is True:
                     fragments.append({"column": name, "sql": "-- excluded from the SELECT", "why": why})
                 elif expr_tpl:
-                    ast = build_expression(expr_tpl, cctx, sqlglot.parse_one(name, read="databricks"),
+                    # La proyección llega al motor con el casing del export
+                    # (doc 76 D8): el bench la muestra igual.
+                    col_name = engine_render.cased(name, BENCH_OPTIONS)
+                    ast = build_expression(expr_tpl, cctx, sqlglot.parse_one(col_name, read="databricks"),
                                            lookups, functions)
-                    alias = expand_template(alias_tpl, cctx, lookups, functions) if alias_tpl else name
+                    alias = expand_template(alias_tpl, cctx, lookups, functions) if alias_tpl else col_name
+                    if alias and alias.lower() == col_name.lower():
+                        alias = col_name              # `{columna.nombre}` = identidad (no pisa el casing)
                     sql = ast.sql(dialect="databricks", normalize_functions="lower")
-                    fragments.append({"column": name, "sql": f"{sql} AS {alias or name}", "why": why})
+                    fragments.append({"column": name, "sql": f"{sql} AS {alias or col_name}", "why": why})
                 elif action.get("tags"):
                     stmts, _ = engine_render.column_tag_statements(
-                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident, None,
+                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident, BENCH_OPTIONS,
                         object_kind=obj_kind)
                     fragments += [{"column": name, "sql": s, "why": why} for s in stmts]
                 else:
