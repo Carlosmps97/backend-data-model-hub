@@ -1610,9 +1610,13 @@ Respuesta 200:
 {
   "success": true,
   "data": [
-    { "id": "ddl.tabla_fisica", "label": "Physical table", "root": true },
-    { "id": "ddl.vista_negocio", "label": "Business view", "root": true },
-    { "id": "ddl.vista_tecnica", "label": "vista_tecnica", "root": false, "generatedBy": "vista_tecnica" }
+    { "id": "ddl.tabla_fisica", "label": "Physical table", "root": true, "kind": "table" },
+    { "id": "ddl.vista_negocio", "label": "Business view", "root": true, "kind": "view" },
+    { "id": "ddl.tabla_rej", "label": "tabla_rej", "root": false, "generatedBy": "tabla_rechazos", "kind": "table" },
+    { "id": "ddl.vista_tecnica", "label": "vista_tecnica", "root": false, "generatedBy": "vista_tecnica", "kind": "view" },
+    { "id": "ddl.vista_tecnica_dac", "label": "vista_tecnica_dac", "root": false, "generatedBy": "vista_tecnica_dac", "kind": "view" },
+    { "id": "ddl.vista_rej", "label": "vista_rej", "root": false, "generatedBy": "vista_rechazos", "kind": "view" },
+    { "id": "ddl.vista_rej_dac", "label": "vista_rej_dac", "root": false, "generatedBy": "vista_rechazos_dac", "kind": "view" }
   ]
 }
 ```
@@ -1713,7 +1717,7 @@ Body (`RenderBody`):
 | `model` | dict \| null | null | `{name, udpValues}` del canvas |
 | `tables` | `RenderTableEntry[]` | `[]` | cada una: `{ table: {...doc canónico...}, columns: [...], baseSql: "CREATE TABLE ..." }` |
 | `views` | `RenderViewEntry[]` | `[]` | cada una: `{ name, schema, sql, sourceTableIds[], businessView }` — `businessView=true` = vista "on canvas"; solo esas se decoran con `ddl.vista_negocio`, el resto pasa intacto |
-| `options` | dict | `{}` | opciones del modal (identifierCase/tableFormat/external/location/includePartitions): los artefactos generados salen espejo del CREATE físico |
+| `options` | dict | `{}` | opciones del modal (identifierCase/tableFormat/external/location/locationFolderCase/includePartitions/partitionsLast): los artefactos generados salen espejo del CREATE físico (doc 76: carpeta del LOCATION con `locationFolderCase`, default MAYÚSCULA) |
 
 ```bash
 curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/render \

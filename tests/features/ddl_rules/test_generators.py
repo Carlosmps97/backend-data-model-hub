@@ -119,7 +119,9 @@ def test_rej_espejo_del_fisico_casing_location_particiones():
     assert "CREATE EXTERNAL TABLE IF NOT EXISTS `CORE`.`TBL_CLIENTE_REJ`" in sql
     assert "`COD_CLIENTE`" in sql and "STRING" in sql          # casing + force_type
     assert "PARTITIONED BY (`FEC_ALTA`)" in sql                # partición heredada
-    assert "LOCATION 's3://dl/warehouse/tbl_cliente_rej'" in sql  # carpeta cruda + _rej
+    # Doc 76 D9: carpeta del LOCATION = nombre final con el casing de carpeta
+    # del export (default MAYÚSCULA, convención ADLS de la macro).
+    assert "LOCATION 's3://dl/warehouse/TBL_CLIENTE_REJ'" in sql
     # Orden (pedido owner): heredadas → añadidas → columnas de PARTICIÓN al final.
     order = [sql.index(f"`{n}`") for n in ("COD_CLIENTE", "REJ_MOTIVO", "FEC_ALTA")]
     assert order == sorted(order)
@@ -127,6 +129,10 @@ def test_rej_espejo_del_fisico_casing_location_particiones():
     stmts2, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
                                  {**opts, "includePartitions": False})
     assert "PARTITIONED BY" not in stmts2[0]["sql"]
+    # `locationFolderCase` explícito: as-is conserva el nombre crudo
+    stmts3, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
+                                 {**opts, "locationFolderCase": "as-is"})
+    assert "LOCATION 's3://dl/warehouse/tbl_cliente_rej'" in stmts3[0]["sql"]
 
 
 def test_cascada_completa_fisica_rej_vista_rej():

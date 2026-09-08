@@ -325,10 +325,14 @@ vistas multi-fuente, C8b grafías variantes fieles al XML).
 ## 6b. `seed_ddl_export_rules` — ruleset base del DDL Export
 
 Siembra, como UNA versión de Data Standards del proyecto ("Base — DDL export
-rules"), las **8 reglas activas** del Export DDL (masking técnico,
-desencriptación de negocio `bcp_ddv_desencrypt`, tags de governance,
-TBLPROPERTIES de vacuum, cascada `_rej` + vista técnica) **más los lookups
-`vacuum_map`/`dac_map`** (doc 30 de plan-implementacion/). Doc 75: el ruleset
+rules"), las **14 reglas activas** del Export DDL que reproducen los 7 DDL de
+la macro BCP (doc 76 de plan-implementacion/): `-- DROP` comentado,
+TBLPROPERTIES de vacuum, tags `updateFrecuency`/`isDAC`/`DAC`, tabla de
+rechazos `_rej` (+ `tiporeject`, particiones con su tipo), vistas técnicas
+NoDAC/DAC (`{tabla}` / `{tabla}dac`), vistas de rechazos NoDAC/DAC y la
+desencriptación `bcp_encrypt_function.decrypt_column_view` en las vistas DAC y
+de negocio, **más los lookups `vacuum_map` / `update_frequency_map` /
+`dac_flag_map` / `dac_map`** (el «case when» de la macro). Doc 75: el ruleset
 es POR PROYECTO — `--project "P"` o `--all-projects` (obligatorio uno); en un
 proyecto que ya tiene reglas se salta con aviso.
 
@@ -340,11 +344,14 @@ proyecto que ya tiene reglas se salta con aviso.
   crea defs UDP con usedBy=0 (política A4) y en el DDV real ninguna tabla
   asigna "Tipo de Vista" — la 1ª corrida en el workspace corporativo falló
   con `Unknown UDP 'Tipo de Vista'`. Resuelto EN el script: la seed auto-crea
-  en el MISMO batch las dos defs que el kit omite — **"Tipo de Vista"**
-  (table, list, `[Regular, Personalizada]`) y **"Frecuencia Vacuum"** (table,
-  list, allowedValues = las 9 claves de `vacuum_map`, default
-  `CUSTOM_90 days`). Idempotente. Cualquier OTRO UDP referenciado que falte
-  = modelo sin migrar → aborta limpio con la lista.
+  en el MISMO batch la def que el kit podría omitir — **"Frecuencia Vacuum"**
+  (table, list, allowedValues = las 9 claves de `vacuum_map`, default
+  `CUSTOM_90 days`) y enlaza a ella todos los lookups que nacen de ese UDP.
+  Idempotente. Desde el doc 76 la vista técnica ya no depende de "Tipo de
+  Vista" (la macro la genera siempre) y esa def dejó de auto-crearse.
+  Cualquier OTRO UDP que las reglas, los lookups o el `partitionOrderUdp`
+  del layout necesiten y falte («Clasificacion del Dato» de tabla y columna,
+  «Particion») = modelo sin migrar → aborta limpio con la lista.
 
 ## 6c. `mark_base_version` — marcador de versión base v1 (cierre OBLIGATORIO)
 

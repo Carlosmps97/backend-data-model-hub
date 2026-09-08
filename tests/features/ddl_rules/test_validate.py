@@ -266,9 +266,18 @@ def test_expression_sobre_tabla_y_tags_sobre_vista_avisan():
                                action={"expression": "sha2({col}, 512)"}), DEFS, CONFIG, ARTS, KINDS)
     assert rep["state"] == "valid"
     assert any("table artifact" in w and "expression" in w for w in rep["warnings"])
+    # Doc 76 D5: los tags SÍ aplican a vistas (ALTER VIEW) — sin aviso; lo que
+    # sigue sin sentido sobre una vista es TBLPROPERTIES.
+    rep_tags = v.validate_rule(rule(target="table", appliesTo=["ddl.vista_negocio"],
+                                    action={"tags": {"x": "y"}}), DEFS, CONFIG, ARTS, KINDS)
+    assert not any("view artifact" in w for w in rep_tags["warnings"])
     rep2 = v.validate_rule(rule(target="table", appliesTo=["ddl.vista_negocio"],
-                                action={"tags": {"x": "y"}}), DEFS, CONFIG, ARTS, KINDS)
-    assert any("view artifact" in w and "tags" in w for w in rep2["warnings"])
+                                action={"tblproperties": {"x": "y"}}), DEFS, CONFIG, ARTS, KINDS)
+    assert any("view artifact" in w and "TBLPROPERTIES" in w for w in rep2["warnings"])
+    # exclude sobre una tabla: mismo aviso que expression
+    rep_ex = v.validate_rule(rule(appliesTo=["ddl.tabla_fisica"],
+                                  action={"exclude": True}), DEFS, CONFIG, ARTS, KINDS)
+    assert any("table artifact" in w and "exclude" in w for w in rep_ex["warnings"])
     # combinación coherente: sin aviso
     rep3 = v.validate_rule(rule(appliesTo=["ddl.vista_tecnica"],
                                 action={"expression": "sha2({col}, 512)"}), DEFS, CONFIG, ARTS, KINDS)

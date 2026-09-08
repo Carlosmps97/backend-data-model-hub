@@ -32,7 +32,9 @@ def _context_value(path: str, ctx: dict):
     if m:
         return ((ctx.get(m.group(1)) or {}).get("udp") or {}).get(m.group(2))
     parts = path.strip().split(".")
-    if len(parts) == 2 and parts[0] in ("tabla", "columna", "modelo"):
+    # `artefacto.*` (doc 76 D6) = el objeto que se está emitiendo (ref/esquema/
+    # nombre/tipo); lo inyectan pipeline/generators, no tiene UDP propios.
+    if len(parts) == 2 and parts[0] in ("tabla", "columna", "modelo", "artefacto"):
         return (ctx.get(parts[0]) or {}).get(parts[1])
     raise RenderError(f"Can't resolve '{path}' in this context.")
 

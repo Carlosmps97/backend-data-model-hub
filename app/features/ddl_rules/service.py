@@ -147,7 +147,6 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     table = tables[0]
     cols = await catalog_repo.list_columns(table_id)
     t_ctx = table_ctx(table, n_by_id)
-    base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}}}
     cols_sorted = sorted(cols, key=lambda c: (c.get("ordinal") or 0))
     cols_ctx = {}
     for c in cols_sorted:
@@ -157,6 +156,13 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     # Los fragmentos de tags salen calificados como en el export (doc 71 H2).
     full_ident = engine_render.full_name(t_ctx.get("esquema"), t_ctx["nombre"])
     artifact = (rule.get("appliesTo") or ["ddl.tabla_fisica"])[0]
+    # Doc 76 D5: el fragmento respeta el TIPO del artefacto destino (ALTER
+    # TABLE | ALTER VIEW). El bench muestra el objeto con el nombre de la tabla
+    # elegida (la vista generada real nace recién en el export).
+    obj_kind = artifact_kinds(await repository.list_rules(project_id)).get(artifact) \
+        or ("view" if "vista" in artifact else "table")
+    base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
+                "artefacto": engine_render.artifact_ctx(t_ctx.get("esquema"), t_ctx["nombre"], obj_kind)}
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     fragments: list[dict] = []
@@ -175,11 +181,17 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
             if engine_cond.eval_condition(cond_ast, base_ctx, rule.get("condition") or ""):
                 matched = 1
                 action = rule.get("action") or {}
+                why = _why(rule.get("condition") or "", base_ctx)
+                if action.get("statements"):
+                    # Doc 76 D6: sentencias libres expandidas (before → after).
+                    for position in ("before", "after"):
+                        stmts, _ = engine_render.statement_snippets(
+                            [rule], artifact, base_ctx, config, position)
+                        fragments += [{"label": f"{full} · {position}", "sql": s, "why": why} for s in stmts]
                 if action.get("tags"):
                     stmts, _ = engine_render.table_tag_statements(
-                        [rule], artifact, base_ctx, config, full_ident)
-                    fragments += [{"label": full, "sql": s,
-                                   "why": _why(rule.get("condition") or "", base_ctx)} for s in stmts]
+                        [rule], artifact, base_ctx, config, full_ident, object_kind=obj_kind)
+                    fragments += [{"label": full, "sql": s, "why": why} for s in stmts]
                 if action.get("tblproperties"):
                     pairs = []
                     for k in sorted(action["tblproperties"]):
@@ -190,37 +202,46 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                     if pairs:
                         fragments.append({"label": full,
                                           "sql": "TBLPROPERTIES (" + ", ".join(pairs) + ")",
-                                          "why": _why(rule.get("condition") or "", base_ctx)})
+                                          "why": why})
                 if action.get("layout"):
-                    # Doc 73: muestra el orden de EMISIÓN resultante de las columnas.
-                    lay = engine_generators.layout_columns(
-                        [{"name": c.get("physicalName") or "", "partition": bool(c.get("isPartition"))}
-                         for c in cols_sorted],
-                        {"partitionsLast": action["layout"].get("partitionColumns") == "last"})
-                    moved = [c.get("physicalName") or "" for c in cols_sorted if c.get("isPartition")]
+                    # Doc 73/76: muestra el orden de EMISIÓN resultante de las
+                    # columnas (particiones al final, ordenadas por el UDP).
+                    lay = action["layout"]
+                    order_udp = str(lay.get("partitionOrderUdp") or "").strip() or None
+                    cols_light = engine_generators.physical_columns(cols_sorted, cols_ctx, order_udp)
+                    emitted = engine_generators.layout_columns(
+                        cols_light, {"partitionsLast": lay.get("partitionColumns") == "last"})
+                    moved = [c["name"] for c in engine_generators.ordered_partitions(cols_light)]
+                    detail = ("partition columns last: " + ", ".join(moved)) if moved \
+                        else "no partition columns in this table"
+                    if moved and order_udp:
+                        detail += f" · ordered by UDP '{order_udp}'"
                     fragments.append({"label": full,
-                                      "sql": "-- column order: " + ", ".join(c["name"] for c in lay),
-                                      "why": ("partition columns last: " + ", ".join(moved)) if moved
-                                             else "no partition columns in this table"})
+                                      "sql": "-- column order: " + ", ".join(c["name"] for c in emitted),
+                                      "why": detail})
         else:  # regla de columna
             total = len(cols_sorted)
-            expr_tpl = ((rule.get("action") or {}).get("expression") or "").strip()
-            alias_tpl = ((rule.get("action") or {}).get("alias") or "").strip()
+            action = rule.get("action") or {}
+            expr_tpl = (action.get("expression") or "").strip()
+            alias_tpl = (action.get("alias") or "").strip()
             for name, ctx in cols_ctx.items():
                 cctx = {**base_ctx, "columna": ctx}
                 if not engine_cond.eval_condition(cond_ast, cctx, rule.get("condition") or ""):
                     continue
                 matched += 1
                 why = _why(rule.get("condition") or "", cctx)
-                if expr_tpl:
+                if action.get("exclude") is True:
+                    fragments.append({"column": name, "sql": "-- excluded from the SELECT", "why": why})
+                elif expr_tpl:
                     ast = build_expression(expr_tpl, cctx, sqlglot.parse_one(name, read="databricks"),
                                            lookups, functions)
                     alias = expand_template(alias_tpl, cctx, lookups, functions) if alias_tpl else name
                     sql = ast.sql(dialect="databricks", normalize_functions="lower")
                     fragments.append({"column": name, "sql": f"{sql} AS {alias or name}", "why": why})
-                elif (rule.get("action") or {}).get("tags"):
+                elif action.get("tags"):
                     stmts, _ = engine_render.column_tag_statements(
-                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident)
+                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident, None,
+                        object_kind=obj_kind)
                     fragments += [{"column": name, "sql": s, "why": why} for s in stmts]
                 else:
                     fragments.append({"column": name, "sql": "— (no expression/tags)", "why": why})

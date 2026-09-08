@@ -28,6 +28,8 @@ _PLAIN_PLACEHOLDERS = {
     "col",
     "columna.nombre", "columna.tipo", "columna.comentario",
     "tabla.nombre", "tabla.esquema", "tabla.catalogo",
+    # doc 76 D6: el objeto que se emite (ref = calificado con backticks + casing)
+    "artefacto.ref", "artefacto.nombre", "artefacto.esquema", "artefacto.tipo",
 }
 _PH_RX = re.compile(r"\{([^{}]+)\}")
 
@@ -248,20 +250,37 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
             fail("Expression syntax (Databricks)",
                  f"Tag/property key '{str(k)[:30]}…' exceeds 256 characters.")
 
-    # Doc 73 · Column layout: acción de TABLA sobre la física, sin condición y
-    # sin mezclarse con otras acciones (es un estándar del ruleset, no una
-    # regla por UDP). Errores estructurales → check "Action" (como "Artifacts").
+    # Errores estructurales de las acciones → check "Action" (como "Artifacts").
+    def _bad(message: str, token: str | None = None) -> None:
+        errors.append({"check": "Action", "message": message, "token": token,
+                       "suggestion": None, "snippet": None, "line": 1, "col": 1})
+
+    # Doc 73/76 · Column layout: acción de TABLA sobre la física, sin condición
+    # y sin mezclarse con otras acciones (es un estándar del ruleset, no una
+    # regla por UDP). `partitionOrderUdp` enlaza un UDP de COLUMNA (faceta
+    # física) cuyos valores PART_nn ordenan las particiones.
     layout = action.get("layout")
     if layout is not None:
-        def _bad(message: str, token: str | None = None) -> None:
-            errors.append({"check": "Action", "message": message, "token": token,
-                           "suggestion": None, "snippet": None, "line": 1, "col": 1})
         allowed = {"partitionColumns": ("keep", "last")}
         if not isinstance(layout, dict) or not layout:
             _bad("Column layout needs at least one setting (partitionColumns: last).")
         else:
             for k, val in layout.items():
-                if k not in allowed:
+                if k == "partitionOrderUdp":
+                    name = str(val or "").strip()
+                    if not name:
+                        _bad("Column layout 'partitionOrderUdp' needs the name of a column UDP (e.g. Particion).")
+                        continue
+                    d = by_level.get("column", {}).get(name)
+                    if d is None:
+                        sug = _closest(name, list(by_level.get("column", {}).keys()))
+                        fail("UDP exists in catalog",
+                             f"Unknown column UDP '{name}' in column layout (partitionOrderUdp)."
+                             + (f" Did you mean '{sug}'?" if sug else ""),
+                             token=name, suggestion=sug)
+                    elif {"udpId": d["id"], "level": "column"} not in udp_refs:
+                        udp_refs.append({"udpId": d["id"], "level": "column"})
+                elif k not in allowed:
                     _bad(f"Unknown column layout setting '{k}'.", token=str(k))
                 elif val not in allowed[k]:
                     _bad(f"Column layout '{k}' must be one of: {', '.join(allowed[k])}.", token=str(val))
@@ -269,11 +288,45 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
             _bad("Column layout is a table rule (target: table).")
         if (rule.get("condition") or "").strip():
             _bad("Column layout rules apply to every physical table of the export — leave the condition empty.")
-        if any(action.get(k) for k in ("expression", "tags", "tblproperties", "emit")):
+        if any(action.get(k) for k in ("expression", "exclude", "tags", "tblproperties", "statements", "emit")):
             _bad("Column layout can't be combined with other actions in the same rule.")
         for art in rule.get("appliesTo") or []:
             if art != "ddl.tabla_fisica":
                 warnings.append(f"Column layout only applies to the physical table — '{art}' is ignored.")
+
+    # Doc 76 D7 · Exclude column: regla de COLUMNA que quita la proyección del
+    # SELECT de un artefacto vista; no se combina con una expresión.
+    exclude = action.get("exclude")
+    if exclude is not None:
+        if exclude is not True:
+            _bad("Exclude column must be `true` (or leave it out).", token=str(exclude))
+        if kind != "rule" or target != "column":
+            _bad("Exclude column is a column rule (target: column).")
+        if (action.get("expression") or "").strip():
+            _bad("Exclude column can't be combined with an expression in the same rule.")
+
+    # Doc 76 D6 · Statements: regla de TABLA con sentencias libres `before`
+    # (antes del CREATE del artefacto) y/o `after` (detrás de los tags).
+    statements = action.get("statements")
+    if statements is not None:
+        if not isinstance(statements, dict):
+            _bad("Statements must be an object with `before` and/or `after` lists.")
+        else:
+            for k, val in statements.items():
+                if k not in ("before", "after"):
+                    _bad(f"Unknown statements position '{k}' — use before or after.", token=str(k))
+                elif not isinstance(val, list) or any(not isinstance(s, str) for s in val):
+                    _bad(f"statements.{k} must be a list of SQL text lines.", token=str(k))
+            if not any(isinstance(statements.get(k), list) and any(str(s).strip() for s in statements[k])
+                       for k in ("before", "after")):
+                _bad("Statements need at least one non-empty entry under before or after.")
+        if kind != "rule" or target != "table":
+            _bad("Statements is a table rule (target: table).")
+
+    # Doc 76 · keep_partition_type del generador: booleano.
+    kpt = ((action.get("emit") or {}).get("columns") or {}).get("keep_partition_type") if kind == "generator" else None
+    if kpt is not None and not isinstance(kpt, bool):
+        _bad("emit.columns.keep_partition_type must be true or false.", token=str(kpt))
 
     # ── 5 · Placeholders resolved ──────────────────────────────────────────
     ph_seen: list[str] = []
@@ -347,8 +400,11 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
         # Artefacto destino sin generador que lo declare = WARNING, no error:
         # se puede autorar la regla antes que su generador; hasta entonces el
         # export simplemente no la aplica ahí.
-        has_expr = bool((action.get("expression") or "").strip())
-        has_props = bool(action.get("tags") or action.get("tblproperties"))
+        # Doc 76: `exclude` es de vistas (como `expression`); tags y statements
+        # aplican a tablas Y vistas (`ALTER VIEW`); TBLPROPERTIES solo a tablas.
+        has_expr = bool((action.get("expression") or "").strip()) or action.get("exclude") is True
+        has_any_kind = bool(action.get("tags") or action.get("statements"))
+        has_table_only = bool(action.get("tblproperties"))
         for art in rule.get("appliesTo") or []:
             if art not in artifacts:
                 warnings.append(f"No generator declares '{art}' yet — the rule won't "
@@ -357,11 +413,11 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
             # Doc 71 H4: acción incompatible con el TIPO del artefacto = la regla
             # valida pero nunca emite nada ahí — se avisa.
             k = kinds.get(art)
-            if k == "table" and has_expr and not has_props:
-                warnings.append(f"'{art}' is a table artifact — expression rules only decorate the "
-                                "SELECT of a view; nothing will be emitted there.")
-            if k == "view" and has_props and not has_expr:
-                warnings.append(f"'{art}' is a view artifact — tags and TBLPROPERTIES only apply to "
+            if k == "table" and has_expr and not (has_any_kind or has_table_only):
+                warnings.append(f"'{art}' is a table artifact — expression and exclude rules only "
+                                "decorate the SELECT of a view; nothing will be emitted there.")
+            if k == "view" and has_table_only and not (has_expr or has_any_kind):
+                warnings.append(f"'{art}' is a view artifact — TBLPROPERTIES only apply to "
                                 "table artifacts; nothing will be emitted there.")
         if not (rule.get("appliesTo") or []):
             warnings.append("This rule has no target artifacts yet — it won't apply anywhere on export.")

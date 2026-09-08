@@ -50,6 +50,6 @@ class RenderBody(BaseModel):
     tables: list[RenderTableEntry] = []
     views: list[RenderViewEntry] = []
     # Opciones del modal de export (identifierCase/tableFormat/external/
-    # location/includePartitions): los artefactos generados salen espejo del
-    # CREATE físico (pedido owner 07-20).
+    # location/locationFolderCase/includePartitions): los artefactos generados
+    # salen espejo del CREATE físico (pedido owner 07-20, doc 76 D9).
     options: dict = {}

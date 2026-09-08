@@ -1,35 +1,35 @@
-"""Siembra las REGLAS BASE de DDL Export (doc 30 §8 + pedido owner 07-20) como
-UNA versión de Data Standards: la versión base del ruleset — POR PROYECTO
-(doc 75: cada proyecto tiene sus reglas, lookups, UDPs y su historial de
-Data Standards). `--project "Nombre"` siembra uno; `--all-projects`, todos
-(el one-shot usa este último).
+"""Siembra el RULESET BASE de DDL Export (doc 76: los 7 DDL de la macro BCP)
+como UNA versión de Data Standards — POR PROYECTO (doc 75: cada proyecto tiene
+sus reglas, lookups, UDPs y su historial). `--project "Nombre"` siembra uno;
+`--all-projects`, todos (el one-shot usa este último).
 
-Qué crea (8 reglas + 2 lookups):
-  - enmascarar_dac            columna DAC-% → sha2({col}, 512)      [vista técnica]
-  - desencriptar_dac_negocio  columna DAC-% → bcp_ddv_desencrypt({col}, '<sufijo>') [vista de negocio]
-                              (el sufijo = lo que va después de 'DAC-', vía lookup dac_map)
-  - tags_clasificacion        tag de gobierno por columna           [tabla física]
-  - tags_tabla                tags dominio/estado/tipo de entidad   [tabla física]
-  - tblproperties_vacuum      retención delta según Frecuencia Vacuum (lookup vacuum_map)
-  - tabla_rechazos            generador: tabla _rej todo STRING sin constraints
-  - vista_rechazos            generador: vista _rej en el esquema espejo _v
-  - vista_tecnica             generador: vista técnica _v para tablas Regular
-  Lookups: vacuum_map (9 valores) + dac_map (11 valores DAC-XXXX → XXXX).
+Qué crea (9 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente):
+  - excluir_dac_vista_sin_dac  vista NoDAC de tabla DAC → quita las columnas DAC-*
+  - desencriptar_dac           columna DAC-% → bcp_encrypt_function.decrypt_column_view({col}, '<sufijo>')
+                               [vistas DAC + vista de negocio]
+  - tags_dac_columna           ALTER … ALTER COLUMN … SET TAGS ('DAC' = '<sufijo>')
+  - drop_comentado             -- DROP TABLE IF EXISTS … comentado antes del CREATE (física y _rej)
+  - tags_update_frequency      SET TAGS ('updateFrecuency' = …) [lookup update_frequency_map]
+  - tags_isdac / tags_isdac_sin_dac   SET TAGS ('isDAC' = 'True'|'False')
+  - tblproperties_vacuum       delta.logRetentionDuration + deletedFileRetentionDuration [lookup vacuum_map]
+  - particiones_al_final       particiones al final del CREATE, ordenadas por el UDP «Particion»
+  - tabla_rechazos             generador: _rej todo STRING (particiones conservan tipo) + tiporeject
+  - vista_tecnica / vista_tecnica_dac / vista_rechazos / vista_rechazos_dac   generadores de vistas _v
+  Lookups: vacuum_map · update_frequency_map · dac_flag_map · dac_map.
 
-Robustez en BD recién migrada (2026-07-30): el kit multi-archivo NO crea defs
-UDP sin uso (política A4, doc 32b) y en el DDV real "Tipo de Vista" y
-"Frecuencia Vacuum" tienen usedBy=0 → no existen tras una carga fresca, y las
-reglas/lookups que las referencian fallarían la validación. Este seed las
-AUTO-CREA en el MISMO batch (`udpUpsert` — la validación cuenta los UDP del
-propio batch) con su catálogo canónico. Cualquier OTRO UDP referenciado que
-falte (p.ej. "Clasificacion del Dato") significa que el modelo no está
-migrado: se aborta LIMPIO con mensaje accionable, sin traceback.
+Robustez en BD recién migrada: el kit siembra el catálogo fijo completo de UDPs
+(doc 68), pero si «Frecuencia Vacuum» faltara (cargas viejas con la política
+A4 de defs sin uso) este seed la AUTO-CREA en el MISMO batch (`udpUpsert` — la
+validación cuenta los UDP del propio batch). Cualquier OTRO UDP que las reglas
+o los lookups necesiten y falte (p.ej. «Clasificacion del Dato», «Particion»)
+significa que el modelo no está migrado: se aborta LIMPIO con mensaje
+accionable, sin traceback.
 
 Pasa por `data_standards.service.apply` (la MISMA ruta que la web): valida cada
 regla contra el catálogo real de UDPs del proyecto, deriva los bindings por id
 y registra la versión "Base — DDL export rules" en el historial del proyecto
 (rollback disponible). NO re-siembra: si el proyecto ya tiene reglas activas,
-lo salta (bórralas o edítalas en la web).
+lo salta (bórralas o edítalas en la web → «Restore the base rule set»).
 
 Dry-run por default; `--apply` para escribir.
   .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects            # dry-run
@@ -48,31 +48,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# Defs UDP que el ruleset base necesita pero que una carga fresca del kit
-# OMITE por tener usedBy=0 en el DDV real (A4). Catálogo canónico:
-#   - "Tipo de Vista": la regla vista_tecnica trata NULL como 'Regular'
-#     (default del propio Erwin); 'Personalizada' queda fuera del generador.
+# Defs UDP que el ruleset base necesita y que una carga vieja del kit podría
+# OMITIR por tener usedBy=0 en el DDV real (A4). Catálogo canónico:
 #   - "Frecuencia Vacuum": allowedValues = las claves del lookup vacuum_map
 #     (se derivan en runtime — una sola fuente de verdad); default de la DEF
 #     de Erwin = CUSTOM_90 days (doc 30b).
 _AUTO_UDPS: list[dict] = [
-    {"name": "Tipo de Vista", "level": "table", "view": "physical", "dataType": "list",
-     "allowedValues": ["Regular", "Personalizada"],
-     "description": "Tipo de vista técnica a generar por tabla (Regular por default)."},
     {"name": "Frecuencia Vacuum", "level": "table", "view": "physical", "dataType": "list",
      "allowedValues": [],   # ← se llena con las claves de vacuum_map en runtime
      "defaultValue": "CUSTOM_90 days",
-     "description": "Retención de vacuum (delta.deletedFileRetentionDuration) vía lookup vacuum_map."},
+     "description": "Retención de vacuum y frecuencia de actualización (lookups vacuum_map / update_frequency_map)."},
 ]
 
 
 def physical_udp_keys(defs: list[dict]) -> dict[tuple[str, str], dict]:
     """(level, name) → def SOLO de la faceta FÍSICA (doc 69). Las reglas DDL
     enlazan UDP físicos (`validate_rule` ignora los lógicos), así que un
-    homónimo LÓGICO no cuenta como presente: el kit siembra «Tipo de Vista» a
-    nivel tabla como lógico (catálogo Erwin) y, si el seed lo daba por existente,
-    no auto-creaba el físico y `vista_tecnica` fallaba la validación
-    (doc 73 §11.3, run del 2026-09-07). Puro."""
+    homónimo LÓGICO no cuenta como presente (doc 73 §11.3). Puro."""
     from app.core.facets import normalize_udp_view
     return {(d.get("level"), d.get("name")): d for d in defs
             if normalize_udp_view(d.get("level"), d.get("view")) == "physical"}
@@ -99,15 +91,24 @@ def select_projects(projects: list[dict], project: str | None, all_projects: boo
     return hits
 
 
-def _referenced_udps(seeds: list[dict]) -> set[tuple[str, str]]:
-    """(level, name) de todo UDP que las semillas usan."""
+def _referenced_udps(seeds: list[dict], seed_lookups: dict | None = None) -> set[tuple[str, str]]:
+    """(level, name) de todo UDP que las semillas usan: condiciones, `{udp:…}`
+    de las acciones, `layout.partitionOrderUdp` (UDP de columna, doc 76) y el
+    UDP de ORIGEN de cada lookup (`fromUdpName`/`fromLevel`). Puro."""
     refs: set[tuple[str, str]] = set()
     for s in seeds:
         for prefix, name in _COND_REF.findall(s.get("condition") or ""):
             refs.add((_LEVEL[prefix], name))
         level = s.get("target") or "table"
-        for name in _ACTION_REF.findall(str(s.get("action") or {})):
+        action = s.get("action") or {}
+        for name in _ACTION_REF.findall(str(action)):
             refs.add((level, name))
+        order_udp = str((action.get("layout") or {}).get("partitionOrderUdp") or "").strip()
+        if order_udp:
+            refs.add(("column", order_udp))
+    for lk in (seed_lookups or {}).values():
+        if lk.get("fromUdpName"):
+            refs.add((lk.get("fromLevel") or "table", lk["fromUdpName"]))
     return refs
 
 
@@ -150,14 +151,16 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
         spec["id"] = str(uuid.uuid4())
         udp_upsert.append(UdpEdit(**spec))
 
-    # Enlazar el lookup vacuum_map al UDP recién creado (mismo batch).
+    # Enlazar TODOS los lookups que nacen de un UDP recién creado (mismo batch).
     for u in udp_upsert:
-        if u.name == "Frecuencia Vacuum" and not lookups.get("vacuum_map", {}).get("fromUdpId"):
-            lookups["vacuum_map"]["fromUdpId"] = u.id
+        for lk_name, lk in lookups.items():
+            seed_lk = SEED_LOOKUPS.get(lk_name) or {}
+            if (seed_lk.get("fromUdpName"), seed_lk.get("fromLevel")) == (u.name, u.level) and not lk.get("fromUdpId"):
+                lk["fromUdpId"] = u.id
 
     missing_required = sorted(
         f"{name} [{level}]"
-        for (level, name) in _referenced_udps(seeds)
+        for (level, name) in _referenced_udps(seeds, SEED_LOOKUPS)
         if (level, name) not in by_level_name and (level, name) not in auto_by_key
     )
     if missing_required:
@@ -176,7 +179,7 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
     for lk_name, lk in lookups.items():
         state = "OK" if lk.get("fromUdpId") else "SIN UDP (¡revisar catálogo!)"
         print(f"   lookup {lk_name}: fromUdpId={lk.get('fromUdpId')} · "
-              f"{len(lk.get('values') or {})} valores · {state}")
+              f"{len(lk.get('values') or {})} valores · default={lk.get('default')!r} · {state}")
     for s in seeds:
         print(f"   regla {s['name']} [{s['kind']}]")
 
@@ -190,9 +193,9 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
     body = ApplyBody(
         kind="ddl",
         title="Base — DDL export rules",
-        description=("Ruleset base del DDL Export (doc 30): masking técnico, "
-                     "desencriptación de negocio, tags, TBLPROPERTIES y la "
-                     "cascada de rechazos/vista técnica."),
+        description=("Ruleset base del DDL Export (doc 76, macro BCP): tabla física con "
+                     "DROP comentado/TBLPROPERTIES/tags, tabla de rechazos, vistas técnicas "
+                     "NoDAC/DAC, vistas de rechazos y decoración de las vistas de negocio."),
         udpUpsert=udp_upsert,
         rulesUpsert=[DdlRuleEdit(**s) for s in seeds],
         ddlConfigPatch=DdlConfigPatch(lookups=lookups),
