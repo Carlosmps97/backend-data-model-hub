@@ -39,6 +39,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.ratelimit import limiter
 from app.features.admin.router import router as admin_router
 from app.features.auth.router import router as auth_router
+from app.features.bulk_upload.profiles.router import router as upload_profiles_router
 from app.features.bulk_upload.router import router as bulk_upload_router
 from app.features.catalog.router import projects_catalog_router, router as catalog_router
 from app.features.data_standards.router import router as data_standards_router
@@ -298,6 +299,7 @@ def create_app() -> FastAPI:
     # (sus rutas `/{cs_id}/...` son más generales) y antes de las estáticas
     # hermanas para que FastAPI resuelva el prefijo literal `/uploads`.
     app.include_router(bulk_upload_router)
+    app.include_router(upload_profiles_router)   # doc 78: perfiles de carga por proyecto
     app.include_router(versions_router)
     app.include_router(project_versions_router)   # doc 75 D2
     app.include_router(requests_router)

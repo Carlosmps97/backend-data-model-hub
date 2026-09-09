@@ -2784,27 +2784,50 @@ La entidad `schemas` opera dentro del changeset con endpoints propios (doc 18): 
 
 ### 8.18 Carga masiva desde Excel (`/api/changesets/{cs_id}/uploads`)
 
-Propósito (doc 55): crear o actualizar **proyectos, carpetas, canvases, esquemas, tablas y columnas** dentro del draft a partir de la plantilla `dmh-upload-template.xlsx` (hojas `Tablas` y `Atributos`). El front parsea el `.xlsx` (SheetJS) y manda JSON por hoja; el backend valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos, arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** y escribe por `add_changes_bulk` (tandas de 1000, orden proyectos → carpetas → canvases → esquemas → tablas → columnas). Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403) y la versión estar en `draft` (409).
+Propósito (doc 55 · doc 78): crear o actualizar **carpetas, canvases, esquemas, tablas y columnas** dentro del draft a partir de un workbook Excel interpretado por un **perfil de carga** del proyecto (§8.19). El front lee el `.xlsx` (SheetJS) y manda **todas las hojas como grillas crudas** + `profileId`; el backend ubica hojas y cabeceras según el perfil, mapea cada columna a un campo o a uno o varios UDP (lógico y/o físico), corre las reglas y políticas del perfil, y recién valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos; arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** (perfil releído) y escribe por `add_changes_bulk` (tandas de 1000, orden carpetas → canvases → esquemas → tablas → columnas). Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403), la versión estar en `draft` (409) y el perfil existir en el proyecto de la versión (404).
 
 | Método y ruta | Cuerpo / respuesta |
 |---|---|
-| `POST …/uploads` | `UploadWorkbookBody` = `{fileName, sheets: {tables?: Sheet, columns?: Sheet}}`, `Sheet = {headers: string[], rows: [{row, cells: {CABECERA: texto}}]}`. Topes: 5,000 filas de tablas y 20,000 de columnas (413); más de 20 jobs activos del usuario → 429. Responde **202** con el job en `validating` |
+| `POST …/uploads` | `UploadWorkbookBody` = `{fileName, profileId, sheets: [{name, rows: [{row, cells: string[]}]}]}` (todas las hojas del workbook, filas vacías fuera, `row` = nº de fila Excel). Topes: 30 hojas, 20,000 filas por hoja y 200 celdas por fila (413); más de 20 jobs activos del usuario → 429; `profileId` inexistente en el proyecto → 404. Responde **202** con el job en `validating` |
 | `GET …/uploads/{job_id}` | `{id, csId, fileName, status, progress: {phase, done, total}, report, result, error, createdAt, updatedAt}`. 404 si el job no existe o expiró (reinicio del proceso) — el front pide validar de nuevo |
 | `POST …/uploads/{job_id}/apply` | **202** con el job en `applying`; 409 si no está `validated`, si el reporte tiene errores, si hay otro apply en curso sobre la misma versión, o si el draft ya no acepta cambios |
 | `DELETE …/uploads/{job_id}` | `{deleted: true}`; cancela la validación si sigue corriendo; 409 mientras aplica (cancelar a mitad dejaría tandas sin el resto) |
 
-Estados: `validating → validated | failed`; `validated → applying → applied | failed`. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount}` con `Issue = {severity, sheet, row, column, code, message}` (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
+Estados: `validating → validated | failed`; `validated → applying → applied | failed`. Fases de progreso: Reading workbook → Loading profile → Applying profile and rules → Loading columns of referenced tables → Validating rows → Building report. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount, profile: {id, name}, sheets: [{role, name, found, headerRow, rows}]}` con `Issue = {severity, sheet, row, column, code, message}` — `sheet` es el nombre REAL de la hoja del perfil (o `Workbook` / `Profile`) y `column` la cabecera real del Excel (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
 
-Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5): lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; `ESQUEMA` obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); `PROJECT`/`SPACE`/`SUBJECT`/`DIAGRAMA` se crean o reusan por nombre; UDP por definición del nivel (valores de lista contra `allowedValues`, vacío → default al crear / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft.
+Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft.
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/uploads \
   -H "Content-Type: application/json" \
-  -d '{"fileName":"carga.xlsx","sheets":{"tables":{"headers":["PROJECT","DIAGRAMA","ESQUEMA","TABLA_LOGICO"],
-        "rows":[{"row":3,"cells":{"PROJECT":"DDV","DIAGRAMA":"Clientes","ESQUEMA":"ddv","TABLA_LOGICO":"Cliente"}}]}}}'
+  -d '{"fileName":"Plantilla.xlsx","profileId":"<profile_id>","sheets":[
+        {"name":"Cargar_Tablas","rows":[{"row":5,"cells":["","SUBJECT","DIAGRAMA","ESQUEMA","TABLA_LOGICO"]},
+                                        {"row":6,"cells":["","Clientes","Clientes","bcp_ddv","Cliente"]}]}]}'
 # → 202 {"success":true,"data":{"id":"…","status":"validating",…}}
 curl http://localhost:8000/api/changesets/cs-9/uploads/<job_id>          # polling hasta validated/failed
 curl -X POST http://localhost:8000/api/changesets/cs-9/uploads/<job_id>/apply
+```
+
+### 8.19 Perfiles de carga (`/api/projects/{project_id}/upload-profiles`)
+
+Propósito (doc 78): la configuración reutilizable que dice cómo interpretar un workbook — por proyecto, colección `upload_profiles` (sin versionado; soft-delete; cascada al borrar el proyecto). Un perfil = `{id, projectId, name, description, isDefault, origin ('user' | 'builtin:plantilla-bcp'), sheets: {tables: SheetSpec, columns: SheetSpec}, policies, createdBy, updatedBy, createdAt, updatedAt}`; `SheetSpec = {name, required, headerRow | null, mappings: [{header, target, rules: [{type, value?, severity}], defaultValue}]}`; `target = {kind: 'field', field} | {kind: 'udp', udpIds: [id…]} | {kind: 'ignore'}` (una columna puede alimentar VARIOS UDP, lógicos y/o físicos, con nombres distintos); reglas `required · maxLength · pattern · allowedValues · uniqueInFile · mustExist` con `severity` `error | warning`; `policies = {onExistingTable, onExistingColumn: 'update' | 'reject', unknownHeaders: 'warn' | 'ignore' | 'reject'}`. Permiso `model.edit` + proyecto vivo (`alive_project`, 404). Un solo default por proyecto; nombre único (CI) entre activos.
+
+| Método y ruta | Cuerpo / respuesta |
+|---|---|
+| `GET …/upload-profiles` | Lista de perfiles activos: el default primero, luego por nombre |
+| `POST …/upload-profiles` | `UploadProfileBody` (perfil sin id/proyecto/auditoría) → **201** doc; **422** `{detail: {message, problems: [{path, code, message}]}}` si la validación estructural falla (`name-empty`, `sheet-name-empty`, `sheet-names-equal`, `header-row-invalid`, `header-empty`, `header-duplicate`, `field-unknown`, `field-duplicate`, `field-required-missing`, `udp-empty`, `udp-unknown`, `udp-wrong-level`, `udp-duplicate`, `rule-unknown`, `rule-duplicate`, `rule-value-invalid`, `rule-not-applicable`, `default-not-applicable`, `policy-invalid`); **409** nombre repetido |
+| `GET …/upload-profiles/catalog` | `{fields: {tables: [{field, label, attr, required, key, mustExist}], columns: […]}, ruleTypes: [{type, label, valueKind, appliesTo}], policies: {…: [valores]}}` — catálogo fijo para el editor |
+| `POST …/upload-profiles/validate` | `UploadProfileBody` → `{problems: […]}` SIN guardar |
+| `POST …/upload-profiles/suggest` | `{sheet: 'tables' \| 'columns', headers: string[]}` → `[{header, target, matched: 'field' \| 'udp' \| null}]` — mapeo sugerido por nombre (alias de campos; UDP del nivel por nombre normalizado, todas las facetas que coincidan) |
+| `POST …/upload-profiles/default` | Materializa el built-in «Plantilla BCP» contra los UDP del proyecto → **201** `{profile, warnings: string[]}` (una def ausente deja la columna en `ignore` y avisa); **409** si el proyecto ya lo tiene. Es default solo si el proyecto no tenía otro |
+| `GET …/upload-profiles/{id}` · `PUT …/{id}` · `DELETE …/{id}` | Leer · reemplazar (doc completo; mismos 422/409; conserva `origin`/`createdBy`) · soft-delete `{deleted: true}`; 404 si no existe en el proyecto |
+| `POST …/upload-profiles/{id}/default` | Marca default (desmarca a los demás) → doc |
+
+```bash
+curl -X POST http://localhost:8000/api/projects/<pid>/upload-profiles/default      # 201 {profile, warnings}
+curl http://localhost:8000/api/projects/<pid>/upload-profiles                       # lista
+curl -X POST http://localhost:8000/api/projects/<pid>/upload-profiles/suggest \
+  -H "Content-Type: application/json" -d '{"sheet":"tables","headers":["TABLA_LOGICO","UDP_Universal","LOGICO"]}'
 ```
 
 ## 9. Requests (Home / Review)
@@ -3365,7 +3388,7 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 
 ## 14. Índice rápido de endpoints (Parte 2)
 
-Las 80 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el total del backend es 132 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28).
+Las 89 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el total del backend es 141 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28; las 9 de perfiles de carga, 8.19, el 2026-09-09).
 
 | Método | Ruta | Sección |
 |---|---|---|
@@ -3402,6 +3425,11 @@ Las 80 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | POST | `/api/changesets/{cs_id}/uploads` | 8.18 |
 | GET/DELETE | `/api/changesets/{cs_id}/uploads/{job_id}` | 8.18 |
 | POST | `/api/changesets/{cs_id}/uploads/{job_id}/apply` | 8.18 |
+| GET/POST | `/api/projects/{project_id}/upload-profiles` | 8.19 |
+| GET | `/api/projects/{project_id}/upload-profiles/catalog` | 8.19 |
+| POST | `/api/projects/{project_id}/upload-profiles/validate` `/suggest` `/default` | 8.19 |
+| GET/PUT/DELETE | `/api/projects/{project_id}/upload-profiles/{id}` | 8.19 |
+| POST | `/api/projects/{project_id}/upload-profiles/{id}/default` | 8.19 |
 | GET | `/api/requests` | 9.1 |
 | GET | `/api/versions?projectId=` | 10.1 |
 | GET | `/api/projects/{project_id}/versions` · `/published` | 10.2 |

@@ -61,6 +61,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 | `naming_config` | NamingConfigDoc | ✅ | — (Data Standards) | — | **`<projectId>:<scope>`** (clave natural; NO hay campo `id`) |
 | `ddl_rules` | DdlRuleDoc | ✅ | — (Data Standards) | ✅ | `id` (uuid) |
 | `ddl_ruleset_config` | DdlRulesetConfigDoc | ✅ | — (Data Standards) | — | **`<projectId>`** (un doc por proyecto) |
+| `upload_profiles` | UploadProfileDoc | ✅ | — (config operativa, sin versionado) | ✅ | `id` (uuid) |
 | `users` | UserDoc | — | — | via `status=disabled` | **`username`** |
 | `roles` | RoleDoc | — | — | — | **`key`** (slug del rol) |
 | `saved_reports` | SavedReportDoc (en `reporting/query/reports.py`, no en `models/`) | ✅ | — | ✅ | `id` (uuid) |
@@ -70,7 +71,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 >
 > **Entidades virtuales del reporting** (no son colecciones): `COLL_OF` en `reporting/query/executor.py` mapea `view_columns → views` y `models → subject_areas`.
 >
-> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
+> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) y `upload_profiles` (doc 78: perfiles de carga — nombre, hojas con fila de cabecera y mapeos cabecera → campo / UDP, reglas por columna, políticas; un `isDefault` por proyecto; `origin` `user` | `builtin:plantilla-bcp`) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
 
 ---
 

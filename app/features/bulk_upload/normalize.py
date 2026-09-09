@@ -4,7 +4,8 @@
   línea, tildes y ñ), solo recortada y con CRLF → LF.
 - `norm_ci`: clave de comparación case-insensitive de nombres (lógicos,
   físicos, proyectos, carpetas, canvases, esquemas, dominios).
-- `norm_key`: clave de matching de cabeceras UDP contra definiciones — sin
+- `norm_key`: clave de matching por NOMBRE de UDP (doc 78: solo para las
+  sugerencias del editor de perfiles y la detección de «Particion») — sin
   tildes, `_`/`-` como espacio, sin stopwords (`UDP_Tipo_Vista` ≡ «Tipo de
   Vista», `UDP_Clasificacion_del_Dato` ≡ «Clasificación del Dato»).
 - `norm_enum`: la MISMA regla del kit Erwin (doc 32b A3) para valores de lista.
@@ -61,16 +62,6 @@ def norm_key(value) -> str:
     """Clave de matching de cabeceras/nombres de UDP (ver docstring del módulo).
     Prefijo `udp` opcional; devuelve palabras significativas en minúsculas."""
     return " ".join(_udp_words(value))
-
-
-def udp_header_facet(value) -> tuple[str, str]:
-    """Cabecera `UDP_*` → (faceta, clave). Doc 69: `UDP_LOGICAL_<x>` apunta a la
-    def LÓGICA (Entidad/Atributo); cualquier otra cabecera a la física
-    (plantilla histórica intacta)."""
-    words = _udp_words(value)
-    if words and words[0] == "logical":
-        return "logical", " ".join(words[1:])
-    return "physical", " ".join(words)
 
 
 def norm_enum(value) -> str:

@@ -168,7 +168,7 @@ def test_particion_por_udp_marca_is_partition():
                columns=[crow(3, "Cliente", "Mes", data_type="INTEGER", udp={"UDP_Particion": "part_01"}),
                         crow(4, "Cliente", "Dia", data_type="INTEGER", udp={"UDP_Particion": ""}),
                         crow(5, "Cliente", "Ano", data_type="INTEGER", udp={"UDP_Particion": "no definido"})],
-               column_udp_headers=["UDP_Particion"])
+               column_udp={"UDP_Particion": defs})
     plan = build_plan(p, ctx(schemas=_SCHEMAS, udp_defs=defs))
     mes, dia, ano = (c["payload"] for c in _cols(plan))
     assert (mes["isPartition"], mes["udpValues"]) == (True, {"u2": "PART_01"})
@@ -182,7 +182,7 @@ def test_udp_de_columna_valida_contra_la_lista():
     p = parsed(tables=[trow(3, "Cliente", schema="ddv")],
                columns=[crow(3, "Cliente", "A", data_type="STRING", udp={"UDP_Clasificacion_del_Dato": "dac-nombre"}),
                         crow(4, "Cliente", "B", data_type="STRING", udp={"UDP_Clasificacion_del_Dato": "DAC-X"})],
-               column_udp_headers=["UDP_Clasificacion_del_Dato"])
+               column_udp={"UDP_Clasificacion_del_Dato": defs})
     plan = build_plan(p, ctx(schemas=_SCHEMAS, udp_defs=defs))
     (a,) = (c["payload"] for c in _cols(plan))
     assert a["udpValues"] == {"u3": "DAC-NOMBRE"}

@@ -18,13 +18,17 @@ def ctx(**kw) -> UploadContext:
 
 
 def parsed(tables: list[TableRow] | None = None, columns: list[ColumnRow] | None = None,
-           table_udp_headers: list[str] | None = None,
-           column_udp_headers: list[str] | None = None) -> ParsedWorkbook:
+           table_udp: dict[str, list[dict]] | None = None, column_udp: dict[str, list[dict]] | None = None,
+           headers: dict[str, dict[str, str]] | None = None) -> ParsedWorkbook:
+    """Workbook YA interpretado por un perfil (doc 78): `table_udp`/`column_udp`
+    son el mapeo resuelto cabecera → defs; los nombres de hoja son los de la
+    plantilla histórica (`Tablas`/`Atributos`)."""
     return ParsedWorkbook(
         tables=list(tables or []), columns=list(columns or []),
-        table_udp_headers=list(table_udp_headers or []),
-        column_udp_headers=list(column_udp_headers or []),
+        table_udp=dict(table_udp or {}), column_udp=dict(column_udp or {}),
+        headers=dict(headers or {}),
         has_tables_sheet=tables is not None, has_columns_sheet=columns is not None,
+        sheet_names={"tables": "Tablas", "columns": "Atributos"},
     )
 
 

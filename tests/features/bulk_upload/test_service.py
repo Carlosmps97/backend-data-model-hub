@@ -12,15 +12,25 @@ import pytest
 from app.features.bulk_upload import service
 from app.features.bulk_upload.context import UploadContext
 from app.features.bulk_upload.jobs import JobRegistry
-from app.features.bulk_upload.schemas import Sheet, SheetRow, UploadSheets, UploadWorkbookBody
+from app.features.bulk_upload.schemas import RawRow, RawSheet, UploadWorkbookBody
 from app.features.changesets.validation import DuplicateEntityError
 
+PROFILE = {"id": "pf", "name": "Perfil test", "sheets": {
+    "tables": {"name": "Tablas", "required": True, "headerRow": 2, "mappings": [
+        {"header": "TABLA_LOGICO", "target": {"kind": "field", "field": "logicalName"}},
+        {"header": "ESQUEMA", "target": {"kind": "field", "field": "schema"}},
+        {"header": "PROJECT", "target": {"kind": "field", "field": "project"}},
+        {"header": "DIAGRAMA", "target": {"kind": "field", "field": "diagram"}}]},
+    "columns": {"name": "Atributos", "required": False, "headerRow": 2, "mappings": [
+        {"header": "TABLA_LOGICO", "target": {"kind": "field", "field": "tableRef"}},
+        {"header": "CAMPO_LOGICO", "target": {"kind": "field", "field": "logicalName"}}]}},
+    "policies": {"onExistingTable": "update", "onExistingColumn": "update", "unknownHeaders": "warn"}}
 
-def _body(n_tables: int = 1, schema: str = "ddv") -> UploadWorkbookBody:
-    rows = [SheetRow(row=3 + i, cells={"TABLA_LOGICO": f"Tabla {i}", "ESQUEMA": schema, "PROJECT": "P", "DIAGRAMA": "D"})
-            for i in range(n_tables)]
-    return UploadWorkbookBody(fileName="carga.xlsx", sheets=UploadSheets(
-        tables=Sheet(headers=["TABLA_LOGICO", "ESQUEMA", "PROJECT", "DIAGRAMA"], rows=rows)))
+
+def _body(n_tables: int = 1, schema: str = "ddv", profile_id: str = "pf") -> UploadWorkbookBody:
+    rows = [RawRow(row=2, cells=["TABLA_LOGICO", "ESQUEMA", "PROJECT", "DIAGRAMA"])]
+    rows += [RawRow(row=3 + i, cells=[f"Tabla {i}", schema, "P", "D"]) for i in range(n_tables)]
+    return UploadWorkbookBody(fileName="carga.xlsx", profileId=profile_id, sheets=[RawSheet(name="Tablas", rows=rows)])
 
 
 def _ctx(schema_kind: str = "tables") -> UploadContext:
@@ -39,6 +49,9 @@ def env(monkeypatch):
     monkeypatch.setattr(service.cs_service, "get", AsyncMock(side_effect=lambda cs_id: state["cs"] if cs_id == "c1" else None))
     monkeypatch.setattr(service.loader, "load_context", AsyncMock(side_effect=lambda cs_id: state["ctx"]))
     monkeypatch.setattr(service.loader, "load_columns", AsyncMock(return_value={}))
+    state["profile"] = PROFILE
+    monkeypatch.setattr(service.loader, "load_profile",
+                        AsyncMock(side_effect=lambda pid, profile_id: state["profile"] if (pid, profile_id) == ("p1", "pf") else None))
 
     async def _bulk(cs_id, actor, items):
         state["batches"].append((cs_id, actor, list(items)))
@@ -73,6 +86,7 @@ def test_guards_de_changeset(env):
     async def run():
         assert await service.start_validation("c9", "ana", _body()) is None
         assert await service.start_validation("c1", "beto", _body()) == "forbidden"
+        assert await service.start_validation("c1", "ana", _body(profile_id="zz")) == "profile-not-found"
         env["cs"] = {"id": "c1", "projectId": "p1", "status": "submitted", "owner": "ana"}
         assert await service.start_validation("c1", "ana", _body()) == "locked"
 
@@ -206,5 +220,30 @@ def test_discard_no_cancela_un_apply_en_curso(env):
         job.status = "applying"                     # a mitad de las tandas
         assert await service.discard("c1", "ana", v["id"]) == "busy"
         assert service.registry.get(v["id"]) is not None
+
+    asyncio.run(run())
+
+
+def test_validation_falla_legible_si_el_perfil_desaparece_entre_medio(env):
+    async def run():
+        v = await service.start_validation("c1", "ana", _body())
+        env["profile"] = None                       # borrado entre el POST y el job
+        done = await _wait(v)
+        assert done["status"] == "failed" and "Upload profile not found" in done["error"]
+
+    asyncio.run(run())
+
+
+def test_validate_workbook_reporta_perfil_invalido_como_error_de_perfil(env):
+    env["profile"] = {**PROFILE, "sheets": {**PROFILE["sheets"], "tables": {**PROFILE["sheets"]["tables"], "mappings": [
+        *PROFILE["sheets"]["tables"]["mappings"], {"header": "U", "target": {"kind": "udp", "udpIds": ["borrada"]}}]}}}
+
+    async def run():
+        done = await _wait(await service.start_validation("c1", "ana", _body()))
+        assert done["status"] == "validated"
+        (e,) = done["report"]["errors"]
+        assert (e["sheet"], e["code"]) == ("Profile", "profile-udp-missing") and "Perfil test" in e["message"]
+        assert done["report"]["profile"] == {"id": "pf", "name": "Perfil test"}
+        assert done["report"]["sheets"][0]["name"] == "Tablas"
 
     asyncio.run(run())

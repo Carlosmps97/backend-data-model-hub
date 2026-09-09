@@ -26,8 +26,8 @@ dos proyectos tiene ids distintos; (3) la adopción por clave natural, la
 unicidad del nombre físico y el prefetch se acotan al proyecto; (4) los
 estándares de un proyecto con varios archivos son la **unión distinta**
 (el primero gana; discrepancias → `glossary_conflicts`/`domain_conflicts` del
-reporte); (5) `seed_ddl_export_rules` y `mark_base_version` corren por
-proyecto. No hay backfill: la BD se reemplaza con el one-shot.
+reporte); (5) `seed_ddl_export_rules`, `seed_upload_profiles` y `mark_base_version` corren
+por proyecto. No hay backfill: la BD se reemplaza con el one-shot.
 
 Todos los scripts viven en `scripts/erwin_migration/` (más los auxiliares en
 `scripts/`). **Son agnósticos al archivo**: no hay nombres DDV, esquemas ni
@@ -55,6 +55,7 @@ resolvió por estructura, no por nombres.
 | Validar consistencia después de cargar | `audit_data_consistency` | Solo lee |
 | Crear el usuario `admin` (BD nueva, para poder entrar) | `create_admin` | Sí (upsert) |
 | Sembrar el ruleset base del DDL Export (8 reglas + lookups) | `seed_ddl_export_rules` | Sí (con `--apply`) |
+| Sembrar el perfil de carga «Plantilla BCP» (doc 78) | `seed_upload_profiles` | Sí (con `--apply`) |
 | Marcar la versión base `v1` al cerrar la carga (sin él la web bloquea Model) | `mark_base_version` | Sí (con `--apply`) |
 | Re-aplicar las 3 correcciones de partición del owner (solo XML DDV actual) | `fix_particiones_ddv_20260717` | Sí (con `--apply`) |
 | Volver a la VERSIÓN BASE de un proyecto (deshace y borra toda versión posterior a su v1) | `reset_to_base_version` | Sí (con `--apply`) |
@@ -65,7 +66,8 @@ El one-shot por carpeta es DESTRUCTIVO (dropea el schema `dmh` completo) y
 encadena, en 4 ETAPAS: `quality` por proyecto (gate + glosario cruzado entre
 los archivos del proyecto) → reset + `create_admin` → `migrate` archivo por
 archivo → `audit_data_consistency` + `seed_ddl_export_rules --all-projects` +
-`arrange_all` + `mark_base_version` (v1 de cada proyecto):
+`seed_upload_profiles --all-projects` + `arrange_all` + `mark_base_version` (v1 de
+cada proyecto):
 ```
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                  # plan (dry-run)
 .venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force  # ejecuta
@@ -121,6 +123,7 @@ Al final, por CADA proyecto:
       arrange_all --project "P"
       audit_data_consistency                               # esperado: 0 fixables
       seed_ddl_export_rules --project "P" (o --all-projects) → --apply
+      seed_upload_profiles --project "P" (o --all-projects) → --apply   # perfil «Plantilla BCP» (doc 78)
       mark_base_version (dry-run) → --apply                # v1 de cada proyecto activo
 ```
 Como los ids son deterministas (`uuid5("<projectId>|<Long_Id>")`), re-correr
@@ -308,7 +311,8 @@ muestra el plan sin abrir conexión a la BD.
   (adopciones, conflictos resueltos por score, alias, fusiones).
 - **Después de `--apply`:** layout inicial en grilla → correr `arrange_all`
   (§5) y `audit_data_consistency` (§6). En una BD estrenada, cerrar con
-  `seed_ddl_export_rules` (§6b) y `mark_base_version` (§6c).
+  `seed_ddl_export_rules` (§6b), `seed_upload_profiles` (perfil de carga) y
+  `mark_base_version` (§6c).
 
 ## 5. `arrange_all` — auto-arrange ELK de todos los canvases
 

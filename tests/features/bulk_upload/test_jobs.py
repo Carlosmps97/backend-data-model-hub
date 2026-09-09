@@ -9,9 +9,9 @@ import pytest
 from app.features.bulk_upload.jobs import (
     JOB_MAX_AGE_SECONDS, JOB_TTL_SECONDS, MAX_JOBS_PER_OWNER, JobRegistry, TooManyJobsError,
 )
-from app.features.bulk_upload.schemas import UploadSheets, UploadWorkbookBody
+from app.features.bulk_upload.schemas import UploadWorkbookBody
 
-BODY = UploadWorkbookBody(fileName="f.xlsx", sheets=UploadSheets())
+BODY = UploadWorkbookBody(fileName="f.xlsx", profileId="pf")
 
 
 class _Clock:

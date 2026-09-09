@@ -1,8 +1,10 @@
-"""Planner — columnas (doc 55 §3.3-3.4, §4.2, §5): la fila referencia su
-tabla por lógico (fila de `Tablas` o tabla efectiva única); identidad por
-físico (declarado/derivado) con fallback por lógico único; tipo heredado del
-parent domain o declarado (gramática de la plataforma); PK autoritativa con
-`pkPosition` por orden de la hoja; UDP por definición. Puro.
+"""Planner — columnas (doc 55 §3.3-3.4, §4.2, §5 · doc 78): la fila referencia
+su tabla por lógico (fila de la hoja de tablas o tabla efectiva única);
+identidad por físico (declarado/derivado) con fallback por lógico único; tipo
+heredado del parent domain o declarado (gramática de la plataforma); PK
+autoritativa con `pkPosition` por orden de la hoja; UDP por el mapeo del
+perfil (una cabecera → N defs). Defaults solo en columnas nuevas;
+`onExistingColumn: reject` corta las existentes. Puro.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from typing import Callable
 
 from app.features.catalog.models import CanonicalColumnDoc
 
-from .normalize import clean_text, norm_ci, norm_key, norm_name, norm_type, partition_correlative
+from .normalize import clean_text, is_pk_mark, norm_ci, norm_key, norm_name, norm_type, partition_correlative
 from .parser import ColumnRow, ParsedWorkbook
 from .plan_tables import TableIndex, TablePlan, changed_fields
 from .report import SHEET_COLUMNS, ReportBuilder
@@ -42,10 +44,11 @@ def normalized_existing(existing: dict) -> dict:
 
 def _resolve_table(r: ColumnRow, by_sheet: dict[str, TablePlan], index: TableIndex,
                    implicit: dict[str, TablePlan], table_plans: list[TablePlan],
-                   rb: ReportBuilder) -> TablePlan | None:
+                   rb: ReportBuilder, h: Callable[[str, str], str], tables_label: str) -> TablePlan | None:
     key = norm_name(r.table_logical)
     if not key:
-        rb.error(SHEET_COLUMNS, "missing-required", "TABLA_LOGICO is required.", row=r.row, column="TABLA_LOGICO")
+        rb.error(SHEET_COLUMNS, "missing-required", f"{h('tableRef', 'TABLA_LOGICO')} is required.",
+                 row=r.row, column=h("tableRef", "TABLA_LOGICO"))
         return None
     tp = by_sheet.get(key)
     if tp is not None:
@@ -65,39 +68,44 @@ def _resolve_table(r: ColumnRow, by_sheet: dict[str, TablePlan], index: TableInd
         names = ", ".join(str(t.get("physicalName")) for t in candidates)
         rb.error(SHEET_COLUMNS, "ambiguous-table",
                  f"Several tables share the logical name '{r.table_logical}' ({names}); add the table to the "
-                 "'Tablas' sheet with its TABLA_FISICA.", row=r.row, column="TABLA_LOGICO")
+                 f"'{tables_label}' sheet with its physical name.", row=r.row, column=h("tableRef", "TABLA_LOGICO"))
         return None
     rb.error(SHEET_COLUMNS, "unknown-table",
-             f"Table '{r.table_logical}' is neither in the 'Tablas' sheet nor in the model.",
-             row=r.row, column="TABLA_LOGICO")
+             f"Table '{r.table_logical}' is neither in the '{tables_label}' sheet nor in the model.",
+             row=r.row, column=h("tableRef", "TABLA_LOGICO"))
     return None
 
 
 def plan_columns(parsed: ParsedWorkbook, ctx, std: Standards, table_plans: list[TablePlan],
-                 udp_map: dict[str, dict], rb: ReportBuilder, new_id: Callable[[], str]) -> list[ColumnPlan]:
+                 udp_map: dict[str, list[dict]], rb: ReportBuilder, new_id: Callable[[], str],
+                 options) -> list[ColumnPlan]:
     by_sheet = {norm_name(tp.logical): tp for tp in table_plans if tp.from_sheet and tp.logical}
     index = TableIndex(ctx.tables)
     implicit: dict[str, TablePlan] = {}
     groups: dict[str, list[ColumnRow]] = {}
     plan_by_id: dict[str, TablePlan] = {}
+    h = lambda f, fallback: parsed.header("columns", f, fallback)  # noqa: E731
+    tables_label = rb.sheet_name("tables")
     for r in parsed.columns:
-        tp = _resolve_table(r, by_sheet, index, implicit, table_plans, rb)
+        tp = _resolve_table(r, by_sheet, index, implicit, table_plans, rb, h, tables_label)
         if tp is None:
             continue
         tp.column_rows.append(r.row)
         plan_by_id[tp.id] = tp
         groups.setdefault(tp.id, []).append(r)
 
-    partition_header = next((h for h, d in udp_map.items() if norm_key(d.get("name")) == _PARTITION_KEY), None)
+    partition_header = next((hdr for hdr, defs in udp_map.items()
+                             if any(norm_key(d.get("name")) == _PARTITION_KEY for d in defs)), None)
     out: list[ColumnPlan] = []
     for tid, rows in groups.items():
-        out.extend(_plan_table_columns(plan_by_id[tid], rows, ctx, std, udp_map, partition_header, rb, new_id))
+        out.extend(_plan_table_columns(plan_by_id[tid], rows, ctx, std, udp_map, partition_header, rb, new_id,
+                                       h, options))
     return out
 
 
-def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standards, udp_map: dict[str, dict],
-                        partition_header: str | None, rb: ReportBuilder,
-                        new_id: Callable[[], str]) -> list[ColumnPlan]:
+def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standards, udp_map: dict[str, list[dict]],
+                        partition_header: str | None, rb: ReportBuilder, new_id: Callable[[], str],
+                        h: Callable[[str, str], str], options) -> list[ColumnPlan]:
     existing_cols = list(ctx.columns_by_table.get(tp.id, [])) if tp.existing is not None else []
     by_phys = {norm_ci(c.get("physicalName")): c for c in existing_cols}
     by_logical: dict[str, list[dict]] = {}
@@ -111,7 +119,7 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
 
     for r in rows:
         cp = _plan_row(r, tp, by_phys, by_logical, std, udp_map, partition_header, rb, new_id,
-                       seen_phys, seen_logical, max_len)
+                       seen_phys, seen_logical, max_len, h, options)
         if cp.action == "create":
             cp.fields["ordinal"] = next_ordinal
             next_ordinal += 1
@@ -129,17 +137,18 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
             cp.fields["pkPosition"] = base + pk_index
             pk_index += 1
         cp.fields["projectId"] = ctx.project_id            # doc 75 I1
-        _close(cp, rb, tp)
+        _close(cp, rb, tp, h)
     return plans
 
 
 def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical: dict[str, list[dict]],
-              std: Standards, udp_map: dict[str, dict], partition_header: str | None, rb: ReportBuilder,
+              std: Standards, udp_map: dict[str, list[dict]], partition_header: str | None, rb: ReportBuilder,
               new_id: Callable[[], str], seen_phys: dict[str, int], seen_logical: dict[str, int],
-              max_len: int) -> ColumnPlan:
+              max_len: int, h: Callable[[str, str], str], options) -> ColumnPlan:
     logical = clean_text(r.logical)
     if not logical:
-        rb.error(SHEET_COLUMNS, "missing-required", "CAMPO_LOGICO is required.", row=r.row, column="CAMPO_LOGICO")
+        rb.error(SHEET_COLUMNS, "missing-required", f"{h('logicalName', 'CAMPO_LOGICO')} is required.",
+                 row=r.row, column=h("logicalName", "CAMPO_LOGICO"))
         return ColumnPlan(row=r.row, table=tp, id=new_id(), action="error")
     declared = bool(clean_text(r.physical))
     physical = clean_text(r.physical) if declared else std.physicalize(logical, "column")
@@ -149,15 +158,27 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         candidates = by_logical.get(norm_name(logical), [])
         if len(candidates) > 1:
             rb.error(SHEET_COLUMNS, "ambiguous-match",
-                     f"Several columns of '{tp.physical}' share the logical name '{logical}'; declare CAMPO_FISICO.",
-                     row=r.row, column="CAMPO_FISICO")
+                     f"Several columns of '{tp.physical}' share the logical name '{logical}'; declare "
+                     f"{h('physicalName', 'CAMPO_FISICO')}.", row=r.row, column=h("physicalName", "CAMPO_FISICO"))
             return ColumnPlan(row=r.row, table=tp, id=new_id(), action="error")
         if len(candidates) == 1:
             existing = candidates[0]
             physical = str(existing.get("physicalName") or physical)
             rb.warning(SHEET_COLUMNS, "matched-by-logical",
                        f"Row matched the existing column '{physical}' by its logical name.",
-                       row=r.row, column="CAMPO_LOGICO")
+                       row=r.row, column=h("logicalName", "CAMPO_LOGICO"))
+    if existing is None:
+        # Doc 78 S5: los defaults del perfil solo aplican a columnas NUEVAS.
+        for attr, val in r.defaults.items():
+            if attr == "pk":
+                r.pk = r.pk or is_pk_mark(val)
+            elif not clean_text(getattr(r, attr, "")):
+                setattr(r, attr, val)
+    elif options.on_existing_column == "reject":
+        rb.error(SHEET_COLUMNS, "existing-not-allowed",
+                 f"Column '{physical}' of '{tp.physical}' already exists and this profile only allows new columns.",
+                 row=r.row, column=h("logicalName", "CAMPO_LOGICO"))
+        return ColumnPlan(row=r.row, table=tp, id=str(existing["id"]), action="error", existing=existing)
     cid = str(existing["id"]) if existing is not None else new_id()
     cp = ColumnPlan(row=r.row, table=tp, id=cid, action="create" if existing is None else "update",
                     existing=existing, pk=r.pk)
@@ -167,7 +188,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     if dup_row is not None:
         rb.error(SHEET_COLUMNS, "duplicate-in-file",
                  f"Column '{logical}' ({physical}) of '{tp.physical}' is repeated (see row {dup_row}).",
-                 row=r.row, column="CAMPO_LOGICO")
+                 row=r.row, column=h("logicalName", "CAMPO_LOGICO"))
         cp.action = "error"
         return cp
     seen_phys[pk_key] = r.row
@@ -178,7 +199,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     if max_len and len(physical) > max_len and physical != current_phys:
         rb.error(SHEET_COLUMNS, "name-too-long",
                  f"Physical name '{physical}' has {len(physical)} characters, over the {max_len}-character limit.",
-                 row=r.row, column="CAMPO_FISICO" if declared else "CAMPO_LOGICO")
+                 row=r.row, column=h("physicalName", "CAMPO_FISICO") if declared else h("logicalName", "CAMPO_LOGICO"))
 
     # Parent domain + tipo.
     domain_id = (existing or {}).get("parentDomainId")
@@ -186,7 +207,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         dom = std.domain(r.domain)
         if dom is None:
             rb.error(SHEET_COLUMNS, "unknown-domain", f"Parent domain '{r.domain}' doesn't exist in Data Standards.",
-                     row=r.row, column="PARENT_DOMAIN")
+                     row=r.row, column=h("parentDomain", "PARENT_DOMAIN"))
         else:
             domain_id = str(dom["id"])
     domain_changed = existing is not None and domain_id != existing.get("parentDomainId")
@@ -196,7 +217,8 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         canonical = std.canonical_type(r.data_type)
         if canonical is None:
             rb.error(SHEET_COLUMNS, "invalid-type",
-                     f"Data type '{r.data_type}' is not a valid type in the platform.", row=r.row, column="TIPO_DATO")
+                     f"Data type '{r.data_type}' is not a valid type in the platform.",
+                     row=r.row, column=h("dataType", "TIPO_DATO"))
     if canonical is not None:
         data_type = canonical
     elif existing is not None and not domain_changed:
@@ -207,7 +229,8 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         data_type = ""
         if existing is None and not clean_text(r.data_type):
             rb.error(SHEET_COLUMNS, "missing-required",
-                     "TIPO_DATO or PARENT_DOMAIN is required to create a column.", row=r.row, column="TIPO_DATO")
+                     f"{h('dataType', 'TIPO_DATO')} or {h('parentDomain', 'PARENT_DOMAIN')} is required to create a column.",
+                     row=r.row, column=h("dataType", "TIPO_DATO"))
     type_overridden = bool(domain_id and dom_default and data_type and norm_type(data_type) != norm_type(dom_default))
     # Doc 69: faceta LÓGICA del tipo — hereda del dominio (o se conserva si la
     # columna existe y el dominio no cambió); sin UI de edición en Fase 1.
@@ -221,10 +244,14 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     description = clean_text(r.description) or None
     if existing is not None and description is None:
         description = clean_text(existing.get("description")) or None
-    udp_values = apply_udps(udp_map, r.udp, (existing or {}).get("udpValues"), rb, SHEET_COLUMNS, r.row)
+    udp_values = apply_udps(udp_map, r.udp, (existing or {}).get("udpValues"), rb, SHEET_COLUMNS, r.row,
+                            udp_defaults=r.udp_defaults, is_new=existing is None)
 
-    if partition_header is not None and clean_text(r.udp.get(partition_header)):
-        is_partition = partition_correlative(r.udp.get(partition_header)) is not None
+    partition_raw = clean_text(r.udp.get(partition_header)) if partition_header is not None else ""
+    if not partition_raw and existing is None and partition_header is not None:
+        partition_raw = clean_text(r.udp_defaults.get(partition_header))
+    if partition_raw:
+        is_partition = partition_correlative(partition_raw) is not None
     else:
         is_partition = bool(existing.get("isPartition")) if existing is not None else False
 
@@ -249,7 +276,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     return cp
 
 
-def _close(cp: ColumnPlan, rb: ReportBuilder, tp: TablePlan) -> None:
+def _close(cp: ColumnPlan, rb: ReportBuilder, tp: TablePlan, h: Callable[[str, str], str]) -> None:
     """Cierra el plan de la columna: doc completo, clasificación y warnings."""
     cp.doc = column_doc(cp.fields)
     if cp.existing is None:
@@ -265,13 +292,13 @@ def _close(cp: ColumnPlan, rb: ReportBuilder, tp: TablePlan) -> None:
     physical = cp.doc["physicalName"]
     if before.get("isPrimaryKey") and not cp.doc.get("isPrimaryKey"):
         rb.warning(SHEET_COLUMNS, "pk-removed",
-                   f"Column '{physical}' of '{tp.physical}' is a primary key today and the sheet doesn't mark it (PK).",
-                   row=cp.row, column="PK")
+                   f"Column '{physical}' of '{tp.physical}' is a primary key today and the sheet doesn't mark it "
+                   f"({h('pk', 'PK')}).", row=cp.row, column=h("pk", "PK"))
     if "logicalName" in changed or "physicalName" in changed:
         rb.warning(SHEET_COLUMNS, "rename",
                    f"Column '{before.get('physicalName')}' of '{tp.physical}' will be renamed "
                    f"({before.get('logicalName')} → {cp.doc['logicalName']}, "
-                   f"{before.get('physicalName')} → {physical}).", row=cp.row, column="CAMPO_LOGICO")
+                   f"{before.get('physicalName')} → {physical}).", row=cp.row, column=h("logicalName", "CAMPO_LOGICO"))
     rb.warning(SHEET_COLUMNS, "existing-column",
                f"Column '{physical}' of '{tp.physical}' already exists — it will be updated ({', '.join(changed)}).",
-               row=cp.row, column="CAMPO_LOGICO")
+               row=cp.row, column=h("logicalName", "CAMPO_LOGICO"))

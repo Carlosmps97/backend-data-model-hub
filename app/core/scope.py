@@ -14,6 +14,7 @@ PROJECT_SCOPED: frozenset[str] = frozenset({
     "canonical_tables", "canonical_columns", "relationships", "views",
     "parent_domains", "glossary_terms", "udp_definitions", "naming_config",
     "ddl_rules", "ddl_ruleset_config",
+    "upload_profiles",                     # doc 78: perfiles de carga por proyecto
     "changesets", "standards_versions", "saved_reports",
 })
 

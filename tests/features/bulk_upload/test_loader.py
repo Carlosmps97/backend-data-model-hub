@@ -88,3 +88,9 @@ def test_load_columns_sin_ids_no_consulta(monkeypatch):
     calls = _cs_mocks(monkeypatch, published={}, changes={})
     assert asyncio.run(loader.load_columns("c1", [])) == {}
     assert calls == []
+
+
+def test_load_profile_delega_en_el_repositorio_scoped(monkeypatch):
+    monkeypatch.setattr(loader.profiles_repo, "get_profile", AsyncMock(return_value={"id": "pf", "name": "P"}))
+    assert asyncio.run(loader.load_profile("p1", "pf")) == {"id": "pf", "name": "P"}
+    loader.profiles_repo.get_profile.assert_awaited_once_with("p1", "pf")

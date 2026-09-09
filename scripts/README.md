@@ -55,6 +55,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | `create_admin` | Cuenta local `admin` (contraseña en el script) + 4 roles + whitelist SSO de Modeladores (idempotente) | BD nueva, para poder entrar |
 | `mark_base_version` | **Marca lo cargado como versión base DE CADA PROYECTO**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards del proyecto si su stream está vacío y permiso `rollback`. Idempotente; un proyecto con versiones aplicadas no recibe marcador | UNA vez, al FINAL de la carga completa (después del último XML) |
 | `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 76, los 7 DDL de la macro BCP) POR PROYECTO (`--project "X"` o `--all-projects`): 14 reglas (DROP comentado, TBLPROPERTIES vacuum, tags `updateFrecuency`/`isDAC`/`DAC`, tabla `_rej`, vistas técnicas y de rechazos NoDAC/DAC, desencriptación `decrypt_column_view` en vistas DAC y de negocio) + lookups `vacuum_map`/`update_frequency_map`/`dac_flag_map`/`dac_map`, como UNA versión de Data Standards del proyecto. Salta los proyectos que ya tienen reglas | BD nueva, tras `create_admin` |
+| `seed_upload_profiles` | **Perfil de carga «Plantilla BCP»** (doc 78) POR PROYECTO (`--project "X"` o `--all-projects`): hojas `Cargar_Tablas`/`Cargar_Campos` de `Plantilla.xlsx`, cabecera en la fila 5, mapeo cabecera → campo / UDP (los de tabla en ambas facetas; «Clasificacion del Dato» de campo en Attribute L + Column P), reglas `required`/`maxLength`. Resuelve los UDP contra el catálogo del proyecto (una def ausente deja la columna en `ignore` y avisa); salta el proyecto que ya lo tiene. Misma ruta que el botón «Create default profile» de la web | BD nueva, tras `seed_ddl_export_rules` |
 | `fix_particiones_ddv_20260717` | Re-aplica las **3 correcciones de partición decididas por el owner** (doc 21 §3) en el proyecto del DDV (`--project`, default «Modelo DDV»). No están en el XML: re-migrar el DDV las pisa (C10 avisa) | Solo si re-migras `DDV - CPYBCA.xml` |
 
 ```bash
@@ -63,6 +64,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 .venv/bin/python -m scripts.audit_data_consistency --fix    # aplica los fixes
 .venv/bin/python scripts/create_admin.py
 .venv/bin/python -m scripts.seed_ddl_export_rules --apply   # ruleset base (dry-run sin --apply)
+.venv/bin/python -m scripts.seed_upload_profiles --all-projects --apply   # perfil de carga «Plantilla BCP» (dry-run sin --apply)
 .venv/bin/python -m scripts.fix_particiones_ddv_20260717 --apply   # solo XML DDV actual
 ```
 
@@ -131,6 +133,7 @@ usuarios/roles, audit_log y los demás proyectos.
 .venv/bin/python scripts/arrange_all.py
 .venv/bin/python scripts/create_admin.py
 .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects --apply   # ruleset base por proyecto
+.venv/bin/python -m scripts.seed_upload_profiles --all-projects --apply   # perfil de carga «Plantilla BCP» por proyecto
 .venv/bin/python -m scripts.audit_data_consistency                      # esperado: 0
 .venv/bin/python -m scripts.mark_base_version --apply                   # v1 + baseline por proyecto + rollback
 # solo si el XML es el DDV actual:

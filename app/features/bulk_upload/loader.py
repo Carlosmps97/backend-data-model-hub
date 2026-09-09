@@ -6,6 +6,7 @@ repositories de las features dueñas (invariante del store); ninguna escritura.
   completos por request no es viable) y estándares vivos por scope.
 - `load_columns`: columnas efectivas SOLO de las tablas existentes que el
   workbook referencia (tandas de 500 ids, índice `tableId`).
+- `load_profile`: el perfil de carga del proyecto (doc 78).
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from app.features.settings import service as settings_service
 from app.features.udp import repository as udp_repo
 
 from .context import UploadContext
+from .profiles import repository as profiles_repo
 
 TABLE_PROJECTION = {"physicalName": 1, "logicalName": 1, "schema": 1, "description": 1, "udpValues": 1}
 _SCOPES = ("table", "column")
@@ -77,3 +79,8 @@ async def load_columns(cs_id: str, table_ids: list[str]) -> dict[str, list[dict]
     for cols in out.values():
         cols.sort(key=lambda c: (c.get("ordinal") or 0, str(c.get("physicalName") or "")))
     return out
+
+
+async def load_profile(project_id: str, profile_id: str) -> dict | None:
+    """Perfil de carga activo DEL PROYECTO (doc 78); None si no existe."""
+    return await profiles_repo.get_profile(project_id, profile_id)

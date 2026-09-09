@@ -6,8 +6,9 @@
   DELETE /api/changesets/{cs}/uploads/{job}          → descarta (cancela si sigue validando)
 
 Permiso `model.edit` (como escribir cambios); owner del changeset y draft
-se verifican en el service (403 / 409). El body ya viene parseado por hoja
-desde el front; el tope de filas se corta acá (413).
+se verifican en el service (403 / 409); el perfil (`profileId`) debe existir
+en el proyecto de la versión (404). El body trae las hojas CRUDAS (doc 78) y
+el backend aplica el perfil; los topes se cortan acá (413).
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from app.features.auth.deps import require_permission
 
 from . import service
 from .jobs import TooManyJobsError
-from .schemas import MAX_COLUMN_ROWS, MAX_TABLE_ROWS, UploadWorkbookBody
+from .schemas import MAX_CELLS_PER_ROW, MAX_ROWS_PER_SHEET, MAX_SHEETS, UploadWorkbookBody
 
 _can_edit = require_permission("model.edit")
 
@@ -32,6 +33,7 @@ _GUARD_DETAIL = {
     "has-errors": (status.HTTP_409_CONFLICT,
                    "The validation report has errors: fix the workbook and validate it again."),
     "busy": (status.HTTP_409_CONFLICT, "Another upload is being applied to this version; wait for it to finish."),
+    "profile-not-found": (status.HTTP_404_NOT_FOUND, "Upload profile not found in this project."),
 }
 
 
@@ -47,13 +49,14 @@ def _mapped(res, missing: str = "Version not found."):
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def start_validation(cs_id: str, body: UploadWorkbookBody, user: dict = Depends(_can_edit)):
-    n_tables = len(body.sheets.tables.rows) if body.sheets.tables else 0
-    n_columns = len(body.sheets.columns.rows) if body.sheets.columns else 0
-    if n_tables > MAX_TABLE_ROWS or n_columns > MAX_COLUMN_ROWS:
+    too_big = (len(body.sheets) > MAX_SHEETS
+               or any(len(s.rows) > MAX_ROWS_PER_SHEET for s in body.sheets)
+               or any(len(r.cells) > MAX_CELLS_PER_ROW for s in body.sheets for r in s.rows))
+    if too_big:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"The workbook is too large: up to {MAX_TABLE_ROWS} table rows and "
-                   f"{MAX_COLUMN_ROWS} column rows per upload.")
+            detail=f"The workbook is too large: up to {MAX_SHEETS} sheets, {MAX_ROWS_PER_SHEET} rows per sheet "
+                   f"and {MAX_CELLS_PER_ROW} cells per row.")
     try:
         res = await service.start_validation(cs_id, user["username"], body)
     except TooManyJobsError as exc:

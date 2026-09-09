@@ -1,18 +1,17 @@
-"""Data Standards y naming vistos por el planner (doc 55 §4-5). Puro.
+"""Data Standards y naming vistos por el planner (doc 55 §4-5 · doc 78). Puro.
 
-`Standards` indexa las definiciones UDP por nivel y nombre normalizado, los
-parent domains por nombre, y resuelve físicos/longitudes con la naming config
-del scope. `resolve_udp_headers` cruza las cabeceras `UDP_*` de una hoja con
-las definiciones; `apply_udps` calcula el mapa `udpValues` de una entidad.
+`Standards` indexa los parent domains por nombre y resuelve físicos/longitudes
+con la naming config del scope. `apply_udps` calcula el mapa `udpValues` de
+una entidad a partir del mapeo del PERFIL (cabecera → defs, doc 78 D2): la
+resolución de cabeceras por nombre ya no existe (es explícita en el perfil).
 """
 from __future__ import annotations
 
-from app.core.facets import udp_view
 from app.core.naming import physicalize
 
 from .context import UploadContext
 from .datatypes import canonical_type
-from .normalize import clean_text, norm_enum, norm_key, norm_name, udp_header_facet
+from .normalize import clean_text, norm_enum, norm_name
 from .report import ReportBuilder
 
 _BOOL_TRUE = frozenset({"true", "si", "sí", "yes", "1", "verdadero"})
@@ -22,22 +21,11 @@ _BOOL_FALSE = frozenset({"false", "no", "0", "falso"})
 class Standards:
     def __init__(self, ctx: UploadContext) -> None:
         self.ctx = ctx
-        # Doc 69: índice por (nivel, faceta) — los homónimos lógico/físico son
-        # defs distintas y la cabecera decide la faceta (`udp_header_facet`).
-        self._defs: dict[tuple[str, str], dict[str, list[dict]]] = {}
-        for d in ctx.udp_defs:
-            level = d.get("level") or "column"
-            self._defs.setdefault((level, udp_view(d)), {}).setdefault(norm_key(d.get("name")), []).append(d)
         self._domains: dict[str, list[dict]] = {}
         for d in ctx.domains:
             self._domains.setdefault(norm_name(d.get("name")), []).append(d)
         self._domain_by_id = {d["id"]: d for d in ctx.domains if d.get("id")}
         self.type_extras = [d["defaultDataType"] for d in ctx.domains if d.get("defaultDataType")]
-
-    # ── UDP ────────────────────────────────────────────────────────────────
-    def defs_for(self, level: str, header: str) -> list[dict]:
-        view, key = udp_header_facet(header)
-        return self._defs.get((level, view), {}).get(key, [])
 
     # ── Parent domains ─────────────────────────────────────────────────────
     def domain(self, name) -> dict | None:
@@ -97,44 +85,25 @@ def udp_value(defn: dict, raw: str) -> tuple[str | None, str | None]:
     return raw, None
 
 
-def resolve_udp_headers(headers: list[str], level: str, rows_udp: list[dict[str, str]],
-                        std: Standards, rb: ReportBuilder, sheet: str) -> dict[str, dict]:
-    """Cabecera `UDP_*` → definición del nivel. Sin definición: error si la
-    columna trae algún valor (se perdería data), warning si viene vacía."""
-    out: dict[str, dict] = {}
-    for h in headers:
-        defs = std.defs_for(level, h)
-        if len(defs) == 1:
-            out[h] = defs[0]
-            continue
-        if len(defs) > 1:
-            names = ", ".join(str(d.get("name")) for d in defs)
-            rb.error(sheet, "ambiguous-udp",
-                     f"Column '{h}' matches several {level}-level UDP definitions ({names}); "
-                     "rename one of them in Data Standards.", column=h)
-            continue
-        base = f"Column '{h}' doesn't match any {level}-level UDP definition in Data Standards"
-        if any(clean_text(r.get(h)) for r in rows_udp):
-            rb.error(sheet, "unknown-udp", base + "; its values can't be loaded.", column=h)
-        else:
-            rb.warning(sheet, "unknown-udp", base + " (empty column, ignored).", column=h)
-    return out
-
-
-def apply_udps(udp_map: dict[str, dict], row_udp: dict[str, str], existing: dict | None,
-               rb: ReportBuilder, sheet: str, row: int) -> dict[str, str]:
+def apply_udps(udp_map: dict[str, list[dict]], row_udp: dict[str, str], existing: dict | None,
+               rb: ReportBuilder, sheet: str, row: int, udp_defaults: dict[str, str] | None = None,
+               is_new: bool = False) -> dict[str, str]:
     """`udpValues` resultante: parte de los valores existentes (update) o de
-    nada (alta); celda con valor → validada; celda vacía → default de la
-    definición SOLO si la entidad no tenía valor."""
+    nada (alta). Una cabecera alimenta N defs (doc 78 D2) y la celda se valida
+    contra CADA una. Celda vacía: default del mapeo (solo entidad nueva) y, si
+    no, default de la definición cuando la entidad no tenía valor."""
     values = {k: str(v) for k, v in (existing or {}).items() if v is not None}
-    for header, d in udp_map.items():
+    for header, defs in udp_map.items():
         raw = clean_text(row_udp.get(header))
-        if raw:
-            val, err = udp_value(d, raw)
-            if err:
-                rb.error(sheet, "invalid-udp-value", err, row=row, column=header)
-            elif val is not None:
-                values[d["id"]] = val
-        elif d["id"] not in values and clean_text(d.get("defaultValue")):
-            values[d["id"]] = clean_text(d.get("defaultValue"))
+        if not raw and is_new:
+            raw = clean_text((udp_defaults or {}).get(header))
+        for d in defs:
+            if raw:
+                val, err = udp_value(d, raw)
+                if err:
+                    rb.error(sheet, "invalid-udp-value", err, row=row, column=header)
+                elif val is not None:
+                    values[d["id"]] = val
+            elif d["id"] not in values and clean_text(d.get("defaultValue")):
+                values[d["id"]] = clean_text(d.get("defaultValue"))
     return values

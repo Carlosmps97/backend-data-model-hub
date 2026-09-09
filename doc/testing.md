@@ -1,6 +1,6 @@
 # Testing del backend — Data Model Hub
 
-> **Actualizado: 2026-09-08** (doc 75: proyectos independientes — suite normal 1 141 tests, verde).
+> **Actualizado: 2026-09-09** (doc 78: perfiles de carga desde Excel — suite normal 1 238 tests, verde).
 >
 > **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
@@ -24,7 +24,7 @@ flowchart TD
     B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>21 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>45 tests contra el Postgres real en schema efimero"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy, sin rutas retiradas)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 141 tests (suite normal, verde 2026-09-08) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 238 tests (suite normal, verde 2026-09-09) · services/models/schemas sin DB"]
 
     D --> C --> L --> B --> A
 
@@ -44,22 +44,22 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-09):** la suite normal son **1 189 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 234** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-09, doc 78):** la suite normal son **1 238 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 283** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**) | 12 | 51 |
 | `tests/architecture` (invariantes de capas + legado retirado) | 2 | 5 |
-| `tests/features` (todas las features; incluye los 192 de `bulk_upload`, doc 55) | 130 | 982 |
+| `tests/features` (todas las features; incluye los 239 de `bulk_upload`, docs 55/78 — perfiles de carga) | 139 | 1 029 |
 | `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 89 |
-| `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, `seed_ddl_export_rules` por proyecto, `reset_for_migration`) | 5 | 49 |
+| `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, `seed_ddl_export_rules` y `seed_upload_profiles` por proyecto, `reset_for_migration`) | 6 | 51 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
 | `tests/lakebase/test_translate.py` + `test_project_column.py` (traducción pura; corren en la suite normal) | 2 | 11 |
-| **Subtotal — suite normal** | **161** | **1 189** |
+| **Subtotal — suite normal** | **171** | **1 238** |
 | `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 45 |
-| **Total recolectado** | **162** | **1 234** |
+| **Total recolectado** | **172** | **1 283** |
 
-La carga masiva desde Excel (`tests/features/bulk_upload/`, 12 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*` son puros (contexto armado a mano con `helpers.py`), `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
+La carga masiva desde Excel (`tests/features/bulk_upload/`, 22 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*`/`policies`/`udp_facets` son puros (workbook YA interpretado por un perfil, armado a mano con `helpers.py`); los perfiles de carga (doc 78) prueban puro el modelo (`profiles_model`: catálogo + `validate_profile`), el built-in (`builtin_profile` contra el catálogo fijo de UDPs), `suggest`, `rules` y `profile_apply` (hojas, fila de cabecera, cabeceras, políticas), y con mocks el repositorio scoped (`profiles_repository`), el service (`profiles_service`: nombre único, 422, default único) y el router (`profiles_router`, con `project_client`); `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
 ---
 

@@ -28,3 +28,5 @@ class UploadContext:
     naming: dict[str, dict] = field(default_factory=dict)
     # Glosario por scope: {término: abreviatura} (entrada de `physicalize`).
     glossary: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Doc 78: el perfil de carga usado por el job (hojas, mapeos, reglas, políticas).
+    profile: dict | None = None

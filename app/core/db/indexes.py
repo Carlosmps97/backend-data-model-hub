@@ -81,6 +81,9 @@ async def ensure_indexes(db: Any) -> None:
         _try("udp_definitions", [("projectId", 1)]),
         _try("naming_config", [("projectId", 1)]),
         _try("ddl_rules", [("projectId", 1)]),
+        # Doc 78: perfiles de carga (colección chica, por proyecto).
+        _try("upload_profiles", [("flgactive", 1)]),
+        _try("upload_profiles", [("projectId", 1)]),
         _try("canonical_tables", [("flgactive", 1)]),
         # REQUERIDO por la búsqueda server-side del catálogo (?q=&limit=): el
         # top-N se ordena por physicalName, y a escala un orden sobre campos sin

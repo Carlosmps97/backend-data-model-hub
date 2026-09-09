@@ -125,10 +125,14 @@ def test_esquema_vacio_en_update_conserva_el_existente():
     assert _table_change(plan)["payload"]["schema"] == "ddv"
 
 
+def _udp_map():
+    return {"UDP_Universal": _udp_universal()}
+
+
 def test_udp_vacio_toma_el_default_al_crear():
     c = ctx(schemas=_schemas(), udp_defs=_udp_universal())
     plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Universal": ""})],
-                             table_udp_headers=["UDP_Universal"]), c)
+                             table_udp=_udp_map()), c)
     assert _table_change(plan)["payload"]["udpValues"] == {"u1": "No Definido"}
     assert plan.report["warnings"] == [] or codes(plan, "warning") == ["no-canvas"]
 
@@ -136,39 +140,24 @@ def test_udp_vacio_toma_el_default_al_crear():
 def test_udp_lista_valida_case_insensitive_y_guarda_grafia_canonica():
     c = ctx(schemas=_schemas(), udp_defs=_udp_universal())
     plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Universal": "  si "})],
-                             table_udp_headers=["UDP_Universal"]), c)
+                             table_udp=_udp_map()), c)
     assert _table_change(plan)["payload"]["udpValues"] == {"u1": "Si"}
 
 
 def test_udp_valor_fuera_de_lista_es_error():
     c = ctx(schemas=_schemas(), udp_defs=_udp_universal())
     plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Universal": "Quizas"})],
-                             table_udp_headers=["UDP_Universal"]), c)
+                             table_udp=_udp_map()), c)
     (e,) = plan.report["errors"]
     assert (e["code"], e["column"], e["row"]) == ("invalid-udp-value", "UDP_Universal", 3)
     assert "No Definido, Si, No" in e["message"]
     assert "canonical_tables" not in by_coll(plan)
 
 
-def test_udp_cabecera_sin_definicion_con_valores_es_error_y_vacia_es_warning():
-    c = ctx(schemas=_schemas())
-    plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Inventado": "x", "UDP_Vacio": ""})],
-                             table_udp_headers=["UDP_Inventado", "UDP_Vacio"]), c)
-    assert [(i["code"], i["column"]) for i in plan.report["errors"]] == [("unknown-udp", "UDP_Inventado")]
-    assert ("unknown-udp", "UDP_Vacio") in [(i["code"], i["column"]) for i in plan.report["warnings"]]
-
-
-def test_udp_de_otro_nivel_no_matchea():
-    c = ctx(schemas=_schemas(), udp_defs=[{**_udp_universal()[0], "level": "column"}])
-    plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Universal": ""})],
-                             table_udp_headers=["UDP_Universal"]), c)
-    assert "unknown-udp" in codes(plan, "warning")
-
-
 def test_udp_vacio_en_update_conserva_el_valor_existente_y_queda_unchanged():
     c = ctx(schemas=_schemas(), udp_defs=_udp_universal(), tables=[_existing(udp={"u1": "Si"})])
     plan = build_plan(parsed(tables=[trow(3, "Cliente", udp={"UDP_Universal": ""})],
-                             table_udp_headers=["UDP_Universal"]), c)
+                             table_udp=_udp_map()), c)
     assert plan.changes == []
     assert plan.report["summary"]["tables"] == {"create": 0, "update": 0, "unchanged": 1}
 
@@ -179,7 +168,7 @@ def test_udp_number_y_boolean():
     c = ctx(schemas=_schemas(), udp_defs=defs)
     plan = build_plan(parsed(tables=[trow(3, "A", schema="ddv", udp={"UDP_Peso": "12.5", "UDP_Activo": "Si"}),
                                      trow(4, "B", schema="ddv", udp={"UDP_Peso": "abc", "UDP_Activo": "tal vez"})],
-                             table_udp_headers=["UDP_Peso", "UDP_Activo"]), c)
+                             table_udp={"UDP_Peso": [defs[0]], "UDP_Activo": [defs[1]]}), c)
     a, = [ch for ch in by_coll(plan)["canonical_tables"] if ch["payload"]["logicalName"] == "A"]
     assert a["payload"]["udpValues"] == {"n": "12.5", "b": "true"}
     assert sorted((e["row"], e["column"]) for e in plan.report["errors"]) == [(4, "UDP_Activo"), (4, "UDP_Peso")]

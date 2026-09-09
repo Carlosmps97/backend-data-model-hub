@@ -150,7 +150,8 @@ def test_oneshot_stages_un_carril_por_proyecto_entre_reset_y_cierre():
     assert migr[0]["steps"][0]["cmd"][-4:] == ["--project", "PA", "--apply", "--force"]
 
     cierre = stages[3]["steps"]
-    assert [st["klass"] for st in cierre] == ["check", "core", "info", "core"]
+    assert [st["klass"] for st in cierre] == ["check", "core", "core", "info", "core"]
+    assert cierre[2]["cmd"][-3:] == ["scripts.seed_upload_profiles", "--all-projects", "--apply"]
     assert cierre[1]["cmd"][-3:] == ["scripts.seed_ddl_export_rules", "--all-projects", "--apply"]
     assert cierre[-1]["cmd"][-2:] == ["--title", "Mi Base"]
 

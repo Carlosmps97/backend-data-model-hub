@@ -961,9 +961,10 @@ def s20_composite_key_relationships() -> Suite:
 
 
 def s21_bulk_upload() -> Suite:
-    """Validate → reporte → apply dentro del draft, con polling del job: crea
-    proyecto/space/canvas/esquema/tablas/columnas; un job ajeno es 403; un
-    reporte con errores no se aplica (409); la re-carga idéntica es unchanged."""
+    """Doc 78: perfil de carga por proyecto (built-in «Plantilla BCP») +
+    Validate → reporte → apply dentro del draft, con polling del job: crea
+    subject/canvas/esquema/tablas/columnas; un job ajeno es 403; un reporte con
+    errores no se aplica (409); la re-carga idéntica es unchanged."""
     s = Suite("s21_bulk_upload")
     mod, otro = Client("modelador"), Client("modelador2")
     pname = f"{TAG} proyecto carga"
@@ -972,20 +973,28 @@ def s21_bulk_upload() -> Suite:
     t_uno, t_dos = f"{TAG} carga uno", f"{TAG} carga dos"
     p_uno, p_dos = f"{TAG}_CARGA_UNO".upper(), f"{TAG}_CARGA_DOS".upper()
 
+    # 0) perfil de carga: el built-in se materializa contra los UDP del proyecto
+    pf = mod.post(f"/api/projects/{pid}/upload-profiles/default")
+    s.eq("perfil default → 201", pf.status, 201)
+    profile_id = ((pf.data or {}).get("profile") or {}).get("id")
+    s.eq("segundo default → 409", mod.post(f"/api/projects/{pid}/upload-profiles/default").status, 409)
+    lst = mod.get(f"/api/projects/{pid}/upload-profiles").data or []
+    s.eq("lista 1 perfil, default", [(p["name"], p["isDefault"]) for p in lst], [("Plantilla BCP", True)])
+    s.eq("uploads con perfil inexistente → 404",
+         mod.post(f"/api/changesets/{cs}/uploads", {"fileName": "x.xlsx", "profileId": "nope", "sheets": []}).status, 404)
+
     def workbook(tipo_nombre="varchar(50)"):
-        hdr_t = ["PROJECT", "SPACE", "DIAGRAMA", "ESQUEMA", "TABLA_LOGICO", "TABLA_FISICA", "DEF_TABLA"]
-        hdr_c = ["TABLA_LOGICO", "CAMPO_LOGICO", "CAMPO_FISICO", "TIPO_DATO", "PK"]
-        base = {"PROJECT": pname, "SPACE": f"{TAG} space", "DIAGRAMA": f"{TAG} diagrama", "ESQUEMA": "e2e"}
-        return {"fileName": f"{TAG}.xlsx", "sheets": {
-            "tables": {"headers": hdr_t, "rows": [
-                {"row": 3, "cells": {**base, "TABLA_LOGICO": t_uno, "TABLA_FISICA": p_uno,
-                                     "DEF_TABLA": "Definición\ncon salto y ñ"}},
-                {"row": 4, "cells": {**base, "TABLA_LOGICO": t_dos, "TABLA_FISICA": p_dos}}]},
-            "columns": {"headers": hdr_c, "rows": [
-                {"row": 3, "cells": {"TABLA_LOGICO": t_uno, "CAMPO_LOGICO": "identificador",
-                                     "CAMPO_FISICO": f"{TAG}_ID".upper(), "TIPO_DATO": "bigint", "PK": "X"}},
-                {"row": 4, "cells": {"TABLA_LOGICO": t_uno, "CAMPO_LOGICO": "nombre",
-                                     "CAMPO_FISICO": f"{TAG}_NOMBRE".upper(), "TIPO_DATO": tipo_nombre}}]}}}
+        hdr_t = ["", "SUBJECT", "DIAGRAMA", "ESQUEMA", "TABLA_LOGICO", "TABLA_FISICA", "DEF_TABLA"]
+        hdr_c = ["", "TABLA_LOGICO", "CAMPO_LOGICO", "CAMPO_FISICO", "TIPO_DATO", "PK"]
+        return {"fileName": f"{TAG}.xlsx", "profileId": profile_id, "sheets": [
+            {"name": "Cargar_Tablas", "rows": [
+                {"row": 5, "cells": hdr_t},
+                {"row": 6, "cells": ["", f"{TAG} subject", f"{TAG} diagrama", "e2e", t_uno, p_uno, "Definición\ncon salto y ñ"]},
+                {"row": 7, "cells": ["", f"{TAG} subject", f"{TAG} diagrama", "e2e", t_dos, p_dos, ""]}]},
+            {"name": "Cargar_Campos", "rows": [
+                {"row": 5, "cells": hdr_c},
+                {"row": 6, "cells": ["", t_uno, "identificador", f"{TAG}_ID".upper(), "bigint", "X"]},
+                {"row": 7, "cells": ["", t_uno, "nombre", f"{TAG}_NOMBRE".upper(), tipo_nombre, ""]}]}]}
 
     def wait(job_id):
         r = None
@@ -1006,6 +1015,11 @@ def s21_bulk_upload() -> Suite:
     s.eq("resumen: 2 tablas a crear", (rep.get("summary") or {}).get("tables", {}).get("create"), 2)
     s.eq("resumen: 2 columnas a crear", (rep.get("summary") or {}).get("columns", {}).get("create"), 2)
     s.eq("resumen: 1 canvas a crear", (rep.get("summary") or {}).get("canvases", {}).get("create"), 1)
+    s.eq("resumen: 1 carpeta (subject) a crear", (rep.get("summary") or {}).get("folders", {}).get("create"), 1)
+    s.eq("reporte nombra el perfil", (rep.get("profile") or {}).get("name"), "Plantilla BCP")
+    s.eq("reporte: hojas halladas con cabecera en la fila 5",
+         [(sh["name"], sh["found"], sh["headerRow"]) for sh in rep.get("sheets") or []],
+         [("Cargar_Tablas", True, 5), ("Cargar_Campos", True, 5)])
     s.eq("job de otro usuario → 403", otro.get(f"/api/changesets/{cs}/uploads/{job['id']}").status, 403)
 
     # 2) apply async → escribe en el draft; el canvas afectado vuelve en el resultado

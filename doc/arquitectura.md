@@ -206,6 +206,7 @@ app/
     ├── summary/                    /api/summary (contadores del Home)
     ├── settings/                   /api/projects/{pid}/settings/naming (separador/case por scope) — standards.edit
     ├── bulk_upload/                /api/changesets/{cs_id}/uploads (carga masiva desde Excel, doc 55)
+    │   └── profiles/               /api/projects/{pid}/upload-profiles (perfiles de carga, doc 78)
     └── reporting/                  /api/reporting/tables|filters|columns|views (tabla de metadata por proyecto)
         └── query/                  Motor de consulta: spec (projectId obligatorio), schema (Field Catalog), compiler,
                                     parser (SQL→spec), executor (keyset), reports, views (insights), router
@@ -240,7 +241,7 @@ Una feature es un vertical de negocio autónomo. La ilustramos con `catalog`:
 
 ### 5.1 Arranque (lifespan)
 
-`create_app()` primero llama `assert_secure_config()` (falla-cerrado: con `REQUIRE_AUTH=true` y el `SECRET_KEY` de desarrollo, la app no arranca). Con `REQUIRE_AUTH=true` además se ocultan `/docs`, `/redoc` y `/openapi.json` (menos fingerprinting). El `lifespan` async abre la conexión (`db_client.connect()`: pool + DDL `ensure_base` de las tablas-colección + `ensure_indexes`) y marca `app.state.db_connected`; si la BD no responde (p. ej. compute Lakebase dormido por scale-to-zero), la app igual arranca en estado degradado y un task en background reintenta la conexión con backoff 15→120 s hasta lograrla — `/api/health` se recupera solo. **No hay seeds en el startup**: los seeds son scripts explícitos (`create_admin`, `seed_ddl_export_rules`, `mark_base_version`). En el teardown cancela el retry y cierra la conexión.
+`create_app()` primero llama `assert_secure_config()` (falla-cerrado: con `REQUIRE_AUTH=true` y el `SECRET_KEY` de desarrollo, la app no arranca). Con `REQUIRE_AUTH=true` además se ocultan `/docs`, `/redoc` y `/openapi.json` (menos fingerprinting). El `lifespan` async abre la conexión (`db_client.connect()`: pool + DDL `ensure_base` de las tablas-colección + `ensure_indexes`) y marca `app.state.db_connected`; si la BD no responde (p. ej. compute Lakebase dormido por scale-to-zero), la app igual arranca en estado degradado y un task en background reintenta la conexión con backoff 15→120 s hasta lograrla — `/api/health` se recupera solo. **No hay seeds en el startup**: los seeds son scripts explícitos (`create_admin`, `seed_ddl_export_rules`, `seed_upload_profiles`, `mark_base_version`). En el teardown cancela el retry y cierra la conexión.
 
 ### 5.2 Pila de middlewares (en el orden de `create_app`)
 
@@ -758,7 +759,8 @@ La superficie total es de **143 rutas repartidas en 26 routers** montados en `ma
 | `/api` | identity | `GET /users?can=` | sesión |
 | `/api/projects/{pid}/catalog` `/api/catalog` | catalog | `GET/POST /tables`, `GET /columns` (búsqueda por columna), `GET /search`, `GET /inventory` (por proyecto) + columns por tabla, usage, `inspect/*` (por id) | `model.edit` (escritura) |
 | `/api/changesets` `/api/versions` `/api/projects/{pid}/versions` `/api/requests` | changesets | snapshot (`projectId`), changes, submit, review, diff (`impact.deletesProject`), `POST /{cs_id}/diff/details` (§6.5), rollback, history, versions (todas o del proyecto), published del proyecto, compare | `model.edit` / `review.decide` / `rollback` |
-| `/api/changesets/{cs_id}/uploads` | bulk_upload | carga masiva desde Excel (job validate/apply) | `model.edit` |
+| `/api/changesets/{cs_id}/uploads` | bulk_upload | carga masiva desde Excel según un perfil de carga (job validate/apply) | `model.edit` |
+| `/api/projects/{pid}/upload-profiles` | bulk_upload/profiles | perfiles de carga (doc 78): hojas, fila de cabecera, mapeo cabecera → campo / UDP L y/o F, reglas con severidad, políticas; catálogo, validate, suggest, built-in «Plantilla BCP» | `model.edit` |
 | `/api/projects/{pid}/ddl-rules` | ddl_rules | 8 rutas: reglas, config, artifacts, templates (lectura) + validate, test, impact (cómputo) + render | sesión; `render` exige `export` |
 | `/api` | projects | `GET/POST /projects` (crear con `copyFrom`), `GET /projects/{pid}/counts`, subject-areas, layout, views, diagram | `model.edit` (escritura) |
 | `/api/folders` `/api/projects/{pid}/schemas` `/api/schemas/{sid}` `/api/relationships` `/api/views` | folders/schemas/rel/views | CRUD del canvas y del esquema físico del proyecto | `model.edit` (escritura) |

@@ -47,3 +47,25 @@ def test_issues_in_cuenta_incidencias_por_hoja_y_filas():
     assert rb.issues_in("Tablas", [3]) == 1
     assert rb.issues_in("Atributos", [10, 11]) == 2
     assert rb.issues_in("Tablas", []) == 0
+
+
+def test_reporte_traduce_roles_a_nombres_de_hoja_y_agrupa_por_rol():
+    rb = ReportBuilder(sheet_names={"tables": "Cargar_Tablas", "columns": "Cargar_Campos"})
+    rb.error("tables", "x", "m", row=6, column="TABLA_LOGICO")
+    rb.warning("workbook", "y", "n")
+    rb.add(Issue("warning", "Cargar_Campos", 7, None, "z", "k"))      # issue ya traducida (apply_profile)
+    rb.issue("warning", "profile", "w", "q")
+    out = rb.build({}, [], profile={"id": "p", "name": "Plantilla BCP"},
+                   sheets=[{"role": "tables", "name": "Cargar_Tablas", "found": True, "headerRow": 5, "rows": 1}])
+    assert [i["sheet"] for i in out["errors"]] == ["Cargar_Tablas"]
+    assert [i["sheet"] for i in out["warnings"]] == ["Cargar_Campos", "Profile", "Workbook"]
+    assert rb.issues_in("tables", [6]) == 1 and rb.issues_in("columns", [7]) == 1
+    assert out["profile"]["name"] == "Plantilla BCP" and out["sheets"][0]["headerRow"] == 5
+    assert rb.sheet_name("columns") == "Cargar_Campos"
+
+
+def test_sin_nombres_los_roles_caen_a_la_plantilla_historica():
+    rb = ReportBuilder()
+    rb.error("tables", "x", "m", row=3)
+    out = rb.build({}, [])
+    assert out["errors"][0]["sheet"] == "Tablas" and out["profile"] is None and out["sheets"] == []

@@ -82,11 +82,17 @@ def test_tabla_existente_ya_en_el_canvas_no_genera_cambios():
     assert plan.report["warnings"] == []
 
 
-def test_diagrama_sin_project_es_error_y_no_crea_estructura():
-    plan = build_plan(parsed(tables=[trow(3, "Cliente", diagram="D", schema="ddv")]), ctx())
-    assert codes(plan, "error") == ["missing-required"]
-    assert plan.report["errors"][0]["column"] == "PROJECT" and plan.report["errors"][0]["row"] == 3
-    assert "subject_areas" not in by_coll(plan) and "projects" not in by_coll(plan)
+def test_diagrama_sin_project_usa_el_proyecto_de_la_version():
+    """Doc 78: la plantilla nueva no trae PROJECT — la estructura cuelga del
+    proyecto del changeset (doc 75: nunca se crea otro)."""
+    plan = build_plan(parsed(tables=[trow(3, "Cliente", subject="SA", diagram="D", schema="ddv")]), ctx(), new_id=seq_ids())
+    assert plan.has_errors is False
+    b = by_coll(plan)
+    folder, = b["folders"]
+    canvas, = b["subject_areas"]
+    assert (folder["payload"]["projectId"], folder["payload"]["parentFolderId"]) == ("p1", None)
+    assert canvas["payload"]["projectId"] == "p1" and canvas["payload"]["folderId"] == folder["entityId"]
+    assert plan.report["tables"][0]["canvas"] == "SA / D"
 
 
 def test_tabla_nueva_sin_diagrama_es_warning_no_canvas():

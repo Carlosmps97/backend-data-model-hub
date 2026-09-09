@@ -1,7 +1,9 @@
-"""Planner de la carga masiva (doc 55 §5-6): del workbook parseado + contexto
-efectivo a un `Plan` — reporte (errores/warnings/resumen), cambios en orden
-de dependencia (docs COMPLETOS) y canvases afectados. Puro y determinista
-(los ids nuevos se inyectan).
+"""Planner de la carga masiva (doc 55 §5-6 · doc 78): del workbook ya
+interpretado por el perfil (`profiles/apply`) + contexto efectivo a un `Plan`
+— reporte (errores/warnings/resumen), cambios en orden de dependencia (docs
+COMPLETOS) y canvases afectados. Puro y determinista (los ids nuevos se
+inyectan). `PlanOptions` trae lo que el perfil decide sobre el planner:
+`mustExist` por campo y las políticas `onExisting*`.
 """
 from __future__ import annotations
 
@@ -16,11 +18,33 @@ from .plan_columns import plan_columns
 from .plan_structure import SchemaResolver, StructurePlanner, zero_counts
 from .plan_tables import TableIndex, TablePlan, plan_tables, resolve_identity
 from .report import SHEET_COLUMNS, SHEET_TABLES, ReportBuilder
-from .standards import Standards, resolve_udp_headers
+from .standards import Standards
 
 # Orden de dependencia para el apply (mismo criterio que VERSIONED).
 _ORDER = ("projects", "folders", "subject_areas", "schemas", "canonical_tables", "canonical_columns")
-_FATAL = frozenset({"missing-sheet", "empty-workbook"})
+_FATAL = frozenset({"missing-sheet", "empty-workbook", "missing-header"})
+
+
+@dataclass
+class PlanOptions:
+    must_exist: dict[str, str] = field(default_factory=dict)   # field → 'error' | 'warning'
+    on_existing_table: str = "update"
+    on_existing_column: str = "update"
+
+    @classmethod
+    def from_profile(cls, profile: dict) -> "PlanOptions":
+        must: dict[str, str] = {}
+        for role in ("tables", "columns"):
+            for m in (((profile.get("sheets") or {}).get(role) or {}).get("mappings") or []):
+                t = m.get("target") or {}
+                if t.get("kind") != "field":
+                    continue
+                for r in m.get("rules") or []:
+                    if r.get("type") == "mustExist":
+                        must[t["field"]] = r.get("severity") or "error"
+        pol = profile.get("policies") or {}
+        return cls(must_exist=must, on_existing_table=pol.get("onExistingTable") or "update",
+                   on_existing_column=pol.get("onExistingColumn") or "update")
 
 
 @dataclass
@@ -81,33 +105,32 @@ def _breakdown(table_plans: list[TablePlan], rb: ReportBuilder) -> list[dict]:
 
 
 def build_plan(parsed: ParsedWorkbook, ctx: UploadContext,
-               new_id: Callable[[], str] | None = None) -> Plan:
+               new_id: Callable[[], str] | None = None, options: PlanOptions | None = None) -> Plan:
     new_id = new_id or (lambda: str(uuid.uuid4()))
-    rb = ReportBuilder()
+    options = options or PlanOptions()
+    rb = ReportBuilder(sheet_names=parsed.sheet_names)
     rb.extend(parsed.issues)
     counts = _empty_counts()
-    if any(i.code in _FATAL for i in parsed.issues):
-        return Plan(report=rb.build(counts, []), counts=counts, has_errors=True)
+    meta = {"profile": parsed.profile_ref, "sheets": parsed.sheets_info}
+    if parsed.fatal or any(i.code in _FATAL for i in parsed.issues):
+        return Plan(report=rb.build(counts, [], **meta), counts=counts, has_errors=True)
 
     std = Standards(ctx)
     schemas = SchemaResolver(ctx, rb, new_id)
-    table_udp = resolve_udp_headers(parsed.table_udp_headers, "table", [t.udp for t in parsed.tables],
-                                    std, rb, SHEET_TABLES)
-    column_udp = resolve_udp_headers(parsed.column_udp_headers, "column", [c.udp for c in parsed.columns],
-                                     std, rb, SHEET_COLUMNS)
-    table_plans = plan_tables(parsed, ctx, std, schemas, table_udp, rb, new_id)
-    column_plans = plan_columns(parsed, ctx, std, table_plans, column_udp, rb, new_id)
+    table_plans = plan_tables(parsed, ctx, std, schemas, parsed.table_udp, rb, new_id, options)
+    column_plans = plan_columns(parsed, ctx, std, table_plans, parsed.column_udp, rb, new_id, options)
 
-    structure = StructurePlanner(ctx, rb, new_id)
+    structure = StructurePlanner(ctx, rb, new_id, headers=parsed.headers.get("tables"), must_exist=options.must_exist)
     for tp in table_plans:
         if tp.from_sheet and tp.action != "error":
             structure.place(tp)
     structure.canvas_warnings()
+    diagram_header = parsed.header("tables", "diagram", "DIAGRAMA")
     for tp in table_plans:
         if tp.from_sheet and tp.action == "create" and not clean_text((tp.canvas or {}).get("diagram")):
             rb.warning(SHEET_TABLES, "no-canvas",
-                       f"Table '{tp.physical}' will be created without a diagram (DIAGRAMA is empty).",
-                       row=tp.row, column="DIAGRAMA")
+                       f"Table '{tp.physical}' will be created without a diagram ({diagram_header} is empty).",
+                       row=tp.row, column=diagram_header)
 
     by_coll: dict[str, list[dict]] = {k: [] for k in _ORDER}
     for ch in structure.changes() + schemas.changes():
@@ -130,5 +153,5 @@ def build_plan(parsed: ParsedWorkbook, ctx: UploadContext,
     counts["schemas"] = schemas.counts()
 
     changes = [ch for coll in _ORDER for ch in by_coll[coll]]
-    return Plan(report=rb.build(counts, _breakdown(table_plans, rb)), changes=changes,
+    return Plan(report=rb.build(counts, _breakdown(table_plans, rb), **meta), changes=changes,
                 affected_canvas_ids=structure.affected_canvas_ids(), counts=counts, has_errors=rb.has_errors)

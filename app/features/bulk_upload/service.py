@@ -1,13 +1,15 @@
-"""Orquestación de la carga masiva (doc 55 §3.2, §6-7).
+"""Orquestación de la carga masiva (doc 55 §3.2, §6-7 · doc 78).
 
 Semántica de guards (misma que `changesets.service.add_change`): `None` = el
 changeset no existe; `"forbidden"` = el actor no es el owner; `"locked"` = la
-versión ya no está en draft. Los jobs corren como tasks de asyncio y el front
+versión ya no está en draft; `"profile-not-found"` = el perfil no existe en
+el proyecto de la versión. Los jobs corren como tasks de asyncio y el front
 hace polling de `get_job`.
 
-`start_apply` SIEMPRE re-valida contra el estado efectivo fresco antes de
-escribir: otro usuario pudo publicar o el owner editar entre Validate y
-Upload. Si aparecen errores, el job falla con el reporte nuevo y no escribe.
+`start_apply` SIEMPRE re-valida contra el estado efectivo fresco (y el perfil
+releído) antes de escribir: otro usuario pudo publicar o el owner editar
+entre Validate y Upload. Si aparecen errores, el job falla con el reporte
+nuevo y no escribe.
 """
 from __future__ import annotations
 
@@ -22,15 +24,18 @@ from app.features.changesets.validation import (
 
 from . import loader
 from .jobs import UploadJob, registry
-from .parser import parse_workbook
-from .planner import Plan, build_plan, referenced_table_ids
+from .planner import Plan, PlanOptions, build_plan, referenced_table_ids
+from .profiles.apply import apply_profile
+from .profiles.models import validate_profile
+from .report import DEFAULT_SHEET_NAMES, SHEET_PROFILE, Issue
 from .schemas import UploadWorkbookBody
 
 log = logging.getLogger(__name__)
 
 # Tanda por request al bulk (mismo criterio que el front, doc 39).
 APPLY_BATCH = 1000
-_VALIDATION_STEPS = 5
+_VALIDATION_STEPS = 6
+_UDP_PROBLEMS = frozenset({"udp-unknown", "udp-wrong-level"})
 
 
 async def _guard(cs_id: str, actor: str) -> dict | str | None:
@@ -55,16 +60,30 @@ def _find(cs_id: str, actor: str, job_id: str) -> UploadJob | str | None:
 
 async def validate_workbook(cs_id: str, body: UploadWorkbookBody,
                             progress: Callable[[str, int, int], None]) -> Plan:
-    """Parser + contexto efectivo + planner. Compartido por validate y apply."""
+    """Contexto efectivo + perfil + aplicación del perfil (reglas) + planner.
+    Compartido por validate y apply. Un perfil borrado entre medio revienta
+    con un mensaje legible (el job queda `failed`)."""
     progress("Reading workbook", 1, _VALIDATION_STEPS)
-    parsed = parse_workbook(body)
-    progress("Loading model state", 2, _VALIDATION_STEPS)
     ctx = await loader.load_context(cs_id)
-    progress("Loading columns of referenced tables", 3, _VALIDATION_STEPS)
+    progress("Loading profile", 2, _VALIDATION_STEPS)
+    profile = await loader.load_profile(ctx.project_id, body.profileId)
+    if profile is None:
+        raise RuntimeError("Upload profile not found (it may have been deleted): pick another profile and validate again.")
+    ctx.profile = profile
+    problems = validate_profile(profile, ctx.udp_defs)
+    progress("Applying profile and rules", 3, _VALIDATION_STEPS)
+    parsed = apply_profile(body, profile, ctx.udp_defs)
+    if problems:
+        for pr in problems:
+            code = "profile-udp-missing" if pr["code"] in _UDP_PROBLEMS else "profile-invalid"
+            parsed.issues.append(Issue("error", DEFAULT_SHEET_NAMES[SHEET_PROFILE], None, pr["path"], code,
+                                       f"Profile '{profile.get('name')}': {pr['message']} Fix the profile and validate again."))
+        parsed.fatal = True
+    progress("Loading columns of referenced tables", 4, _VALIDATION_STEPS)
     ctx.columns_by_table = await loader.load_columns(cs_id, referenced_table_ids(parsed, ctx))
-    progress("Validating rows", 4, _VALIDATION_STEPS)
-    plan = build_plan(parsed, ctx)
-    progress("Building report", 5, _VALIDATION_STEPS)
+    progress("Validating rows", 5, _VALIDATION_STEPS)
+    plan = build_plan(parsed, ctx, options=PlanOptions.from_profile(profile))
+    progress("Building report", 6, _VALIDATION_STEPS)
     return plan
 
 
@@ -114,6 +133,8 @@ async def start_validation(cs_id: str, actor: str, body: UploadWorkbookBody) -> 
     cs = await _guard(cs_id, actor)
     if not isinstance(cs, dict):
         return cs
+    if await loader.load_profile(cs.get("projectId") or "", body.profileId) is None:
+        return "profile-not-found"
     job = registry.create(cs_id, actor, body.fileName, body)
     job.task = asyncio.create_task(_run_validation(job))
     return job.view()
