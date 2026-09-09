@@ -443,7 +443,13 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
         known = await repository.column_tables_by_ids(list(c_ch))
         counts = adjust_column_counts(counts, c_ch, known, scope)
 
-    views = await views_repo.list_all(table_ids=table_ids) if table_ids else []
+    # Perf del Explorer en proyectos grandes: las vistas se acotan por
+    # `projectId` (índice, doc 75 D19) en lugar de un `$in` de miles de ids
+    # sobre el array jsonb `sourceTableIds` — ese `$or` sin proyecto ESCANEA las
+    # vistas de TODOS los proyectos y en UDV INT FISICO (2288 tablas / 1534
+    # vistas) a veces excede el timeout del front («Couldn't load the project
+    # catalog»). El filtro por fuentes de más abajo conserva el alcance exacto.
+    views = await views_repo.list_all(project_id=project_id) if table_ids else []
     v_ch = changes.get("views") or {}
     if v_ch:
         in_v = {v["id"] for v in views}

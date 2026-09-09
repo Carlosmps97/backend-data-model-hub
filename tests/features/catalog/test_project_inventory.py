@@ -109,3 +109,22 @@ def test_inventario_incluye_tablas_del_proyecto_fuera_de_canvas(monkeypatch):
     out = asyncio.run(service.project_inventory("p1", None))
     assert [t["physicalName"] for t in out["tables"]] == ["A", "B"]   # B no está en ningún canvas
     assert out["total"]["tables"] == 2
+
+
+def test_project_inventory_consulta_vistas_por_projectid_no_por_ids(monkeypatch):
+    """Perf/fiabilidad: las vistas se piden por `projectId` (índice, doc 75 D19),
+    NO con un `$in` de miles de ids sobre el array jsonb `sourceTableIds` — ese
+    `$or` sin proyecto escanea las vistas de TODOS los proyectos y disparaba
+    «Couldn't load the project catalog» (timeout) en UDV INT FISICO."""
+    list_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(service.repository, "canvases_of_project",
+                        AsyncMock(return_value=[{"id": "sa1", "projectId": "p1", "tableIds": ["t1"], "viewIds": None}]))
+    monkeypatch.setattr(service.repository, "table_ids_of_project", AsyncMock(return_value=["t1", "t2"]))
+    monkeypatch.setattr(service.repository, "list_tables_by_ids",
+                        AsyncMock(return_value=[{"id": "t1", "projectId": "p1", "physicalName": "A", "logicalName": "a", "schema": "s"}]))
+    monkeypatch.setattr(service.repository, "column_counts_for", AsyncMock(return_value={"t1": 1}))
+    monkeypatch.setattr(service.repository, "column_tables_by_ids", AsyncMock(return_value={}))
+    monkeypatch.setattr("app.features.views.repository.list_all", list_all)
+    monkeypatch.setattr("app.features.changesets.repository.changes_map", AsyncMock(return_value={}))
+    asyncio.run(service.project_inventory("p1"))
+    list_all.assert_awaited_once_with(project_id="p1")               # acotado por proyecto, sin table_ids
