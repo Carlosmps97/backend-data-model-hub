@@ -395,6 +395,30 @@ def adjust_column_counts(counts: dict[str, int], col_changes: dict,
     return out
 
 
+def view_row(v: dict) -> dict:
+    """Fila SLIM de vista para el árbol del Explorer: lo que se pinta (nombre,
+    esquema, fuentes) + el CONTEO de columnas de salida. Las columnas en sí se
+    piden al expandir (`view_columns`), igual que las de una tabla.
+
+    Acepta las DOS formas que conviven tras el overlay: una fila ya slim del
+    repositorio (trae `columnCount`) o el doc COMPLETO del payload de un cambio
+    del draft (del que se derivan el conteo y el flag `custom`, doc 61). Pura.
+    """
+    if "columnCount" in v:
+        return v
+    from app.features.views.membership import view_sources
+    custom = bool((v.get("customSql") or "").strip())
+    cols = v.get("customColumns") if custom else v.get("sources")
+    return {
+        "id": v.get("id"),
+        "name": v.get("name") or "",
+        "schema": v.get("schema"),
+        "sourceTableIds": list(view_sources(v)),
+        "columnCount": len(cols or []),
+        "custom": custom,
+    }
+
+
 async def project_inventory(project_id: str, changeset_id: str | None = None) -> dict:
     """Inventario del proyecto para el Explorer unificado (doc 72 §1): sus
     tablas (con `columnCount`) y las vistas cuyas fuentes son esas tablas, en
@@ -405,14 +429,20 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
     cambios) y vistas (las que tocan el alcance; re-filtro por fuentes).
 
     Contrato: {"tables": [{id, physicalName, logicalName, schema, description,
-    columnCount}], "views": [vista normalizada…], "canvases": int,
-    "total": {"tables": int, "views": int}} — tablas por esquema › nombre."""
+    columnCount}], "views": [{id, name, schema, sourceTableIds, columnCount,
+    custom}], "canvases": int, "total": {"tables": int, "views": int}} — tablas
+    por esquema › nombre. Ambas listas llevan CONTEO de columnas, no columnas:
+    las de una tabla se piden con `list_columns` y las de una vista con
+    `view_columns`, al expandir."""
     from app.core.versioning.overlay import overlay
     from app.features.changesets import repository as cs_repo
     from app.features.views.membership import view_sources
 
     sas = await repository.canvases_of_project(project_id)
-    table_ids = await repository.table_ids_of_project(project_id)
+    # UNA consulta lite trae las tablas del proyecto Y sus ids (antes eran dos:
+    # `table_ids_of_project` + `list_tables_by_ids` con el doc completo).
+    tables = await repository.table_rows_of_project(project_id)
+    table_ids = [t["id"] for t in tables]
     changes: dict = {}
     if changeset_id:
         changes = await cs_repo.changes_map(
@@ -433,23 +463,24 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
                 table_ids.append(eid)
 
     scope = set(table_ids)
-    tables = await repository.list_tables_by_ids(table_ids)
     t_ch = changes.get("canonical_tables") or {}
     if t_ch:
+        # El overlay suma las altas del draft (su doc COMPLETO) sobre las filas
+        # lite; las bajas ya salieron de `scope` y el armado de `rows` las filtra.
         tables = overlay(tables, {e: c for e, c in t_ch.items() if e in scope})
-    counts = await repository.column_counts_for(table_ids)
+    counts = await repository.column_counts_for(project_id) if table_ids else {}
     c_ch = changes.get("canonical_columns") or {}
     if c_ch:
         known = await repository.column_tables_by_ids(list(c_ch))
         counts = adjust_column_counts(counts, c_ch, known, scope)
 
-    # Perf del Explorer en proyectos grandes: las vistas se acotan por
-    # `projectId` (índice, doc 75 D19) en lugar de un `$in` de miles de ids
-    # sobre el array jsonb `sourceTableIds` — ese `$or` sin proyecto ESCANEA las
-    # vistas de TODOS los proyectos y en UDV INT FISICO (2288 tablas / 1534
-    # vistas) a veces excede el timeout del front («Couldn't load the project
-    # catalog»). El filtro por fuentes de más abajo conserva el alcance exacto.
-    views = await views_repo.list_all(project_id=project_id) if table_ids else []
+    # Perf del Explorer en proyectos grandes (medido 2026-09-08): las vistas se
+    # acotan por `projectId` (índice, doc 75 D19) — no con un `$in` de miles de
+    # ids sobre el array jsonb `sourceTableIds`, que ESCANEA las vistas de TODOS
+    # los proyectos — y llegan SLIM (`rows_of_project`: lo que se pinta + el
+    # conteo), sin `sql` ni `sources`. Juntos bajan «Modelo DDV» de 36.7 MB a
+    # ~1.2 MB; antes el volumen disparaba «Couldn't load the project catalog».
+    views = await views_repo.rows_of_project(project_id) if table_ids else []
     v_ch = changes.get("views") or {}
     if v_ch:
         in_v = {v["id"] for v in views}
@@ -457,10 +488,12 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
         def _touches(c: dict) -> bool:
             return bool(scope & set(view_sources(c.get("payload") or {})))
 
+        # `overlay` deja el doc COMPLETO del cambio junto a las filas slim;
+        # `view_row` normaliza ambas formas a la fila del árbol.
         merged = overlay(views, {e: c for e, c in v_ch.items() if e in in_v or _touches(c)})
-        views = [views_repo.normalize(v) for v in merged]
+        views = [view_row(v) for v in merged]
     # Re-filtro post-overlay: un upsert pudo re-apuntar la vista fuera del alcance.
-    views = [v for v in views if scope & set(view_sources(v))]
+    views = [v for v in views if scope & set(v["sourceTableIds"])]
     views.sort(key=lambda v: ((v.get("schema") or "").lower(), (v.get("name") or "").lower()))
 
     rows = [{
@@ -471,6 +504,39 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
     rows.sort(key=lambda t: ((t["schema"] or "").lower(), t["physicalName"].lower()))
     return {"tables": rows, "views": views, "canvases": len(sas),
             "total": {"tables": len(rows), "views": len(views)}}
+
+
+async def view_columns(view_id: str, changeset_id: str | None = None) -> list[dict] | None:
+    """Columnas de SALIDA de UNA vista, para expandirla en el Explorer — el
+    inventario sólo trae el conteo, igual que con las tablas. Vista Regular →
+    sus `sources`; Personalizada (doc 61) → sus `customColumns`. Con
+    `changeset_id` aplica el overlay del draft. None si la vista no existe en el
+    estado efectivo (el router responde 404).
+
+    Forma UNIFORME (las dos clases de vista salen igual, así el cliente tiene un
+    solo mapeo) y sólo con lo que el árbol pinta — `description` y el resto del
+    doc no viajan: {outputAlias, column, tableId, table, castType, expression}.
+    `tableId` deja que el cliente resuelva el nombre de la tabla fuente con el
+    inventario que ya tiene.
+    """
+    from app.core.versioning.overlay import overlay
+    from app.features.changesets import repository as cs_repo
+
+    docs = await views_repo.list_by_ids([view_id])
+    if changeset_id:
+        changes = await cs_repo.changes_map(changeset_id, ["views"])
+        docs = overlay(docs, {e: c for e, c in (changes.get("views") or {}).items() if e == view_id})
+    view = next((v for v in docs if v.get("id") == view_id), None)
+    if view is None:
+        return None
+    if bool((view.get("customSql") or "").strip()):
+        return [{"outputAlias": c.get("name"), "column": None, "tableId": None,
+                 "table": None, "castType": None, "expression": c.get("expression")}
+                for c in (view.get("customColumns") or [])]
+    return [{"outputAlias": s.get("outputAlias"), "column": s.get("column"),
+             "tableId": s.get("tableId"), "table": s.get("table"),
+             "castType": s.get("castType"), "expression": s.get("expression")}
+            for s in (view.get("sources") or [])]
 
 
 # ── Object Inspector (doc 72 §3): metadata completa de UN objeto, sin canvas ──

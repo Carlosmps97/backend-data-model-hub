@@ -181,6 +181,28 @@ async def table_ids_of_project(project_id: str) -> list[str]:
     return [str(d["_id"]) for d in docs]
 
 
+_TABLE_LITE = {"physicalName": 1, "logicalName": 1, "schema": 1, "description": 1}
+
+
+async def table_rows_of_project(project_id: str) -> list[dict]:
+    """Filas LITE de las tablas del proyecto para el ÁRBOL del Explorer: sólo
+    los campos que el inventario pinta. Doc 75 §6.2: el alcance es el
+    `projectId` — una tabla sin canvas también es del proyecto.
+
+    Sustituye al par `table_ids_of_project` + `list_tables_by_ids`, que eran DOS
+    consultas a la MISMA colección para lo mismo (0.80 s + 1.44 s en «Modelo
+    DDV») por UNA con proyección (0.43 s, medido 2026-09-08): el doc completo de
+    tabla trae metadata que el árbol no usa y validar 2 129 docs con Pydantic
+    tampoco es gratis. `list_tables_by_ids` se conserva intacta para el resto de
+    llamadores (canvas, proyectos, DDL), que sí necesitan el doc completo."""
+    db = await get_db()
+    docs = await db[TABLES].find(scoped(project_id, {"flgactive": {"$ne": False}}),
+                                 _TABLE_LITE).to_list(None)
+    return [{"id": str(d["_id"]), "physicalName": d.get("physicalName") or "",
+             "logicalName": d.get("logicalName") or "", "schema": d.get("schema"),
+             "description": d.get("description")} for d in docs]
+
+
 async def project_of_table(table_id: str) -> str | None:
     """Proyecto dueño de una tabla activa, o None si no existe."""
     db = await get_db()
@@ -194,14 +216,19 @@ async def count_active(project_id: str, collection: str) -> int:
     return await db[collection].count_documents(scoped(project_id, {"flgactive": {"$ne": False}}))
 
 
-async def column_counts_for(table_ids: list[str]) -> dict[str, int]:
-    """Conteo de columnas activas por tabla ACOTADO a `table_ids` (`$match` +
-    `$group` server-side, mismo patrón que el reporting paginado): el Explorer
-    muestra el badge sin materializar columnas."""
-    if not table_ids:
-        return {}
+async def column_counts_for(project_id: str) -> dict[str, int]:
+    """Conteo de columnas activas por tabla DEL PROYECTO (`$match` + `$group`
+    server-side): el Explorer muestra el badge sin materializar columnas.
+
+    Perf (medido 2026-09-08 en UDV INT FISICO, 2 288 tablas / 46 196 columnas):
+    acotar por `projectId` (índice) tarda **0.9 s** contra **27 s** del
+    `tableId: {"$in": [...2 288 ids]}` que se usaba antes — el `$in` masivo era
+    el 85 % del tiempo del inventario y lo que disparaba «Couldn't load the
+    project catalog». Ambos devuelven EXACTAMENTE los mismos grupos y conteos
+    (verificado); por proyecto puede devolver tablas fuera del alcance del
+    draft, pero es inofensivo: `project_inventory` sólo lee las del alcance."""
     db = await get_db()
-    pipeline = [{"$match": {"flgactive": {"$ne": False}, "tableId": {"$in": list(table_ids)}}},
+    pipeline = [{"$match": {"flgactive": {"$ne": False}, "projectId": project_id}},
                 {"$group": {"_id": "$tableId", "n": {"$sum": 1}}}]
     rows = await db[COLUMNS].aggregate(pipeline).to_list(None)
     return {r["_id"]: r["n"] for r in rows if r.get("_id") is not None}

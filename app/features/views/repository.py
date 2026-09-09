@@ -60,6 +60,41 @@ async def list_all(table_id: str | None = None, table_ids: list[str] | None = No
     return [_dump(ViewDoc.model_validate(_to(d))) for d in docs]
 
 
+async def rows_of_project(project_id: str) -> list[dict]:
+    """Filas SLIM de las vistas del proyecto para el ÁRBOL del Explorer: sólo lo
+    que se pinta (nombre, esquema, fuentes) + el CONTEO de columnas de salida.
+
+    Perf (medido 2026-09-08): el doc completo de vista es enorme y el árbol casi
+    no lo usa — en «Modelo DDV» las 1 932 vistas pesan 35.8 MB, de los cuales
+    `sql` (22.2 MB, el preview congelado que el árbol NUNCA pinta) y `sources`
+    (12.6 MB, sólo visibles al EXPANDIR la vista) son el 99 %; lo imprescindible
+    son 0.37 MB. El `$size` lo resuelve Postgres, así que esos arrays ni salen
+    de la BD. Las columnas se piden aparte al expandir (`catalog.view_columns`),
+    igual que las de una tabla.
+    """
+    db = await get_db()
+    pipeline = [
+        {"$match": {"projectId": project_id, "flgactive": {"$ne": False}}},
+        {"$project": {"name": 1, "schema": 1, "sourceTableIds": 1, "tableId": 1, "customSql": 1,
+                      "nSources": {"$size": {"$ifNull": ["$sources", []]}},
+                      "nCustom": {"$size": {"$ifNull": ["$customColumns", []]}}}},
+    ]
+    docs = await db[COLL].aggregate(pipeline).to_list(None)
+    rows = []
+    for d in docs:
+        custom = bool((d.get("customSql") or "").strip())
+        tid = d.get("tableId")
+        rows.append({
+            "id": str(d.get("_id") or d.get("id")),
+            "name": d.get("name") or "",
+            "schema": d.get("schema"),
+            "sourceTableIds": list(d.get("sourceTableIds") or ([tid] if tid else [])),
+            "columnCount": (d.get("nCustom") or 0) if custom else (d.get("nSources") or 0),
+            "custom": custom,
+        })
+    return rows
+
+
 async def get(vid: str) -> dict | None:
     """Vista ACTIVA por id (None si no existe / soft-deleted)."""
     db = await get_db()

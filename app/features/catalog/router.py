@@ -82,6 +82,20 @@ async def project_inventory(project_id: str, changesetId: str | None = Query(def
     return ok(await service.project_inventory(project_id, changesetId))
 
 
+@projects_catalog_router.get("/views/{view_id}/columns")
+async def view_columns(project_id: str, view_id: str, changesetId: str | None = Query(default=None),
+                       principal: Principal = Depends(current_principal)):
+    """Columnas de salida de UNA vista, al expandirla en el Explorer: el
+    inventario sólo trae el conteo (como con las tablas), así no viajan las
+    columnas de las ~2 000 vistas del proyecto. Con `changesetId` aplica el
+    overlay del draft (también `asof:`)."""
+    await ensure_changeset_visible(changesetId, principal)   # doc 70 §12
+    cols = await service.view_columns(view_id, changesetId)
+    if cols is None:
+        raise HTTPException(status_code=404, detail="View not found.")
+    return ok(cols)
+
+
 @router.get("/tables/{table_id}/columns")
 async def list_columns(table_id: str):
     return ok(await service.list_columns(table_id))
