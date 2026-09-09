@@ -21,14 +21,16 @@ comando encadena toda la secuencia (dry-run por default):
 .venv/bin/python -m scripts.run_migration --append "ruta/modelo.xml" --apply
 ```
 
-Proyecto destino por archivo (doc 75 D9): el **manifiesto** `projects.json`
-de la carpeta — `{"projects": [{"name": "Modelo DDV", "files": ["Modelo de
-Datos DDV_FISICO/*.xml"], "description": "…"}]}` — une varios XML en un
-proyecto; lo que ningún patrón matchea sigue la regla general: **un XML = un
-proyecto con el nombre del archivo**. Del `<Locator>` del Mart sólo se toman
-dominio y modelo como origen informativo (la carpeta de origen del proyecto).
-El manifiesto se valida contra los archivos reales ANTES de tocar la BD. En
-Databricks: `scripts/databricks/carga_erwin_notebook.py`.
+Proyecto destino por archivo (doc 77 §3): lo decide la **ubicación**, no un
+manifiesto. Cada **subcarpeta** de la raíz es un proyecto que se llama como
+ella y FUSIONA sus `.xml` (`MODELO DDV/*.xml` → «MODELO DDV»); cada `.xml`
+**suelto en la raíz** es su propio proyecto con el nombre del archivo
+(`UDV INT FISICO.xml` → «UDV INT FISICO»). Dos orígenes que caen al mismo
+nombre ignorando mayúsculas = `DiscoveryError` antes de tocar la BD. Del
+`<Locator>` del Mart sólo se toman dominio y modelo como origen informativo.
+Los proyectos migran en **carriles paralelos** (`--jobs`, default 4; los
+archivos de un mismo proyecto siempre en orden). En Databricks:
+`scripts/databricks/carga_erwin_notebook.py`.
 
 Paso a paso manual (lo mismo que encadena el orquestador):
 

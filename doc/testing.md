@@ -44,20 +44,20 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-08):** la suite normal son **1 141 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 186** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-09):** la suite normal son **1 189 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 234** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**) | 12 | 51 |
 | `tests/architecture` (invariantes de capas + legado retirado) | 2 | 5 |
-| `tests/features` (todas las features; incluye los 192 de `bulk_upload`, doc 55) | 133 | 959 |
+| `tests/features` (todas las features; incluye los 192 de `bulk_upload`, doc 55) | 130 | 982 |
 | `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 89 |
-| `tests/scripts` (orquestadores: `run_migration` con manifiesto, `seed_ddl_export_rules` por proyecto, `reset_for_migration`) | 3 | 24 |
+| `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, `seed_ddl_export_rules` por proyecto, `reset_for_migration`) | 5 | 49 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
 | `tests/lakebase/test_translate.py` + `test_project_column.py` (traducción pura; corren en la suite normal) | 2 | 11 |
-| **Subtotal — suite normal** | **162** | **1 141** |
+| **Subtotal — suite normal** | **161** | **1 189** |
 | `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 45 |
-| **Total recolectado** | **163** | **1 186** |
+| **Total recolectado** | **162** | **1 234** |
 
 La carga masiva desde Excel (`tests/features/bulk_upload/`, 12 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*` son puros (contexto armado a mano con `helpers.py`), `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
@@ -123,7 +123,7 @@ tests/
 │   ├── test_adapter_live.py         # suite VIVA del adaptador (45) — solo con LAKEBASE_TESTS=1
 │   ├── test_project_column.py       # traduccion projectId → columna generada project_id (5, pura — doc 75 D19)
 │   └── test_translate.py            # traduccion de updates PURA (6) — $mergeObjects (doc 56)
-└── scripts/                         # run_migration (manifiesto), seed_ddl_export_rules (por proyecto), reset_for_migration
+└── scripts/                         # run_migration (convención + carriles), create_admin, databricks/workdir, seed_ddl_export_rules (por proyecto), reset_for_migration
 ```
 
 ---
@@ -435,7 +435,7 @@ Reemplazan desde 2026-07-24 al viejo test del seed determinista (`tests/scripts/
 - **`test_policies_merge.py`:** las reglas puras de resolución del merge (`policies.py`): adopción por clave natural `schema + nombre físico` case-insensitive, conflicto de versiones resuelto por score de uso (`2×relaciones + 1×canvases + 1×vistas`, empate → gana la existente), alias de duplicados internos, dedup de relaciones por clave natural e ids namespaceados por proyecto (`project_scoped_id`, doc 75).
 - **`test_migrate_merge.py`:** `migrate` completo contra una BD fake en memoria — merge incremental end-to-end: proyecto resuelto PRIMERO y `projectId` en todo doc (doc 75), adopción con el mismo `_id` dentro del proyecto, update-in-place cuando gana la entrante, fusión de folders/canvases homónimos, unión distinta de estándares (`domain_conflicts`) y reasignación de particiones por orden físico.
 - **`test_migrate_facets.py`, `test_migrate_override.py`, `test_column_order.py`, `test_standard_udps.py`, `test_udp_allowed_values.py`:** facetas lógico/físico (doc 69), override físico persistido (doc 68), orden único de columnas (doc 74), catálogo FIJO de UDPs (doc 61 r2) y `allowedValues` completos desde `tag_Udp_Values_List`.
-- **`tests/scripts/test_run_migration.py`:** el orquestador con **manifiesto** (`projects.json`, doc 75 D9): `plan_files`/`group_by_project` (patrón → proyecto, regla general = nombre de archivo, errores `ManifestError` por patrón sin match / archivo en dos entradas / nombres repetidos), gate `quality` por proyecto y secuencia de pasos; `test_seed_ddl_export_rules.py` (`--project` / `--all-projects`, `select_projects`, skip si ya hay reglas); `test_reset_for_migration.py`.
+- **`tests/scripts/test_run_migration.py`:** el orquestador por **convención** (doc 77): `project_of`/`plan_files`/`group_by_project` (subcarpeta = un proyecto, `.xml` suelto = un proyecto, `DiscoveryError` por colisión carpeta/archivo o de casing), las ETAPAS con sus carriles (`oneshot_stages`/`append_stages`, un carril por proyecto, archivos en orden dentro del carril, peso y orden de despacho) y `execute` con carriles reales —una `threading.Barrier` prueba que corren a la vez, y hay casos de gate en rojo que deja terminar los carriles y aborta lo que sigue, de `core` en rojo que no frena al resto, y de `--jobs 1` = secuencial—; `test_create_admin.py` (whitelist SSO: admins vs. modeladores, listas vacías, dedupe, normalización); `test_databricks_workdir.py` (el `rm -rf` del notebook: guard de ruta, `..`, raíz permitida, verificación por tamaño); `test_seed_ddl_export_rules.py` (`--project` / `--all-projects`, `select_projects`, skip si ya hay reglas); `test_reset_for_migration.py`.
 
 ---
 

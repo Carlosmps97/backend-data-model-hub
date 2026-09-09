@@ -19,8 +19,8 @@ obligatorio si ya existe). Cada carga deja un reporte JSON de decisiones en
 universo aparte — sus tablas, esquemas, relaciones, vistas, canvases,
 **estándares** (glosario, dominios, defs UDP, naming, reglas DDL) y
 **versiones**. En el kit eso significa: (1) el proyecto se resuelve PRIMERO
-(por el **manifiesto** `projects.json` de la carpeta o por el nombre del
-archivo) y todo doc nace con `projectId`; (2) los ids de plataforma son
+(por la **convención de ubicación** del doc 77: subcarpeta = un proyecto,
+`.xml` suelto = un proyecto) y todo doc nace con `projectId`; (2) los ids de plataforma son
 `uuid5("<projectId>|<Long_Id de Erwin>")` — el mismo objeto Erwin cargado en
 dos proyectos tiene ids distintos; (3) la adopción por clave natural, la
 unicidad del nombre físico y el prefetch se acotan al proyecto; (4) los
@@ -60,46 +60,61 @@ resolvió por estructura, no por nombres.
 | Volver a la VERSIÓN BASE de un proyecto (deshace y borra toda versión posterior a su v1) | `reset_to_base_version` | Sí (con `--apply`) |
 | Orquestar TODO lo anterior por carpeta (one-shot destructivo) o sumar un XML (append) | `run_migration` | Sí (con `--apply`) |
 
-**Flujo recomendado: el orquestador `run_migration` (doc 54 + doc 75).**
+**Flujo recomendado: el orquestador `run_migration` (doc 54 + doc 77).**
 El one-shot por carpeta es DESTRUCTIVO (dropea el schema `dmh` completo) y
-encadena, por proyecto del manifiesto: `quality` (gate + glosario cruzado
-entre los archivos del proyecto) → reset → `create_admin` → `migrate` archivo
-por archivo → `audit_data_consistency` → `seed_ddl_export_rules --project` →
-`arrange_all --project` → `mark_base_version` (v1 de cada proyecto):
+encadena, en 4 ETAPAS: `quality` por proyecto (gate + glosario cruzado entre
+los archivos del proyecto) → reset + `create_admin` → `migrate` archivo por
+archivo → `audit_data_consistency` + `seed_ddl_export_rules --all-projects` +
+`arrange_all` + `mark_base_version` (v1 de cada proyecto):
 ```
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                  # plan (dry-run)
 .venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force  # ejecuta
 .venv/bin/python -m scripts.run_migration --append "ruta/otro.xml" [--project "…"] --apply   # suma UN xml
 ```
 `--force` sigue haciendo falta para `folder_data/` (E-REL-BROKEN ×2 en UDV
-Físico: el gate lo explica al final). `--manifest PATH` apunta a otro
-manifiesto (default `<carpeta>/projects.json`; en `--append` sólo si se pasa).
+Físico: el gate lo explica al final).
 
-**Manifiesto de proyectos (`projects.json`, doc 75 D9).** Decide a qué
-proyecto va cada archivo ANTES de tocar la BD:
-```json
-{"projects": [
-  {"name": "Modelo DDV", "files": ["Modelo de Datos DDV_FISICO/*.xml"],
-   "description": "Modelo de Datos DDV físico (CPYBCA, Otros y los demás archivos de la carpeta)"}
-]}
+**Proyecto destino por CONVENCIÓN (doc 77 §3; deroga el manifiesto
+`projects.json` de la D9 del doc 75).** Lo decide dónde está el archivo, y se
+resuelve ANTES de tocar la BD:
+
+| Ubicación del `.xml` bajo la carpeta raíz | Proyecto |
+|---|---|
+| Dentro de una subcarpeta (a cualquier profundidad) | El nombre de la **primera subcarpeta**, tal cual |
+| Suelto en la raíz | El nombre del **archivo** sin extensión |
+
 ```
-- `files` son patrones glob relativos a la carpeta (recursivos con `**`);
-  varios archivos bajo un mismo `name` = UN proyecto multi-archivo (merge
-  incremental + unión distinta de estándares).
-- **Regla general** para lo que ningún patrón matchea: un archivo = un
-  proyecto con el **nombre del archivo** sin extensión (`UDV INT FISICO.xml`
-  → «UDV INT FISICO»).
-- Validación estricta (`ManifestError`, aborta antes del wipe): patrón sin
-  match, un archivo en dos entradas, nombres repetidos o que colisionan con
-  la regla general.
-- Con `folder_data/` (4 XML) el plan da **3 proyectos**: «Modelo DDV»
-  [manifest] ×2 archivos (orígenes CPYBCA / Otros), «UDV INT FISICO» y
-  «UDV INT LOGICO» [archivo]; 13 pasos con 3 gates.
+folder_data/
+├── MODELO DDV/                 → «MODELO DDV» (los 2 XML se FUSIONAN)
+│   ├── DDV - CPYBCA.xml
+│   └── DDV Modelo de Datos Fisico Otros V0.214.xml
+├── UDV INT FISICO.xml          → «UDV INT FISICO»
+└── UDV INT LOGICO.xml          → «UDV INT LOGICO»
+```
+- Dentro de un proyecto los archivos van en orden de subruta (minúsculas): el
+  primero gana en los estándares y toma los nombres físicos libres antes que
+  `_DUPn`.
+- `DiscoveryError` (aborta antes del wipe) si dos ORÍGENES distintos caen al
+  mismo nombre ignorando mayúsculas — una subcarpeta y un `.xml` suelto
+  homónimos, o dos archivos que sólo difieren en el casing.
+- Un `projects.json` residual se ignora con un aviso: ya no decide nada.
+- Con `folder_data/` (4 XML) el plan da **3 proyectos** y 4 etapas con 3
+  carriles de gate y 3 de migrate.
+
+**Paralelismo por proyecto (`--jobs`, doc 77 §4).** Los archivos de un mismo
+proyecto son SECUENCIALES a propósito (el prefetch `_DUPn` de cada uno tiene
+que ver lo que escribió el anterior), pero entre proyectos no hay nada
+compartido desde el doc 75: los gates y los migrate corren en **carriles**, un
+carril por proyecto, hasta `--jobs` a la vez (default **4**; `--jobs 1` vuelve
+a lo secuencial con la salida en vivo). Los carriles se despachan de mayor a
+menor peso (bytes del proyecto). En un carril la salida se captura y se
+imprime COMPLETA al terminar el paso — nada se resume. Con la foto de
+`folder_data/`: 12.3 → ~8.3 min.
 
 **Secuencia manual equivalente** (lo que el orquestador hace por dentro; útil
 para diagnosticar o para el notebook corporativo):
 ```
-0)    create_admin                                        # cuenta admin + 4 roles + whitelist de Modeladores (idempotente)
+0)    create_admin                                        # cuenta admin + 4 roles + whitelist SSO (admins + Modeladores; idempotente)
 1..N) por CADA proyecto y CADA uno de sus XML:
       quality → crosscheck --project "P" → migrate --project "P" [--description "…"] (dry-run) → --apply
 Al final, por CADA proyecto:
@@ -408,10 +423,14 @@ Dry-run por default; `--apply` escribe.
   UDP Logical/Physical, mapeo de niveles UDP (Entity→table, Attribute→column,
   Model→canvas), ids deterministas uuid5 namespaceados por proyecto
   (`project_scoped_id(project_id, long_id)`, doc 75).
-- **`scripts/run_migration.py`** — orquestador (doc 54/75): lee el
-  manifiesto (`ManifestError`), planifica archivos → proyectos
-  (`plan_files`/`group_by_project`), corre el gate `quality` por proyecto y
-  encadena los scripts de arriba.
+- **`scripts/run_migration.py`** — orquestador (doc 54/77): planifica
+  archivos → proyectos por convención (`project_of`/`plan_files`/
+  `group_by_project`, `DiscoveryError` si dos orígenes colisionan), arma las
+  ETAPAS con sus carriles (`oneshot_stages`/`append_stages`) y las corre
+  (`execute`, hasta `--jobs` carriles a la vez).
+- **`scripts/databricks/workdir.py`** — `limpiar`/`verificar` del área de
+  trabajo del driver (doc 77 §5): el `rm -rf` con guard de ruta y la
+  verificación por tamaño que usa el notebook antes de copiar de ADLS.
 
 ## 9. Qué garantiza el agnosticismo (y sus límites)
 

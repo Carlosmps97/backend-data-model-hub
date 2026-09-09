@@ -1,4 +1,4 @@
-"""Orquestador de la migración Erwin (doc 54): ONE-SHOT por carpeta y APPEND.
+"""Orquestador de la migración Erwin (doc 54 + doc 77): ONE-SHOT por carpeta y APPEND.
 
 Dos modos mutuamente excluyentes:
 
@@ -8,7 +8,7 @@ ONE-SHOT (destructivo) — deja la plataforma como un primer deployment:
   Descubre TODOS los .xml (recursivo, orden determinista por subruta) y corre:
   quality POR PROYECTO (gate + glosario cruzado sólo entre los archivos que
   se unen en un mismo proyecto) → reset DESTRUCTIVO → create_admin (4 roles
-  de caja + admin/admin) → migrate archivo por archivo → audit →
+  de caja + admin + whitelist SSO) → migrate archivo por archivo → audit →
   seed_ddl_export_rules ("data functions", en todos los proyectos) →
   arrange_all → mark_base_version (v1 de cada proyecto, título parametrizable).
 
@@ -17,23 +17,32 @@ APPEND (no destructivo) — suma UN archivo sobre la base viva:
   quality → crosscheck (vs BD) → migrate → audit → arrange del proyecto.
   Sin reset, sin admin, sin seeds, sin marcador (v1 ya existe).
 
-Proyecto destino por archivo (doc 75 D9): lo decide el MANIFIESTO
-`<carpeta>/projects.json` — `{"projects": [{"name", "files": [patrones
-relativos a la carpeta], "description"?}]}` — y, para los archivos que ningún
-patrón matchea, la regla general: el nombre del archivo sin extensión (un XML =
-un proyecto). Sólo el manifiesto une varios XML en un proyecto (p. ej. los DDV
-en «Modelo DDV»); dos archivos que caerían al mismo nombre sin estar unidos
-por el manifiesto son un error, no un merge silencioso. El manifiesto se
-valida contra los archivos reales ANTES de tocar la BD. Del `<Locator>` del
-XML sólo se conservan dominio y modelo (capas del Mart) como origen
-informativo. `--project` (solo --append) fuerza un destino explícito.
+Proyecto destino por archivo (doc 77, deroga el manifiesto de la D9 del doc 75):
+lo decide la CONVENCIÓN de ubicación, no un archivo declarativo —
 
-El apply es SECUENCIAL a propósito (no configurable): la unicidad de nombres
-físicos POR PROYECTO (política `_DUPn`) depende del prefetch que cada archivo
-hace contra la BD al empezar; en paralelo se correría con fotos desactualizadas.
+  <raíz>/MODELO DDV/*.xml   → proyecto «MODELO DDV»  (la subcarpeta fusiona)
+  <raíz>/UDV INT FISICO.xml → proyecto «UDV INT FISICO»  (suelto = un proyecto)
+
+es decir: un .xml dentro de una subcarpeta pertenece al proyecto que se llama
+como esa PRIMERA subcarpeta (a cualquier profundidad), y un .xml suelto en la
+raíz es su propio proyecto con el nombre del archivo. Dos orígenes distintos
+que caen al mismo nombre ignorando mayúsculas son un error ANTES de tocar la
+BD, nunca un merge silencioso. Del `<Locator>` del XML sólo se conservan
+dominio y modelo (capas del Mart) como origen informativo. `--project` (solo
+--append) fuerza un destino explícito.
+
+El apply corre en ETAPAS (doc 77 §4). Dentro de un proyecto los archivos van
+SECUENCIALES a propósito: la unicidad de nombres físicos POR PROYECTO (política
+`_DUPn`) depende del prefetch que cada archivo hace contra la BD al empezar.
+Entre proyectos DISTINTOS no hay nada compartido (doc 75: `projectId` en todo
+doc, ids namespaceados), así que los gates y los migrate corren en CARRILES
+paralelos — un carril por proyecto, hasta `--jobs` a la vez (default 4; con
+`--jobs 1` todo vuelve a ser secuencial con la salida en vivo).
 
 Manejo de fallas por paso:
-  - quality (gate)        → detiene TODO antes de borrar nada (salvo --force)
+  - quality (gate)        → detiene TODO antes de borrar nada (salvo --force);
+                            los otros carriles del gate igual terminan (son
+                            de solo lectura) y recién ahí se aborta
   - reset / create_admin  → detienen el resto (base a medio wipe: no seguir)
   - migrate / audit / seeds / mark_base → la falla se registra, se continúa
     con el resto y el exit code final es 1 (falla VISIBLE, nunca silenciosa)
@@ -41,7 +50,9 @@ Manejo de fallas por paso:
 
 Los pasos invocan los MISMOS scripts del repo (cero lógica duplicada), cada
 uno como subproceso propio (memoria liberada entre parses de cientos de MB)
-con la salida streameada COMPLETA — nada se resume ni se oculta.
+con la salida COMPLETA — nada se resume ni se oculta. En un carril paralelo no
+se puede streamear (varios procesos escribiendo a la vez es ilegible): la
+salida se captura y se imprime entera, en bloque, apenas termina el paso.
 """
 from __future__ import annotations
 
@@ -50,9 +61,12 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import unescape
@@ -66,13 +80,18 @@ _LOCATOR_RE = re.compile(rb"<Locator>([^<]{1,600})</Locator>")
 _PEEK_CHUNK = 8 * 1024 * 1024
 _PEEK_CAP = 64 * 1024 * 1024
 
-MANIFEST_NAME = "projects.json"
-_MANIFEST_KEYS = {"name", "files", "description"}
+# Manifiesto retirado por el doc 77: si quedó uno en la carpeta, se avisa.
+LEGACY_MANIFEST = "projects.json"
+
+DEFAULT_JOBS = 4
+
+_PRINT = threading.Lock()   # serializa los bloques de salida de los carriles
 
 
-class ManifestError(ValueError):
-    """Manifiesto inválido o inconsistente con los archivos: se aborta ANTES de
-    tocar la BD (un typo en un patrón convertiría los 31 DDV en 31 proyectos)."""
+class DiscoveryError(ValueError):
+    """Los .xml de la carpeta no dan un mapa de proyectos sin ambigüedad: se
+    aborta ANTES de tocar la BD (dos orígenes al mismo proyecto sería un merge
+    silencioso de modelos que nadie pidió)."""
 
 
 # ── Descubrimiento y proyecto destino (lógica pura, testeable) ───────────────
@@ -104,100 +123,50 @@ def read_locator(path: Path, cap: int = _PEEK_CAP,
     return None
 
 
-def _glob_re(pattern: str) -> re.Pattern:
-    """Glob relativo a la raíz: `*`/`?` no cruzan `/`, `**/` sí; case-insensitive."""
-    out, i = [], 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            out.append("(?:.*/)?")
-            i += 3
-        elif pattern[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(pattern[i]))
-            i += 1
-    return re.compile("^" + "".join(out) + "$", re.IGNORECASE)
+def project_of(rel: str) -> str:
+    """Proyecto destino de una subruta (doc 77 §3): el nombre de la PRIMERA
+    subcarpeta, o el del archivo si está suelto en la raíz."""
+    parts = rel.split("/")
+    if len(parts) > 1:
+        return parts[0].strip()
+    return os.path.splitext(parts[0])[0].strip()
 
 
-def load_manifest(path: Path | None) -> dict:
-    """`{"projects": [{name, files[], description?}]}` (doc 75 D9). Sin archivo →
-    sin entradas: cada XML es un proyecto con el nombre del archivo. Estricto:
-    claves desconocidas, `name` vacío o repetido, `files` vacío → ManifestError."""
-    if path is None or not path.is_file():
-        return {"projects": []}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ManifestError(f"{path}: JSON inválido ({exc})") from exc
-    if (not isinstance(data, dict) or set(data) != {"projects"}
-            or not isinstance(data["projects"], list)):
-        raise ManifestError(f'{path}: se espera {{"projects": [...]}}')
-    seen: set[str] = set()
-    for i, entry in enumerate(data["projects"]):
-        if not isinstance(entry, dict):
-            raise ManifestError(f"{path}: entrada {i} no es un objeto")
-        extra = set(entry) - _MANIFEST_KEYS
-        if extra:
-            raise ManifestError(f"{path}: entrada {i}: claves desconocidas {sorted(extra)}")
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            raise ManifestError(f"{path}: entrada {i}: 'name' vacío")
-        if name.lower() in seen:
-            raise ManifestError(f"{path}: nombre de proyecto repetido «{name}»")
-        seen.add(name.lower())
-        files = entry.get("files")
-        if (not isinstance(files, list) or not files
-                or not all(isinstance(f, str) and f.strip() for f in files)):
-            raise ManifestError(f"{path}: «{name}»: 'files' debe ser una lista de patrones no vacía")
-    return data
+def _check_collisions(plans: list[dict]) -> None:
+    """Dos ORÍGENES distintos (subcarpetas o archivos sueltos) que caen al mismo
+    nombre de proyecto ignorando mayúsculas."""
+    origins: dict[str, dict[str, str]] = {}
+    for p in plans:
+        key = p["rel"].split("/")[0] if p["source"] == "carpeta" else p["rel"]
+        origins.setdefault(p["project"].lower(), {}).setdefault(key, p["project"])
+    for keys in origins.values():
+        if len(keys) > 1:
+            name = next(iter(keys.values()))
+            raise DiscoveryError(
+                f"nombre de proyecto repetido «{name}»: " + ", ".join(sorted(keys))
+                + " — una subcarpeta y un .xml suelto (o dos nombres que sólo "
+                  "difieren en mayúsculas) caen al mismo proyecto; renombra uno")
 
 
-def plan_files(files: list[Path], root: Path, manifest: dict,
+def plan_files(files: list[Path], root: Path,
                locator_of=read_locator) -> list[dict]:
-    """Proyecto destino por archivo: la entrada del manifiesto que lo matchea o,
-    si ninguna, el nombre del archivo (doc 75 D9). Dominio y modelo salen del
-    Locator del Mart (informativos). Valida el manifiesto contra los archivos
-    REALES: cualquier ambigüedad → ManifestError. `locator_of` es inyectable."""
-    rels = {f: str(f.relative_to(root)).replace(os.sep, "/") for f in files}
-    assigned: dict[Path, dict] = {}
-    for entry in manifest.get("projects", []):
-        name = entry["name"].strip()
-        for pattern in entry["files"]:
-            rx = _glob_re(pattern.strip())
-            hits = [f for f in files if rx.match(rels[f])]
-            if not hits:
-                raise ManifestError(f"«{name}»: el patrón {pattern!r} no matchea ningún .xml bajo {root}")
-            for f in hits:
-                prev = assigned.get(f)
-                if prev is not None and prev["name"].strip() != name:
-                    raise ManifestError(f"{rels[f]}: matchea dos entradas del manifiesto "
-                                        f"(«{prev['name'].strip()}» y «{name}»)")
-                assigned[f] = entry
+    """Proyecto destino por archivo según la CONVENCIÓN del doc 77. Dominio y
+    modelo salen del Locator del Mart (informativos); `size` alimenta el peso
+    del carril. `locator_of` es inyectable (tests)."""
     plans = []
     for f in files:
+        rel = str(f.relative_to(root)).replace(os.sep, "/")
         loc = locator_of(f)
         parsed = parse_locator(loc) if loc else None
-        entry = assigned.get(f)
         plans.append({
-            "path": f, "rel": rels[f],
-            "project": entry["name"].strip() if entry else f.stem.strip(),
-            "description": ((entry.get("description") or "").strip() or None) if entry else None,
+            "path": f, "rel": rel,
+            "project": project_of(rel),
+            "size": f.stat().st_size if f.is_file() else 0,
             "domain": parsed["domain"] if parsed else "",
             "model": parsed["model"] if parsed else f.stem.strip(),
-            "source": "manifest" if entry else "archivo",
+            "source": "carpeta" if "/" in rel else "archivo",
         })
-    by_name: dict[str, list[dict]] = {}
-    for p in plans:
-        by_name.setdefault(p["project"].lower(), []).append(p)
-    for group in by_name.values():
-        if len(group) > 1 and any(p["source"] == "archivo" for p in group):
-            raise ManifestError(f"nombre de proyecto repetido «{group[0]['project']}»: "
-                                + ", ".join(p["rel"] for p in group)
-                                + " — declara la unión en el manifiesto o renombra el archivo")
+    _check_collisions(plans)
     return plans
 
 
@@ -209,12 +178,16 @@ def group_by_project(plans: list[dict]) -> list[tuple[str, list[dict]]]:
     return list(groups.items())
 
 
-# ── Pasos del pipeline (construcción pura, testeable) ────────────────────────
+# ── Pasos y etapas (construcción pura, testeable) ────────────────────────────
 # klass: gate  = detiene todo salvo --force (corre ANTES de borrar nada)
 #        abort = su falla detiene el resto del pipeline
 #        core  = su falla marca el run como fallido, pero se continúa
 #        check = validación: igual que core (falla visible, no detiene)
 #        info  = informativo: warning, no afecta el exit code
+#
+# Una ETAPA es {"kind": "seq", "steps": [...]} (en orden, salida en vivo) o
+# {"kind": "par", "lanes": [{"lane", "weight", "steps"}]} (carriles a la vez,
+# los pasos DE UN carril siempre en orden).
 
 def _quality_cmd(xmls: list[str], quality_json: str | None) -> list[str]:
     """`--json` va ANTES de los archivos: los .xml siguen siendo los últimos args."""
@@ -224,10 +197,7 @@ def _quality_cmd(xmls: list[str], quality_json: str | None) -> list[str]:
 
 def _migrate_cmd(p: dict, force: bool) -> list[str]:
     cmd = [_PY, "-m", "scripts.erwin_migration.migrate", str(p["path"]),
-           "--project", p["project"]]
-    if p.get("description"):
-        cmd += ["--description", p["description"]]
-    cmd.append("--apply")
+           "--project", p["project"], "--apply"]
     if force:
         cmd.append("--force")
     return cmd
@@ -238,40 +208,53 @@ def _quality_json_of(quality_json: str | None, n: int) -> str | None:
     return f"{quality_json[:-5]}-{n}.json" if quality_json else None
 
 
-def oneshot_steps(plans: list[dict], *, force: bool, base_title: str,
-                  quality_json: str | None = None) -> list[dict]:
-    steps = []
+def _lane(project: str, steps: list[dict], weight: int) -> dict:
+    return {"lane": project, "weight": weight, "steps": steps}
+
+
+def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
+                   quality_json: str | None = None) -> list[dict]:
+    gates, migrates = [], []
     for n, (project, group) in enumerate(group_by_project(plans), start=1):
-        steps.append({"name": f"quality «{project}» (gate + glosario cruzado del proyecto)",
-                      "klass": "gate",
-                      "cmd": _quality_cmd([str(p["path"]) for p in group],
-                                          _quality_json_of(quality_json, n))})
-    steps += [
-        {"name": "reset DESTRUCTIVO (borra todo el schema)", "klass": "abort",
-         "cmd": [_PY, "-m", "scripts.reset_for_migration", "--apply"]},
-        {"name": "create_admin (4 roles + admin + whitelist Modeladores)", "klass": "abort",
-         "cmd": [_PY, "scripts/create_admin.py"]},
-    ]
-    for p in plans:
-        steps.append({"name": f"migrate {p['rel']} → «{p['project']}»",
-                      "klass": "core", "cmd": _migrate_cmd(p, force)})
-    steps += [
-        {"name": "audit_data_consistency", "klass": "check",
-         "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
-        {"name": "seed_ddl_export_rules (data functions, por proyecto)", "klass": "core",
-         "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]},
-        {"name": "arrange_all (layout ELK, todos los canvases)", "klass": "info",
-         "cmd": [_PY, "scripts/arrange_all.py"]},
-        {"name": "mark_base_version (v1 de cada proyecto)", "klass": "core",
-         "cmd": [_PY, "-m", "scripts.mark_base_version", "--apply",
-                 "--title", base_title]},
-    ]
-    return steps
-
-
-def append_steps(plan: dict, *, force: bool, quality_json: str | None = None) -> list[dict]:
-    xml = str(plan["path"])
+        weight = sum(p.get("size") or 0 for p in group)
+        gates.append(_lane(project, [{
+            "name": f"quality «{project}» (gate + glosario cruzado del proyecto)",
+            "klass": "gate",
+            "cmd": _quality_cmd([str(p["path"]) for p in group],
+                                _quality_json_of(quality_json, n))}], weight))
+        migrates.append(_lane(project, [{
+            "name": f"migrate {p['rel']} → «{project}»",
+            "klass": "core",
+            "cmd": _migrate_cmd(p, force)} for p in group], weight))
     return [
+        {"kind": "par", "title": "gates de calidad (un carril por proyecto)",
+         "lanes": gates},
+        {"kind": "seq", "title": "reset destructivo + accesos", "steps": [
+            {"name": "reset DESTRUCTIVO (borra todo el schema)", "klass": "abort",
+             "cmd": [_PY, "-m", "scripts.reset_for_migration", "--apply"]},
+            {"name": "create_admin (4 roles + admin + whitelist SSO)", "klass": "abort",
+             "cmd": [_PY, "scripts/create_admin.py"]},
+        ]},
+        {"kind": "par", "title": "migrate (un carril por proyecto)",
+         "lanes": migrates},
+        {"kind": "seq", "title": "cierre (validación, seeds, layout, v1)", "steps": [
+            {"name": "audit_data_consistency", "klass": "check",
+             "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
+            {"name": "seed_ddl_export_rules (data functions, por proyecto)", "klass": "core",
+             "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]},
+            {"name": "arrange_all (layout ELK, todos los canvases)", "klass": "info",
+             "cmd": [_PY, "scripts/arrange_all.py"]},
+            {"name": "mark_base_version (v1 de cada proyecto)", "klass": "core",
+             "cmd": [_PY, "-m", "scripts.mark_base_version", "--apply",
+                     "--title", base_title]},
+        ]},
+    ]
+
+
+def append_stages(plan: dict, *, force: bool,
+                  quality_json: str | None = None) -> list[dict]:
+    xml = str(plan["path"])
+    return [{"kind": "seq", "title": f"append → «{plan['project']}»", "steps": [
         {"name": "quality (gate)", "klass": "gate",
          "cmd": _quality_cmd([xml], quality_json)},
         {"name": f"crosscheck vs BD viva del proyecto «{plan['project']}»", "klass": "info",
@@ -283,44 +266,124 @@ def append_steps(plan: dict, *, force: bool, quality_json: str | None = None) ->
          "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
         {"name": f"arrange_all del proyecto «{plan['project']}»", "klass": "info",
          "cmd": [_PY, "scripts/arrange_all.py", "--project", plan["project"]]},
-    ]
+    ]}]
+
+
+def _iter_steps(stage: dict):
+    """(carril|None, paso) de una etapa, en orden natural (el del plan)."""
+    if stage["kind"] == "seq":
+        for st in stage["steps"]:
+            yield None, st
+    else:
+        for lane in stage["lanes"]:
+            for st in lane["steps"]:
+                yield lane["lane"], st
+
+
+def _stage_steps(stage: dict) -> list[dict]:
+    return [st for _, st in _iter_steps(stage)]
+
+
+def _dispatch_order(lanes: list[dict]) -> list[int]:
+    """Índices de los carriles de mayor a menor peso: con menos trabajos que
+    carriles, el proyecto grande no puede quedar de cola."""
+    return sorted(range(len(lanes)), key=lambda i: (-(lanes[i]["weight"] or 0), i))
 
 
 # ── Ejecución ────────────────────────────────────────────────────────────────
 
-def _run_step(step: dict) -> tuple[int, float]:
-    print(f"\n{'━' * 72}\n▶ {step['name']}\n  $ {' '.join(step['cmd'])}\n",
-          flush=True)
+def _run_step(step: dict, lane: str | None = None) -> tuple[int, float]:
+    """Corre un paso. Sin carril, la salida se streamea en vivo; dentro de un
+    carril paralelo se CAPTURA y se imprime COMPLETA al terminar (en bloque,
+    bajo lock) — nada se resume ni se oculta."""
+    head = f"▶ {step['name']}" if lane is None else f"▶ [{lane}] {step['name']}"
+    cmd = shlex.join(step["cmd"])
+    if lane is None:
+        print(f"\n{'━' * 72}\n{head}\n  $ {cmd}\n", flush=True)
+        t0 = time.perf_counter()
+        p = subprocess.run(step["cmd"], cwd=ROOT)
+        return p.returncode, time.perf_counter() - t0
+
+    with _PRINT:
+        print(f"\n{'┄' * 72}\n{head}\n  $ {cmd}\n  (en paralelo: su salida "
+              f"completa se imprime cuando termine)", flush=True)
     t0 = time.perf_counter()
-    p = subprocess.run(step["cmd"], cwd=ROOT)
-    return p.returncode, time.perf_counter() - t0
+    p = subprocess.run(step["cmd"], cwd=ROOT, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                       errors="replace")
+    secs = time.perf_counter() - t0
+    with _PRINT:
+        print(f"\n{'━' * 72}\n{head} — terminó en {secs:.1f}s (rc={p.returncode})\n"
+              f"  $ {cmd}\n", flush=True)
+        print(p.stdout, end="", flush=True)
+    return p.returncode, secs
 
 
-def execute(steps: list[dict], *, force: bool) -> list[dict]:
-    """Corre los pasos en orden con la política de fallas del docstring."""
-    results = []
-    abort = False
-    for st in steps:
-        if abort:
-            results.append({**st, "rc": None, "secs": 0.0,
-                            "estado": "OMITIDO", "fatal": False})
-            continue
-        rc, secs = _run_step(st)
-        estado, fatal = "OK", False
-        if rc != 0:
-            if st["klass"] == "gate":
-                if force:
-                    estado = "CON ERRORS (--force: continúa)"
-                else:
-                    estado, fatal, abort = "ERROR — DETIENE (gate)", True, True
-            elif st["klass"] == "abort":
-                estado, fatal, abort = "ERROR — DETIENE", True, True
-            elif st["klass"] in ("core", "check"):
-                estado, fatal = "ERROR", True
+def _classify(step: dict, lane: str | None, rc: int, secs: float,
+              force: bool) -> tuple[dict, bool]:
+    """(resultado, ¿detiene lo que sigue?) según la clase del paso."""
+    estado, fatal, stops = "OK", False, False
+    if rc != 0:
+        if step["klass"] == "gate":
+            if force:
+                estado = "CON ERRORS (--force: continúa)"
             else:
-                estado = "WARNING (informativo)"
-        results.append({**st, "rc": rc, "secs": secs,
-                        "estado": estado, "fatal": fatal})
+                estado, fatal, stops = "ERROR — DETIENE (gate)", True, True
+        elif step["klass"] == "abort":
+            estado, fatal, stops = "ERROR — DETIENE", True, True
+        elif step["klass"] in ("core", "check"):
+            estado, fatal = "ERROR", True
+        else:
+            estado = "WARNING (informativo)"
+    return ({**step, "lane": lane, "rc": rc, "secs": secs,
+             "estado": estado, "fatal": fatal}, stops)
+
+
+def _omitted(step: dict, lane: str | None) -> dict:
+    return {**step, "lane": lane, "rc": None, "secs": 0.0,
+            "estado": "OMITIDO", "fatal": False}
+
+
+def _run_lanes(lanes: list[dict], *, force: bool, jobs: int) -> tuple[list[dict], bool]:
+    """Corre los carriles a la vez (pasos de un carril en orden). Devuelve los
+    resultados en orden de CARRIL —no de llegada— y si algo detiene lo que sigue."""
+    def corre(lane: dict) -> list[tuple[dict, bool]]:
+        return [_classify(st, lane["lane"], *_run_step(st, lane["lane"]), force)
+                for st in lane["steps"]]
+
+    done: dict[int, list[tuple[dict, bool]]] = {}
+    with ThreadPoolExecutor(max_workers=min(jobs, len(lanes))) as ex:
+        futures = {ex.submit(corre, lanes[i]): i for i in _dispatch_order(lanes)}
+        for fut in as_completed(futures):
+            done[futures[fut]] = fut.result()
+    results = [r for i in range(len(lanes)) for r, _ in done[i]]
+    stops = any(s for i in range(len(lanes)) for _, s in done[i])
+    return results, stops
+
+
+def execute(stages: list[dict], *, force: bool, jobs: int = 1) -> list[dict]:
+    """Corre las etapas en orden con la política de fallas del docstring. Una
+    etapa paralela se corre entera (sus carriles son independientes) y recién
+    después se evalúa si algo aborta lo que sigue."""
+    results: list[dict] = []
+    abort = False
+    for stage in stages:
+        if abort:
+            results += [_omitted(st, lane) for lane, st in _iter_steps(stage)]
+            continue
+        lanes = stage["lanes"] if stage["kind"] == "par" else None
+        if lanes and jobs > 1 and len(lanes) > 1:
+            res, stops = _run_lanes(lanes, force=force, jobs=jobs)
+            results += res
+            abort = abort or stops
+            continue
+        for lane, st in _iter_steps(stage):
+            if abort:
+                results.append(_omitted(st, lane))
+                continue
+            r, stops = _classify(st, lane, *_run_step(st), force)
+            abort = abort or stops
+            results.append(r)
     return results
 
 
@@ -376,58 +439,77 @@ def _print_gate_help(quality_json: str) -> None:
           "(referencias a objetos que ya no existen en el archivo), no algo que se arregle en la plataforma.")
 
 
-def _print_summary(results: list[dict]) -> None:
+def _print_summary(results: list[dict], wall: float, jobs: int) -> None:
     print(f"\n{'═' * 72}\nRESUMEN DEL RUN")
     for r in results:
         secs = f"{r['secs']:7.1f}s" if r["rc"] is not None else "      —"
-        print(f"  [{r['estado']:<32}] {secs}  {r['name']}")
+        lane = f"[{r['lane']}] " if r.get("lane") else ""
+        print(f"  [{r['estado']:<32}] {secs}  {lane}{r['name']}")
+    total = sum(r["secs"] for r in results)
+    print(f"\n  tiempo real {wall / 60:.1f} min · suma de los pasos {total / 60:.1f} min "
+          f"(hasta {jobs} proyecto(s) en paralelo)")
 
 
 def _write_summary(mode: str, plans: list[dict], results: list[dict],
-                   started: str) -> str:
+                   started: str, jobs: int) -> str:
     out = os.path.join(str(ROOT), "migration-reports",
                        f"run_migration-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump({
-            "mode": mode, "startedAt": started,
+            "mode": mode, "startedAt": started, "jobs": jobs,
             "finishedAt": datetime.now(timezone.utc).isoformat(),
             "files": [{"rel": p["rel"], "project": p["project"],
-                       "description": p.get("description"),
                        "domain": p["domain"], "model": p["model"],
-                       "source": p["source"]} for p in plans],
-            "steps": [{"name": r["name"], "rc": r["rc"], "estado": r["estado"],
-                       "secs": round(r["secs"], 1)} for r in results],
+                       "source": p["source"], "bytes": p.get("size")} for p in plans],
+            "steps": [{"name": r["name"], "lane": r.get("lane"), "rc": r["rc"],
+                       "estado": r["estado"], "secs": round(r["secs"], 1)}
+                      for r in results],
         }, fh, ensure_ascii=False, indent=1)
     return out
 
 
-def _print_plan(title: str, plans: list[dict], steps: list[dict]) -> None:
+def _print_stage(i: int, stage: dict) -> None:
+    if stage["kind"] == "seq":
+        print(f"  {i}. [seq] {stage['title']}")
+        for st in stage["steps"]:
+            print(f"          [{st['klass']:<5}] {st['name']}")
+            print(f"            $ {shlex.join(st['cmd'])}")
+        return
+    print(f"  {i}. [par] {stage['title']} — {len(stage['lanes'])} carril(es)")
+    for lane in stage["lanes"]:
+        print(f"      carril «{lane['lane']}» ({(lane['weight'] or 0) / 1e6:,.0f} MB)")
+        for st in lane["steps"]:
+            print(f"          [{st['klass']:<5}] {st['name']}")
+            print(f"            $ {shlex.join(st['cmd'])}")
+
+
+def _print_plan(title: str, plans: list[dict], stages: list[dict], jobs: int) -> None:
     print(f"{'═' * 72}\n{title}\n{'═' * 72}")
-    print(f"\nARCHIVOS ({len(plans)}) — proyecto destino por archivo "
-          f"(manifest = {MANIFEST_NAME}; archivo = nombre del .xml):")
+    print(f"\nARCHIVOS ({len(plans)}) — proyecto destino por CONVENCIÓN (doc 77): "
+          f"subcarpeta = 1 proyecto (fusiona sus .xml); .xml suelto = 1 proyecto:")
     for p in plans:
-        mb = p["path"].stat().st_size / 1e6
-        origin = f" · origen: {p['domain']} / {p['model']}" if p["domain"] else f" · origen: {p['model']}"
+        mb = (p.get("size") or 0) / 1e6
+        origin = (f" · origen: {p['domain']} / {p['model']}" if p["domain"]
+                  else f" · origen: {p['model']}")
         print(f"  {p['rel']}  ({mb:,.0f} MB)")
         print(f"      → proyecto «{p['project']}» [{p['source']}]{origin}")
     groups = group_by_project(plans)
     print(f"\nPROYECTOS ({len(groups)}):")
     for project, group in groups:
-        desc = next((g["description"] for g in group if g.get("description")), None)
-        print(f"  «{project}»" + (f" — {desc}" if desc else ""))
+        print(f"  «{project}»")
         for g in group:
             print(f"      · {g['rel']}")
-    print(f"\nPASOS ({len(steps)}):")
-    for i, st in enumerate(steps, 1):
-        print(f"  {i:2}. [{st['klass']:<5}] {st['name']}")
-        print(f"        $ {' '.join(st['cmd'])}")
+    print(f"\nETAPAS ({len(stages)}) — hasta {jobs} proyecto(s) en paralelo "
+          f"(los archivos de un mismo proyecto siempre en orden):")
+    for i, stage in enumerate(stages, 1):
+        _print_stage(i, stage)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Orquestador de migración Erwin: one-shot por carpeta "
-                    "(destructivo) o append de un archivo (doc 54)")
+                    "(destructivo) o append de un archivo (doc 54 + doc 77)")
     ap.add_argument("--folder", help="ONE-SHOT: carpeta con los .xml (recursivo); "
                                      "DESTRUCTIVO: borra TODO el schema antes de cargar")
     ap.add_argument("--append", help="APPEND: un .xml que se SUMA a la BD viva "
@@ -438,8 +520,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="continuar aunque el gate de calidad tenga ERRORs "
                          "(migrate omite los objetos con error)")
     ap.add_argument("--project", help="(solo --append) proyecto destino explícito")
-    ap.add_argument("--manifest", help=f"manifiesto de proyectos (default en --folder: "
-                                       f"<carpeta>/{MANIFEST_NAME}; en --append sólo si se pasa)")
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"proyectos en paralelo (default {DEFAULT_JOBS}; 1 = todo "
+                         "secuencial con la salida en vivo)")
     ap.add_argument("--base-title", default="Base - Migración Erwin (XML)",
                     help="(one-shot) título del marcador de versión base v1")
     args = ap.parse_args(argv)
@@ -448,6 +531,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("exactamente uno: --folder (one-shot) o --append (un archivo)")
     if args.project and not args.append:
         ap.error("--project es solo para --append")
+    if args.jobs < 1:
+        ap.error("--jobs debe ser >= 1")
 
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")   # los subprocesos heredan os.environ
@@ -467,18 +552,17 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print(f"⛔ No hay .xml bajo {root} (búsqueda recursiva).")
             return 2
-        mpath = Path(args.manifest).expanduser() if args.manifest else root / MANIFEST_NAME
-        if args.manifest and not mpath.is_file():
-            print(f"⛔ No existe el manifiesto: {mpath}")
-            return 2
+        if (root / LEGACY_MANIFEST).is_file():
+            print(f"⚠ {root / LEGACY_MANIFEST} YA NO SE USA (doc 77): el proyecto "
+                  "sale de dónde está cada .xml. Puedes borrarlo.\n")
         try:
-            plans = plan_files(files, root, load_manifest(mpath))
-        except ManifestError as exc:
-            print(f"⛔ Manifiesto: {exc}")
+            plans = plan_files(files, root)
+        except DiscoveryError as exc:
+            print(f"⛔ Descubrimiento: {exc}")
             return 2
-        steps = oneshot_steps(plans, force=args.force, base_title=args.base_title,
-                              quality_json=quality_json)
-        _print_plan("ONE-SHOT (DESTRUCTIVO) — plan", plans, steps)
+        stages = oneshot_stages(plans, force=args.force, base_title=args.base_title,
+                                quality_json=quality_json)
+        _print_plan("ONE-SHOT (DESTRUCTIVO) — plan", plans, stages, args.jobs)
         if not args.apply:
             print("\nConteos actuales de la BD (esto es lo que se borraría):")
             _run_step({"name": "reset (dry-run informativo)",
@@ -491,31 +575,24 @@ def main(argv: list[str] | None = None) -> int:
         if not xml.is_file():
             print(f"⛔ No existe el archivo: {xml}")
             return 2
-        mpath = Path(args.manifest).expanduser() if args.manifest else None
-        if mpath is not None and not mpath.is_file():
-            print(f"⛔ No existe el manifiesto: {mpath}")
-            return 2
-        try:
-            plans = plan_files([xml], xml.parent, load_manifest(mpath))
-        except ManifestError as exc:
-            print(f"⛔ Manifiesto: {exc}")
-            return 2
+        plans = plan_files([xml], xml.parent)
         if args.project:
             plans[0]["project"] = args.project.strip()
             plans[0]["source"] = "--project"
-        steps = append_steps(plans[0], force=args.force, quality_json=quality_json)
-        _print_plan("APPEND (no destructivo) — plan", plans, steps)
+        stages = append_stages(plans[0], force=args.force, quality_json=quality_json)
+        _print_plan("APPEND (no destructivo) — plan", plans, stages, args.jobs)
         if not args.apply:
             print("\nDRY-RUN — nada ejecutado. Repite con --apply.")
             return 0
 
-    results = execute(steps, force=args.force)
-    _print_summary(results)
+    t0 = time.perf_counter()
+    results = execute(stages, force=args.force, jobs=args.jobs)
+    _print_summary(results, time.perf_counter() - t0, args.jobs)
     gate_failed = any(r["klass"] == "gate" and r.get("rc") not in (0, None) for r in results)
     if gate_failed and not args.force:
         _print_gate_help(quality_json)
     out = _write_summary("one-shot" if args.folder else "append",
-                         plans, results, started)
+                         plans, results, started, args.jobs)
     print(f"\nResumen del run: {out}")
     if any(r["fatal"] for r in results):
         print("RESULTADO: CON ERRORES (revisar arriba).")

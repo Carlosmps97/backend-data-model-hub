@@ -37,7 +37,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 # 4. (solo si REEMPLAZAS la BD) reset previo
 .venv/bin/python -m scripts.reset_for_migration --apply
 
-# 5. Migrar (los archivos de una familia comparten proyecto — R8; el one-shot lo toma del manifiesto)
+# 5. Migrar (los archivos de una familia comparten proyecto — R8; el one-shot lo deduce de la carpeta)
 .venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia"           # dry-run
 .venv/bin/python -m scripts.erwin_migration.migrate "../folder_data/modelo.xml" --project "Familia" --apply
 #   flags: --description "…" · --report ruta.json · --keep-unused-udp-defs · --only-sa SA · --force
@@ -121,7 +121,7 @@ usuarios/roles, audit_log y los demás proyectos.
 ## Flujo completo (BD nueva en otro workspace)
 
 ```bash
-# Recomendado: el orquestador con el manifiesto de proyectos de la carpeta (doc 54 + doc 75)
+# Recomendado: el orquestador, que deduce los proyectos de la estructura de la carpeta (doc 54 + doc 77)
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                 # plan
 .venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force
 
@@ -152,12 +152,16 @@ lleva `projectId`, los ids de plataforma van namespaceados por proyecto
 tabla es por proyecto y los estándares (glosario, dominios, defs UDP, naming,
 reglas DDL) y las versiones se siembran y se marcan **por proyecto**.
 
-- **Proyecto destino por archivo** = manifiesto `projects.json` en la carpeta
-  del one-shot (`{"projects": [{"name", "files": [patrones], "description"?}]}`;
-  p. ej. `Modelo de Datos DDV_FISICO/*.xml` → «Modelo DDV»). Regla general para
-  lo que ningún patrón matchea: el nombre del archivo (`UDV INT FISICO.xml` →
-  «UDV INT FISICO»). Dos archivos que caerían al mismo nombre sin estar unidos
-  por el manifiesto = error antes de tocar la BD. `--manifest` para otra ruta.
+- **Proyecto destino por archivo** = la CONVENCIÓN del doc 77: cada subcarpeta
+  de la raíz del one-shot es un proyecto que se llama como ella y fusiona sus
+  `.xml` (`MODELO DDV/*.xml` → «MODELO DDV»); cada `.xml` suelto en la raíz es
+  su propio proyecto con el nombre del archivo (`UDV INT FISICO.xml` → «UDV INT
+  FISICO»). Dos orígenes que caen al mismo nombre ignorando mayúsculas =
+  `DiscoveryError` antes de tocar la BD. El manifiesto `projects.json` de la D9
+  del doc 75 quedó DEROGADO (si aparece uno, se ignora con un aviso).
+- **Paralelismo por proyecto** (`--jobs`, default 4): gates y migrate corren en
+  carriles, uno por proyecto; los archivos de un mismo proyecto siempre en
+  orden (el prefetch `_DUPn` lo exige). `--jobs 1` = todo secuencial.
 - **Estándares de un proyecto con varios archivos** = unión DISTINTA: el
   primero gana; abreviatura o tipo de dominio distinto en otro archivo → al
   reporte (`glossary_conflicts`, `domain_conflicts`; hoja «Dominios en

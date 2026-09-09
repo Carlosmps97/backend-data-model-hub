@@ -45,7 +45,7 @@ tomada (adopciones, conflictos con score, alias, dedups, reasignaciones).
 
 Jerarquía: Modelo → proyecto · Subject Area → folder · ER_Diagram → canvas.
 Los N archivos de una familia cargan al MISMO proyecto (R8) — pásalo SIEMPRE
-con `--project` (el one-shot lo toma del manifiesto `projects.json`); si el
+con `--project` (el one-shot lo deduce de la carpeta, doc 77); si el
 proyecto ya existe y no lo pasaste, el script ABORTA (nada de fusiones
 silenciosas). `--description` describe el proyecto si se crea. Folders y
 canvases homónimos del proyecto se reusan.
@@ -1110,7 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--project", help="nombre de proyecto destino (obligatorio "
                                       "si el proyecto ya existe — R8)")
     ap.add_argument("--description", help="descripción del proyecto si se crea "
-                                          "(viene del manifiesto projects.json)")
+                                          "(default: «Migrado de Erwin — <modelo>»)")
     ap.add_argument("--only-sa", help="migrar solo canvases de esta subject area")
     ap.add_argument("--force", action="store_true",
                     help="continuar aunque el gate de calidad tenga ERRORs")

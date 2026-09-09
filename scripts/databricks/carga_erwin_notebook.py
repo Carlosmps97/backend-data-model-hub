@@ -12,18 +12,25 @@
 # MAGIC - **one-shot** (DESTRUCTIVO): baja TODOS los `.xml` de la carpeta raiz
 # MAGIC   (recursivo, espejando subcarpetas) y deja la plataforma como un primer
 # MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja, la
-# MAGIC   cuenta local `admin` y la whitelist SSO de Modeladores (doc 75), migra
-# MAGIC   archivo por archivo (SECUENCIAL a proposito),
-# MAGIC   siembra las data functions, hace el layout y marca la version base v1
-# MAGIC   de cada proyecto. El proyecto destino de cada archivo lo decide el
-# MAGIC   MANIFIESTO `projects.json` en la carpeta raiz (doc 75: p. ej. todos los
-# MAGIC   DDV → «Modelo DDV»); sin entrada en el manifiesto, el nombre del
-# MAGIC   archivo (un XML = un proyecto).
+# MAGIC   cuenta local `admin` y la whitelist SSO (admins + Modeladores), migra
+# MAGIC   los proyectos en CARRILES paralelos (widget `jobs`; los archivos de un
+# MAGIC   mismo proyecto siempre en orden), siembra las data functions, hace el
+# MAGIC   layout y marca la version base v1 de cada proyecto.
+# MAGIC   El proyecto destino sale de la CONVENCION del doc 77, no de un archivo
+# MAGIC   declarativo: **cada subcarpeta es un proyecto** que se llama como ella y
+# MAGIC   fusiona sus `.xml` (p. ej. `MODELO DDV/` → proyecto «MODELO DDV»), y
+# MAGIC   **cada `.xml` suelto en la raiz es su propio proyecto** con el nombre
+# MAGIC   del archivo.
 # MAGIC - **append** (no destructivo): baja UN archivo y lo SUMA a la BD viva
 # MAGIC   (sin reset, sin admin, sin seeds, sin marcador).
 # MAGIC
 # MAGIC El gate de calidad corre ANTES de borrar nada: si falla, la BD queda
 # MAGIC intacta (salvo `force = si`, que continua omitiendo los objetos con ERROR).
+# MAGIC
+# MAGIC Antes de copiar, el notebook **borra** el area de trabajo del driver
+# MAGIC (`/local_disk0/tmp/erwin/carpeta` y `.../append`): ese tmp es acumulativo
+# MAGIC entre corridas y los residuos de una corrida previa se levantaban como
+# MAGIC PROYECTOS FANTASMA (doc 77 §2).
 # MAGIC
 # MAGIC ## Prerequisitos
 # MAGIC 1. Cluster **classic** (no serverless), DBR con Python 3.10+, single node
@@ -78,6 +85,9 @@ dbutils.widgets.text("pghost",
 dbutils.widgets.text("pguser", "carlosperez@bcp.com.pe", "12. PGUSER (Role de Lakebase)")
 dbutils.widgets.text("pgschema", "dmh", "13. Schema PG")
 dbutils.widgets.text("repo_dir", "", "14. Ruta del repo (vacio = autodetectar)")
+
+# --- Rendimiento --------------------------------------------------------------
+dbutils.widgets.text("jobs", "4", "15. Proyectos en paralelo (1 = secuencial)")
 
 print("Widgets creados.")
 
@@ -136,6 +146,9 @@ CONFIRMAR_WIPE = W("confirmar_wipe").strip().lower() == "si"
 LAKEBASE_ENDPOINT = W("lakebase_endpoint").strip()
 PGHOST, PGUSER = W("pghost").strip(), W("pguser").strip()
 PGSCHEMA = W("pgschema").strip() or "dmh"
+JOBS = W("jobs").strip() or "4"
+if not JOBS.isdigit() or int(JOBS) < 1:
+    raise ValueError(f"`jobs` debe ser un entero >= 1 (llego {JOBS!r}).")
 
 if MODO == "one-shot" and not FOLDER:
     raise ValueError("modo one-shot necesita `folder_path` (carpeta raiz de los XML).")
@@ -159,6 +172,7 @@ print(f"modo     : {MODO}{' (FORCE)' if FORCE else ''}")
 if MODO == "one-shot":
     print(f"carpeta  : {adls(FOLDER)}  (recursivo)")
     print(f"v1 title : {BASE_TITLE}")
+    print(f"paralelo : hasta {JOBS} proyecto(s) a la vez")
     print(f"wipe     : {'CONFIRMADO - se borra TODO' if CONFIRMAR_WIPE else 'no confirmado (solo dry-run)'}")
 else:
     print(f"archivo  : {adls(ARCHIVO_APPEND)}")
@@ -168,35 +182,43 @@ print(f"lakebase : {PGUSER}@{PGHOST} | {LAKEBASE_ENDPOINT} | schema {PGSCHEMA}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Materializar los XML en el driver
+# MAGIC ## 4. Limpiar el driver y materializar los XML
 # MAGIC `abfss://` no es un filesystem: `open()` no lo lee. Se baja al disco local
 # MAGIC del driver — en one-shot, TODA la carpeta recursivamente, espejando las
-# MAGIC subcarpetas (asi dos archivos homonimos de distintas subcarpetas no se
-# MAGIC pisan) mas el manifiesto `projects.json` de la raiz, si existe. Requiere
-# MAGIC access mode **Dedicated**.
+# MAGIC subcarpetas (de ahi sale el proyecto de cada archivo). Requiere access
+# MAGIC mode **Dedicated**.
+# MAGIC
+# MAGIC **Primero se BORRA** el area de trabajo (doc 77 §5): sin eso, lo que quedo
+# MAGIC de una corrida anterior —una carpeta de ADLS que se renombro, un XML que se
+# MAGIC saco— se sumaba a esta y aparecian proyectos que nadie pidio. El guard de
+# MAGIC `scripts/databricks/workdir.py` sólo deja borrar dentro del tmp del driver;
+# MAGIC el bundle de elkjs (`.../erwin/elk`) se conserva.
+# MAGIC
+# MAGIC Las copias van en paralelo y se **verifican por tamaño** contra ADLS; lo
+# MAGIC que falte se reintenta en serie.
 
 # COMMAND ----------
 
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+if REPO_DIR not in sys.path:
+    sys.path.insert(0, REPO_DIR)        # helpers del repo, en el proceso del driver
+from scripts.databricks.workdir import limpiar, verificar   # noqa: E402
+from scripts.run_migration import project_of                # noqa: E402
+
 WORK = "/local_disk0/tmp/erwin" if os.path.isdir("/local_disk0") else "/tmp/erwin"
-os.makedirs(WORK, exist_ok=True)
+LOCAL_ROOT = os.path.join(WORK, "carpeta")
+LOCAL_APPEND = os.path.join(WORK, "append")
+DESCARGAS_PARALELAS = 4
 
-
-def bajar(uri: str, dst: str) -> str:
-    if not os.path.isfile(dst):
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        try:
-            dbutils.fs.cp(uri, "file:" + dst)
-        except Exception as exc:
-            if "Shared cluster" in str(exc) or "non /Workspace" in str(exc):
-                raise RuntimeError(
-                    "El cluster corre con ACCESS MODE 'Standard/Shared' y ahi "
-                    "Databricks prohibe escribir al disco del driver. Cambia a "
-                    "Compute > Edit > Advanced > Access mode > 'Dedicated' "
-                    "(la Policy 'Unrestricted' es otra perilla) y reintenta."
-                ) from exc
-            raise
-    print(f"{dst}: {os.path.getsize(dst) / 1e6:,.0f} MB")
-    return dst
+# --- Limpieza (doc 77 §5) -----------------------------------------------------
+# Las DOS areas, siempre: asi un `append` no deja restos que ensucien el proximo
+# one-shot. `WORK/elk` no se toca (es el bundle de elkjs, no data de la carga).
+for _dir in (LOCAL_ROOT, LOCAL_APPEND):
+    _n, _bytes = limpiar(_dir)
+    print(f"limpieza: {_dir} -> {_n} archivo(s), {_bytes / 1e6:,.0f} MB borrados")
 
 
 def walk_xmls(uri: str) -> list:
@@ -210,26 +232,73 @@ def walk_xmls(uri: str) -> list:
     return out
 
 
+def bajar(uri: str, dst: str) -> str:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        dbutils.fs.cp(uri, "file:" + dst)
+    except Exception as exc:
+        if "Shared cluster" in str(exc) or "non /Workspace" in str(exc):
+            raise RuntimeError(
+                "El cluster corre con ACCESS MODE 'Standard/Shared' y ahi "
+                "Databricks prohibe escribir al disco del driver. Cambia a "
+                "Compute > Edit > Advanced > Access mode > 'Dedicated' "
+                "(la Policy 'Unrestricted' es otra perilla) y reintenta."
+            ) from exc
+        raise
+    return dst
+
+
+def bajar_todos(items: list) -> None:
+    """`items` = [(uri, destino local, bytes en ADLS)]. Copia en paralelo, verifica
+    por tamaño y reintenta en serie lo que falte (si `dbutils.fs.cp` no tolerara
+    el hilo, el fallback igual completa la copia)."""
+    t0 = time.perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=min(DESCARGAS_PARALELAS, len(items))) as ex:
+            list(ex.map(lambda it: bajar(it[0], it[1]), items))
+    except Exception as exc:
+        print(f"copia en paralelo interrumpida ({exc}); reintento en serie lo que falte...")
+    esperados = [(dst, size) for _, dst, size in items]
+    pendientes = set(verificar(esperados))
+    for uri, dst, _ in items:
+        if dst in pendientes:
+            print(f"  reintento en serie: {dst}")
+            bajar(uri, dst)
+    faltan = verificar(esperados)
+    if faltan:
+        raise RuntimeError("copias incompletas o de tamaño distinto al de ADLS:\n  "
+                           + "\n  ".join(faltan))
+    total = sum(size for _, _, size in items)
+    print(f"\n{len(items)} XML materializados · {total / 1e6:,.0f} MB en "
+          f"{time.perf_counter() - t0:,.0f}s (verificados por tamaño)")
+
+
 if MODO == "one-shot":
-    LOCAL_ROOT = os.path.join(WORK, "carpeta")
     base_uri = adls(FOLDER).rstrip("/") + "/"
     files = walk_xmls(base_uri)
     if not files:
         raise ValueError(f"No hay .xml bajo {base_uri} (busqueda recursiva).")
+    items = []
     for f in files:
         rel = f.path[len(base_uri):] if f.path.startswith(base_uri) else f.name
-        bajar(f.path, os.path.join(LOCAL_ROOT, *rel.split("/")))
-    print(f"\n{len(files)} XML materializados bajo {LOCAL_ROOT}")
-    # Doc 75: el manifiesto de proyectos vive en la raiz de la carpeta.
-    manifest = [f for f in dbutils.fs.ls(base_uri) if f.name == "projects.json"]
-    if manifest:
-        bajar(manifest[0].path, os.path.join(LOCAL_ROOT, "projects.json"))
-    else:
-        print("sin projects.json en la raiz: cada XML sera un proyecto con el nombre del archivo")
+        items.append((f.path, os.path.join(LOCAL_ROOT, *rel.split("/")), f.size))
+    bajar_todos(items)
     TARGET = LOCAL_ROOT
+
+    # Plan derivado (doc 77): subcarpeta = 1 proyecto; .xml suelto = 1 proyecto.
+    proyectos: dict = {}
+    for _, dst, size in items:
+        rel = os.path.relpath(dst, LOCAL_ROOT).replace(os.sep, "/")
+        proyectos.setdefault(project_of(rel), []).append((rel, size))
+    print(f"\nPROYECTOS QUE SE VAN A CREAR ({len(proyectos)}):")
+    for nombre, archivos in proyectos.items():
+        print(f"  «{nombre}»")
+        for rel, size in archivos:
+            print(f"      · {rel}  ({size / 1e6:,.0f} MB)")
 else:
-    TARGET = bajar(adls(ARCHIVO_APPEND),
-                   os.path.join(WORK, "append", ARCHIVO_APPEND.rsplit("/", 1)[-1]))
+    info = dbutils.fs.ls(adls(ARCHIVO_APPEND))[0]
+    TARGET = os.path.join(LOCAL_APPEND, ARCHIVO_APPEND.rsplit("/", 1)[-1])
+    bajar_todos([(adls(ARCHIVO_APPEND), TARGET, info.size)])
 
 # COMMAND ----------
 
@@ -340,15 +409,16 @@ else:
 # MAGIC %md
 # MAGIC ## 7. DRY-RUN del orquestador
 # MAGIC Imprime el plan completo SIN ejecutar nada: archivos agrupados por
-# MAGIC proyecto segun `projects.json` de la carpeta (regla general: nombre del
-# MAGIC archivo), un gate de calidad por proyecto, los pasos con sus comandos
-# MAGIC exactos y — en one-shot — los conteos actuales de la BD (todo lo que se
-# MAGIC borraria). Un manifiesto invalido aborta aqui, antes de tocar la BD.
+# MAGIC proyecto segun la CONVENCION (subcarpeta = 1 proyecto; `.xml` suelto = 1
+# MAGIC proyecto), las ETAPAS con sus carriles, los comandos exactos y — en
+# MAGIC one-shot — los conteos actuales de la BD (todo lo que se borraria). Dos
+# MAGIC nombres de proyecto en colision abortan aqui, antes de tocar la BD.
 # MAGIC REVISAR ESTO antes de la celda 8.
 
 # COMMAND ----------
 
 ARGS = ["--folder", TARGET] if MODO == "one-shot" else ["--append", TARGET]
+ARGS += ["--jobs", JOBS]
 if MODO == "one-shot":
     ARGS += ["--base-title", BASE_TITLE]
 if MODO == "append" and APPEND_PROJECT:
@@ -385,8 +455,9 @@ else:
 # MAGIC ## 9. Cierre
 # MAGIC Tras un one-shot OK la plataforma ya abre: la cuenta local `admin` entra
 # MAGIC con la contraseña definida en `scripts/create_admin.py` (cambiarla al
-# MAGIC entrar) y los Modeladores declarados en `MODELER_EMAILS` entran por el
-# MAGIC SSO de Databricks (su padron ya esta en la whitelist). Produccion v1
+# MAGIC entrar) y los correos declarados ahi entran por el SSO de Databricks —
+# MAGIC `ADMIN_EMAILS` con rol Administrador y `MODELER_EMAILS` con rol Modelador
+# MAGIC (las dos listas se editan en ese archivo y pueden quedar vacias). Produccion v1
 # MAGIC marcada, data functions sembradas y layout aplicado. Cualquier otro
 # MAGIC usuario se crea desde Admin (la plataforma tiene su propio padron, no
 # MAGIC hereda los del workspace).
