@@ -36,7 +36,7 @@ COLUMN_FACET_FIELDS: dict[str, tuple[str, ...]] = {
 DOMAIN_FACET_FIELDS: dict[str, tuple[str, ...]] = {
     LOGICAL: ("logicalDataType",),
     PHYSICAL: ("defaultDataType",),
-    "shared": ("id", "projectId", "name", "namingTerm", "description"),
+    "shared": ("id", "projectId", "name", "namingTerm", "description", "inheritsName"),
 }
 
 

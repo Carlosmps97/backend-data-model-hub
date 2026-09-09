@@ -13,6 +13,9 @@ class ParentDomainBody(BaseModel):
     logicalDataType: str | None = None
     namingTerm: str | None = None  # R5b: aditivo (ver ParentDomainDoc).
     description: str | None = None
+    # Doc 79: marca "atributo estándar". `bool | None` a propósito: omitido ⇒
+    # exclude_none lo descarta ⇒ un update que no lo envíe NO pisa el flag.
+    inheritsName: bool | None = None
 
     # Doc 62: el default se HOMOLOGA a la grafía canónica de la plataforma en
     # el borde (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`); lo desconocido

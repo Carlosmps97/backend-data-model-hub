@@ -131,3 +131,30 @@ def test_orden_unico_llaves_primero_en_el_orden_de_la_llave_doc74():
     cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
     assert [cols[n]["ordinal"] for n in ("CODCLAVE", "CODMES", "FLG", "NOTA")] == [0, 1, 2, 3]
     assert (cols["CODCLAVE"]["pkPosition"], cols["CODMES"]["pkPosition"], cols["FLG"]["pkPosition"]) == (0, 1, None)
+
+
+def test_dominio_estandar_hereda_nombre_y_definicion_doc79():
+    """Doc 79: un dominio "atributo estándar" (Erwin `Attribute_Definition`) se
+    marca `inheritsName=True` y siembra su definición de atributo como
+    `description`; un dominio genérico de tipo NO se marca y conserva su propia
+    definición de dominio (la UI la muestra, pero jamás se empuja a columnas)."""
+    m = ep.ErwinModel(name="Modelo Doc79")
+    m.domains = {
+        "D-GEN": ep.ErwinDomain(id="D-GEN", name="Codigo", builtin=False, data_type="VARCHAR(20)",
+                                parent_ref=None, definition="Se asigna a atributos con codificacion.",
+                                physical_type="VARCHAR(30)"),
+        "D-STD": ep.ErwinDomain(id="D-STD", name="FecRutina", builtin=False, data_type="DATE",
+                                parent_ref=None, definition="", physical_type="DATE",
+                                attribute_definition="Fecha de la rutina."),
+    }
+    e = ep.ErwinEntity(id="E1", name="t", physical="T", physical_was_macro=False, definition="",
+                       comment="", attributes=[], pk_attr_ids=set(), pk_attr_order=[])
+    m.entities = {"E1": e}
+    m.hive_dbs = {"S1": ["E1"]}
+    db = FakeDb()
+    Migrator(db, m, "Proyecto D79", None).run()
+    doms = {d["name"]: d for d in db.data["parent_domains"].values()}
+    assert doms["FecRutina"]["inheritsName"] is True
+    assert doms["FecRutina"]["description"] == "Fecha de la rutina."
+    assert doms["Codigo"]["inheritsName"] is False
+    assert doms["Codigo"]["description"] == "Se asigna a atributos con codificacion."

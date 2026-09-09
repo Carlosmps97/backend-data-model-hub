@@ -396,3 +396,24 @@ def test_column_order_cae_al_attribute_order_sin_columns_array(tmp_path):
     m = ep.parse(str(p))
     by_id = {a.id: a for a in m.entities["E1"].attributes}
     assert (by_id["A2"].column_order, by_id["A1"].column_order) == (0, 1)
+
+
+def test_dominio_atributo_estandar_captura_attribute_definition(tmp_path):
+    """Doc 79: el parser captura `Attribute_Definition` (la marca del dominio
+    "atributo estándar"); un dominio genérico de tipo lo deja vacío."""
+    xml = textwrap.dedent(f"""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <erwin xmlns="http://www.erwin.com/dm" FileVersion="10.10" Format="erwin">
+     <Model {NS} id="M" name="M">
+      <Domain_Groups>
+       <Domain id="D-GEN" name="Codigo"><DomainProps><Name>Codigo</Name><Logical_Data_Type>VARCHAR(20)</Logical_Data_Type><Definition>Dominio codigo</Definition></DomainProps></Domain>
+       <Domain id="D-STD" name="FecRutina"><DomainProps><Name>FecRutina</Name><Logical_Data_Type>DATE</Logical_Data_Type><Attribute_Definition>Fecha de la rutina.</Attribute_Definition></DomainProps></Domain>
+      </Domain_Groups>
+     </Model>
+    </erwin>
+    """)
+    p = tmp_path / "d.xml"
+    p.write_text(xml, encoding="utf-8")
+    m = ep.parse(str(p))
+    assert m.domains["D-STD"].attribute_definition == "Fecha de la rutina."
+    assert m.domains["D-GEN"].attribute_definition == ""

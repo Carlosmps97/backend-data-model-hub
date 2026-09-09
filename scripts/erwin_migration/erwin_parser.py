@@ -138,6 +138,11 @@ class ErwinDomain:
     parent_ref: str | None
     definition: str
     physical_type: str = ""    # Physical_Data_Type (doc 69; data_type = Logical_Data_Type)
+    # Doc 79: Attribute_Definition — presente SOLO en los dominios "atributo
+    # estándar" (FecRutina, CodMes, los de auditoría…). Es la marca de que sus
+    # atributos heredan nombre (macro %AttDomain) y definición; los genéricos de
+    # tipo (Codigo, Fecha, Number…) no la traen.
+    attribute_definition: str = ""
 
 
 @dataclass
@@ -400,6 +405,7 @@ def parse(xml_path: str) -> ErwinModel:
                 parent_ref=_txt(p, "Parent_Domain_Ref") or None,
                 definition=_txt(p, "Definition").strip(),
                 physical_type=_txt(p, "Physical_Data_Type").strip(),
+                attribute_definition=_txt(p, "Attribute_Definition").strip(),
             )
             m.domains[d.id] = d
 

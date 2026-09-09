@@ -26,3 +26,7 @@ class ParentDomainDoc(BaseModel):
     # descartaba al leer por `extra="ignore"`. Default None = no-breaking.
     namingTerm: str | None = None
     description: str | None = None
+    # Doc 79: dominio "atributo estándar" (Erwin `Attribute_Definition`) — al
+    # asignarlo, el atributo hereda su nombre y definición; los genéricos de
+    # tipo (Codigo, Fecha, Number…) no la llevan. Aditivo, default False.
+    inheritsName: bool = False

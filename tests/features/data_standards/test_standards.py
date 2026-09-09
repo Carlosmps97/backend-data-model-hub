@@ -17,7 +17,8 @@ def test_snapshot_of_limpia_campos():
         naming={"column": {"separator": "_", "case": "upper"}, "table": {"separator": "", "case": "upper"}},
     )
     assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
-                                   "namingTerm": None, "description": None, "logicalDataType": None}
+                                   "namingTerm": None, "description": None, "logicalDataType": None,
+                                   "inheritsName": None}  # doc 79: aditivo al snapshot
     assert "junk" not in snap["dict"][0]
     assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
 

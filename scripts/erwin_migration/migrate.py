@@ -368,7 +368,14 @@ class Migrator:
                 "name": d.name,
                 "defaultDataType": phys_type,
                 "logicalDataType": canonicalize_default_type(d.data_type) or None,
-                "namingTerm": None, "description": d.definition or None,
+                # Doc 79: `Attribute_Definition` marca al dominio "atributo
+                # estándar" (FecRutina, CodMes…): al asignarlo, el atributo
+                # hereda nombre + definición. Su texto es la definición que se
+                # empuja (los genéricos de tipo NO la llevan y conservan su
+                # propia definición de dominio, solo para mostrar en la UI).
+                "namingTerm": None,
+                "inheritsName": bool(d.attribute_definition),
+                "description": d.attribute_definition or d.definition or None,
                 "erwinLongId": d.id})
             self.stats["dominios creados"] += 1
 

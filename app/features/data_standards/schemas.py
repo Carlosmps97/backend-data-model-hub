@@ -24,6 +24,7 @@ class DomainEdit(BaseModel):
     logicalDataType: str | None = None
     namingTerm: str | None = None
     description: str | None = None
+    inheritsName: bool | None = None  # Doc 79 (ver ParentDomainBody).
 
     # Doc 62: misma homologación que ParentDomainBody — el apply de Standards
     # es el otro camino de escritura de dominios.

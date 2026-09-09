@@ -46,7 +46,7 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
     return {
         "domains": [
             {k: d.get(k) for k in ("id", "name", "defaultDataType", "namingTerm", "description",
-                                   "logicalDataType")}   # doc 69: tipo por faceta
+                                   "logicalDataType", "inheritsName")}   # doc 69/79
             for d in domains
         ],
         "dict": [
@@ -559,7 +559,7 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
 
 COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl")
 _UDP_KEYS = ("name", "level", "view", "dataType", "defaultValue", "allowedValues", "description")
-_DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description")
+_DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description", "inheritsName")
 _TERM_KEYS = ("term", "abbrev", "scope", "wordType")
 _RULE_KEYS = ("name", "description", "kind", "target", "sourceArtifact", "condition", "action",
               "appliesTo", "priority", "enabled")
