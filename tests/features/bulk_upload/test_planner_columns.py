@@ -211,3 +211,29 @@ def test_columnas_de_una_fila_de_tabla_con_error_se_validan_igual():
     p = parsed(tables=[trow(3, "Cliente")], columns=[crow(3, "Cliente", "A", data_type="texto raro")])
     plan = build_plan(p, ctx())
     assert sorted(e["code"] for e in plan.report["errors"]) == ["invalid-type", "missing-required"]
+
+
+def test_ordinal_pk_primero_en_tabla_nueva_doc81():
+    """Doc 81: en una tabla NUEVA el `ordinal` nace con las PK primero (en orden
+    de hoja = orden de llave), aunque en la hoja haya una no-PK intercalada.
+    Reproduce el bug reportado: hoja [PK, PK, no-PK, PK] guardaba el ordinal en
+    orden de hoja y el properties (puro ordinal) divergía del canvas (PK-first).
+    """
+    p = parsed(tables=[trow(3, "Cuenta", schema="ddv")],
+               columns=[crow(3, "Cuenta", "Codigo Clave Party Cliente", data_type="varchar(128)", pk=True),
+                        crow(4, "Cuenta", "Tipo Rol Cliente", data_type="varchar(128)", pk=True),
+                        crow(5, "Cuenta", "xd", data_type="varchar(128)"),
+                        crow(6, "Cuenta", "Codigo Clave Cuenta Evaluada", data_type="varchar(128)", pk=True)])
+    plan = build_plan(p, ctx(schemas=_SCHEMAS, domains=_DOMAINS), new_id=seq_ids())
+    assert plan.has_errors is False
+    by_logical = {c["payload"]["logicalName"]: c["payload"] for c in _cols(plan)}
+    ordinal = {lg: pl["ordinal"] for lg, pl in by_logical.items()}
+    # PKs primero (orden de hoja entre PKs), la no-PK al final.
+    assert ordinal == {"Codigo Clave Party Cliente": 0, "Tipo Rol Cliente": 1,
+                       "Codigo Clave Cuenta Evaluada": 2, "xd": 3}
+    # pkPosition = orden de llave (mismo orden de hoja entre PKs).
+    assert by_logical["Codigo Clave Party Cliente"]["pkPosition"] == 0
+    assert by_logical["Tipo Rol Cliente"]["pkPosition"] == 1
+    assert by_logical["Codigo Clave Cuenta Evaluada"]["pkPosition"] == 2
+    assert by_logical["xd"]["isPrimaryKey"] in (None, False)
+

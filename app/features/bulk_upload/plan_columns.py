@@ -120,10 +120,20 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
     for r in rows:
         cp = _plan_row(r, tp, by_phys, by_logical, std, udp_map, partition_header, rb, new_id,
                        seen_phys, seen_logical, max_len, h, options)
-        if cp.action == "create":
-            cp.fields["ordinal"] = next_ordinal
-            next_ordinal += 1
         plans.append(cp)
+
+    # Ordinal PK-first (doc 81): entre las columnas NUEVAS, las PK van PRIMERO —
+    # en el orden de la hoja, que es su orden de llave — y luego el resto. Antes
+    # el ordinal seguía el orden crudo de la hoja: si una no-PK caía entre PKs,
+    # el canvas (que agrupa PK arriba) y el properties (puro ordinal) mostraban
+    # órdenes distintos. Así el orden guardado ya nace con la llave arriba y
+    # coincide con ambos, sin depender del re-agrupado de display. Es la misma
+    # política «PKs primero» que aplica la migración Erwin (doc 74). Las
+    # columnas existentes conservan su ordinal (no se re-numera lo ya guardado).
+    creates = [cp for cp in plans if cp.action == "create"]
+    for cp in [c for c in creates if c.pk] + [c for c in creates if not c.pk]:
+        cp.fields["ordinal"] = next_ordinal
+        next_ordinal += 1
 
     # PK: la hoja es autoritativa para las columnas listadas; las PK existentes
     # NO listadas conservan su posición y las de la hoja van después, en orden.
