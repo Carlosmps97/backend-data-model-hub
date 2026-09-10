@@ -72,7 +72,7 @@ Consideraciones específicas de App Service:
 
 - **Puerto:** App Service enruta al puerto que expone el contenedor. Usa `--port 8000` (o el que se defina) y alinea `WEBSITES_PORT=8000` en las Application Settings si el proxy no lo detecta solo.
 - **Variables de entorno = Application Settings.** Se cargan como variables de proceso; `config.py` las lee con `os.getenv`. No hace falta `.env` en el servidor.
-- **Health probe:** apunta el health check a `GET /api/health` (devuelve `status: ok | degraded` y `db_connected`).
+- **Health probe:** apunta el health check a `GET /api/health` (devuelve `status: ok | degraded` y `db_connected`). Desde el doc 82 responde además `build: {sha, time}` con el commit desplegado (lo estampa el workflow en `app.yaml` como `BUILD_SHA`/`BUILD_TIME`; `null` en dev): compáralo con el commit del fix antes de reportar un error «que ya está arreglado».
 - **HTTPS y HSTS:** App Service termina TLS en el borde y reenvía HTTP interno con `X-Forwarded-Proto: https`. El middleware de `app/main.py` detecta ese header y agrega `Strict-Transport-Security`; no hay que tocar nada.
 
 ### 2.2 Databricks Apps (destino actual)
@@ -593,7 +593,7 @@ Además, en postura de producción la app oculta la superficie de fingerprinting
 
 ## 9. Salud y observabilidad
 
-- **Health endpoint:** `GET /api/health` hace un `ping` vivo a la base (Lakebase). Devuelve `status: ok` si la DB responde, o `degraded` si no (con Lakebase, un `degraded` transitorio tras idle suele ser el wake del compute). Úsalo como readiness/liveness probe.
+- **Health endpoint:** `GET /api/health` hace un `ping` vivo a la base (Lakebase). Devuelve `status: ok` si la DB responde, o `degraded` si no (con Lakebase, un `degraded` transitorio tras idle suele ser el wake del compute). Úsalo como readiness/liveness probe. Incluye `build.sha`/`build.time` (doc 82): el commit y la hora del deploy que el workflow reutilizable estampa en `app.yaml` (`BUILD_SHA`, `BUILD_TIME`); en dev local es `null`.
 
   ```bash
   curl -s http://localhost:8000/api/health | jq

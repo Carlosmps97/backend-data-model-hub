@@ -37,7 +37,12 @@ async def list_users(user: dict = Depends(_admin)):
 
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 async def create_user(body: UserCreate, user: dict = Depends(_admin)):
-    return ok(await service.create_user(user["username"], body))
+    # Doc 82: era el único endpoint del router sin mapear `AdminGuardError`
+    # (email inválido, username repetido, cuenta local sin contraseña) → 500.
+    try:
+        return ok(await service.create_user(user["username"], body))
+    except AdminGuardError as exc:
+        raise _guard(exc) from exc
 
 
 @router.put("/users/{username}")

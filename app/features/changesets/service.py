@@ -291,10 +291,6 @@ def history_events(changes: list[dict], headers: dict[str, dict]) -> list[dict]:
 # ── Orquestación async (repository + puras) ───────────────────────────────
 
 
-async def create(title: str, owner: str) -> dict:
-    return await repository.create(title, owner)
-
-
 async def ensure_project_alive(cs: dict) -> None:
     """Doc 75 I11: nada se edita, envía, publica ni restaura sobre un proyecto borrado."""
     if not await projects_repo.get_project(cs["projectId"]):

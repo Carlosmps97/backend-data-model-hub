@@ -36,6 +36,13 @@ def _csv(name: str) -> list[str]:
 class Settings:
     """Configuración global del backend de plataforma."""
 
+    # ─── Identidad del build (doc 82) ──────────────────────────
+    # Los estampa el workflow de deploy en app.yaml (`github.sha` + hora UTC);
+    # `GET /api/health` los expone para saber QUÉ commit corre en Apps. Vacíos
+    # en dev local. Nunca son configuración de negocio.
+    BUILD_SHA: str = os.getenv("BUILD_SHA", "")
+    BUILD_TIME: str = os.getenv("BUILD_TIME", "")
+
     # ─── Databricks Lakebase Postgres (doc 28) ─────────────────
     # BD única del backend (adaptador JSONB en app/core/db/lakebase/). El seam
     # es app/core/db/client.py: los repositorios no ven Postgres directamente.

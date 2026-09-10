@@ -36,7 +36,6 @@ from .validation import (
 from .schemas import (
     ChangeBody,
     ChangesBulkBody,
-    ChangesetCreate,
     CommentBody,
     CompareDetailsBody,
     DiffDetailsBody,
@@ -50,9 +49,10 @@ from .schemas import (
 router = APIRouter(prefix="/api/changesets", tags=["changesets"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-async def create(body: ChangesetCreate, user: dict = Depends(_can_edit)):
-    return ok(await service.create(body.title, user["username"]))
+# `POST /api/changesets` (create M-series, sin proyecto) se RETIRÓ (doc 82):
+# desde el doc 75 un changeset pertenece a UN proyecto y ese camino creaba la
+# cabecera sin `projectId` → 500 en la validación del modelo. El único alta es
+# `POST /api/changesets/snapshot {projectId}`; el front nunca usó el viejo.
 
 
 @router.get("")

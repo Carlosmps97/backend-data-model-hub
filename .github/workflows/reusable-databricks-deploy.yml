@@ -129,6 +129,18 @@ jobs:
           echo "── env efectivo de app.yaml ──"
           yq '.env' app.yaml
 
+      # Identidad del build (doc 82): el commit y la hora del deploy viajan
+      # como env de la app (NO son GitHub Variables: se derivan del run). El
+      # backend los expone en GET /api/health → `build.sha`, y así se sabe qué
+      # código corre en Apps antes de reportar un bug "que ya está arreglado".
+      - name: Estampar BUILD_SHA / BUILD_TIME en app.yaml
+        run: |
+          if [ ! -f app.yaml ]; then exit 0; fi
+          SHA="${{ github.sha }}" NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)" yq -i \
+            'del(.env[] | select(.name == "BUILD_SHA" or .name == "BUILD_TIME"))
+             | .env += [{"name": "BUILD_SHA", "value": strenv(SHA)}, {"name": "BUILD_TIME", "value": strenv(NOW)}]' app.yaml
+          echo "build: ${{ github.sha }} @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
       # El CLI aplica el bundle con un OpenTofu embebido y la verificación de
       # firma del provider databricks falla en el runner; se instala desde un
       # mirror local pre-armado. Este OpenTofu solo arma el mirror (ver script).

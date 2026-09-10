@@ -3351,10 +3351,11 @@ curl http://localhost:8000/api/health
 
 Respuesta:
 ```json
-{ "status": "ok", "version": "1.0.0", "db_connected": true }
+{ "status": "ok", "version": "1.0.0", "db_connected": true,
+  "build": { "sha": "3af3619…", "time": "2026-09-10T02:09:00Z" } }
 ```
 
-`status` es `"ok"` si el ping responde, `"degraded"` si no; `db_connected` refleja el ping en vivo.
+`status` es `"ok"` si el ping responde, `"degraded"` si no; `db_connected` refleja el ping en vivo. `build` (doc 82) identifica el código que corre: `sha` = commit desplegado y `time` = hora del deploy, estampados por el workflow en `app.yaml` (`BUILD_SHA`/`BUILD_TIME`); `null` en dev local.
 
 ### 13.2 Dónde corre
 

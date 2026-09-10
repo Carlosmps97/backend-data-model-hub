@@ -41,3 +41,7 @@ def test_legacy_scripts_y_rutas_retirados():
     assert "logicalize" not in glossary
     projects = (FEATURES / "projects" / "router.py").read_text(encoding="utf-8")
     assert "/udp" not in projects and "UdpValuesBody" not in projects
+    # Doc 82: el create M-series (`POST /api/changesets {title}`) creaba una
+    # cabecera SIN proyecto → 500 desde el doc 75; el alta es `/snapshot`.
+    changesets = (FEATURES / "changesets" / "router.py").read_text(encoding="utf-8")
+    assert "ChangesetCreate" not in changesets and '@router.post("", ' not in changesets

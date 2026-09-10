@@ -134,8 +134,12 @@ async def set_password_hash(username: str, password_hash: str) -> bool:
 
 async def delete_user(username: str) -> bool:
     db = await get_db()
+    # Filtra flgactive (doc 82): sin él, un doble-delete o un username ya
+    # borrado re-tocaba `deletedAt`, devolvía True y se auditaba otra vez
+    # (mismo bug que tuvo delete_subject_area); ahora → False → 404.
     res = await db[USERS].update_one(
-        {"_id": username}, {"$set": {"flgactive": False, "deletedAt": _now()}}
+        {"_id": username, "flgactive": {"$ne": False}},
+        {"$set": {"flgactive": False, "deletedAt": _now()}},
     )
     return res.modified_count > 0
 

@@ -418,10 +418,21 @@ async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
 async def earliest_applied(project_id: str) -> dict | None:
     """Cabecera de la versión APLICADA más VIEJA DEL PROYECTO (mínimo `appliedAt`)
     — el marcador v1 de la carga inicial (doc 51: la entrada sintética
-    "Initial load" toma de acá label y fecha de fallback)."""
+    "Initial load" toma de acá label y fecha de fallback).
+
+    Doc 82: el doc 75 insertó `changesets_deleting_project` EN MEDIO de esta
+    función y su cola (`if not docs … return {...}`) quedó como código muerto
+    tras el `return` de la otra — esta devolvía siempre None y el historial
+    perdía la fila «Initial load». `tests/architecture/test_function_bodies.py`
+    acusa ambas formas (función sin `return` / código tras un `return`)."""
     db = await get_db()
     docs = await db[COLL].find(scoped(project_id, {"status": "approved", "appliedAt": {"$ne": None}}),
                                {"appliedAt": 1, "versionLabel": 1, "title": 1}).to_list(None)
+    if not docs:
+        return None
+    d = min(docs, key=lambda d: d.get("appliedAt") or "")
+    return {"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
+            "versionLabel": d.get("versionLabel"), "title": d.get("title")}
 
 
 async def changesets_deleting_project(cs_ids: list[str]) -> set[str]:
@@ -435,11 +446,6 @@ async def changesets_deleting_project(cs_ids: list[str]) -> set[str]:
         {"collection": "projects", "op": "delete", "csId": {"$in": sorted(set(cs_ids))}},
         {"csId": 1}).to_list(None)
     return {str(d.get("csId")) for d in docs}
-    if not docs:
-        return None
-    d = min(docs, key=lambda d: d.get("appliedAt") or "")
-    return {"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
-            "versionLabel": d.get("versionLabel"), "title": d.get("title")}
 
 
 async def published(collection: str, flt: dict | None = None, limit: int | None = None,

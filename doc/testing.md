@@ -1,6 +1,6 @@
 # Testing del backend — Data Model Hub
 
-> **Actualizado: 2026-09-09** (doc 78: perfiles de carga desde Excel — suite normal 1 238 tests, verde).
+> **Actualizado: 2026-09-09** (doc 82: suite de integración en proceso sobre una BD en memoria + guardas de arquitectura — suite normal **1 294 tests**, verde).
 >
 > **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
@@ -23,13 +23,15 @@ flowchart TD
     A["Estres (historico, seeds retirados 2026-07-20)<br/>10k tablas / 400k columnas / 9k vistas / 150 canvases"]
     B["E2E · scripts/e2e (httpx contra backend en vivo)<br/>21 escenarios por rol + 5 suites standalone · login real, JWT, RBAC, Lakebase, auditoria"]
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>45 tests contra el Postgres real en schema efimero"]
-    C["Arquitectura · tests/architecture<br/>invariantes de capas (store boundary, sin legacy, sin rutas retiradas)"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 238 tests (suite normal, verde 2026-09-09) · services/models/schemas sin DB"]
+    I["Integracion en proceso · tests/integration (doc 82)<br/>app REAL sobre BD en memoria (mongomock): flujos por HTTP, merge, aislamiento, barrido anti-500"]
+    C["Arquitectura · tests/architecture<br/>invariantes de capas, alcance por proyecto, firmas reales, funciones truncadas, contrato de rutas front↔back"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 294 tests (suite normal, verde 2026-09-09) · services/models/schemas sin DB"]
 
-    D --> C --> L --> B --> A
+    D --> C --> I --> L --> B --> A
 
     style D fill:#e8f5e9,stroke:#2e7d32
     style C fill:#e3f2fd,stroke:#1565c0
+    style I fill:#fff8e1,stroke:#f9a825
     style L fill:#ede7f6,stroke:#4527a0
     style B fill:#fff3e0,stroke:#e65100
     style A fill:#fce4ec,stroke:#ad1457
@@ -40,24 +42,27 @@ Principios de diseño de las pruebas:
 - **Unit puros con repositorios mockeados.** La lógica de negocio vive en funciones puras (`physicalize`, `overlay`, `structured_diff`, `table_rows`, `effective_permissions`, etc.) o en orquestadores async que se testean sustituyendo el `repository` por `AsyncMock` con `monkeypatch`. No se levanta ninguna base de datos.
 - **Invariantes de capas verificados por código.** Los tests de arquitectura leen los archivos fuente y fallan si alguien filtra el store fuera de `repository.py`, si reaparecen árboles/features legacy o si vuelven los scripts backfill y las rutas retiradas en el doc 75 (`GET /api/me`, `logicalize`).
 - **Alcance por proyecto (doc 75).** `tests/core/test_scope.py` fija el contrato de `app/core/scope.py` (`scoped`, `naming_id`, `assert_scoped_filter` → `MissingProjectError`); en `changesets`, `test_cross_project_guard.py` (referencias a entidades de otro proyecto → 409), `test_project_delete.py` (borrado por draft: `deletesProject`, cascada `cascade_delete`, 404/409 después) y `test_project_versions.py` (versiones y producción por proyecto); en `data_standards`, `test_copy_standards.py` (proyecto nuevo con `copyFrom`) y `test_scope_restore.py` (rollback acotado al proyecto); y `tests/lakebase/test_project_column.py` (puro, corre en la suite normal) cubre la traducción `projectId → project_id` del adaptador.
+- **Integración en proceso (doc 82).** `tests/integration/` levanta la app FastAPI REAL (routers, RBAC, services, repositorios, guards de alcance) sobre `tests/support/fakedb.py`: `mongomock` con la fachada async del adaptador Lakebase (incluido el dialecto `$mergeObjects`). Cada request atraviesa el mismo código que en Databricks Apps; sólo el driver es falso. Es la capa que la suite unitaria (repos mockeados) no puede ver — donde vivieron los 500 del doc 80 (`TypeError`/`MissingProjectError` en líneas que ningún test ejecutaba con la firma real). Cubre el flujo completo de versionado por HTTP, el merge colaborativo, el aislamiento entre proyectos, un barrido de TODAS las rutas GET y las escrituras directas.
+- **Guardas de firma y de contrato (docs 80/82).** `test_scoped_reads` (toda lectura de `published()` con alcance), `test_call_signatures` (toda llamada interna satisface la firma real), `test_function_bodies` (sin funciones truncadas ni código muerto tras `return`), `test_fake_signatures` (ningún fake de test congela una firma vieja) y `test_front_routes` (toda llamada del front hermano tiene ruta en el backend; se salta si el front no está al lado).
 - **Integración real del adaptador.** La suite viva `tests/lakebase/test_adapter_live.py` (45 tests) pega al Postgres real de Lakebase en un schema efímero `dmh_test_<rand>` que se dropea al final; solo corre con `LAKEBASE_TESTS=1`, por eso no entra en el `pytest` normal.
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-09, doc 78):** la suite normal son **1 238 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 283** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-09, doc 82):** la suite normal son **1 294 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 339** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
 | `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**) | 12 | 51 |
-| `tests/architecture` (invariantes de capas + legado retirado) | 2 | 5 |
-| `tests/features` (todas las features; incluye los 239 de `bulk_upload`, docs 55/78 — perfiles de carga) | 139 | 1 029 |
-| `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 89 |
+| `tests/architecture` (invariantes de capas, legado retirado, alcance, firmas, funciones truncadas, fakes, rutas front↔back) | 7 | 16 |
+| `tests/integration` (app real sobre BD en memoria: flujos por HTTP, merge, aislamiento, barrido anti-500, escrituras directas — doc 82) | 5 | 22 |
+| `tests/features` (todas las features; incluye los de `bulk_upload`, docs 55/78, `health` y el repositorio de changesets contra la BD falsa) | 144 | 1 050 |
+| `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 91 |
 | `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, `seed_ddl_export_rules` y `seed_upload_profiles` por proyecto, `reset_for_migration`) | 6 | 51 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
 | `tests/lakebase/test_translate.py` + `test_project_column.py` (traducción pura; corren en la suite normal) | 2 | 11 |
-| **Subtotal — suite normal** | **171** | **1 238** |
+| **Subtotal — suite normal** | **186** | **1 294** |
 | `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 45 |
-| **Total recolectado** | **172** | **1 283** |
+| **Total recolectado** | **187** | **1 339** |
 
 La carga masiva desde Excel (`tests/features/bulk_upload/`, 22 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*`/`policies`/`udp_facets` son puros (workbook YA interpretado por un perfil, armado a mano con `helpers.py`); los perfiles de carga (doc 78) prueban puro el modelo (`profiles_model`: catálogo + `validate_profile`), el built-in (`builtin_profile` contra el catálogo fijo de UDPs), `suggest`, `rules` y `profile_apply` (hojas, fila de cabecera, cabeceras, políticas), y con mocks el repositorio scoped (`profiles_repository`), el service (`profiles_service`: nombre único, 422, default único) y el router (`profiles_router`, con `project_client`); `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
@@ -69,9 +74,23 @@ La carga masiva desde Excel (`tests/features/bulk_upload/`, 22 archivos) sigue e
 tests/
 ├── conftest.py                      # fixture `client` (TestClient SIN lifespan → no toca la BD)
 ├── test_smoke.py                    # app.title + /api/health degradado sin DB
+├── support/
+│   └── fakedb.py                    # BD en memoria (mongomock + fachada async del adaptador, $mergeObjects) — doc 82
+├── integration/                     # app REAL sobre la BD falsa, por HTTP (doc 82) — 5 archivos, 22 tests
+│   ├── conftest.py                  # roles de caja + usuarios por rol, cliente `api(user)`, `build_world` (proyecto con v2 publicada)
+│   ├── test_publish_flow.py         # snapshot → cambios → submit → diff → Change details → approve → historial → compare → rollback → asof
+│   ├── test_collaboration_merge.py  # merge tipo git: pull automático, conflicto por objeto, granularidad por columna
+│   ├── test_project_isolation.py    # nombres repetidos entre proyectos, guard anti-cruce, estándares/rollback acotados, borrado por draft
+│   ├── test_no_500_sweep.py         # TODAS las rutas GET + POST de sólo lectura sin 5xx (UNSUPPORTED_BY_FAKE explícito)
+│   └── test_direct_writes.py        # escrituras directas: estructura, catálogo, vistas, relaciones, estándares, admin, reporting
 ├── architecture/
 │   ├── test_store_boundary.py       # el store solo se toca desde repository.py
-│   └── test_no_legacy_features.py   # features/arboles legacy, scripts backfill y rutas retiradas (doc 75) no vuelven
+│   ├── test_no_legacy_features.py   # features/arboles legacy, scripts backfill y rutas retiradas (docs 75/82) no vuelven
+│   ├── test_scoped_reads.py         # toda lectura de published() lleva alcance de proyecto (doc 80)
+│   ├── test_call_signatures.py      # toda llamada interna satisface la firma real de su destino (doc 80)
+│   ├── test_function_bodies.py      # sin funciones truncadas ni código muerto tras return (doc 82)
+│   ├── test_fake_signatures.py      # ningún fake de test congela una firma vieja (doc 82)
+│   └── test_front_routes.py         # toda llamada del front hermano tiene ruta en el backend (doc 82)
 ├── core/
 │   ├── db/test_indexes.py           # indices del adaptador
 │   ├── identity/                    # provider local/databricks, dependencies, models, dev_switch (4 archivos)
@@ -239,6 +258,23 @@ Ver la sección 6. Ejercita el stack real por HTTP con `httpx`, por rol, con lim
 ### 3.6 Prueba de estrés a escala (histórico)
 
 Ver la sección 7. `seed_stress.py` generaba data sintética a escala real (script retirado 2026-07-20); `arrange_all.py` sigue vigente y reorganiza los canvases con ELK.
+
+### 3.7 Integración en proceso + guardas de cableado (doc 82)
+
+**Por qué existe.** Los 500 de producción del 2026-09-09 (doc 80 §3/§8 y el `diff/details` reportado ese día) eran `TypeError`/`MissingProjectError` en líneas que NINGÚN test ejecutaba con las firmas reales: la suite unitaria mockea los repositorios, y los fakes certificaban la firma anterior al doc 75. `tests/integration/` cierra esa brecha sin Lakebase ni Docker: la app FastAPI real — routers, `require_permission`/`write_guard`, services, repositorios, `scoped()`/`assert_scoped_filter`, modelos — con UN solo reemplazo, el driver de BD.
+
+**La BD falsa (`tests/support/fakedb.py`).** `FakeDb` envuelve `mongomock` con la fachada async de `app/core/db/lakebase/collection.py`: cursores `find(...).sort().skip().limit().to_list()`, métodos awaitables, `bulk_write` por-op (los objetos de pymongo ≥ 4.10 no entran al `bulk_write` de mongomock), `create_index` tolerante al wildcard `$**` y el dialecto propio `$mergeObjects` traducido a un `$set` del objeto mergeado. Mide el CABLEADO, no el SQL: para el SQL real sigue la suite viva (§3.4).
+
+**Fixtures (`tests/integration/conftest.py`).** `fake_db` instala la BD en `app.core.db.client._pg_db` y siembra los 4 roles de caja (`scripts/create_admin.build_roles()`) y usuarios por rol (`admin`, `ana`/`carla` modeladoras, `beto` revisor, `diego` lector) que entran por el seam local `X-Dev-User`; `api(user)` desempaqueta el envelope y falla con el body legible; `build_world()` deja un proyecto con su `v2` publicada (esquema, carpeta, canvas, dos tablas, columnas, relación, vista) con ids deterministas por prefijo.
+
+**Qué cubre.** `test_publish_flow` (el ciclo completo por HTTP, incluidos `diff/details`, historial, compare, `asof:`, rollback, withdraw/reject/reopen), `test_collaboration_merge` (dos drafts desde la misma producción: pull automático, conflicto sólo en el objeto compartido, granularidad por columna), `test_project_isolation` (guard anti-cruce, unicidad por proyecto, estándares y rollback acotados, `copyFrom`, borrado por draft con cascada), `test_no_500_sweep` (todas las rutas GET con parámetros reales + POST de sólo lectura; una ruta que el fake no pueda ejecutar debe listarse en `UNSUPPORTED_BY_FAKE`, hoy vacío) y `test_direct_writes` (endpoints directos de estructura, catálogo, vistas, relaciones, estándares, admin y reporting).
+
+**Guardas nuevas.** `test_function_bodies` (una función con retorno anotado y sin `return` — la forma del corte de `earliest_applied` en el doc 75 — o código tras un `return` acusan), `test_fake_signatures` (un `monkeypatch.setattr` cuyo fake no acepta la firma real acusa) y `test_front_routes` (cada `apiGet/apiPost/…` de `../web-data-model-hub/src` debe existir en `app.routes`; se salta sin el front al lado). Las cinco guardas de cableado (con `test_scoped_reads` y `test_call_signatures` del doc 80) fueron verificadas rompiendo el código y viendo que acusan la línea exacta.
+
+```bash
+.venv/bin/pytest -q tests/integration              # ~0,8 s, sin BD real
+.venv/bin/pytest -q tests/architecture             # guardas estáticas
+```
 
 ---
 

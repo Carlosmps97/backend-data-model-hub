@@ -2,3 +2,5 @@
 -r requirements.txt
 pytest>=8.0
 httpx>=0.27
+# BD en memoria con semántica Mongo para la suite de integración en proceso (tests/integration, doc 82)
+mongomock>=4.3

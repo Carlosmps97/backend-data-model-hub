@@ -6,10 +6,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class ChangesetCreate(BaseModel):
-    title: str
-
-
 class DiffDetailItem(BaseModel):
     """Una entidad puntual del changeset a detallar (popup doc 31)."""
     collection: str
