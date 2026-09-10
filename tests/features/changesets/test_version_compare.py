@@ -18,7 +18,8 @@ from app.features.changesets import service
 
 
 def _wire_catalogs(monkeypatch):
-    async def _empty():
+    # Doc 80 §8: firma REAL — `list_udp`/`list_domains` piden proyecto.
+    async def _empty(project_id):
         return []
     monkeypatch.setattr("app.features.udp.repository.list_udp", _empty)
     monkeypatch.setattr("app.features.domains.repository.list_domains", _empty)

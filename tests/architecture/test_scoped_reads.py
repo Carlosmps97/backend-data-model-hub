@@ -18,7 +18,9 @@ formas aceptadas son deliberadamente pocas:
   · literal `{...}` con `projectId` / `_id` / `tableId` de primer nivel,
   · `scoped(...)` / `_scoped(...)` / `_table_dup_filter(...)` (los constructores
     de alcance — `scoped()` levanta solo si el proyecto viene vacío),
-  · sin filtro (colecciones fuera de `PROJECT_SCOPED`),
+  · SIN filtro, y sólo si la colección es literal y NO está en `PROJECT_SCOPED`
+    (r2 2026-09-09: `published("folders")` pelado también revienta — el guard
+    exige alcance igual, y así reventaba el popup «Change details»),
   · una variable, SOLO en los sitios listados en `_OPAQUE_OK`.
 
 Si agregas una llamada nueva y este test se queja: no la agregues a la lista —
@@ -29,6 +31,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+
+from app.core.scope import PROJECT_SCOPED
 
 APP = Path(__file__).resolve().parents[2] / "app"
 
@@ -87,7 +91,13 @@ def _offenders() -> list[str]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or _callee(node) != "published":
                 continue
-            if len(node.args) < 2:                 # `published(coll)` → sin filtro
+            if len(node.args) < 2:
+                # `published(coll)` sin filtro: legítimo SÓLO fuera de
+                # PROJECT_SCOPED. Con colección variable no se juzga (el
+                # llamador decide y `assert_scoped_filter` lo ataja en runtime).
+                coll = node.args[0] if node.args else None
+                if isinstance(coll, ast.Constant) and coll.value in PROJECT_SCOPED:
+                    bad.append(f"app/{rel}:{node.lineno} — published({coll.value!r}) sin filtro")
                 continue
             verdict = _describe(node.args[1])
             if verdict == "ok":
@@ -120,3 +130,6 @@ def test_el_barrido_detecta_el_bug_de_2026_09_09():
     sano = ast.parse('await repository.published("relationships", scoped(pid, {"$or": []}))')
     call = next(n for n in ast.walk(sano) if isinstance(n, ast.Call) and _callee(n) == "published")
     assert _describe(call.args[1]) == "ok"
+
+    # r2: la colección de alcance SIN filtro es el mismo 500 por otra puerta.
+    assert "folders" in PROJECT_SCOPED and "projects" not in PROJECT_SCOPED

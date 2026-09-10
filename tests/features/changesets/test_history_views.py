@@ -54,7 +54,8 @@ def test_historial_de_vista_resuelve_tablas_y_custom_sql(monkeypatch):
         return [{"id": "u1", "name": "Ana P", "email": "ana@x.pe"},
                 {"id": "u2", "name": "Rev", "email": "rev@x.pe"}]
 
-    async def _udp():
+    # Doc 80 §8: firma REAL (catálogos por proyecto desde el doc 75).
+    async def _udp(project_id):
         return []
 
     monkeypatch.setattr(service.repository, "entity_changes", _changes)

@@ -1672,10 +1672,15 @@ async def diff(cs_id: str) -> dict | None:
 
 
 async def _detail_resolvers(wanted: list[tuple[str, str]], changes: dict,
-                            before_by: dict[tuple[str, str], dict | None]) -> dict:
+                            before_by: dict[tuple[str, str], dict | None],
+                            project_id: str) -> dict:
     """Mapas id→nombre para que el detalle sea legible: UDP, dominios, tablas/
     columnas referenciadas por relaciones y vistas, proyectos/folders. Slices
-    puntuales — nunca colecciones completas de datos (solo estructura chica)."""
+    puntuales — nunca colecciones completas de datos (solo estructura chica).
+
+    `project_id` = el proyecto del changeset (doc 80 §8). Los catálogos de Data
+    Standards son POR PROYECTO desde el doc 75; pedirlos sin él era `TypeError`
+    (y `published("folders")` pelado, `MissingProjectError`) ⇒ 500 del popup."""
     from app.features.domains import repository as dom_repo
     from app.core.facets import udp_display_names
     from app.features.udp import repository as udp_repo
@@ -1685,9 +1690,9 @@ async def _detail_resolvers(wanted: list[tuple[str, str]], changes: dict,
                  "projects": {}, "folders": {}}
     if cols & {"canonical_tables", "canonical_columns", "subject_areas"}:
         # Doc 69: la faceta lógica sale como «X (Logical)» (homónimos legibles).
-        res["udp"] = udp_display_names(await udp_repo.list_udp())
+        res["udp"] = udp_display_names(await udp_repo.list_udp(project_id))
     if "canonical_columns" in cols:
-        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
 
     entries = []
     for c, e in wanted:
@@ -1718,12 +1723,14 @@ async def _detail_resolvers(wanted: list[tuple[str, str]], changes: dict,
                           for d in docs}
         _merge_change_names("columns", "canonical_columns", cids)
     if cols & {"folders", "subject_areas"}:
+        # El changeset vive en UN proyecto: su nombre se resuelve por id, no
+        # bajando el padrón entero (fuga de nombres entre proyectos).
         res["projects"] = {d["id"]: d.get("name") or d["id"]
-                           for d in await repository.published("projects")}
+                           for d in await repository.published("projects", {"_id": project_id})}
         _merge_change_names("projects", "projects", set(res["projects"]) | set(changes.get("projects") or {}))
     if "subject_areas" in cols:
         res["folders"] = {d["id"]: d.get("name") or d["id"]
-                          for d in await repository.published("folders")}
+                          for d in await repository.published("folders", scoped(project_id))}
         _merge_change_names("folders", "folders", set(res["folders"]) | set(changes.get("folders") or {}))
     return res
 
@@ -1766,7 +1773,7 @@ async def diff_details(cs_id: str, items: list[tuple[str, str]]) -> dict | None:
             if c == col:
                 before_by[(c, e)] = pubs.get(e)
 
-    res = await _detail_resolvers(wanted, changes, before_by)
+    res = await _detail_resolvers(wanted, changes, before_by, cs["projectId"])
     return {"items": [diffdetail.entity_detail(c, e, changes[c][e], before_by[(c, e)], res)
                       for c, e in wanted]}
 
@@ -1778,18 +1785,25 @@ async def diff_details(cs_id: str, items: list[tuple[str, str]]) -> dict | None:
 HISTORY_COLLECTIONS = ("canonical_tables", "canonical_columns", "views")
 
 
-async def _history_resolvers(collection: str) -> dict:
+async def _history_resolvers(collection: str, project_id: str | None) -> dict:
     """Mapas id→nombre para el detalle de campos del historial: UDP siempre
     (ambas colecciones los llevan) y Parent Domain para columnas. Catálogos
-    chicos de Data Standards — nunca colecciones de datos."""
+    chicos de Data Standards — nunca colecciones de datos.
+
+    `project_id` = el proyecto DE LA ENTIDAD (doc 80 §8). Sin él —entidad no
+    publicada y cabeceras legacy sin proyecto— los mapas van vacíos: el
+    historial se muestra igual, sólo sin resolver nombres de UDP/dominio.
+    Llamarlos con `None` sería `MissingProjectError` ⇒ 500 de la pantalla."""
     from app.features.domains import repository as dom_repo
     from app.features.udp import repository as udp_repo
 
     res: dict = {"udp": {}, "domains": {}, "tables": {}, "columns": {},
                  "projects": {}, "folders": {}}
-    res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp()}
+    if not project_id:
+        return res
+    res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp(project_id)}
     if collection == "canonical_columns":
-        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
     return res
 
 
@@ -1817,7 +1831,15 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
         [str(c.get("csId") or "") for c in changes])
     events = history_events(changes, headers)[: max(1, limit)]
 
-    res = await _history_resolvers(collection) if events else {}
+    # Proyecto de la entidad: manda la cabecera de sus versiones y, si son
+    # legacy (pre-doc-75, sin `projectId`), el doc publicado. Se lee UNA vez y
+    # se reusa para el marcador «Initial load» de más abajo.
+    pub = await repository.published(collection, {"_id": entity_id})
+    doc = next((d for d in pub if str(d.get("id") or "") == entity_id), None)
+    pid = next((h.get("projectId") for h in headers.values() if h.get("projectId")), None) \
+        or (doc or {}).get("projectId")
+
+    res = await _history_resolvers(collection, pid) if events else {}
     if events and collection == "views":
         # Doc 61: las filas "Columns · <tabla>" del detalle resuelven la tabla
         # fuente por NOMBRE (mismo criterio que _detail_resolvers).
@@ -1851,12 +1873,8 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
         })
 
     if not any(i["action"] == "created" for i in items):
-        pub = await repository.published(collection, {"_id": entity_id})
-        doc = next((d for d in pub if str(d.get("id") or "") == entity_id), None)
         if items or doc:
             # Doc 75: el marcador «Initial load» es el v1 DEL PROYECTO de la entidad.
-            pid = next((h.get("projectId") for h in headers.values() if h.get("projectId")), None) \
-                or (doc or {}).get("projectId")
             first = await repository.earliest_applied(pid) if pid else None
             if first:
                 items.append({
@@ -1938,11 +1956,14 @@ def compare_buckets(composed: dict, res: dict) -> dict:
     return cols
 
 
-async def _compare_resolvers(composed: dict) -> dict:
+async def _compare_resolvers(composed: dict, project_id: str) -> dict:
     """Mapas id→nombre para el compare (doc 65) — mismos catálogos que el popup
     de revisión (UDP, dominios, tablas/columnas referidas, proyectos/folders),
     con fallback a los DOCS DEL PROPIO RANGO para entidades que ya no existen
-    publicadas (p.ej. una tabla referida por una relación y borrada después)."""
+    publicadas (p.ej. una tabla referida por una relación y borrada después).
+
+    `project_id` = el proyecto del rango comparado (doc 80 §8): las dos
+    versiones son del mismo proyecto por construcción de `_compare_headers`."""
     from app.features.domains import repository as dom_repo
     from app.features.udp import repository as udp_repo
 
@@ -1950,9 +1971,9 @@ async def _compare_resolvers(composed: dict) -> dict:
     res: dict = {"udp": {}, "domains": {}, "tables": {}, "columns": {},
                  "projects": {}, "folders": {}}
     if cols & {"canonical_tables", "canonical_columns", "subject_areas"}:
-        res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp()}
+        res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp(project_id)}
     if "canonical_columns" in cols:
-        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains()}
+        res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
     entries = [(coll, entry.get("before"), entry.get("after"))
                for (coll, _eid), entry in composed.items()]
     tids, cids = diffdetail.collect_ref_ids(entries)
@@ -1979,11 +2000,11 @@ async def _compare_resolvers(composed: dict) -> dict:
         _range_names("columns", "canonical_columns", cids)
     if cols & {"folders", "subject_areas"}:
         res["projects"] = {d["id"]: d.get("name") or d["id"]
-                           for d in await repository.published("projects")}
+                           for d in await repository.published("projects", {"_id": project_id})}
         _range_names("projects", "projects", {e for (c, e) in composed if c == "projects"})
     if "subject_areas" in cols:
         res["folders"] = {d["id"]: d.get("name") or d["id"]
-                          for d in await repository.published("folders")}
+                          for d in await repository.published("folders", scoped(project_id))}
         _range_names("folders", "folders", {e for (c, e) in composed if c == "folders"})
     return res
 
@@ -2043,7 +2064,7 @@ async def compare_versions(from_id: str, to_id: str) -> dict | str | None:
         return {"id": cs["id"], "versionLabel": cs.get("versionLabel"),
                 "title": cs.get("title"), "appliedAt": cs.get("appliedAt")}
 
-    buckets = compare_buckets(composed, await _compare_resolvers(composed))
+    buckets = compare_buckets(composed, await _compare_resolvers(composed, older["projectId"]))
     counts = {"added": 0, "edited": 0, "deleted": 0}
     for bucket in buckets.values():
         for verb in counts:
@@ -2063,7 +2084,7 @@ async def compare_details(from_id: str, to_id: str,
     got = await _compare_composed(from_id, to_id)
     if got is None or isinstance(got, str):
         return got
-    _older, _newer, _span, composed, _missing = got
+    older, _newer, _span, composed, _missing = got
     seen: set[tuple[str, str]] = set()
     wanted: list[tuple[str, str]] = []
     for c, e in items:
@@ -2072,7 +2093,7 @@ async def compare_details(from_id: str, to_id: str,
         seen.add((c, e))
         if (c, e) in composed:
             wanted.append((c, e))
-    res = await _compare_resolvers(composed)
+    res = await _compare_resolvers(composed, older["projectId"])
     out = []
     for c, e in wanted:
         entry = composed[(c, e)]

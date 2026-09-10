@@ -91,10 +91,13 @@ def _wire(monkeypatch, *, changes, headers, published, earliest, users=None):
     async def _users():
         return users or []
 
-    async def _udp():
+    # Doc 80 §8: firma REAL (los catálogos son POR PROYECTO desde el doc 75).
+    # El fake sin parámetro que había acá escondió durante días un TypeError
+    # que en vivo era un 500 del historial.
+    async def _udp(project_id):
         return [{"id": "udp1", "name": "Sensibilidad"}]
 
-    async def _domains():
+    async def _domains(project_id):
         return [{"id": "d1", "name": "Dominio Cliente"}]
 
     monkeypatch.setattr(service.repository, "entity_changes", _changes)
