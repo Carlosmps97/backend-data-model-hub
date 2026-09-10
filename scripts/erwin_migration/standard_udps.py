@@ -54,14 +54,15 @@ FIXED_UDPS: list[dict] = [
                        "SEMIYEARLY_365 days", "YEARLY_730 days", "EVENTUAL_90 days"]},
     {"name": "Tabla Cross", "level": "table", "view": "physical", "dataType": "list",
      "defaultValue": "No Definido", "allowedValues": _SI_NO},
-    # Grafía canónica = la del estándar del owner (con su typo «Snaptshot»,
-    # doc 68 decisión 1): round-trip fiel con Erwin/notebooks corporativos;
-    # la variante corregida converge vía ALIASES. Fuera del catálogo:
-    # «Tipo 1 (Historia Snapshot)» e «Independiente» (no están en la imagen).
+    # Grafía canónica = «Snapshot» BIEN ESCRITO (owner 2026-09-09). Deroga la
+    # decisión 1 del doc 68, que había adoptado el typo «Snaptshot» del estándar
+    # corporativo por round-trip fiel: el typo pasa a ALIASES, así los XML que
+    # lo traen siguen convergiendo. Fuera del catálogo: «Tipo 1 (Historia
+    # Snapshot)» e «Independiente» (no están en la imagen del estándar).
     {"name": "Tipo de Carga", "level": "table", "view": "physical", "dataType": "list",
      "defaultValue": "No Definido",
      "allowedValues": ["No Definido", "Tipo 1 (No Historia)", "Tipo 2 (Historia Vigencia)",
-                       "Tipo 4 (Historia Snaptshot)"]},
+                       "Tipo 4 (Historia Snapshot)"]},
     {"name": "Tipo de Entidad", "level": "table", "view": "physical", "dataType": "list",
      "defaultValue": "No Definido", "allowedValues": _TIPO_ENTIDAD},
     {"name": "Universal", "level": "table", "view": "physical", "dataType": "list",
@@ -115,16 +116,16 @@ FIXED_UDPS: list[dict] = [
 
 # Variantes CONOCIDAS de los XML (norm_enum de la variante → grafía canónica).
 # norm_enum ya absorbe case/trim/espacios múltiples; acá van solo las que no:
-# typos ("Snaptshot"), tildes y guiones con espacios. Indexados por (level,
+# typos del origen ("Snaptshot"), tildes y guiones con espacios. Indexados por (level,
 # nombre): aplican a AMBAS facetas (los typos de valor son los mismos).
 ALIASES: dict[tuple[str, str], dict[str, str]] = {
     ("table", "TIPO DE CARGA"): {
-        # Doc 68: canónica = «Snaptshot» (typo del estándar); la corregida y
-        # los paréntesis pegados convergen. «Tipo 1 (Historia …)» quedó fuera
-        # del catálogo ⇒ sin destino (rige el default y va al reporte).
-        norm_enum("Tipo 4 (Historia Snapshot)"): "Tipo 4 (Historia Snaptshot)",
-        norm_enum("Tipo 4(Historia Snaptshot)"): "Tipo 4 (Historia Snaptshot)",
-        norm_enum("Tipo 4(Historia Snapshot)"): "Tipo 4 (Historia Snaptshot)",
+        # Canónica = «Snapshot» (owner 2026-09-09): el typo del estándar y los
+        # paréntesis pegados convergen hacia ella. «Tipo 1 (Historia …)» quedó
+        # fuera del catálogo ⇒ sin destino (rige el default y va al reporte).
+        norm_enum("Tipo 4 (Historia Snaptshot)"): "Tipo 4 (Historia Snapshot)",
+        norm_enum("Tipo 4(Historia Snaptshot)"): "Tipo 4 (Historia Snapshot)",
+        norm_enum("Tipo 4(Historia Snapshot)"): "Tipo 4 (Historia Snapshot)",
         norm_enum("Tipo 2(Historia Vigencia)"): "Tipo 2 (Historia Vigencia)",
         norm_enum("Tipo 1(No Historia)"): "Tipo 1 (No Historia)",
     },

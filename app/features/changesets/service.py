@@ -1596,6 +1596,7 @@ async def diff(cs_id: str) -> dict | None:
     cs = await repository.get(cs_id)
     if not cs:
         return None
+    pid = cs["projectId"]
     changes = await repository.changes_map(cs_id)
 
     published: dict[str, list[dict]] = {}
@@ -1615,9 +1616,14 @@ async def diff(cs_id: str) -> dict | None:
     relationships: list[dict] = []
     if touched:
         t = sorted(touched)
+        # `scoped()` NO es decorativo: `published()` exige alcance en el PRIMER
+        # nivel del filtro (doc 75 D1) y `$or` no cuenta — sin el proyecto acá,
+        # cada request que tocara una tabla moría con MissingProjectError → 500
+        # en `GET /changesets/{id}/diff` y la revisión no cargaba (2026-09-09).
         relationships = await repository.published(
-            "relationships", {"$or": [{"parentTableId": {"$in": t}}, {"childTableId": {"$in": t}},
-                                      {"sourceTableId": {"$in": t}}, {"targetTableId": {"$in": t}}]}
+            "relationships",
+            scoped(pid, {"$or": [{"parentTableId": {"$in": t}}, {"childTableId": {"$in": t}},
+                                 {"sourceTableId": {"$in": t}}, {"targetTableId": {"$in": t}}]})
         )
 
     # Nombres de las tablas AFECTADAS vía relaciones (fuera del slice de tocadas).
@@ -1642,7 +1648,6 @@ async def diff(cs_id: str) -> dict | None:
     # Jerarquía Proyecto→Folder→Canvas→Esquema→Tabla→Columnas (+Vistas) +
     # La
     # estructura es chica (proyectos/folders/canvases) → overlay completo.
-    pid = cs["projectId"]
     sas = overlay(await repository.published("subject_areas", scoped(pid)), changes.get("subject_areas") or {})
     pub_projects = await repository.published("projects", {"_id": pid})
     projs = overlay(pub_projects, changes.get("projects") or {})

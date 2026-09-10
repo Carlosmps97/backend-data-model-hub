@@ -132,10 +132,16 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
     for d in body.domainsUpsert:
         if d.id and d.id in before_domains:
             prev = before_domains[d.id]
+            parts = [f"Domain {d.name}"]
             if prev.get("defaultDataType") != d.defaultDataType:
-                edited.append(f"Domain {d.name} · {prev.get('defaultDataType')} → {d.defaultDataType}")
-            else:
-                edited.append(f"Domain {d.name}")
+                parts.append(f"{prev.get('defaultDataType')} → {d.defaultDataType}")
+            # Doc 80 §4: prender/apagar la marca «atributo estándar» cambia qué se
+            # estampa en CADA columna que adopte el dominio (nombre lógico +
+            # definición funcional) — sale nombrado en el historial y el rollback,
+            # no como un "Domain X" mudo. `None` = el cliente no mandó el flag.
+            if d.inheritsName is not None and bool(prev.get("inheritsName")) != d.inheritsName:
+                parts.append(f"inherits name + definition {'ON' if d.inheritsName else 'OFF'}")
+            edited.append(" · ".join(parts))
         else:
             added.append(f"Domain {d.name} · {d.defaultDataType}")
     for did in body.domainsDelete:

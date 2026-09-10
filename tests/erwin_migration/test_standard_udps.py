@@ -53,14 +53,15 @@ def test_match_colapsa_espacios_internos():
 
 
 def test_match_aliases_typos_y_tildes():
-    # Doc 68: la grafía CANÓNICA es la de la imagen del estándar del owner
-    # (2026-09-03) — con su typo «Snaptshot»; la variante corregida converge
-    # vía alias (round-trip fiel con Erwin/notebooks corporativos).
+    # Owner 2026-09-09 (deroga la decisión 1 del doc 68): la grafía CANÓNICA es
+    # «Snapshot» bien escrito. El typo «Snaptshot» del estándar corporativo —y
+    # las variantes con el paréntesis pegado— convergen hacia ella, así los XML
+    # ya cargados con el typo siguen resolviendo al re-sembrar.
     carga = _fixed("table", "Tipo de Carga")
-    assert match_value(carga, "Tipo 4 (Historia Snaptshot)") == "Tipo 4 (Historia Snaptshot)"
-    assert match_value(carga, "TIPO 4(HISTORIA SNAPTSHOT)") == "Tipo 4 (Historia Snaptshot)"
-    assert match_value(carga, "Tipo 4 (Historia Snapshot)") == "Tipo 4 (Historia Snaptshot)"
-    assert match_value(carga, "Tipo 4(Historia Snapshot)") == "Tipo 4 (Historia Snaptshot)"
+    assert match_value(carga, "Tipo 4 (Historia Snapshot)") == "Tipo 4 (Historia Snapshot)"
+    assert match_value(carga, "Tipo 4 (Historia Snaptshot)") == "Tipo 4 (Historia Snapshot)"
+    assert match_value(carga, "TIPO 4(HISTORIA SNAPTSHOT)") == "Tipo 4 (Historia Snapshot)"
+    assert match_value(carga, "Tipo 4(Historia Snapshot)") == "Tipo 4 (Historia Snapshot)"
     ent = _fixed("table", "Tipo de Entidad")
     assert match_value(ent, "Sub - Tipo") == "Sub-Tipo"
     assert match_value(ent, "sub tipo") == "Sub-Tipo"
@@ -127,7 +128,7 @@ def test_catalogo_tabla_owner_2026_09():
     assert "Exclusivo Cloud" not in tabla
     assert tabla["Tipo de Carga"]["allowedValues"] == [
         "No Definido", "Tipo 1 (No Historia)", "Tipo 2 (Historia Vigencia)",
-        "Tipo 4 (Historia Snaptshot)"]
+        "Tipo 4 (Historia Snapshot)"]
     assert tabla["Tipo de Entidad"]["allowedValues"] == [
         "No Definido", "Super-Tipo", "Sub-Tipo", "Asociacion", "Referencia",
         "Dependiente"]

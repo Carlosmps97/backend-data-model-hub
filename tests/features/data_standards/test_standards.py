@@ -158,3 +158,32 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
 def test_rollback_version_inexistente_es_none(monkeypatch):
     monkeypatch.setattr(service.repository, "get_version", AsyncMock(return_value=None))
     assert asyncio.run(service.rollback("mr", "p1", 999)) is None
+
+
+# ── Doc 80 §4: la marca «atributo estándar» es un cambio auditable ────────
+
+def test_build_diff_nombra_el_cambio_de_inherits_name():
+    """Prender/apagar la herencia de nombre+definición cambia qué se estampa en
+    CADA columna que adopte el dominio: la versión de estándares debe decirlo,
+    no salir como un "Domain X" mudo (así se lee en el historial y en el
+    rollback qué se prendió y cuándo)."""
+    before = {"d1": {"name": "FecRutina", "defaultDataType": "DATE", "inheritsName": False},
+              "d2": {"name": "CodMes", "defaultDataType": "VARCHAR(6)", "inheritsName": True},
+              "d3": {"name": "Codigo", "defaultDataType": "VARCHAR(30)", "inheritsName": False}}
+    body = ApplyBody(domainsUpsert=[
+        DomainEdit(id="d1", name="FecRutina", defaultDataType="DATE", inheritsName=True),      # ON
+        DomainEdit(id="d2", name="CodMes", defaultDataType="VARCHAR(6)", inheritsName=False),  # OFF
+        DomainEdit(id="d3", name="Codigo", defaultDataType="VARCHAR(30)"),                     # sin tocar
+    ])
+    diff = service.build_diff(body, before, {})
+    assert "Domain FecRutina · inherits name + definition ON" in diff["edited"]
+    assert "Domain CodMes · inherits name + definition OFF" in diff["edited"]
+    assert "Domain Codigo" in diff["edited"]      # un cliente que no manda el flag no lo toca
+
+
+def test_build_diff_reporta_tipo_e_inherits_name_juntos():
+    before = {"d1": {"name": "FecRutina", "defaultDataType": "DATE", "inheritsName": False}}
+    body = ApplyBody(domainsUpsert=[
+        DomainEdit(id="d1", name="FecRutina", defaultDataType="TIMESTAMP", inheritsName=True)])
+    diff = service.build_diff(body, before, {})
+    assert "Domain FecRutina · DATE → TIMESTAMP · inherits name + definition ON" in diff["edited"]
