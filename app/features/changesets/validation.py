@@ -47,8 +47,27 @@ def project_change_error(cs_project_id: str, entity_id: str, op: str, payload: d
     return None
 
 
-class CrossProjectError(ValueError):
+class PublishError(ValueError):
+    """Base de los errores del PUBLISH (y de las escrituras al changeset) con
+    detalle ESTRUCTURADO (doc 84 D1): `code` estable para el front, `items`
+    (lista de dicts: qué entidad y por qué) y `next` (qué hacer). `str(exc)`
+    sigue siendo el mensaje legible — compat con logs, tests y con los
+    `raise X("mensaje")` existentes (items vacío)."""
+    code = "publish_error"
+
+    def __init__(self, message: str = "", items: list[dict] | None = None,
+                 next_step: str | None = None):
+        super().__init__(message)
+        self.items: list[dict] = list(items or [])
+        self.next = next_step
+
+    def to_detail(self) -> dict:
+        return {"code": self.code, "message": str(self), "items": self.items, "next": self.next}
+
+
+class CrossProjectError(PublishError):
     """Referencia a una entidad de OTRO proyecto (doc 75 I2). Router → 409."""
+    code = "cross_project"
 
 
 REFERENCE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -89,16 +108,18 @@ def cross_project_error(project_id: str, refs: dict[str, set[str]],
     return None
 
 
-class InvalidPayloadError(ValueError):
+class InvalidPayloadError(PublishError):
     """Payload de cambio que NO valida contra el modelo de su colección.
     El router la convierte en 422 (el mensaje ya es legible)."""
+    code = "invalid_changes"
 
 
-class NameTooLongError(ValueError):
+class NameTooLongError(PublishError):
     """Nombre FÍSICO (tabla/columna) que excede el límite de caracteres del
     naming config (Data Standards · Glosario). El router la convierte en 400
     (el mensaje ya es legible). Solo se dispara al CREAR o al RENOMBRAR — nunca
     penaliza nombres largos HEREDADOS que no se están tocando."""
+    code = "name_too_long"
 
 
 def payload_error(collection: str, entity_id: str, op: str | None, payload: dict | None) -> str | None:
@@ -156,19 +177,22 @@ def validate_changes(changes: dict) -> list[str]:
 # nivel service: nombre SIN CAMBIOS respecto del publicado no bloquea.
 
 
-class DuplicateEntityError(ValueError):
+class DuplicateEntityError(PublishError):
     """Upsert que viola la unicidad de nombres (tabla, columna o esquema).
     El router la convierte en 409 (el mensaje ya es legible)."""
+    code = "duplicate_names"
 
 
-class SchemaInUseError(ValueError):
+class SchemaInUseError(PublishError):
     """Delete de un esquema que todavía tiene tablas/vistas efectivas (doc 18).
     El router la convierte en 409 (el mensaje ya es legible)."""
+    code = "schema_in_use"
 
 
-class RelationshipKeyMismatchError(ValueError):
+class RelationshipKeyMismatchError(PublishError):
     """Upsert de relación que NO migra la llave completa del padre (N=N,
     doc 47). El router la convierte en 409 (el mensaje ya es legible)."""
+    code = "relationship_key"
 
 
 def relationship_key_error(payload: dict, parent_pk_ids: set[str]) -> str | None:
@@ -218,10 +242,12 @@ def _effective_docs(published: list[dict], pending: dict, exclude_id: str) -> li
     return list(docs.values())
 
 
-def duplicate_error(collection: str, entity_id: str, payload: dict | None,
-                    published: list[dict], pending: dict) -> str | None:
-    """Mensaje de duplicado si el upsert viola la unicidad; None si pasa (o la
-    colección no chequea unicidad). Puro.
+def duplicate_hit(collection: str, entity_id: str, payload: dict | None,
+                  published: list[dict], pending: dict) -> dict | None:
+    """Choque de unicidad de un upsert → {message, hit} con el doc EFECTIVO con
+    el que choca (publicado o pendiente del MISMO request); None si pasa (o la
+    colección no chequea unicidad). Doc 84 A1: `hit` deja decir QUÉ existe y
+    DÓNDE en el panel de bloqueo. Puro.
 
     - `published`: slice publicado relevante (mismo nombre / misma tabla).
     - `pending`: cambios pendientes de la MISMA colección en el changeset.
@@ -232,23 +258,37 @@ def duplicate_error(collection: str, entity_id: str, payload: dict | None,
         if not key:
             return None
         hit = next((d for d in _effective_docs(published, pending, entity_id) if _table_key(d) == key), None)
-        if hit is not None:
-            name = str(p.get("physicalName") or "").strip()
-            # El homónimo puede vivir en OTRO esquema (la clave es global):
-            # nombrarlo hace obvio el conflicto cross-schema.
-            hit_schema = str(hit.get("schema") or hit.get("sql_schema") or "").strip()
-            return (f"Table {name} already exists"
-                    + (f" (schema {hit_schema})" if hit_schema else ""))
-    elif collection == "canonical_columns":
+        if hit is None:
+            return None
+        name = str(p.get("physicalName") or "").strip()
+        # El homónimo puede vivir en OTRO esquema (la clave es global):
+        # nombrarlo hace obvio el conflicto cross-schema.
+        hit_schema = str(hit.get("schema") or hit.get("sql_schema") or "").strip()
+        return {"message": f"Table {name} already exists" + (f" (schema {hit_schema})" if hit_schema else ""),
+                "hit": hit}
+    if collection == "canonical_columns":
         key = _column_key(p)
         if not (key[0] and key[1]):
             return None
-        if any(_column_key(d) == key for d in _effective_docs(published, pending, entity_id)):
-            return f"Column {str(p.get('physicalName') or '').strip()} already exists in this table"
-    elif collection == "schemas":
+        hit = next((d for d in _effective_docs(published, pending, entity_id) if _column_key(d) == key), None)
+        if hit is None:
+            return None
+        return {"message": f"Column {str(p.get('physicalName') or '').strip()} already exists in this table",
+                "hit": hit}
+    if collection == "schemas":
         key = _norm(p.get("name"))
         if not key:
             return None
-        if any(_norm(d.get("name")) == key for d in _effective_docs(published, pending, entity_id)):
-            return f"Schema {str(p.get('name') or '').strip()} already exists"
+        hit = next((d for d in _effective_docs(published, pending, entity_id) if _norm(d.get("name")) == key), None)
+        if hit is None:
+            return None
+        return {"message": f"Schema {str(p.get('name') or '').strip()} already exists", "hit": hit}
     return None
+
+
+def duplicate_error(collection: str, entity_id: str, payload: dict | None,
+                    published: list[dict], pending: dict) -> str | None:
+    """Mensaje de duplicado si el upsert viola la unicidad; None si pasa (o la
+    colección no chequea unicidad). Puro. Ver `duplicate_hit`."""
+    hit = duplicate_hit(collection, entity_id, payload, published, pending)
+    return hit["message"] if hit else None

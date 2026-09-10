@@ -375,10 +375,12 @@ async def applied_after(project_id: str, applied_at: str) -> list[dict]:
     db = await get_db()
     docs = await db[COLL].find(
         scoped(project_id, {"status": "approved", "appliedAt": {"$gt": applied_at}}),
-        {"appliedAt": 1, "versionLabel": 1}).to_list(None)
+        {"appliedAt": 1, "versionLabel": 1, "owner": 1, "title": 1}).to_list(None)
     docs.sort(key=lambda d: d.get("appliedAt") or "", reverse=True)
+    # Doc 84 C2: owner/title viajan para la atribución por entidad del compare.
     return [{"id": str(d["_id"]), "appliedAt": d.get("appliedAt"),
-             "versionLabel": d.get("versionLabel")} for d in docs]
+             "versionLabel": d.get("versionLabel"), "owner": d.get("owner"),
+             "title": d.get("title")} for d in docs]
 
 
 async def entity_changes(collection: str, entity_id: str) -> list[dict]:

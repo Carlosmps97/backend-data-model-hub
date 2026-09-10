@@ -17,7 +17,11 @@ import json
 import re
 
 # Ruido global: identidad/timestamps/soft-delete — jamás son "el cambio".
-NOISE = {"id", "_id", "csId", "at", "createdAt", "updatedAt", "flgactive"}
+NOISE = {"id", "_id", "csId", "at", "createdAt", "updatedAt", "flgactive",
+         # Doc 84 B1: el proyecto es el del changeset (jamás cambia dentro de un
+         # request) y los flags de override del naming son mecánica interna
+         # (como `typeOverridden`): al revisor le importan los nombres/tipos.
+         "projectId", "physicalNameOverridden", "logicalTypeOverridden"}
 NOISE_BY_COLLECTION: dict[str, set[str]] = {
     # layout/drawings = posiciones y shapes del canvas: mover cajitas no es un
     # cambio de MODELO revisable campo a campo.
@@ -339,6 +343,8 @@ def entity_detail(collection: str, entity_id: str, change: dict,
         "action": action,
         "name": _display_name(collection, before, after, res),
         "fields": _field_rows(collection, before, after, action, res),
+        # Doc 84 B3: cuándo se grabó el cambio (el front lo pinta con el owner).
+        "at": change.get("at"),
     }
 
 

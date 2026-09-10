@@ -32,7 +32,7 @@ _can_rollback = require_permission("rollback")
 from .repository import VERSIONED
 from .validation import (
     CrossProjectError, DuplicateEntityError, InvalidPayloadError, NameTooLongError,
-    RelationshipKeyMismatchError, SchemaInUseError)
+    PublishError, RelationshipKeyMismatchError, SchemaInUseError)
 from .schemas import (
     ChangeBody,
     ChangesBulkBody,
@@ -251,34 +251,34 @@ async def submit(cs_id: str, body: SubmitBody | None = None,
     return ok(res)
 
 
+def _publish_detail(exc: PublishError) -> dict:
+    """Doc 84 D1: `detail` estructurado de un publish bloqueado. `message` es lo
+    que el cliente HTTP muestra (compat con `apiErrorMessage`); `items`/`next`
+    alimentan el panel de bloqueo de la revisión."""
+    d = exc.to_detail()
+    d["next"] = d.get("next") or service.PUBLISH_NEXT_STEP
+    return d
+
+
 async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
     """Registra la decisión de un revisor asignado vía `service.review` (política
     de UNANIMIDAD: sólo se aplica cuando TODOS los revisores aprobaron). Camino
     único de decisión — /review, /approve y /reject pasan por acá."""
     try:
         res = await service.review(cs_id, actor, decision, note)
-    except (CrossProjectError, ProjectDeletedError) as exc:
+    except ProjectDeletedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except DuplicateEntityError as exc:
-        # Carrera entre changesets (spec 10 §9): otro publish ganó el nombre.
-        # El claim ya se revirtió (producción intacta); el request sigue en revisión.
-        raise HTTPException(
-            status_code=409,
-            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
-        ) from exc
-    except SchemaInUseError as exc:
-        # Delete de esquema con tablas/vistas efectivas (doc 18): el claim ya
-        # se revirtió, producción intacta; el request sigue en revisión.
-        raise HTTPException(
-            status_code=409,
-            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
-        ) from exc
+    except (CrossProjectError, DuplicateEntityError, SchemaInUseError) as exc:
+        # Doc 84 D1: detalle ESTRUCTURADO {code, message, items, next} — el front
+        # pinta el panel «Publish blocked» con la lista completa. Duplicados =
+        # carrera entre changesets (spec 10 §9: otro publish ganó el nombre);
+        # esquema en uso (doc 18); referencia cruzada (doc 75 I2). En todos, el
+        # claim ya se revirtió (producción intacta) y el request sigue en
+        # revisión. Mismo 409, mismo guard, mismo momento: el bloqueo no cambia.
+        raise HTTPException(status_code=409, detail=_publish_detail(exc)) from exc
     except InvalidPayloadError as exc:
         # Gate autoritativo del apply: el claim se revirtió, producción intacta.
-        raise HTTPException(
-            status_code=422,
-            detail=f"Publish failed: {exc}. The owner must withdraw the version, fix it and re-submit.",
-        ) from exc
+        raise HTTPException(status_code=422, detail=_publish_detail(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="You are not assigned as a reviewer of this request.")
     if res is None:

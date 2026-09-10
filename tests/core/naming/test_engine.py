@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.naming.engine import physicalize
+from app.core.naming.engine import apply_case, physicalize
 
 DICT = {"monto": "MTO", "deuda": "DEU", "dólares": "USD", "tipo de cambio": "TPC"}
 # Mapa per-table del diseño (screen 08b): cuenta riesgo → CTARIESGO.
@@ -70,3 +70,42 @@ def test_physicalize_vacio_con_case():
 def test_physicalize_case_invalido_levanta():
     with pytest.raises(ValueError):
         physicalize("monto", DICT, case="title")
+
+
+# ── apply_case (doc 83): físico TIPEADO (no derivado) → regla de case del scope ──
+
+
+def test_apply_case_upper_pasa_minusculas_a_mayusculas():
+    # Popup New column en modo Physical / panel Properties: «monto_deuda»
+    # tipeado en un proyecto con regla `upper` se persiste en MAYÚSCULA.
+    assert apply_case("monto_deuda", "upper") == "MONTO_DEUDA"
+
+
+def test_apply_case_lower():
+    assert apply_case("MTO_DEU", "lower") == "mto_deu"
+
+
+def test_apply_case_es_idempotente():
+    assert apply_case("MTO_DEU", "upper") == "MTO_DEU"
+    assert apply_case("mtoDeuUsd", "camel") == "mtoDeuUsd"
+
+
+def test_apply_case_camel_resegmenta_por_separadores():
+    # Mismo armado que el motor: primer segmento lower, siguientes Capitalized.
+    assert apply_case("MTO_DEU_USD", "camel") == "mtoDeuUsd"
+    assert apply_case("mto-deu usd", "camel") == "mtoDeuUsd"
+
+
+def test_apply_case_camel_sin_separadores_respeta_lo_tipeado():
+    # Sin separador no hay cómo re-segmentar: no se pisa un camel ya correcto.
+    assert apply_case("mtoDeu", "camel") == "mtoDeu"
+
+
+def test_apply_case_default_es_upper_y_vacio_pasa():
+    assert apply_case("monto") == "MONTO"
+    assert apply_case("", "upper") == ""
+
+
+def test_apply_case_invalido_levanta():
+    with pytest.raises(ValueError):
+        apply_case("monto", "title")

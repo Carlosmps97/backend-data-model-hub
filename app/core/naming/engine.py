@@ -18,7 +18,12 @@ El físico se arma en 3 pasos configurables por *scope* (columna vs tabla):
 """
 from __future__ import annotations
 
+import re
+
 _VALID_CASES = ("upper", "lower", "camel")
+
+# Separadores con los que un físico TIPEADO se re-segmenta para camel.
+_SEGMENT_SPLIT = re.compile(r"[_\-\s]+")
 
 
 def _abbreviate(logical: str, mappings: dict[str, str]) -> list[str]:
@@ -76,3 +81,33 @@ def physicalize(
         return head.lower() + "".join(s[:1].upper() + s[1:].lower() for s in tail)
     transform = str.upper if case == "upper" else str.lower
     return separator.join(transform(s) for s in segments)
+
+
+def apply_case(physical: str, case: str = "upper") -> str:
+    """Normaliza un físico TIPEADO (no derivado) a la regla `case` del scope (doc 83).
+
+    Complementa a `physicalize`: aquél aplica el case al DERIVAR desde el
+    lógico; éste cubre los caminos donde el modelador escribe el físico
+    directo (popup New column en modo Physical, panel Properties) para que la
+    regla se cumpla SIEMPRE, sin importar por dónde entró el nombre. No
+    abrevia ni toca el lógico. Idempotente.
+
+    - 'upper' / 'lower': sobre el string completo.
+    - 'camel': re-segmenta por `_` / `-` / espacios con el mismo armado del
+      motor (primer segmento lower, siguientes Capitalized); SIN separadores
+      deja lo tipeado tal cual — no hay forma de re-segmentar «mtoDeu» sin
+      perderlo.
+
+    `case` inválido levanta ValueError (como `physicalize`).
+    """
+    if case not in _VALID_CASES:
+        raise ValueError(f"case debe ser uno de {_VALID_CASES}, no {case!r}")
+    if case == "upper":
+        return physical.upper()
+    if case == "lower":
+        return physical.lower()
+    segments = [s for s in _SEGMENT_SPLIT.split(physical) if s]
+    if len(segments) <= 1:
+        return physical
+    head, *tail = segments
+    return head.lower() + "".join(s[:1].upper() + s[1:].lower() for s in tail)

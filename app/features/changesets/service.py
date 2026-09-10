@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timezone
 
 from app.core.logging import get_logger
+from app.core.naming import apply_case
 from app.core.scope import PROJECT_SCOPED, ProjectDeletedError, scoped
 from app.core.versioning import overlay, summarize_diff
 from app.features.glossary import service as dict_svc
@@ -549,8 +550,8 @@ async def _name_length_error(cs: dict, collection: str, entity_id: str,
         pub = await repository.published(collection, {"_id": entity_id})
         if pub:
             current = str(pub[0].get("physicalName") or "").strip() or None
-    if current == name:
-        return None  # heredado sin cambios
+    if current is not None and current.casefold() == name.casefold():
+        return None  # heredado sin cambios (doc 83: el case no cuenta como rename)
     return _too_long_msg(scope, name, max_len)
 
 
@@ -621,6 +622,9 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
             raise RelationshipKeyMismatchError(key_err)
     # Doc 75 I2: toda referencia se resuelve dentro del proyecto del changeset.
     await _cross_project_check(cs, collection, entity_id, op, payload)
+    # Doc 83: reglas de naming (case del físico de columnas + override, doc 68)
+    # ANTES de unicidad/longitud: esos chequeos ven el nombre que se persiste.
+    await _apply_naming_rules(cs["projectId"], [{"collection": collection, "op": op, "payload": payload}])
     # Unicidad de nombres (spec 10 §9) POR PROYECTO: tablas por physicalName y
     # columnas por physicalName dentro de su tableId — contra publicado activo
     # + pendientes de ESTE changeset. El router lo convierte en 409.
@@ -630,7 +634,6 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     too_long = await _name_length_error(cs, collection, entity_id, op, payload)
     if too_long:
         raise NameTooLongError(too_long)
-    await _stamp_physical_overrides(cs["projectId"], [{"collection": collection, "op": op, "payload": payload}])
     updated = await repository.set_change(cs_id, collection, entity_id, op, payload, origin)
     if updated is not None:
         return updated
@@ -642,19 +645,29 @@ _UNIQUE_COLLS = ("canonical_tables", "canonical_columns", "schemas")
 
 # Doc 68: colecciones cuyo `physicalName` se deriva del lógico por scope.
 _OVERRIDE_SCOPES = {"canonical_tables": "table", "canonical_columns": "column"}
+# Doc 83: colecciones cuyo físico TIPEADO se normaliza al `case` del scope.
+# Sólo columnas (alcance del pedido owner 2026-09-10); las tablas siguen
+# entrando tal cual — extender = sumar la colección acá.
+_CASE_NORMALIZED = ("canonical_columns",)
 
 
-async def _stamp_physical_overrides(project_id: str, items: list[dict]) -> None:
-    """Estampa `physicalNameOverridden` en upserts de tablas/columnas (doc 68):
-    flag del payload OR (físico ≠ physicalize(lógico) con las reglas vigentes
-    del scope). Este choke point cubre TODOS los escritores (panels, New
-    table/column, CTAS, paste `_copy_n`, subcategorías `_DUPn`, bulk upload)
-    sin tocar cada feature — sin él, un físico custom quedaría re-derivable y
-    el próximo Save & apply del Glosario lo pisaría.
+async def _apply_naming_rules(project_id: str, items: list[dict]) -> None:
+    """Aplica las reglas de naming del scope a upserts de tablas/columnas, en
+    este orden y con UNA carga de reglas por scope presente en el lote:
 
-    Reglas cargadas UNA vez por scope presente en el lote. Si no cargan
-    (naming inaccesible / unit tests con repos mockeados), el payload pasa tal
-    cual: el estampado JAMÁS bloquea la escritura."""
+    1. Doc 83 — `physicalName` de COLUMNAS al `case` del scope (`apply_case`):
+       la regla sólo regía al derivar desde el lógico; tipear el físico (popup
+       New column en modo Physical, panel Properties) dejaba pasar minúsculas.
+       Este choke point cubre TODOS los escritores (panels, popup, CTAS, paste
+       `_copy_n`, subcategorías `_DUPn`, bulk upload) sin tocar cada feature.
+    2. Doc 68 — estampa `physicalNameOverridden`: flag del payload OR (físico
+       ≠ physicalize(lógico) con las reglas vigentes). Sin esto, un físico
+       custom quedaría re-derivable y el próximo Save & apply del Glosario lo
+       pisaría. Se evalúa sobre el físico YA normalizado.
+
+    Va ANTES de los chequeos de unicidad/longitud: esos ven el nombre que se
+    persiste. Si las reglas no cargan (naming inaccesible / unit tests con
+    repos mockeados), el payload pasa tal cual: JAMÁS bloquea la escritura."""
     rules: dict[str, tuple | None] = {}
     for it in items:
         scope = _OVERRIDE_SCOPES.get(it.get("collection") or "")
@@ -664,15 +677,18 @@ async def _stamp_physical_overrides(project_id: str, items: list[dict]) -> None:
             try:
                 rules[scope] = await dict_svc.naming_rules(project_id, scope)
             except Exception:
-                log.warning("naming rules unavailable — physical override NOT stamped",
+                log.warning("naming rules unavailable — physical case/override NOT applied",
                             extra={"scope": scope})
                 rules[scope] = None
         loaded = rules[scope]
         if loaded is None:
             continue
         mappings, sep, case = loaded
-        it["payload"]["physicalNameOverridden"] = dict_svc.is_physical_override(
-            it["payload"], mappings, sep, case)
+        payload = it["payload"]
+        if it["collection"] in _CASE_NORMALIZED and isinstance(payload.get("physicalName"), str):
+            payload["physicalName"] = apply_case(payload["physicalName"], case)
+        payload["physicalNameOverridden"] = dict_svc.is_physical_override(
+            payload, mappings, sep, case)
 
 
 async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | str | None:
@@ -739,6 +755,10 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
     for it in ordered:
         await _cross_project_check(cs, it["collection"], it["entityId"], it["op"], it.get("payload"), merged)
 
+    # Doc 83: reglas de naming (case del físico de columnas + override) ANTES
+    # de unicidad/longitud — mismo orden que add_change.
+    await _apply_naming_rules(cs["projectId"], ordered)
+
     upserts = [it for it in ordered if it["op"] == "upsert" and it["collection"] in _UNIQUE_COLLS]
     pending_all: dict[str, dict] = {}
     pub_tables: dict[str, list[dict]] = {}
@@ -794,14 +814,13 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
                     pub_self = await repository.published(coll, {"_id": eid})
                     if pub_self:
                         current = str(pub_self[0].get("physicalName") or "").strip() or None
-                if current != name:
+                if current is None or current.casefold() != name.casefold():
                     raise NameTooLongError(
                         _too_long_msg("table" if coll == "canonical_tables" else "column", name, limit))
         # El pending evoluciona con CADA ítem (también deletes y colecciones
         # sin unicidad no cuestan nada): semántica del loop secuencial.
         pending[eid] = {"op": op} if op == "delete" else {"op": op, "payload": it.get("payload") or {}}
 
-    await _stamp_physical_overrides(cs["projectId"], ordered)
     updated = await repository.set_changes_bulk(cs_id, ordered)
     if updated is not None:
         return updated
@@ -975,12 +994,30 @@ async def submit(cs_id: str, actor: str, title: str | None = None, description: 
     return await repository.transition(cs_id, "draft", fields)
 
 
-async def _publish_duplicates(project_id: str, changes: dict) -> list[str]:
+# Doc 84 D1: qué hacer ante un publish bloqueado (viaja en `next` del detail).
+PUBLISH_NEXT_STEP = ("The owner must withdraw the request, fix or remove the listed items, "
+                     "and re-submit it for review.")
+
+
+async def _publish_duplicate_items(project_id: str, changes: dict) -> list[dict]:
     """Re-chequeo COMPLETO de unicidad al publicar (spec 10 §9): cubre la
-    carrera entre changesets concurrentes DEL MISMO PROYECTO (doc 75 D6). Queries
-    acotadas: tablas por $or de nombres dentro del proyecto, columnas por $in
-    de los tableIds tocados, esquemas por nombre dentro del proyecto."""
-    errors: list[str] = []
+    carrera entre changesets concurrentes DEL MISMO PROYECTO (doc 75 D6).
+    Queries acotadas: tablas por $or de nombres dentro del proyecto, columnas
+    por $in de los tableIds tocados, esquemas por nombre dentro del proyecto.
+
+    Doc 84 A1: devuelve la lista COMPLETA de choques como ítems estructurados
+    (sin truncar) — {collection, kind, entityId, name, schema | tableId +
+    tableName, where: production | request, message, existing: {id, name, …}}
+    — para que el panel de bloqueo diga qué choca, con qué y dónde. `existing`
+    se enriquece después con la versión que lo publicó (`_production_refs`)."""
+    items: list[dict] = []
+    seen: set[str] = set()
+
+    def _push(item: dict) -> None:
+        if item["message"] in seen:      # mismo dedupe que los mensajes de siempre
+            return
+        seen.add(item["message"])
+        items.append(item)
 
     tbl_changes = changes.get("canonical_tables") or {}
     tbl_upserts = {
@@ -991,12 +1028,21 @@ async def _publish_duplicates(project_id: str, changes: dict) -> list[str]:
     if tbl_upserts:
         flt = scoped(project_id, {"$or": [_table_name_filter(ch.get("payload") or {}) for ch in tbl_upserts.values()]})
         pub = await repository.published("canonical_tables", flt)
+        pub_ids = {d.get("id") for d in pub}
         for eid, ch in tbl_upserts.items():
-            err = validation.duplicate_error("canonical_tables", eid, ch.get("payload") or {}, pub, tbl_changes)
-            if err and await _table_name_grandfathered(project_id, eid, ch.get("payload") or {}):
-                err = None  # nombre legacy sin cambios (doc 50)
-            if err and err not in errors:
-                errors.append(err)
+            p = ch.get("payload") or {}
+            hit = validation.duplicate_hit("canonical_tables", eid, p, pub, tbl_changes)
+            if hit and await _table_name_grandfathered(project_id, eid, p):
+                hit = None  # nombre legacy sin cambios (doc 50)
+            if hit:
+                h = hit["hit"]
+                _push({"collection": "canonical_tables", "kind": "table", "entityId": eid,
+                       "name": str(p.get("physicalName") or "").strip(),
+                       "schema": str(p.get("schema") or "").strip() or None,
+                       "where": "production" if h.get("id") in pub_ids else "request",
+                       "message": hit["message"],
+                       "existing": {"id": h.get("id"), "name": h.get("physicalName"),
+                                    "schema": str(h.get("schema") or h.get("sql_schema") or "").strip() or None}})
 
     col_changes = changes.get("canonical_columns") or {}
     col_upserts = {
@@ -1006,10 +1052,26 @@ async def _publish_duplicates(project_id: str, changes: dict) -> list[str]:
     if col_upserts:
         tids = sorted({(ch.get("payload") or {})["tableId"] for ch in col_upserts.values()})
         pub = await repository.published("canonical_columns", {"tableId": {"$in": tids}})
+        pub_ids = {d.get("id") for d in pub}
+        # Nombre de la tabla dueña: las del propio request + las publicadas.
+        tnames = {teid: (tch.get("payload") or {}).get("physicalName")
+                  for teid, tch in tbl_changes.items() if tch.get("payload")}
+        missing = [t for t in tids if t not in tnames]
+        if missing:
+            for d in await repository.published("canonical_tables", {"_id": {"$in": missing}}):
+                tnames[d["id"]] = d.get("physicalName")
         for eid, ch in col_upserts.items():
-            err = validation.duplicate_error("canonical_columns", eid, ch.get("payload") or {}, pub, col_changes)
-            if err and err not in errors:
-                errors.append(err)
+            p = ch.get("payload") or {}
+            hit = validation.duplicate_hit("canonical_columns", eid, p, pub, col_changes)
+            if hit:
+                h = hit["hit"]
+                _push({"collection": "canonical_columns", "kind": "column", "entityId": eid,
+                       "name": str(p.get("physicalName") or "").strip(),
+                       "tableId": p.get("tableId"), "tableName": tnames.get(p.get("tableId")),
+                       "where": "production" if h.get("id") in pub_ids else "request",
+                       "message": hit["message"],
+                       "existing": {"id": h.get("id"), "name": h.get("physicalName"),
+                                    "tableId": h.get("tableId"), "tableName": tnames.get(h.get("tableId"))}})
 
     sch_changes = changes.get("schemas") or {}
     sch_upserts = {
@@ -1022,11 +1084,71 @@ async def _publish_duplicates(project_id: str, changes: dict) -> list[str]:
                         for ch in sch_upserts.values()})
         flt = scoped(project_id, {"$or": [{"name": {"$regex": f"^{re.escape(n)}$", "$options": "i"}} for n in names]})
         pub = await repository.published("schemas", flt)
+        pub_ids = {d.get("id") for d in pub}
         for eid, ch in sch_upserts.items():
-            err = validation.duplicate_error("schemas", eid, ch.get("payload") or {}, pub, sch_changes)
-            if err and err not in errors:
-                errors.append(err)
-    return errors
+            p = ch.get("payload") or {}
+            hit = validation.duplicate_hit("schemas", eid, p, pub, sch_changes)
+            if hit:
+                h = hit["hit"]
+                _push({"collection": "schemas", "kind": "schema", "entityId": eid,
+                       "name": str(p.get("name") or "").strip(),
+                       "where": "production" if h.get("id") in pub_ids else "request",
+                       "message": hit["message"],
+                       "existing": {"id": h.get("id"), "name": h.get("name")}})
+    return items
+
+
+async def _publish_duplicates(project_id: str, changes: dict) -> list[str]:
+    """Mensajes de los choques (compat: bulk upload y tests). Ver `_publish_duplicate_items`."""
+    return [it["message"] for it in await _publish_duplicate_items(project_id, changes)]
+
+
+async def _production_refs(items: list[dict]) -> None:
+    """Doc 84 A1: completa `existing` de los choques CONTRA PRODUCCIÓN con la
+    ÚLTIMA versión publicada que tocó esa entidad — {version, owner,
+    publishedAt} — a partir del mismo ledger del historial (doc 51). Best-
+    effort: sin ledger (migración Erwin) o con error queda None; JAMÁS altera
+    el error de publish que se está armando."""
+    for it in items:
+        ex = it.get("existing")
+        if it.get("where") != "production" or not ex or not ex.get("id"):
+            continue
+        ex.update({"version": None, "owner": None, "publishedAt": None})
+        try:
+            changes = await repository.entity_changes(it["collection"], str(ex["id"]))
+            headers = await repository.changesets_by_ids([str(c.get("csId") or "") for c in changes])
+            events = history_events(changes, headers)
+        except Exception:
+            log.warning("production ref unavailable for publish conflict",
+                        extra={"collection": it.get("collection"), "id": ex.get("id")})
+            continue
+        if events:
+            last = max(events, key=lambda e: str(e.get("at") or ""))
+            ex.update({"version": last.get("version"), "owner": last.get("userId"),
+                       "publishedAt": last.get("at")})
+
+
+def _duplicates_message(items: list[dict]) -> str:
+    """Mensaje corto del bloqueo por duplicados (doc 84 D1): conteo por tipo
+    contra producción + repetidos dentro del request + los 3 primeros detalles.
+    Puro. La lista completa viaja en `items` (el panel la pinta entera)."""
+    prod = [it for it in items if it.get("where") == "production"]
+    req = [it for it in items if it.get("where") != "production"]
+    parts: list[str] = []
+    if prod:
+        counts: dict[str, int] = {}
+        for it in prod:
+            kind = it.get("kind") or "entity"
+            counts[kind] = counts.get(kind, 0) + 1
+        pieces = [f"{n} {kind} name{'s' if n != 1 else ''}" for kind, n in counts.items()]
+        parts.append(" and ".join(pieces) + " already exist" + ("s" if len(prod) == 1 else "")
+                     + " in production")
+    if req:
+        parts.append(f"{len(req)} name{'s are' if len(req) != 1 else ' is'} repeated within the request")
+    head = "Publish blocked: " + "; ".join(parts)
+    msgs = [str(it.get("message") or "") for it in items[:3]]
+    tail = " | ".join(m for m in msgs if m) + (f" | +{len(items) - 3} more" if len(items) > 3 else "")
+    return f"{head} — {tail}" if tail else head
 
 
 # ── Entidad `schemas` en el changeset (doc 18) ─────────────────────────────
@@ -1231,27 +1353,28 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
     if invalid:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
         raise InvalidPayloadError(
-            "el request contiene cambios inválidos y no se puede publicar — "
-            + " | ".join(invalid[:5])
-        )
+            "Publish blocked: the request contains changes that no longer validate — "
+            + " | ".join(invalid[:5]) + (f" | +{len(invalid) - 5} more" if len(invalid) > 5 else ""),
+            items=[{"kind": "change", "message": m} for m in invalid], next_step=PUBLISH_NEXT_STEP)
     # Re-chequeo de unicidad (spec 10 §9): otro changeset pudo publicar el
     # nombre entre el add_change y este apply. Mismo protocolo que el gate de
     # validación: revierte el claim y la producción queda intacta.
-    dups = await _publish_duplicates(pid, changes)
+    dups = await _publish_duplicate_items(pid, changes)
     if dups:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
-        raise DuplicateEntityError(
-            "el request contiene nombres duplicados contra lo ya publicado — "
-            + " | ".join(dups[:5])
-        )
+        # Doc 84 A1: la lista COMPLETA + con qué versión choca (best-effort).
+        # El bloqueo en sí no cambia: mismo guard, mismo momento, mismo 409.
+        await _production_refs(dups)
+        raise DuplicateEntityError(_duplicates_message(dups), items=dups, next_step=PUBLISH_NEXT_STEP)
     # Guard de esquemas (doc 18): un delete de esquema con tablas/vistas
     # efectivas no publica — mismo protocolo (revierte el claim, 409).
     in_use = await _publish_schema_deletes(pid, changes)
     if in_use:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
         raise SchemaInUseError(
-            "the request deletes schemas that are still in use — " + " | ".join(in_use[:5])
-        )
+            "Publish blocked: the request deletes schemas that are still in use — "
+            + " | ".join(in_use[:5]) + (f" | +{len(in_use) - 5} more" if len(in_use) > 5 else ""),
+            items=[{"kind": "schema", "message": m} for m in in_use], next_step=PUBLISH_NEXT_STEP)
     # Doc 75 I2 (gate autoritativo): ninguna referencia del plan cruza proyectos.
     try:
         for coll, per in changes.items():
@@ -1479,6 +1602,19 @@ def build_diff_tree(collections: dict, changes: dict, published: dict,
         return {e["id"]: verb for verb in ("added", "edited", "deleted") for e in b.get(verb, [])}
 
     tbl_kind, col_kind, view_kind = _kinds("canonical_tables"), _kinds("canonical_columns"), _kinds("views")
+    # Doc 84 B2: verbo de las entidades de ESTRUCTURA para marcarlas EN el árbol
+    # (carpeta/canvas/proyecto por id; esquema por NOMBRE — el nodo del árbol es
+    # el nombre del esquema y la entidad versionada es su uuid). `in_tree`
+    # recuerda cuáles quedaron representadas para que la sección «Structure
+    # changes» las marque (`inTree`) y el front no las repita.
+    fold_kind, sa_kind, proj_kind = _kinds("folders"), _kinds("subject_areas"), _kinds("projects")
+    schema_mark: dict[str, tuple[str, str]] = {}
+    for verb in ("added", "edited", "deleted"):
+        for e in (collections.get("schemas") or {}).get(verb, []):
+            nm = str(e.get("name") or "").strip().lower()
+            if nm:
+                schema_mark[nm] = (verb, e["id"])
+    in_tree: set[tuple[str, str]] = set()
 
     # Meta efectiva de tablas (nombre/esquema aun si sólo cambiaron columnas).
     tmeta = {d["id"]: d for d in published.get("canonical_tables", [])}
@@ -1493,7 +1629,10 @@ def build_diff_tree(collections: dict, changes: dict, published: dict,
         p = ((changes.get("canonical_columns") or {}).get(eid) or {}).get("payload") or {}
         tid = p.get("tableId") or (cmeta.get(eid) or {}).get("tableId") or "__none__"
         nm = p.get("physicalName") or p.get("logicalName") or (cmeta.get(eid) or {}).get("physicalName") or eid
-        cols_by_table.setdefault(tid, []).append({"type": "column", "id": eid, "name": nm, "change": verb})
+        # Doc 84 B4: el tipo viaja en la fila (se escanea sin abrir cada columna).
+        cols_by_table.setdefault(tid, []).append({
+            "type": "column", "id": eid, "name": nm, "change": verb,
+            "dataType": p.get("dataType") or (cmeta.get(eid) or {}).get("dataType")})
 
     # Vistas cambiadas.
     vmeta = {d["id"]: d for d in published.get("views", [])}
@@ -1557,16 +1696,33 @@ def build_diff_tree(collections: dict, changes: dict, published: dict,
                 for schema, groups in schemas_map.items():
                     kids = list(groups["tables"].values()) + list(groups["views"].values())
                     kids.sort(key=lambda n: (n["type"] != "table", (n.get("name") or "").lower()))
-                    s_children.append({"type": "schema", "id": schema, "name": schema, "children": kids})
+                    snode = {"type": "schema", "id": schema, "name": schema, "children": kids}
+                    mark = schema_mark.get(str(schema or "").strip().lower())
+                    if mark:
+                        snode["change"], snode["entityId"] = mark
+                        in_tree.add(("schemas", mark[1]))
+                    s_children.append(snode)
                 s_children.sort(key=lambda n: (n["name"] or "").lower())
-                c_children.append({"type": "canvas", "id": sa_id,
-                                   "name": (sa_by_id.get(sa_id) or {}).get("name") or sa_id, "children": s_children})
+                cnode = {"type": "canvas", "id": sa_id,
+                         "name": (sa_by_id.get(sa_id) or {}).get("name") or sa_id, "children": s_children}
+                if sa_kind.get(sa_id):
+                    cnode["change"], cnode["entityId"] = sa_kind[sa_id], sa_id
+                    in_tree.add(("subject_areas", sa_id))
+                c_children.append(cnode)
             c_children.sort(key=lambda n: (n["name"] or "").lower())
             fname = "— (project root)" if folder_id == "__root__" else ((folder_by.get(folder_id) or {}).get("name") or folder_id)
-            f_children.append({"type": "folder", "id": folder_id, "name": fname, "children": c_children})
+            fnode = {"type": "folder", "id": folder_id, "name": fname, "children": c_children}
+            if folder_id != "__root__" and fold_kind.get(folder_id):
+                fnode["change"], fnode["entityId"] = fold_kind[folder_id], folder_id
+                in_tree.add(("folders", folder_id))
+            f_children.append(fnode)
         f_children.sort(key=lambda n: (n["name"] or "").lower())
-        tree.append({"type": "project", "id": proj_id or "—", "name": proj_name.get(proj_id) or proj_id or "—",
-                     "children": f_children})
+        pnode = {"type": "project", "id": proj_id or "—", "name": proj_name.get(proj_id) or proj_id or "—",
+                 "children": f_children}
+        if proj_id and proj_kind.get(proj_id):
+            pnode["change"], pnode["entityId"] = proj_kind[proj_id], proj_id
+            in_tree.add(("projects", proj_id))
+        tree.append(pnode)
     tree.sort(key=lambda n: (n["name"] or "").lower())
 
     STRUCT = {"projects": "Project", "folders": "Folder", "subject_areas": "Canvas", "schemas": "Schema"}
@@ -1576,7 +1732,8 @@ def build_diff_tree(collections: dict, changes: dict, published: dict,
         for verb in ("added", "edited", "deleted"):
             for e in b.get(verb, []):
                 structure.append({"type": coll, "id": e["id"], "name": e.get("name") or e["id"],
-                                  "kind": label, "change": verb})
+                                  "kind": label, "change": verb,
+                                  "inTree": (coll, e["id"]) in in_tree})
 
     return {"tree": tree, "orphans": orphan_tables + orphan_views, "structure": structure}
 
@@ -1641,6 +1798,10 @@ async def diff(cs_id: str) -> dict | None:
             "canonical_tables", {"_id": {"$in": need}})
 
     result = structured_diff(changes, published, relationships, baseline=cs.get("createdAt"))
+    # Doc 84 A3: último cambio grabado en el request (el autor es el owner).
+    result["lastChangeAt"] = max(
+        (str(ch.get("at")) for per in changes.values() for ch in (per or {}).values() if ch.get("at")),
+        default=None)
     # Jerarquía Proyecto→Folder→Canvas→Esquema→Tabla→Columnas (+Vistas) +
     # La
     # estructura es chica (proyectos/folders/canvases) → overlay completo.
@@ -1887,7 +2048,8 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
 # ── Comparación entre versiones publicadas (doc 65) ────────────────────────
 
 
-def compose_versions_range(ordered_changes: list[dict]) -> tuple[dict, list[dict]]:
+def compose_versions_range(ordered_changes: list[dict],
+                           headers: list[dict] | None = None) -> tuple[dict, list[dict]]:
     """Compone los ledgers de versiones aplicadas EN ORDEN CRONOLÓGICO
     (oldest→newest) en un estado NETO por entidad. Puro.
 
@@ -1899,7 +2061,10 @@ def compose_versions_range(ordered_changes: list[dict]) -> tuple[dict, list[dict
     (publicadas antes de la captura de before-images): su "antes" real es
     irreconstruible y se EXCLUYEN del diff (nunca se inventa un antes)."""
     state: dict[tuple[str, str], dict] = {}
-    for changes in ordered_changes:
+    for idx, changes in enumerate(ordered_changes):
+        # Doc 84 C2: cabecera de la versión (paralela a `ordered_changes`) para
+        # atribuir cada entidad a la ÚLTIMA versión del rango que la tocó.
+        hdr = (headers[idx] if headers and idx < len(headers) else None) or None
         for coll, per in (changes or {}).items():
             for eid, ch in per.items():
                 entry = state.get((coll, eid))
@@ -1909,6 +2074,9 @@ def compose_versions_range(ordered_changes: list[dict]) -> tuple[dict, list[dict
                     state[(coll, eid)] = entry
                 entry["op"] = ch.get("op")
                 entry["after"] = ch.get("payload") if ch.get("op") != "delete" else None
+                if hdr:
+                    entry["lastVersion"] = {"id": hdr.get("id"), "versionLabel": hdr.get("versionLabel"),
+                                            "owner": hdr.get("owner"), "appliedAt": hdr.get("appliedAt")}
     out: dict[tuple[str, str], dict] = {}
     missing: list[dict] = []
     for (coll, eid), entry in state.items():
@@ -1945,7 +2113,8 @@ def compare_buckets(composed: dict, res: dict) -> dict:
         else:
             verb = "edited"
         bucket = cols.setdefault(coll, {"added": [], "edited": [], "deleted": []})
-        bucket[verb].append({"id": eid, "name": detail["name"], "collection": coll})
+        bucket[verb].append({"id": eid, "name": detail["name"], "collection": coll,
+                             "lastVersion": entry.get("lastVersion")})
     for bucket in cols.values():
         for verb in ("added", "edited", "deleted"):
             bucket[verb].sort(key=lambda e: str(e.get("name") or "").lower())
@@ -2041,7 +2210,7 @@ async def _compare_composed(from_id: str, to_id: str):
         span.append({"id": newer["id"], "appliedAt": newer.get("appliedAt"),
                      "versionLabel": newer.get("versionLabel")})
     composed, missing = compose_versions_range(
-        [await repository.changes_map(v["id"]) for v in span])
+        [await repository.changes_map(v["id"]) for v in span], headers=span)
     return older, newer, span, composed, missing
 
 
@@ -2065,10 +2234,37 @@ async def compare_versions(from_id: str, to_id: str) -> dict | str | None:
     for bucket in buckets.values():
         for verb in counts:
             counts[verb] += len(bucket[verb])
+    tree = await _compare_tree(buckets, composed, older["projectId"])
     return {"from": _hdr(older), "to": _hdr(newer), "versionsSpanned": len(span),
             "collections": buckets,
             "counts": {**counts, "total": sum(counts.values())},
-            "unreconstructed": missing}
+            "unreconstructed": missing,
+            "tree": tree["tree"], "orphans": tree["orphans"], "structure": tree["structure"]}
+
+
+async def _compare_tree(buckets: dict, composed: dict, project_id: str) -> dict:
+    """Doc 84 C1: la MISMA jerarquía del popup de revisión para el compare —
+    `build_diff_tree` sobre el estado neto compuesto. Meta de tablas: los docs
+    del rango (payload, o imagen previa para los deletes) + las publicadas que
+    sólo aparecen como dueñas de columnas cambiadas. Canvases/carpetas/
+    proyecto: publicados VIVOS (la membresía de HOY ubica cada tabla; una tabla
+    ya fuera de todo canvas cae en «Not on any canvas»)."""
+    changes: dict[str, dict] = {}
+    published: dict[str, list[dict]] = {"canonical_tables": [], "canonical_columns": [], "views": []}
+    for (coll, eid), entry in composed.items():
+        changes.setdefault(coll, {})[eid] = {"op": entry.get("op"), "payload": entry.get("after")}
+        if coll in published and entry.get("op") == "delete" and entry.get("before"):
+            published[coll].append({**entry["before"], "id": eid})
+    owners = {(e.get("after") or e.get("before") or {}).get("tableId")
+              for (c, _eid), e in composed.items() if c == "canonical_columns"}
+    owners = {t for t in owners if t} - {eid for (c, eid) in composed if c == "canonical_tables"}
+    if owners:
+        published["canonical_tables"] = published["canonical_tables"] + await repository.published(
+            "canonical_tables", {"_id": {"$in": sorted(owners)}})
+    sas = await repository.published("subject_areas", scoped(project_id))
+    projs = await repository.published("projects", {"_id": project_id})
+    flds = await repository.published("folders", scoped(project_id))
+    return build_diff_tree(buckets, changes, published, sas, projs, flds)
 
 
 async def compare_details(from_id: str, to_id: str,
