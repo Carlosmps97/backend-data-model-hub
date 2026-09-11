@@ -26,6 +26,7 @@ class CanonicalColumnBody(BaseModel):
     isNullable: bool = True
     isPartition: bool = False
     description: str | None = None
+    physicalDescription: str | None = None   # doc 85: comment físico (None = igual a la lógica)
     ordinal: int = 0
     udpValues: dict[str, str] | None = None   # etiquetas UDP asignadas a la columna
     # Doc 69: faceta lógica (opcionales; el default lo pone el modelo).

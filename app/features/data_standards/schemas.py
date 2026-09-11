@@ -25,6 +25,9 @@ class DomainEdit(BaseModel):
     namingTerm: str | None = None
     description: str | None = None
     inheritsName: bool | None = None  # Doc 79 (ver ParentDomainBody).
+    physicalName: str | None = None          # doc 85 (ver ParentDomainBody)
+    physicalDescription: str | None = None
+    udpValues: dict[str, str] | None = None
 
     # Doc 62: misma homologación que ParentDomainBody — el apply de Standards
     # es el otro camino de escritura de dominios.

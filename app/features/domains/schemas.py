@@ -16,6 +16,12 @@ class ParentDomainBody(BaseModel):
     # Doc 79: marca "atributo estándar". `bool | None` a propósito: omitido ⇒
     # exclude_none lo descarta ⇒ un update que no lo envíe NO pisa el flag.
     inheritsName: bool | None = None
+    # Doc 85: faceta física + UDP por defecto. `''` se conserva a propósito
+    # (exclude_none no lo descarta): es cómo el cliente vuelve al derivado /
+    # limpia; el doc lo lee como None (ParentDomainDoc._blank_to_none).
+    physicalName: str | None = None
+    physicalDescription: str | None = None
+    udpValues: dict[str, str] | None = None
 
     # Doc 62: el default se HOMOLOGA a la grafía canónica de la plataforma en
     # el borde (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`); lo desconocido

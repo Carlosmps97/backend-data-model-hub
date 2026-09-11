@@ -237,3 +237,18 @@ def test_ordinal_pk_primero_en_tabla_nueva_doc81():
     assert by_logical["Codigo Clave Cuenta Evaluada"]["pkPosition"] == 2
     assert by_logical["xd"]["isPrimaryKey"] in (None, False)
 
+
+
+def test_update_conserva_physical_description_y_create_la_deja_vacia_doc85():
+    """Doc 85: el comment físico NO viene de la plantilla — un update lo conserva."""
+    c = ctx(schemas=_SCHEMAS, tables=[_table()],
+            columns_by_table={"t1": [_col("c1", "COD", "Codigo", 0, physicalDescription="Comentario fisico")]})
+    # solo hoja de atributos (como los tests vecinos): la tabla existente se referencia por lógico
+    p = parsed(columns=[crow(3, "cliente", "Codigo", data_type="bigint"),      # update (cambia el tipo)
+                        crow(4, "cliente", "Nombre", data_type="string")])     # create
+    plan = build_plan(p, c, new_id=seq_ids())
+    assert plan.has_errors is False
+    # por lógico: el físico de una columna existente puede re-derivarse (warning `rename`)
+    payloads = {ch["payload"]["logicalName"]: ch["payload"] for ch in _cols(plan)}
+    assert payloads["Codigo"]["physicalDescription"] == "Comentario fisico"
+    assert payloads["Nombre"]["physicalDescription"] is None

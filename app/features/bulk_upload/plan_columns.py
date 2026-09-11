@@ -282,6 +282,8 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         "logicalDataType": logical_type, "logicalTypeOverridden": logical_overridden,
         "logicalOnly": bool((existing or {}).get("logicalOnly")),
         "physicalOnly": bool((existing or {}).get("physicalOnly")),
+        # Doc 85: el comment físico no viene de la plantilla — se conserva.
+        "physicalDescription": (existing or {}).get("physicalDescription"),
     }
     return cp
 

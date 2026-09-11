@@ -69,6 +69,9 @@ class CanonicalColumnDoc(BaseModel):
     isNullable: bool = True
     isPartition: bool = False
     description: str | None = None
+    # Doc 85: descripción FÍSICA (Comment de Erwin; el DDL la emite como
+    # COMMENT con fallback a `description`). None = igual a la lógica.
+    physicalDescription: str | None = None
     # Orden ÚNICO de la columna en la tabla (doc 74): el mismo en el modelo
     # lógico y en el físico — canvas, paneles, reporting y DDL ordenan por él.
     # La migración Erwin lo hereda como «llaves primero + Column order».

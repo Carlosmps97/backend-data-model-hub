@@ -23,7 +23,10 @@ def _mock(monkeypatch):
     created = {"domains": [], "terms": [], "udp": [], "rules": [], "config": [], "naming": []}
     monkeypatch.setattr(service.dom_repo, "list_domains",
                         AsyncMock(return_value=[{"id": "d-src", "name": "Codigo", "defaultDataType": "VARCHAR(20)",
-                                                 "logicalDataType": None, "namingTerm": None, "description": None}]))
+                                                 "logicalDataType": None, "namingTerm": None, "description": None,
+                                                 # doc 85: físico override + UDP por defecto (ids del proyecto FUENTE)
+                                                 "physicalName": "COD_F", "physicalDescription": None,
+                                                 "udpValues": {"u-src": "No DAC", "u-gone": "x"}}]))
     monkeypatch.setattr(service.dict_repo, "list_entries",
                         AsyncMock(return_value=[{"id": "t-src", "term": "codigo", "abbrev": "COD", "scope": "column",
                                                  "wordType": None, "locked": True, "lockedBy": "admin", "lockedAt": "x"}]))
@@ -53,6 +56,8 @@ def test_copia_total_remapea_udp_en_reglas_y_lookups_y_quita_locks(monkeypatch):
     v = asyncio.run(service.copy_standards("ana", "dst", "src", list(service.COPY_BLOCKS), "DDV"))
     assert v["kind"] == "copy" and v["projectId"] == "dst" and "DDV" in v["title"]
     assert created["domains"][0][0] == "dst" and "id" not in created["domains"][0][1]
+    dom = created["domains"][0][1]
+    assert dom["udpValues"] == {"u-new": "No DAC"} and dom["physicalName"] == "COD_F"   # doc 85 D11
     term = created["terms"][0][1]
     assert term["locked"] is False and term.get("lockedBy") is None
     assert created["udp"][0][0] == "dst"
@@ -83,3 +88,9 @@ def test_bootstrap_sin_copia_registra_baseline_vacio(monkeypatch):
     _mock(monkeypatch)
     v = asyncio.run(service.bootstrap_project("ana", "dst", None))
     assert v["kind"] == "baseline" and v["projectId"] == "dst"
+
+
+def test_copia_de_dominios_sin_udp_descarta_los_defaults(monkeypatch):
+    created = _mock(monkeypatch)
+    asyncio.run(service.copy_standards("ana", "dst", "src", ["domains"]))
+    assert created["domains"][0][1]["udpValues"] is None

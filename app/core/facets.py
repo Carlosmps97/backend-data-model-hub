@@ -26,17 +26,22 @@ TABLE_FACET_FIELDS: dict[str, tuple[str, ...]] = {
 }
 COLUMN_FACET_FIELDS: dict[str, tuple[str, ...]] = {
     LOGICAL: ("logicalName", "logicalDataType", "logicalTypeOverridden", "logicalOnly"),
+    # Doc 85: `physicalDescription` = Comment de Erwin (el DDL lo emite como COMMENT).
     PHYSICAL: ("physicalName", "physicalNameOverridden", "dataType", "typeOverridden",
-               "isNullable", "isPartition", "physicalOnly"),
+               "isNullable", "isPartition", "physicalOnly", "physicalDescription"),
     # Doc 74: `ordinal` es el orden ÚNICO de la columna (lógico = físico),
     # como `pkPosition` es el único orden de la llave.
     "shared": ("id", "projectId", "tableId", "parentDomainId", "description", "isPrimaryKey",
                "isForeignKey", "pkPosition", "ordinal", "udpValues"),
 }
+# Doc 85 §3.1: el dominio tiene UN objeto con dos facetas, como Erwin
+# (`Name`/`Physical_Name`, `Logical_Data_Type`/`Physical_Data_Type`,
+# `Definition`/`Comment`). `udpValues` son los UDP por DEFECTO de
+# atributo/columna (ambas facetas) que la columna hereda al asignar el dominio.
 DOMAIN_FACET_FIELDS: dict[str, tuple[str, ...]] = {
-    LOGICAL: ("logicalDataType",),
-    PHYSICAL: ("defaultDataType",),
-    "shared": ("id", "projectId", "name", "namingTerm", "description", "inheritsName"),
+    LOGICAL: ("name", "logicalDataType", "description"),
+    PHYSICAL: ("physicalName", "defaultDataType", "physicalDescription"),
+    "shared": ("id", "projectId", "namingTerm", "inheritsName", "udpValues"),
 }
 
 

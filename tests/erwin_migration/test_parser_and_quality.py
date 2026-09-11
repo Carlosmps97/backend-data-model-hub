@@ -417,3 +417,50 @@ def test_dominio_atributo_estandar_captura_attribute_definition(tmp_path):
     m = ep.parse(str(p))
     assert m.domains["D-STD"].attribute_definition == "Fecha de la rutina."
     assert m.domains["D-GEN"].attribute_definition == ""
+
+
+def test_dominio_captura_fisico_comment_y_udp_derivados_doc85(tmp_path):
+    """Doc 85: el <Domain> trae físico resuelto, Comment y UDP de atributo en
+    ambas facetas; los `Derived="Y"` del DOMINIO son valores heredados de la
+    cadena de padres materializados por Erwin ⇒ se capturan. En un atributo,
+    un derivado sigue siendo herencia del dominio ⇒ se sigue descartando."""
+    xml = textwrap.dedent(f"""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <erwin xmlns="http://www.erwin.com/dm" FileVersion="10.10" Format="erwin">
+     <Model {NS} id="M" name="M">
+      <Domain_Groups>
+       <Domain id="D-CC" name="Codigo Clave"><DomainProps><Name>Codigo Clave</Name><Definition>Clave.</Definition><Comment>Clave fisica.</Comment>
+        <Physical_Name Derived="Y">%DomainName</Physical_Name><User_Formatted_Physical_Name ReadOnly="Y" Derived="Y">CodigoClave</User_Formatted_Physical_Name>
+        <Logical_Data_Type>VARCHAR(20)</Logical_Data_Type><Physical_Data_Type>VARCHAR(30)</Physical_Data_Type>
+        <UDP_Instance_Groups>
+         <UDP_Instance name="Attribute.Logical.Atributo Cross" id="U-AC" Derived="Y"> No</UDP_Instance>
+         <UDP_Instance name="Attribute.Physical.Campo Cross" id="U-CC"> No</UDP_Instance>
+        </UDP_Instance_Groups>
+       </DomainProps></Domain>
+       <Domain id="D-RAW" name="Raw"><DomainProps><Name>Raw</Name><Physical_Name>RAW_F</Physical_Name><Logical_Data_Type>DATE</Logical_Data_Type></DomainProps></Domain>
+      </Domain_Groups>
+      <Entity_Groups>
+       <Entity id="E1" name="Uno"><EntityProps><Name>Uno</Name><User_Formatted_Physical_Name>UNO</User_Formatted_Physical_Name></EntityProps>
+        <Attribute_Groups>
+         <Attribute id="A1" name="a"><AttributeProps><Name>a</Name><User_Formatted_Physical_Name>A</User_Formatted_Physical_Name>
+          <Physical_Data_Type>STRING</Physical_Data_Type><Physical_Order>1</Physical_Order>
+          <UDP_Instance_Groups>
+           <UDP_Instance name="Attribute.Logical.Atributo Cross" id="U-AC" Derived="Y"> No</UDP_Instance>
+           <UDP_Instance name="Attribute.Physical.Campo Cross" id="U-CC">Si</UDP_Instance>
+          </UDP_Instance_Groups>
+         </AttributeProps></Attribute>
+        </Attribute_Groups>
+       </Entity>
+      </Entity_Groups>
+     </Model>
+    </erwin>
+    """)
+    p = tmp_path / "d85.xml"
+    p.write_text(xml, encoding="utf-8")
+    m = ep.parse(str(p))
+    d = m.domains["D-CC"]
+    assert (d.physical_name, d.comment, d.definition) == ("CodigoClave", "Clave fisica.", "Clave.")
+    assert m.domains["D-RAW"].physical_name == "RAW_F"          # sin macro: vale el Physical_Name crudo
+    vals = {(o, t, u): v for o, t, u, v in m.udp_values}
+    assert vals[("D-CC", "Domain", "U-AC")] == "No" and vals[("D-CC", "Domain", "U-CC")] == "No"
+    assert ("A1", "Attribute", "U-AC") not in vals and vals[("A1", "Attribute", "U-CC")] == "Si"

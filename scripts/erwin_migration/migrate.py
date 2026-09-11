@@ -187,18 +187,26 @@ class Migrator:
         if len(self._buf[coll]) >= _BATCH:
             self._flush(coll)
 
+    def _derived_physical(self, logical: str, scope: str) -> str:
+        """Físico DERIVADO del lógico por la regla vigente del scope (glosario
+        + naming config del proyecto). '' sin lógico. Doc 85: lo usan el
+        override de tablas/columnas (doc 68) y el físico del dominio."""
+        logical = (logical or "").strip()
+        if not logical:
+            return ""
+        sep, case = self.naming_cfg[scope]
+        return physicalize(logical, self.gloss_scope.get(scope) or {}, separator=sep, case=case)
+
     def _physical_override(self, logical: str, physical: str, scope: str) -> bool:
         """Doc 68: ¿el físico real difiere del derivado por la regla vigente
         del scope? True ⇒ se estampa `physicalNameOverridden` y el
         rephysicalize retroactivo del Glosario NO lo pisa. Sin lógico o sin
         físico no hay derivación posible (el barrido los salta) ⇒ False."""
-        logical = (logical or "").strip()
         physical = (physical or "").strip()
-        if not logical or not physical:
+        derived = self._derived_physical(logical, scope)
+        if not derived or not physical:
             return False
-        sep, case = self.naming_cfg[scope]
-        return physicalize(logical, self.gloss_scope.get(scope) or {},
-                           separator=sep, case=case) != physical
+        return derived != physical
 
     def _soft_delete(self, coll: str, pid: str) -> None:
         self._buf[coll].append(UpdateOne(
@@ -345,6 +353,7 @@ class Migrator:
         # (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`).
         # Doc 75: unión DISTINTA entre los archivos del proyecto — el primero
         # gana; el mismo nombre con tipo distinto va al reporte, no se pisa.
+        seeded_domains: list[tuple[str, str]] = []   # (erwin_id, pid) sembrados por ESTE archivo (doc 85)
         for d in self.m.domains.values():
             if d.builtin or d.name.startswith("<"):
                 continue
@@ -364,6 +373,15 @@ class Migrator:
                     self.stats["dominios en conflicto (tipo distinto)"] += 1
                 continue
             self.ex_domains[name_key] = {"_id": pid, "defaultDataType": phys_type}
+            # Doc 85 §3.4: faceta física del dominio. El físico de Erwin se
+            # guarda SOLO si difiere del derivado por la regla del scope column
+            # (None = derivado: se calcula al mostrar/heredar); el Comment solo
+            # si difiere de la Definition. Los UDP por defecto se estampan en
+            # una segunda pasada (más abajo): `_udp_values_for` resuelve contra
+            # el catálogo fijo, que se siembra DESPUÉS de este bucle.
+            dom_phys_name = (d.physical_name or "").strip()
+            phys_name = dom_phys_name if dom_phys_name and dom_phys_name != self._derived_physical(d.name, "column") else None
+            phys_desc = d.comment if d.comment and d.comment != (d.definition or "") else None
             self._upsert("parent_domains", pid, {
                 "name": d.name,
                 "defaultDataType": phys_type,
@@ -376,7 +394,12 @@ class Migrator:
                 "namingTerm": None,
                 "inheritsName": bool(d.attribute_definition),
                 "description": d.attribute_definition or d.definition or None,
+                "physicalName": phys_name,
+                "physicalDescription": phys_desc,
                 "erwinLongId": d.id})
+            seeded_domains.append((d.id, pid))
+            if phys_name:
+                self.stats["dominios con físico custom (override)"] += 1
             self.stats["dominios creados"] += 1
 
         # glosario (term+abbrev; nunca tocar existentes/locked). Full outer
@@ -458,6 +481,18 @@ class Migrator:
                 continue
             self.udp_pid[key] = fixed_pid[(fx["level"], fx["view"], pol.norm_enum(fx["name"]))]
             self.udp_fixed[key] = fx
+
+        # Doc 85 D6: UDP por DEFECTO del dominio (ambas facetas: explícitos y
+        # derivados, materializados por Erwin en cada <Domain>). Va DESPUÉS del
+        # catálogo fijo porque `_udp_values_for` resuelve contra `udp_fixed` /
+        # `udp_pid`, que recién existen acá. Solo los dominios sembrados por
+        # ESTE archivo (los reusados no se tocan — política doc 75); siempre se
+        # estampa (aunque sea {}) para que el doc no quede en None.
+        for erwin_id, dom_pid in seeded_domains:
+            dom_udps = self._udp_values_for(erwin_id, "column")
+            self._upsert("parent_domains", dom_pid, {"udpValues": dom_udps})
+            if dom_udps:
+                self.stats["dominios con UDP por defecto"] += 1
 
         # naming_config del proyecto (doc 75): se SIEMBRA con los defaults
         # corporativos sólo si no existe — la config viva del proyecto manda.
@@ -712,6 +747,10 @@ class Migrator:
                     "isForeignKey": bool(a.parent_attr_ref),
                     "isNullable": a.nullable, "isPartition": a.id in part_ids,
                     "description": a.definition or a.comment or None,
+                    # Doc 85 D10: Comment de Erwin = descripción FÍSICA, solo
+                    # cuando hay Definition y difieren (si no hay Definition el
+                    # Comment ya es la descripción de arriba).
+                    "physicalDescription": a.comment if (a.comment and a.definition and a.comment != a.definition) else None,
                     "ordinal": i,
                     "udpValues": self._udp_values_for(a.id, "column"),
                     "erwinLongId": a.id})

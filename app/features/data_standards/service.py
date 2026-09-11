@@ -46,7 +46,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
     return {
         "domains": [
             {k: d.get(k) for k in ("id", "name", "defaultDataType", "namingTerm", "description",
-                                   "logicalDataType", "inheritsName")}   # doc 69/79
+                                   "logicalDataType", "inheritsName",             # doc 69/79
+                                   "physicalName", "physicalDescription", "udpValues")}   # doc 85
             for d in domains
         ],
         "dict": [
@@ -141,6 +142,12 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
             # no como un "Domain X" mudo. `None` = el cliente no mandó el flag.
             if d.inheritsName is not None and bool(prev.get("inheritsName")) != d.inheritsName:
                 parts.append(f"inherits name + definition {'ON' if d.inheritsName else 'OFF'}")
+            # Doc 85: el físico del dominio y sus UDP por defecto se heredan a
+            # cada columna que lo adopte — salen nombrados en el historial.
+            if d.physicalName is not None and (prev.get("physicalName") or "") != (d.physicalName or ""):
+                parts.append(f"physical name {prev.get('physicalName') or '(derived)'} → {d.physicalName or '(derived)'}")
+            if d.udpValues is not None and (prev.get("udpValues") or {}) != d.udpValues:
+                parts.append("UDP defaults changed")
             edited.append(" · ".join(parts))
         else:
             added.append(f"Domain {d.name} · {d.defaultDataType}")
@@ -170,6 +177,16 @@ def _domains_key(snap: dict):
 # rollback (los snapshots pre-bloqueo traen locked=False: compararlos daba 409
 # a TODO rollback con términos bloqueados, aunque el contenido fuera idéntico).
 _TERM_CONTENT_KEYS = ("term", "abbrev", "scope", "wordType")
+
+
+def remap_udp_values(values: dict | None, udp_map: dict[str, str]) -> dict[str, str] | None:
+    """Doc 85 D11: `udpValues` de un dominio copiado — las claves son ids de
+    defs UDP del proyecto FUENTE; se traducen con `udp_map` y las que no tienen
+    def copiada se descartan. None si no queda nada. Puro."""
+    if not values:
+        return None
+    out = {udp_map[k]: v for k, v in values.items() if k in udp_map}
+    return out or None
 
 
 def locked_terms_touched(snap_terms: list[dict], cur_terms: list[dict]) -> list[str]:
@@ -565,7 +582,8 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
 
 COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl")
 _UDP_KEYS = ("name", "level", "view", "dataType", "defaultValue", "allowedValues", "description")
-_DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description", "inheritsName")
+_DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description", "inheritsName",
+                "physicalName", "physicalDescription")   # doc 85 (`udpValues` se remapea aparte)
 _TERM_KEYS = ("term", "abbrev", "scope", "wordType")
 _RULE_KEYS = ("name", "description", "kind", "target", "sourceArtifact", "condition", "action",
               "appliesTo", "priority", "enabled")
@@ -600,7 +618,11 @@ async def copy_standards(actor: str, target_project_id: str, source_project_id: 
             udp_map[u["id"]] = created["id"]
     if "domains" in wanted:
         for d in await dom_repo.list_domains(source_project_id):
-            await dom_repo.create_domain(target_project_id, {k: d.get(k) for k in _DOMAIN_KEYS})
+            await dom_repo.create_domain(target_project_id, {
+                **{k: d.get(k) for k in _DOMAIN_KEYS},
+                # Doc 85 D11: sin el bloque `udp` no hay defs destino ⇒ sin defaults.
+                "udpValues": remap_udp_values(d.get("udpValues"), udp_map) if "udp" in wanted else None,
+            })
     if "glossary" in wanted:
         for t in await dict_repo.list_entries(source_project_id, None):
             await dict_repo.create_entry(target_project_id, {**{k: t.get(k) for k in _TERM_KEYS},

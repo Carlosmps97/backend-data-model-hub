@@ -132,6 +132,15 @@ def test_column_rows_metadata_completa_doc70():
     assert (c2["typeOverridden"], c2["physicalNameOverridden"], c2["logicalOnly"], c2["physicalOnly"]) == (False, False, False, False)
 
 
+def test_column_rows_expone_physical_description_doc85():
+    rows = column_rows([{"id": "c1", "tableId": "t1", "physicalName": "COD", "logicalName": "codigo",
+                         "dataType": "INT", "ordinal": 0, "description": "Def", "physicalDescription": "Comentario"},
+                        {"id": "c2", "tableId": "t1", "physicalName": "X", "logicalName": "x", "dataType": "INT", "ordinal": 1}], [])
+    by_id = {r["id"]: r for r in rows}
+    assert (by_id["c1"]["description"], by_id["c1"]["physicalDescription"]) == ("Def", "Comentario")
+    assert by_id["c2"]["physicalDescription"] is None
+
+
 # ── Orquestación por proyecto (doc 75) ─────────────────────────────────────
 
 

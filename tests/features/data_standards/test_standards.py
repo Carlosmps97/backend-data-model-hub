@@ -18,7 +18,8 @@ def test_snapshot_of_limpia_campos():
     )
     assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
                                    "namingTerm": None, "description": None, "logicalDataType": None,
-                                   "inheritsName": None}  # doc 79: aditivo al snapshot
+                                   "inheritsName": None,                       # doc 79: aditivo al snapshot
+                                   "physicalName": None, "physicalDescription": None, "udpValues": None}  # doc 85
     assert "junk" not in snap["dict"][0]
     assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
 
@@ -187,3 +188,27 @@ def test_build_diff_reporta_tipo_e_inherits_name_juntos():
         DomainEdit(id="d1", name="FecRutina", defaultDataType="TIMESTAMP", inheritsName=True)])
     diff = service.build_diff(body, before, {})
     assert "Domain FecRutina · DATE → TIMESTAMP · inherits name + definition ON" in diff["edited"]
+
+
+# ── Doc 85: faceta física y UDP por defecto del dominio son cambios auditables ──
+
+def test_build_diff_nombra_fisico_y_udp_defaults_doc85():
+    before = {"d1": {"name": "Codigo Clave", "defaultDataType": "VARCHAR(30)", "physicalName": None, "udpValues": {}}}
+    body = ApplyBody(domainsUpsert=[DomainEdit(id="d1", name="Codigo Clave", defaultDataType="VARCHAR(30)",
+                                               physicalName="CodigoClave", udpValues={"u1": "No"})])
+    diff = service.build_diff(body, before, {})
+    assert "Domain Codigo Clave · physical name (derived) → CodigoClave · UDP defaults changed" in diff["edited"]
+
+
+def test_build_diff_volver_al_derivado_y_sin_cambios_de_udp():
+    before = {"d1": {"name": "Codigo Clave", "defaultDataType": "VARCHAR(30)", "physicalName": "CodigoClave", "udpValues": {"u1": "No"}}}
+    body = ApplyBody(domainsUpsert=[DomainEdit(id="d1", name="Codigo Clave", defaultDataType="VARCHAR(30)",
+                                               physicalName="", udpValues={"u1": "No"})])
+    diff = service.build_diff(body, before, {})
+    assert "Domain Codigo Clave · physical name CodigoClave → (derived)" in diff["edited"]
+
+
+def test_remap_udp_values_doc85():
+    assert service.remap_udp_values({"u-src": "No", "u-gone": "x"}, {"u-src": "u-new"}) == {"u-new": "No"}
+    assert service.remap_udp_values({"u-gone": "x"}, {"u-src": "u-new"}) is None
+    assert service.remap_udp_values(None, {}) is None and service.remap_udp_values({}, {}) is None

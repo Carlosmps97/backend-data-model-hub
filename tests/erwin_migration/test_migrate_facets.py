@@ -12,10 +12,10 @@ from test_migrate_override import FakeDb  # mismo dir de tests (sin __init__.py)
 
 
 def _attr(aid, owner, logical, phys, order, *, ptype="STRING", ltype="", dom=None,
-          corder=None, lonly=False):
+          corder=None, lonly=False, definition="", comment=""):
     return ep.ErwinAttribute(
         id=aid, owner_id=owner, owner_kind="Entity", name=logical, physical=phys, physical_raw=phys,
-        data_type=ptype, logical_type=ltype, nullable=True, order=order, definition="", comment="",
+        data_type=ptype, logical_type=ltype, nullable=True, order=order, definition=definition, comment=comment,
         domain_ref=dom, parent_attr_ref=None, parent_rel_ref=None,
         column_order=order if corder is None else corder, logical_only=lonly)
 
@@ -27,15 +27,24 @@ def _udp(did, owner, mode, name, code="6", allowed=()):
 
 def _modelo():
     m = ep.ErwinModel(name="Modelo Facetas")
-    m.domains = {"D1": ep.ErwinDomain(id="D1", name="Codigo", builtin=False, data_type="VARCHAR(20)",
-                                      parent_ref=None, definition="Codigos", physical_type="VARCHAR(30)")}
+    m.domains = {
+        # físico de Erwin == derivado (join+UPPER: CODIGO) ⇒ physicalName None; Comment == Definition ⇒ None
+        "D1": ep.ErwinDomain(id="D1", name="Codigo", builtin=False, data_type="VARCHAR(20)", parent_ref=None,
+                             definition="Codigos", physical_type="VARCHAR(30)", physical_name="CODIGO", comment="Codigos"),
+        # físico de Erwin distinto del derivado (CODIGOCLAVE) ⇒ override; Comment distinto ⇒ descripción física
+        "D2": ep.ErwinDomain(id="D2", name="Codigo Clave", builtin=False, data_type="VARCHAR(20)", parent_ref=None,
+                             definition="Clave.", physical_type="VARCHAR(30)", physical_name="CodigoClave", comment="Clave fisica."),
+    }
     e1 = ep.ErwinEntity(id="E1", name="cliente", physical="CLIENTE", physical_was_macro=False, definition="",
                         comment="", attributes=[
                             # hereda el FÍSICO del dominio ⇒ NO es override (antes: falso override)
-                            _attr("A1", "E1", "codigo", "COD", 1, ptype="VARCHAR(30)", ltype="VARCHAR(20)", dom="D1", corder=3),
+                            _attr("A1", "E1", "codigo", "COD", 1, ptype="VARCHAR(30)", ltype="VARCHAR(20)", dom="D1", corder=3,
+                                  definition="Def A1", comment="Comentario A1"),
                             # difiere del físico del dominio ⇒ override real; lógico distinto ⇒ override lógico
-                            _attr("A2", "E1", "codigo alt", "CODALT", 2, ptype="STRING", ltype="CHAR(20)", dom="D1", corder=1),
-                            _attr("A3", "E1", "nota", "NOTA", 3, ptype="STRING", ltype="", corder=2, lonly=True),
+                            _attr("A2", "E1", "codigo alt", "CODALT", 2, ptype="STRING", ltype="CHAR(20)", dom="D1", corder=1,
+                                  definition="Igual", comment="Igual"),
+                            _attr("A3", "E1", "nota", "NOTA", 3, ptype="STRING", ltype="", corder=2, lonly=True,
+                                  definition="", comment="solo comment"),
                         ], pk_attr_ids=set(), pk_attr_order=[], physical_only=True)
     m.entities = {"E1": e1}
     m.hive_dbs = {"S1": ["E1"]}
@@ -43,8 +52,10 @@ def _modelo():
         "UP": _udp("UP", "Entity", "Physical", "Clasificacion del Dato", allowed=["No Definido", "No DAC", "DAC"]),
         "UL": _udp("UL", "Entity", "Logical", "Clasificacion del Dato", allowed=["No Definido", "No DAC", "DAC"]),
         "AC": _udp("AC", "Attribute", "Logical", "Atributo Cross", allowed=["No Definido", "Si", "No"]),
+        "CC": _udp("CC", "Attribute", "Physical", "Campo Cross", allowed=["No Definido", "Si", "No"]),
     }
-    m.udp_values = [("E1", "Entity", "UP", "DAC"), ("E1", "Entity", "UL", "No DAC"), ("A1", "Attribute", "AC", "Si")]
+    m.udp_values = [("E1", "Entity", "UP", "DAC"), ("E1", "Entity", "UL", "No DAC"), ("A1", "Attribute", "AC", "Si"),
+                    ("D2", "Domain", "AC", "No"), ("D2", "Domain", "CC", "No")]   # doc 85: UDP por defecto del dominio
     return m
 
 
@@ -60,6 +71,7 @@ _PF = pol.platform_id("project|Proyecto F")
 _UDP_PHYS_TABLE = pol.project_scoped_id(_PF, "udpfix|table|Clasificacion del Dato")
 _UDP_LOG_TABLE = pol.project_scoped_id(_PF, "udpfix|table|logical|Clasificacion del Dato")
 _UDP_LOG_COLUMN = pol.project_scoped_id(_PF, "udpfix|column|logical|Atributo Cross")
+_UDP_PHYS_COLUMN_CC = pol.project_scoped_id(_PF, "udpfix|column|Campo Cross")
 
 
 def test_defs_udp_sembradas_por_faceta_con_ids_estables():
@@ -88,8 +100,32 @@ def test_valores_udp_de_ambas_facetas_en_el_mismo_udpvalues():
 
 def test_dominio_con_tipo_fisico_y_logico():
     db = _run()
-    d = next(iter(db.data["parent_domains"].values()))
+    d = next(x for x in db.data["parent_domains"].values() if x["name"] == "Codigo")
     assert (d["defaultDataType"], d["logicalDataType"]) == ("VARCHAR(30)", "VARCHAR(20)")
+
+
+def test_dominio_faceta_fisica_y_udp_por_defecto_doc85():
+    db = _run()
+    doms = {d["name"]: d for d in db.data["parent_domains"].values()}
+    assert doms["Codigo"]["physicalName"] is None and doms["Codigo"]["physicalDescription"] is None
+    assert doms["Codigo"]["udpValues"] == {}
+    assert doms["Codigo Clave"]["physicalName"] == "CodigoClave"
+    assert doms["Codigo Clave"]["physicalDescription"] == "Clave fisica."
+    assert doms["Codigo Clave"]["udpValues"] == {_UDP_LOG_COLUMN: "No", _UDP_PHYS_COLUMN_CC: "No"}
+
+
+def test_columna_physical_description_solo_si_difiere_doc85():
+    db = _run()
+    cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
+    assert (cols["COD"]["description"], cols["COD"]["physicalDescription"]) == ("Def A1", "Comentario A1")
+    assert cols["CODALT"]["physicalDescription"] is None                 # Comment == Definition
+    assert (cols["NOTA"]["description"], cols["NOTA"]["physicalDescription"]) == ("solo comment", None)
+
+
+def test_extract_standards_expone_fisico_del_dominio_doc85():
+    from scripts.erwin_migration.extract_standards import extract
+    doms = {d["name"]: d for d in extract(_modelo())["parent_domains"]}
+    assert doms["Codigo Clave"]["physicalName"] == "CodigoClave" and doms["Codigo Clave"]["comment"] == "Clave fisica."
 
 
 def test_override_por_faceta_y_campos_logicos():

@@ -143,6 +143,11 @@ class ErwinDomain:
     # atributos heredan nombre (macro %AttDomain) y definición; los genéricos de
     # tipo (Codigo, Fecha, Number…) no la traen.
     attribute_definition: str = ""
+    # Doc 85: faceta FÍSICA del dominio — físico resuelto por Erwin
+    # (User_Formatted_Physical_Name: «Codigo Clave» → «CodigoClave»; fallback
+    # Physical_Name si no es macro) y Comment (descripción física).
+    physical_name: str = ""
+    comment: str = ""
 
 
 @dataclass
@@ -274,11 +279,17 @@ def parse(xml_path: str) -> ErwinModel:
         stack.pop()
 
         if tag == "UDP_Instance":
-            # jerarquía: Owner > OwnerProps > UDP_Instance_Groups > UDP_Instance
-            if el.get("Derived") != "Y" and len(stack) >= 3:
+            # jerarquía: Owner > OwnerProps > UDP_Instance_Groups > UDP_Instance.
+            # Doc 85: en un <Domain> las instancias `Derived="Y"` son los
+            # valores heredados de la cadena de dominios padre, MATERIALIZADOS
+            # por Erwin en cada dominio ⇒ son sus UDP por defecto y se capturan.
+            # En Entity/Attribute/View un derivado es herencia del dominio y se
+            # sigue descartando (la plataforma la resuelve al asignar).
+            if len(stack) >= 3:
                 owner = stack[-3]
-                m.udp_values.append((owner.get("id") or "", _t(owner),
-                                     el.get("id") or "", (el.text or "").strip()))
+                if el.get("Derived") != "Y" or _t(owner) == "Domain":
+                    m.udp_values.append((owner.get("id") or "", _t(owner),
+                                         el.get("id") or "", (el.text or "").strip()))
 
         elif tag == "Attribute":
             owner = stack[-2] if len(stack) >= 2 else None
@@ -397,6 +408,7 @@ def parse(xml_path: str) -> ErwinModel:
 
         elif tag == "Domain":
             p = _props(el, "DomainProps")
+            raw_phys = _txt(p, "Physical_Name")
             d = ErwinDomain(
                 id=el.get("id") or "",
                 name=el.get("name") or _txt(p, "Name"),
@@ -406,6 +418,9 @@ def parse(xml_path: str) -> ErwinModel:
                 definition=_txt(p, "Definition").strip(),
                 physical_type=_txt(p, "Physical_Data_Type").strip(),
                 attribute_definition=_txt(p, "Attribute_Definition").strip(),
+                physical_name=(_txt(p, "User_Formatted_Physical_Name")
+                               or (raw_phys if "%" not in raw_phys else "")).strip(),
+                comment=_txt(p, "Comment").strip(),
             )
             m.domains[d.id] = d
 

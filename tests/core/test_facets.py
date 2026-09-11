@@ -46,3 +46,13 @@ def test_contratos_sin_campos_repetidos_entre_facetas():
     # Doc 74: un solo orden de columnas, compartido por ambas facetas.
     assert "ordinal" in fx.COLUMN_FACET_FIELDS["shared"] and "pkPosition" in fx.COLUMN_FACET_FIELDS["shared"]
     assert "defaultDataType" in fx.DOMAIN_FACET_FIELDS["physical"]
+
+
+def test_dominio_y_columna_facetas_doc85():
+    """Doc 85 §3.2: el dominio declara nombre/tipo/descripción POR faceta; la
+    columna suma la descripción física (Comment de Erwin)."""
+    assert set(fx.DOMAIN_FACET_FIELDS["logical"]) == {"name", "logicalDataType", "description"}
+    assert set(fx.DOMAIN_FACET_FIELDS["physical"]) == {"physicalName", "defaultDataType", "physicalDescription"}
+    assert {"id", "projectId", "namingTerm", "inheritsName", "udpValues"} <= set(fx.DOMAIN_FACET_FIELDS["shared"])
+    assert "physicalDescription" in fx.COLUMN_FACET_FIELDS["physical"]
+    assert "description" in fx.COLUMN_FACET_FIELDS["shared"]      # la definición funcional sigue compartida en el CONTRATO

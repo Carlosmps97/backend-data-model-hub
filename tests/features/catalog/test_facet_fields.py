@@ -35,3 +35,12 @@ def test_bodies_exponen_los_campos():
     assert (b.logicalDataType, b.ordinal, b.logicalTypeOverridden, b.logicalOnly) == ("DATE", 1, None, None)
     tb = CanonicalTableBody.model_validate({"logicalName": "x", "logicalOnly": True})
     assert tb.logicalOnly is True and tb.physicalOnly is None
+
+
+def test_column_physical_description_doc85():
+    base = {"projectId": "p1", "tableId": "t1", "physicalName": "COD", "logicalName": "codigo", "dataType": "VARCHAR(30)"}
+    assert CanonicalColumnDoc.model_validate(base).model_dump()["physicalDescription"] is None
+    d = CanonicalColumnDoc.model_validate({**base, "description": "Codigo.", "physicalDescription": "Comentario fisico."}).model_dump()
+    assert (d["description"], d["physicalDescription"]) == ("Codigo.", "Comentario fisico.")
+    assert CanonicalColumnBody.model_validate({"logicalName": "x", "physicalDescription": "c"}).physicalDescription == "c"
+    assert CanonicalColumnBody.model_validate({"logicalName": "x"}).physicalDescription is None

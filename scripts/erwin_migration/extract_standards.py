@@ -48,7 +48,8 @@ def extract(model: ep.ErwinModel) -> dict[str, list[dict]]:
     # Parent domains: sección <Domain>, sin built-ins ni placeholders "<...>".
     domains = [
         {"name": d.name, "dataType": d.data_type or "STRING",
-         "definition": d.definition or None}
+         "definition": d.definition or None,
+         "physicalName": d.physical_name or None, "comment": d.comment or None}   # doc 85
         for d in model.domains.values()
         if not d.builtin and not d.name.startswith("<")
     ]
