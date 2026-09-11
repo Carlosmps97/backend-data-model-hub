@@ -1,5 +1,6 @@
 """Plantillas del picker "New rule" (pantalla 16d) + el RULESET BASE que
-reproduce los DDL de la macro BCP (doc 76 §5): 9 reglas + 5 generadores —
+reproduce los DDL de la macro BCP (doc 76 §5) + la homologación de tipos
+CHAR(n) → VARCHAR(n) (doc 90): 10 reglas + 5 generadores —
 TODAS con UDPs reales del catálogo fijo (doc 68/69). Las semillas también son
 los fixtures de los golden tests y el contenido del CTA "Restore the base rule
 set" del catálogo vacío (doc 30 D4): el front las manda por
@@ -52,6 +53,17 @@ SEED_RULES: list[dict] = [
         "condition": _COL_IS_DAC,
         "action": {"tags": {"DAC": "{lookup:dac_map}"}},
         "appliesTo": TABLE_ARTIFACTS + DAC_VIEWS, "priority": 50, "enabled": True,
+    },
+    {   # 1/2 · homologación de tipos (pedido owner 2026-09-11, doc 90): toda
+        # columna CHAR(n) sale VARCHAR(n) en la física y la _rej (misma
+        # longitud). Acción genérica `types` = {tipo base origen: destino};
+        # más pares, o una condición por UDP/dominio, se editan en la regla.
+        # Las vistas no declaran tipos: fuera de appliesTo.
+        "name": "char_a_varchar", "kind": "rule", "target": "column",
+        "description": "Exporta las columnas CHAR(n) como VARCHAR(n), misma longitud (tabla física y _rej)",
+        "condition": "",
+        "action": {"types": {"CHAR": "VARCHAR"}},
+        "appliesTo": list(TABLE_ARTIFACTS), "priority": 80, "enabled": True,
     },
     # ── Reglas de TABLA (objeto: tablas y vistas) ──────────────────────────
     {   # 1/2 · preámbulo comentado (la macro lo escribe siempre)
@@ -231,6 +243,9 @@ TEMPLATES: list[dict] = [
     {"id": "partitions-last", "title": "Partition columns last",
      "summary": "PARTITIONED BY columns at the end of the CREATE, ordered by the UDP 'Particion'",
      "rule": _SEED_BY_NAME["particiones_al_final"]},
+    {"id": "map-types", "title": "Map data types",
+     "summary": "CHAR(10) → VARCHAR(10): rename a base type on export, keeping each column's length",
+     "rule": _SEED_BY_NAME["char_a_varchar"]},
     {"id": "blank", "title": "Blank rule",
      "summary": "Start from scratch and configure every field yourself.",
      "rule": {"name": "", "kind": "rule", "target": "column", "condition": "",

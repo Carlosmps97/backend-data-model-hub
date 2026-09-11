@@ -231,9 +231,20 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
             action = rule.get("action") or {}
             expr_tpl = (action.get("expression") or "").strip()
             alias_tpl = (action.get("alias") or "").strip()
+            # Doc 90 · Data types: el bench lista SOLO las columnas cuyo tipo cambia.
+            type_maps = [(rule.get("name"), engine_render.type_map_of(rule))] if action.get("types") else []
             for name, ctx in cols_ctx.items():
                 cctx = {**base_ctx, "columna": ctx}
                 if not engine_cond.eval_condition(cond_ast, cctx, rule.get("condition") or ""):
+                    continue
+                if type_maps:
+                    new_type, applied = engine_render.map_type_text(ctx.get("tipo") or "", type_maps)
+                    if not applied:
+                        continue
+                    matched += 1
+                    fragments.append({"column": name,
+                                      "sql": f"{engine_render.ident(name, BENCH_OPTIONS)} {new_type}",
+                                      "why": f"{ctx.get('tipo')} → {new_type}"})
                     continue
                 matched += 1
                 why = _why(rule.get("condition") or "", cctx)
@@ -312,6 +323,9 @@ async def impact(project_id: str, rule: dict) -> dict:
                     hit += 1
             return {"columns": 0, "tables": hit}
         cols = await repository.columns_light(project_id)
+        # Doc 90 · Data types: cuenta SOLO las columnas cuyo tipo cambia.
+        type_maps = ([(rule.get("name"), engine_render.type_map_of(rule))]
+                     if (rule.get("action") or {}).get("types") else [])
         matched_cols = 0
         matched_tables: set[str] = set()
         for c in cols:
@@ -321,6 +335,9 @@ async def impact(project_id: str, rule: dict) -> dict:
             ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
                    "columna": column_ctx(c, n_by_id, domains)}
             if engine_cond.eval_condition(cond_ast, ctx, rule.get("condition") or ""):
+                if type_maps and not engine_render.map_type_text(
+                        ctx["columna"].get("tipo") or "", type_maps)[1]:
+                    continue
                 matched_cols += 1
                 matched_tables.add(c["tableId"])
         return {"columns": matched_cols, "tables": len(matched_tables)}

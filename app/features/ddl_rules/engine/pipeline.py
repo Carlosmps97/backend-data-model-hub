@@ -6,7 +6,8 @@ lectura de BD, mucho menos escritura (spec §13).
 Orden de statements — determinista (spec §7.6, ajustado a la macro BCP en el
 doc 76):
     por cada tabla (en el orden del payload):
-        [sentencias `before`] + CREATE base (con TBLPROPERTIES inyectadas) →
+        [sentencias `before`] + CREATE base (tipos de columna mapeados, doc 90,
+        y TBLPROPERTIES inyectadas) →
         ALTER … SET TAGS de tabla (una sentencia por regla) →
         ALTER … ALTER COLUMN … SET TAGS (una por columna) →
         sentencias `after` → artefactos generados (orden topológico, cada uno
@@ -113,6 +114,9 @@ def render_export(payload: dict, rules: list[dict], config: dict,
         # 1) [before] + CREATE base + TBLPROPERTIES desde UDP (spec §8.4)
         base_sql = entry.get("baseSql") or ""
         if base_sql:
+            # Doc 90: tipos de columna (CHAR → VARCHAR) ANTES de decorar el CREATE
+            base_sql, l = render.apply_column_types_sql(base_sql, run, PHYSICAL, ctx, cols_ctx, config)
+            log += l
             base_sql, l = render.apply_tblproperties(base_sql, run, PHYSICAL, ctx, config)
             log += l
             before, l = render.statement_snippets(run, PHYSICAL, ctx, config, "before")

@@ -32,6 +32,8 @@ _PLAIN_PLACEHOLDERS = {
     "artefacto.ref", "artefacto.nombre", "artefacto.esquema", "artefacto.tipo",
 }
 _PH_RX = re.compile(r"\{([^{}]+)\}")
+# Doc 90: un tipo BASE (CHAR, VARCHAR, STRING…) — sin argumentos ni `<…>`.
+_TYPE_NAME_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _lev(a: str, b: str) -> int:
@@ -323,6 +325,25 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
         if kind != "rule" or target != "table":
             _bad("Statements is a table rule (target: table).")
 
+    # Doc 90 · Data types: regla de COLUMNA que renombra el tipo BASE de las
+    # columnas que matchean (CHAR → VARCHAR) en los artefactos TABLA; cada
+    # columna conserva su longitud/precisión si el destino la admite.
+    types = action.get("types")
+    if types is not None:
+        if not isinstance(types, dict) or not types:
+            _bad("Data types needs at least one mapping (from type → to type), e.g. CHAR → VARCHAR.")
+        else:
+            for k, val in types.items():
+                for txt in (k, val):
+                    if not _TYPE_NAME_RX.match(str(txt or "").strip()):
+                        _bad(f"Data types: '{txt}' isn't a base type name — write the type without "
+                             "arguments (CHAR, not CHAR(10)); each column keeps its own length/precision.",
+                             token=str(txt))
+        if kind != "rule" or target != "column":
+            _bad("Data types is a column rule (target: column).")
+        if (action.get("expression") or "").strip() or action.get("exclude") is True:
+            _bad("Data types can't be combined with an expression or exclude in the same rule.")
+
     # Doc 76 · keep_partition_type del generador: booleano.
     kpt = ((action.get("emit") or {}).get("columns") or {}).get("keep_partition_type") if kind == "generator" else None
     if kpt is not None and not isinstance(kpt, bool):
@@ -401,10 +422,15 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
         # se puede autorar la regla antes que su generador; hasta entonces el
         # export simplemente no la aplica ahí.
         # Doc 76: `exclude` es de vistas (como `expression`); tags y statements
-        # aplican a tablas Y vistas (`ALTER VIEW`); TBLPROPERTIES solo a tablas.
+        # aplican a tablas Y vistas (`ALTER VIEW`); TBLPROPERTIES y `types`
+        # (doc 90) solo a tablas.
         has_expr = bool((action.get("expression") or "").strip()) or action.get("exclude") is True
         has_any_kind = bool(action.get("tags") or action.get("statements"))
-        has_table_only = bool(action.get("tblproperties"))
+        # Doc 71 H4 / doc 90: TBLPROPERTIES y los mapeos de tipo solo tienen
+        # sentido en artefactos TABLA (las vistas no declaran tipos).
+        table_only = [label for label, key in (("TBLPROPERTIES", "tblproperties"),
+                                               ("data type mappings", "types")) if action.get(key)]
+        has_table_only = bool(table_only)
         for art in rule.get("appliesTo") or []:
             if art not in artifacts:
                 warnings.append(f"No generator declares '{art}' yet — the rule won't "
@@ -417,7 +443,7 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
                 warnings.append(f"'{art}' is a table artifact — expression and exclude rules only "
                                 "decorate the SELECT of a view; nothing will be emitted there.")
             if k == "view" and has_table_only and not (has_expr or has_any_kind):
-                warnings.append(f"'{art}' is a view artifact — TBLPROPERTIES only apply to "
+                warnings.append(f"'{art}' is a view artifact — {' and '.join(table_only)} only apply to "
                                 "table artifacts; nothing will be emitted there.")
         if not (rule.get("appliesTo") or []):
             warnings.append("This rule has no target artifacts yet — it won't apply anywhere on export.")

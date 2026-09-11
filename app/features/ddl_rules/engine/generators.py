@@ -303,7 +303,8 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
     """Cascada completa para UNA tabla física: ejecuta los generadores en orden
     topológico, decora las VISTAS generadas con las reglas de columna que las
     tengan en `appliesTo` y aplica a cada artefacto las reglas de tabla que lo
-    nombren (doc 71 H3 / doc 76): sentencias `before` (preámbulo del CREATE),
+    nombren (doc 71 H3 / doc 76): tipos de columna (`types`, doc 90 — tablas),
+    sentencias `before` (preámbulo del CREATE),
     TBLPROPERTIES (tablas), tags de objeto (`ALTER TABLE|VIEW … SET TAGS`, una
     sentencia por regla), tags de columna (en vistas, solo sobre las columnas
     proyectadas) y sentencias `after`. `options` = opciones del export del
@@ -340,6 +341,14 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
         full_art = render.full_name(art.get("schema"), art["name"], options)
         ctx = {**base_ctx, "artefacto": render.artifact_ctx(art.get("schema"), art["name"],
                                                               art["kind"], options)}
+        if art["kind"] == "table":
+            # Doc 90: las columnas del artefacto pasan por las reglas `types`
+            # que lo nombren (la _rej conserva el tipo de sus particiones →
+            # también mapean) ANTES de emitir el CREATE.
+            art["columns"], l_ty = render.apply_column_types(
+                art["columns"], runnable_rules, art["artifact"], ctx,
+                artifact_cols_ctx(art, cols_ctx_by_name), config)
+            log.extend(l_ty)
         sql = artifact_sql(art, meta, options)
         extra_stmts: list[dict] = []
         if art["kind"] == "view":

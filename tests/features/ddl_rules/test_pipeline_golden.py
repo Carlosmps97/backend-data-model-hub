@@ -219,7 +219,7 @@ def test_templates_payload_resuelve_lookup(monkeypatch):
     from app.features.ddl_rules import service as svc
     monkeypatch.setattr(svc.udp_repo, "list_udp", AsyncMock(return_value=DEFS))
     out = asyncio.run(svc.templates_payload("p1"))
-    assert len(out["templates"]) == 8 and len(out["seedRules"]) == 14   # doc 76: 9 reglas + 5 generadores
+    assert len(out["templates"]) == 9 and len(out["seedRules"]) == 15   # doc 76 + doc 90: 10 reglas + 5 generadores
     assert out["seedLookups"]["vacuum_map"]["fromUdpId"] == "u-vac"
     assert out["seedLookups"]["update_frequency_map"]["fromUdpId"] == "u-vac"
     assert out["seedLookups"]["dac_flag_map"]["fromUdpId"] == "u-dac-tab"
@@ -267,7 +267,7 @@ def test_vista_no_negocio_pasa_intacta():
 
 
 def test_seed_rules_validan_contra_el_catalogo_real():
-    """Las 14 semillas deben salir VÁLIDAS con las defs reales + los lookups."""
+    """Las 15 semillas deben salir VÁLIDAS con las defs reales + los lookups."""
     importlib.import_module("app.features.ddl_rules.engine.validate")
     from app.features.ddl_rules.engine import validate as v
     from app.features.ddl_rules import service as svc

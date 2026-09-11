@@ -15,6 +15,10 @@ Doc 76 (macro BCP): `exclude` quita una proyección; los tags salen también
 sobre VISTAS (`ALTER VIEW`); los tags de tabla van UNA sentencia por regla;
 `statements` (before/after) emite sentencias libres con placeholders; el
 contexto `artefacto.*` identifica el objeto que se emite.
+
+Doc 90: `types` (regla de columna) renombra el tipo BASE de las columnas al
+emitir un CREATE TABLE — el CREATE físico del front se reescribe por TOKEN
+(sqlglot) y las tablas generadas tipo por tipo; las vistas no declaran tipos.
 """
 from __future__ import annotations
 
@@ -22,6 +26,9 @@ import re
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.tokens import TokenType
+
+from app.core.datatypes import ARG_SPECS
 
 from . import conditions as cond
 from .expressions import RenderError, build_expression, expand_template
@@ -626,3 +633,255 @@ def decorate_view_sql(sql: str, artifact: str, rules: list[dict], config: dict,
     if sql.rstrip().endswith(";"):
         out += ";"
     return out, skipped + log
+
+
+# ── Doc 90 · Data types: `action.types = {FROM: TO}` (regla de COLUMNA) ────
+# Renombra el tipo BASE de las columnas que matchean al emitir un CREATE TABLE
+# (CHAR → VARCHAR). El CREATE físico llega como TEXTO del front y se reescribe
+# por TOKEN (tokenizer de sqlglot, dialecto databricks): los literales
+# (COMMENT 'CHAR(3)'), los identificadores (`char`) y los comentarios no son
+# tokens de tipo, así que quedan intactos y el resto del texto sale
+# byte-idéntico. Los argumentos `(n)`/`(p,s)` se conservan si el tipo destino
+# los admite según la gramática del catálogo (`ARG_SPECS`); si no, se
+# descartan (`CHAR(10)` → `STRING`). Las tablas generadas pasan por el mismo
+# mapeador tipo por tipo. Las vistas no declaran tipos: no aplica.
+
+_TYPE_WORD_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def column_type_rules_for(rules: list[dict], artifact: str) -> list[dict]:
+    """Reglas de columna con `action.types` (mapa no vacío) que nombran el artefacto."""
+    out: list[dict] = []
+    for r in rules:
+        types = (r.get("action") or {}).get("types")
+        if (r.get("kind") == "rule" and r.get("target") == "column"
+                and isinstance(types, dict) and types
+                and artifact in (r.get("appliesTo") or [])):
+            out.append(r)
+    return out
+
+
+def type_map_of(rule: dict) -> dict[str, str]:
+    """{FROM en MAYÚSCULA: to tal cual lo escribió el autor}; pares vacíos fuera."""
+    types = (rule.get("action") or {}).get("types") or {}
+    return {str(k).strip().upper(): str(v).strip()
+            for k, v in types.items() if str(k).strip() and str(v).strip()}
+
+
+def _match_case(new: str, old: str) -> str:
+    """El destino copia el estilo de mayúsculas del token original (el front
+    emite `CHAR(10)`; un modelo puede guardar `char(8)`): el DDL sale homogéneo."""
+    if old.isupper():
+        return new.upper()
+    if old.islower():
+        return new.lower()
+    return new
+
+
+def _tokenize(text: str):
+    try:
+        return sqlglot.tokenize(text, read="databricks")
+    except Exception:
+        return None
+
+
+def _retype_tokens(text: str, toks: list, i0: int, i1: int,
+                   maps: list[tuple[str, dict[str, str]]]) -> list[dict]:
+    """Reemplazos de tipo en toks[i0:i1]: [{start, end, new, old_disp, new_disp,
+    rules}] (`end` exclusivo sobre `text`). Cada token-palabra que matchee un
+    mapa se encadena por los mapas EN ORDEN (CHAR → VARCHAR → STRING); los
+    argumentos `( … )` que le siguen se conservan o se descartan según el
+    destino FINAL."""
+    out: list[dict] = []
+    maps = [(name, {str(k).upper(): v for k, v in m.items()}) for name, m in maps]   # match case-insensitive
+    i = i0
+    while i < i1:
+        t = toks[i]
+        span = text[t.start:t.end + 1]
+        if not _TYPE_WORD_RX.match(span):
+            i += 1
+            continue
+        cur, applied = span, []
+        for name, m in maps:
+            to = m.get(cur.upper())
+            if to is not None:
+                cur, applied = to, applied + [name]
+        if not applied:
+            i += 1
+            continue
+        new_base = _match_case(cur, span)
+        args_end = None                      # índice del ')' que cierra los argumentos
+        if i + 1 < i1 and toks[i + 1].token_type == TokenType.L_PAREN:
+            depth, k = 0, i + 1
+            while k < i1:
+                tt = toks[k].token_type
+                if tt == TokenType.L_PAREN:
+                    depth += 1
+                elif tt == TokenType.R_PAREN:
+                    depth -= 1
+                    if depth == 0:
+                        args_end = k
+                        break
+                k += 1
+        if args_end is None:
+            out.append({"start": t.start, "end": t.end + 1, "new": new_base,
+                        "old_disp": span, "new_disp": new_base, "rules": applied})
+            i += 1
+            continue
+        args = text[t.end + 1:toks[args_end].end + 1]
+        if ARG_SPECS.get(cur.upper(), 0) > 0:      # el destino admite argumentos: verbatim
+            out.append({"start": t.start, "end": t.end + 1, "new": new_base,
+                        "old_disp": span + args, "new_disp": new_base + args, "rules": applied})
+        else:                                       # no los admite: `CHAR(10)` → `STRING`
+            out.append({"start": t.start, "end": toks[args_end].end + 1, "new": new_base,
+                        "old_disp": span + args, "new_disp": new_base, "rules": applied})
+        i = args_end + 1
+    return out
+
+
+def _splice(text: str, repl: list[dict]) -> str:
+    out = text
+    for r in sorted(repl, key=lambda r: r["start"], reverse=True):
+        out = out[:r["start"]] + r["new"] + out[r["end"]:]
+    return out
+
+
+def map_type_text(text: str, maps: list[tuple[str, dict[str, str]]]) -> tuple[str, list[str]]:
+    """Un TIPO suelto (`CHAR(10)`, `STRUCT<a: CHAR(3)>`) por los mapas
+    [(regla, {FROM: TO})] en orden. Devuelve (texto, reglas que aplicaron —
+    sin repetir, en orden). Sin matches (o texto no tokenizable) → intacto."""
+    if not text or not maps:
+        return text, []
+    toks = _tokenize(text)
+    if toks is None:
+        return text, []
+    repl = _retype_tokens(text, toks, 0, len(toks), maps)
+    if not repl:
+        return text, []
+    applied = list(dict.fromkeys(n for r in repl for n in r["rules"]))
+    return _splice(text, repl), applied
+
+
+def _column_regions(toks: list) -> list[tuple[str, int, int]]:
+    """[(nombre, i0, i1)] de las definiciones de columna del PRIMER grupo
+    `( … )` de los tokens (la lista de columnas del CREATE): toks[i0:i1] son
+    los tokens DESPUÉS del nombre hasta la coma de nivel 1 (o el cierre). Las
+    comas dentro de `< … >` (STRUCT/MAP) y de `( … )` anidados no cortan; una
+    entrada que no empieza por un nombre (CONSTRAINT …, PRIMARY KEY …) no es
+    columna."""
+    depth, angle, started = 0, 0, False
+    start = 0
+    raw: list[tuple[int, int]] = []
+    for i, t in enumerate(toks):
+        tt = t.token_type
+        if tt == TokenType.L_PAREN:
+            depth += 1
+            if depth == 1 and not started:
+                started, start = True, i + 1
+            continue
+        if tt == TokenType.R_PAREN:
+            depth -= 1
+            if started and depth == 0:
+                raw.append((start, i))
+                break
+            continue
+        if not started or depth != 1:
+            continue
+        if tt == TokenType.LT:
+            angle += 1
+        elif tt == TokenType.GT:
+            angle -= 1
+        elif tt == TokenType.COMMA and angle <= 0:
+            raw.append((start, i))
+            start, angle = i + 1, 0
+    out: list[tuple[str, int, int]] = []
+    for a, b in raw:
+        if b - a < 2:                    # nombre sin tipo (o entrada vacía)
+            continue
+        head = toks[a]
+        if head.token_type in (TokenType.IDENTIFIER, TokenType.VAR):
+            out.append((head.text, a + 1, b))
+    return out
+
+
+def _applicable_maps(ordered: list[dict], ctx: dict, parsed: dict,
+                     log: list[dict]) -> list[tuple[str, dict[str, str]]]:
+    """[(regla, mapa)] de las reglas cuya condición aplica a la columna en `ctx`."""
+    out: list[tuple[str, dict[str, str]]] = []
+    for r in ordered:
+        try:
+            if not _eval_rule_condition(r, ctx, parsed):
+                continue
+        except cond.CondError as e:
+            log.append({"rule": r.get("name"), "status": "skipped", "reason": str(e)})
+            continue
+        m = type_map_of(r)
+        if m:
+            out.append((r.get("name"), m))
+    return out
+
+
+def apply_column_types_sql(sql: str, rules: list[dict], artifact: str, base_ctx: dict,
+                           cols_ctx_by_name: dict[str, dict], config: dict) -> tuple[str, list[dict]]:
+    """Doc 90 · reescribe los TIPOS de las columnas del CREATE base (texto del
+    front) según las reglas de columna con `action.types` que nombren el
+    artefacto: por columna (condición evaluada con su contexto) y por token
+    (comentarios, literales e identificadores intactos). Sin matches → SQL
+    byte-idéntico. `config` se acepta por simetría con las demás acciones."""
+    del config
+    ordered = run_order(column_type_rules_for(rules, artifact))
+    if not ordered or not sql:
+        return sql, []
+    toks = _tokenize(sql)
+    if toks is None:
+        return sql, [{"rule": None, "status": "skipped", "artifact": artifact,
+                      "reason": "base CREATE didn't tokenize — data types not mapped"}]
+    log: list[dict] = []
+    parsed: dict[str, object] = {}
+    by_ci = _ci_index(cols_ctx_by_name)
+    repl: list[dict] = []
+    for name, i0, i1 in _column_regions(toks):
+        col_ctx = by_ci.get(str(name).lower())
+        if col_ctx is None:
+            continue
+        maps = _applicable_maps(ordered, {**base_ctx, "columna": col_ctx}, parsed, log)
+        if not maps:
+            continue
+        for r in _retype_tokens(sql, toks, i0, i1, maps):
+            repl.append(r)
+            for rule_name in dict.fromkeys(r["rules"]):
+                log.append({"rule": rule_name, "column": name, "status": "applied", "artifact": artifact,
+                            "object": f"{r['old_disp']} → {r['new_disp']}"})
+    if not repl:
+        return sql, log
+    return _splice(sql, repl), log
+
+
+def apply_column_types(cols: list[dict], rules: list[dict], artifact: str, base_ctx: dict,
+                       cols_ctx_by_name: dict[str, dict], config: dict) -> tuple[list[dict], list[dict]]:
+    """Doc 90 · el mismo mapeo sobre las columnas de un artefacto TABLA
+    generado ([{name, type, …}] → copia con `type` mapeado). `cols_ctx_by_name`
+    = contexto de esas columnas (`artifact_cols_ctx`: el de la física con el
+    tipo del artefacto). Sin matches → la MISMA lista."""
+    del config
+    ordered = run_order(column_type_rules_for(rules, artifact))
+    if not ordered:
+        return cols, []
+    log: list[dict] = []
+    parsed: dict[str, object] = {}
+    by_ci = _ci_index(cols_ctx_by_name)
+    out: list[dict] = []
+    changed = False
+    for c in cols:
+        col_ctx = by_ci.get(str(c.get("name")).lower())
+        maps = _applicable_maps(ordered, {**base_ctx, "columna": col_ctx}, parsed, log) if col_ctx else []
+        new_type, applied = map_type_text(c.get("type") or "", maps) if maps else (c.get("type"), [])
+        if not applied:
+            out.append(c)
+            continue
+        for rule_name in applied:
+            log.append({"rule": rule_name, "column": c.get("name"), "status": "applied", "artifact": artifact,
+                        "object": f"{c.get('type')} → {new_type}"})
+        out.append({**c, "type": new_type})
+        changed = True
+    return (out if changed else cols), log

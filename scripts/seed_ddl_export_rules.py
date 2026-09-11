@@ -3,11 +3,12 @@ como UNA versión de Data Standards — POR PROYECTO (doc 75: cada proyecto tien
 sus reglas, lookups, UDPs y su historial). `--project "Nombre"` siembra uno;
 `--all-projects`, todos (el one-shot usa este último).
 
-Qué crea (9 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente):
+Qué crea (10 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente):
   - excluir_dac_vista_sin_dac  vista NoDAC de tabla DAC → quita las columnas DAC-*
   - desencriptar_dac           columna DAC-% → bcp_encrypt_function.decrypt_column_view({col}, '<sufijo>')
                                [vistas DAC + vista de negocio]
   - tags_dac_columna           ALTER … ALTER COLUMN … SET TAGS ('DAC' = '<sufijo>')
+  - char_a_varchar             columna CHAR(n) → VARCHAR(n) en la física y la _rej (acción `types`, doc 90)
   - drop_comentado             -- DROP TABLE IF EXISTS … comentado antes del CREATE (física y _rej)
   - tags_update_frequency      SET TAGS ('updateFrecuency' = …) [lookup update_frequency_map]
   - tags_isdac / tags_isdac_sin_dac   SET TAGS ('isDAC' = 'True'|'False')
