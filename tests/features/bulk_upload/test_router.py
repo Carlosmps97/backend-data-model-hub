@@ -113,3 +113,20 @@ def test_delete(client, monkeypatch):
 def test_delete_409_mientras_aplica(client, monkeypatch):
     monkeypatch.setattr(service, "discard", AsyncMock(return_value="busy"))
     assert client.delete("/api/changesets/c1/uploads/j1").status_code == 409
+
+
+# ── Doc 87 §3.5: GET …/uploads/targets ────────────────────────────────────
+def test_get_targets_no_se_confunde_con_un_job(client, monkeypatch):
+    targets = AsyncMock(return_value={"mode": "choose", "candidates": [{"id": "c", "name": "CPYBCA", "folders": 4, "canvases": 0}]})
+    get_job = AsyncMock(return_value=JOB)
+    monkeypatch.setattr(service, "targets", targets)
+    monkeypatch.setattr(service, "get_job", get_job)
+    r = client.get("/api/changesets/c1/uploads/targets")
+    assert r.status_code == 200 and r.json()["data"]["mode"] == "choose"
+    assert targets.await_args.args == ("c1", "ana") and get_job.await_count == 0
+
+
+@pytest.mark.parametrize("res,status", [(None, 404), ("forbidden", 403), ("locked", 409)])
+def test_get_targets_mapea_guards(client, monkeypatch, res, status):
+    monkeypatch.setattr(service, "targets", AsyncMock(return_value=res))
+    assert client.get("/api/changesets/c1/uploads/targets").status_code == status

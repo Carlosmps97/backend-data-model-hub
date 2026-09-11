@@ -51,7 +51,7 @@ def extract(model: ep.ErwinModel) -> dict[str, list[dict]]:
          "definition": d.definition or None,
          "physicalName": d.physical_name or None, "comment": d.comment or None}   # doc 85
         for d in model.domains.values()
-        if not d.builtin and not d.name.startswith("<")
+        if not d.name.startswith("<")   # built-in con nombre (Number, String…) también se siembran (2026-09-11)
     ]
 
     # Glosario NSM: (término, abreviatura, *alternativas), dedup por término.

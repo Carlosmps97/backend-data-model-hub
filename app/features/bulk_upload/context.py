@@ -16,6 +16,9 @@ class UploadContext:
     folders: list[dict] = field(default_factory=list)
     canvases: list[dict] = field(default_factory=list)       # subject_areas
     schemas: list[dict] = field(default_factory=list)
+    # Doc 87: vistas efectivas PROYECTADAS (id, name, schema, sourceTableIds) —
+    # solo para saber si la `_vu` de una tabla ya existe (nunca se re-escribe).
+    views: list[dict] = field(default_factory=list)
     # Pool de tablas efectivo, PROYECTADO (id, physicalName, logicalName,
     # schema, description, udpValues) — resuelve identidades por nombre.
     tables: list[dict] = field(default_factory=list)

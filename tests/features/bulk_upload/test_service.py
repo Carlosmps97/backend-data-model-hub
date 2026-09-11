@@ -129,10 +129,11 @@ def test_apply_re_valida_y_escribe_en_tandas_en_orden(env, monkeypatch):
         assert a["status"] == "applying"
         done = await _wait(a)
         assert done["status"] == "applied", done["error"]
-        # canvas + 3 tablas = 4 cambios (doc 75: el proyecto es el del changeset,
-        # nunca se crea) → tandas de 2, 2, en orden de dependencia
+        # 3 tablas + canvas = 4 cambios (doc 75: el proyecto es el del changeset,
+        # nunca se crea) → tandas de 2, 2; el canvas va AL FINAL (doc 87 §3.4:
+        # referencia tablas y vistas, que ya están pendientes cuando llega su tanda)
         colls = [ch["collection"] for _, _, items in env["batches"] for ch in items]
-        assert colls == ["subject_areas", "canonical_tables", "canonical_tables", "canonical_tables"]
+        assert colls == ["canonical_tables", "canonical_tables", "canonical_tables", "subject_areas"]
         assert [len(items) for _, _, items in env["batches"]] == [2, 2]
         assert all(actor == "ana" for _, actor, _ in env["batches"])
         assert len(done["result"]["affectedCanvasIds"]) == 1
@@ -247,3 +248,53 @@ def test_validate_workbook_reporta_perfil_invalido_como_error_de_perfil(env):
         assert done["report"]["sheets"][0]["name"] == "Tablas"
 
     asyncio.run(run())
+
+
+# ── Doc 87 §3.5: proyecto destino ──────────────────────────────────────────
+_DDV_FOLDERS = [{"id": "c", "projectId": "p1", "parentFolderId": None, "name": "CPYBCA", "order": 0},
+                {"id": "o", "projectId": "p1", "parentFolderId": None, "name": "Otros", "order": 1},
+                {"id": "x", "projectId": "p1", "parentFolderId": "c", "name": "SA1", "order": 0},
+                {"id": "y", "projectId": "p1", "parentFolderId": "o", "name": "SA2", "order": 0}]
+
+
+def test_targets_devuelve_la_capa_de_proyectos_internos_con_los_guards(env, monkeypatch):
+    monkeypatch.setattr(service.loader, "load_folders", AsyncMock(return_value=_DDV_FOLDERS))
+
+    async def run():
+        assert await service.targets("c9", "ana") is None
+        assert await service.targets("c1", "beto") == "forbidden"
+        t = await service.targets("c1", "ana")
+        assert t["mode"] == "choose" and [c["name"] for c in t["candidates"]] == ["CPYBCA", "Otros"]
+        env["cs"] = {"id": "c1", "projectId": "p1", "status": "submitted", "owner": "ana"}
+        assert await service.targets("c1", "ana") == "locked"
+
+    asyncio.run(run())
+
+
+def test_validation_respeta_el_proyecto_destino_del_body(env):
+    c = _ctx()
+    c.folders = list(_DDV_FOLDERS)
+    env["ctx"] = c
+
+    async def run():
+        done = await _wait(await service.start_validation("c1", "ana", _body()))
+        assert [e["code"] for e in done["report"]["errors"]] == ["target-folder-required"]
+        body = _body()
+        body.targetFolderId = "o"
+        done = await _wait(await service.start_validation("c1", "ana", body))
+        assert done["report"]["errorCount"] == 0
+        canvas = next(ch for ch in _plan_changes(done) if ch["collection"] == "subject_areas")
+        assert canvas["payload"]["folderId"] == "o"
+
+    asyncio.run(run())
+
+
+def _plan_changes(job_view: dict) -> list[dict]:
+    """Los cambios planificados no viajan en el view del job: se re-planifican
+    con el mismo body para inspeccionarlos (validate_workbook es determinista)."""
+    from app.features.bulk_upload.planner import build_plan
+    from app.features.bulk_upload.profiles.apply import apply_profile
+    body = service.registry.get(job_view["id"]).body
+    ctx = service.loader.load_context.side_effect("c1")
+    parsed = apply_profile(body, PROFILE, ctx.udp_defs)
+    return build_plan(parsed, ctx, target_folder_id=body.targetFolderId).changes

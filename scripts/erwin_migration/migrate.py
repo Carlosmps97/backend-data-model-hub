@@ -347,7 +347,11 @@ class Migrator:
 
     # ---------- pasos ----------
     def standards(self) -> None:
-        # dominios padre (solo custom; los builtin de Erwin no aportan).
+        # dominios padre. Los BUILT-IN de Erwin con nombre (Number, String,
+        # Datetime, Blob) SÍ se siembran (owner 2026-09-11): son dominios reales
+        # que los modeladores asignan — «Number» (INTEGER/INT) lo usan 14 023
+        # atributos en MODELO DDV y sin él quedaban sin parent domain. Solo se
+        # saltan los placeholders `<root>` / `<default>` (usarlos = sin dominio).
         # Reuso por nombre case-insensitive vía cache (cero round-trips).
         # Doc 62: el default se HOMOLOGA a la grafía canónica de la plataforma
         # (`Array` → `ARRAY<>`, `BIG INTEGER` → `BIGINT`).
@@ -355,7 +359,7 @@ class Migrator:
         # gana; el mismo nombre con tipo distinto va al reporte, no se pisa.
         seeded_domains: list[tuple[str, str]] = []   # (erwin_id, pid) sembrados por ESTE archivo (doc 85)
         for d in self.m.domains.values():
-            if d.builtin or d.name.startswith("<"):
+            if d.name.startswith("<"):
                 continue
             name_key = d.name.strip().upper()
             # Doc 69: default = tipo FÍSICO (lo que emite el DDL); el lógico
@@ -488,6 +492,12 @@ class Migrator:
         # `udp_pid`, que recién existen acá. Solo los dominios sembrados por
         # ESTE archivo (los reusados no se tocan — política doc 75); siempre se
         # estampa (aunque sea {}) para que el doc no quede en None.
+        # Doc 85 §11.2: el buffer se VACÍA antes — el fast path del adaptador
+        # Lakebase (`_bulk_update_by_id`) resuelve un lote con UPDATE de los
+        # pre-existentes + INSERT … ON CONFLICT DO NOTHING de los nuevos: un
+        # segundo op del mismo `_id` en el MISMO lote que su insert se descarta
+        # en silencio (prueba viva del owner: dominios con físico y sin UDP).
+        self._flush("parent_domains")
         for erwin_id, dom_pid in seeded_domains:
             dom_udps = self._udp_values_for(erwin_id, "column")
             self._upsert("parent_domains", dom_pid, {"udpValues": dom_udps})
@@ -1127,7 +1137,7 @@ def _dry_run_plan(m: ep.ErwinModel, project: str | None) -> None:
     print(f"  folders={len(m.subject_areas)} canvases={len(m.diagrams)} "
           f"tablas={len(m.entities)} vistas={len(m.views)} "
           f"defsUDP={len(defs)} (por faceta) glosario={len(m.glossary)} "
-          f"dominios={sum(1 for d in m.domains.values() if not d.builtin)}")
+          f"dominios={sum(1 for d in m.domains.values() if not d.name.startswith('<'))}")
     dup_t = Counter(f"{pol.schema_or_default(schema_of.get(e.id))}.{e.physical}".upper()
                     for e in m.entities.values())
     dups = sum(n - 1 for n in dup_t.values() if n > 1)

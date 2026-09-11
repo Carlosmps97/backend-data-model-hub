@@ -24,6 +24,7 @@ from app.features.changesets.validation import (
 
 from . import loader
 from .jobs import UploadJob, registry
+from .plan_structure import upload_targets
 from .planner import Plan, PlanOptions, build_plan, referenced_table_ids
 from .profiles.apply import apply_profile
 from .profiles.models import validate_profile
@@ -82,7 +83,7 @@ async def validate_workbook(cs_id: str, body: UploadWorkbookBody,
     progress("Loading columns of referenced tables", 4, _VALIDATION_STEPS)
     ctx.columns_by_table = await loader.load_columns(cs_id, referenced_table_ids(parsed, ctx))
     progress("Validating rows", 5, _VALIDATION_STEPS)
-    plan = build_plan(parsed, ctx, options=PlanOptions.from_profile(profile))
+    plan = build_plan(parsed, ctx, options=PlanOptions.from_profile(profile), target_folder_id=body.targetFolderId)
     progress("Building report", 6, _VALIDATION_STEPS)
     return plan
 
@@ -127,6 +128,16 @@ async def _run_apply(job: UploadJob) -> None:
         except Exception as exc:  # noqa: BLE001
             log.exception("bulk upload apply failed", extra={"job": job.id, "cs": job.cs_id})
             job.finish("failed", error=str(exc) or type(exc).__name__)
+
+
+async def targets(cs_id: str, actor: str) -> dict | str | None:
+    """Doc 87 §3.5: capa de proyectos internos del proyecto de la versión
+    (carpetas EFECTIVAS del draft) para el selector del popup. Mismos guards
+    que subir (owner + draft)."""
+    cs = await _guard(cs_id, actor)
+    if not isinstance(cs, dict):
+        return cs
+    return upload_targets(await loader.load_folders(cs_id))
 
 
 async def start_validation(cs_id: str, actor: str, body: UploadWorkbookBody) -> dict | str | None:

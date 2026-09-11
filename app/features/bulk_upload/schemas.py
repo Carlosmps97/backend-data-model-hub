@@ -25,3 +25,8 @@ class UploadWorkbookBody(BaseModel):
     fileName: str = "workbook.xlsx"
     profileId: str
     sheets: list[RawSheet] = Field(default_factory=list)
+    # Doc 87 §3.5: carpeta raíz «proyecto interno» bajo la que cuelgan SPACE /
+    # SUBJECT / DIAGRAMA. Obligatoria solo cuando el proyecto tiene 2+ raíces
+    # con subcarpetas (`upload_targets` → mode `choose`); con una sola, el
+    # backend la resuelve solo; sin capa, va la raíz del proyecto.
+    targetFolderId: str | None = None

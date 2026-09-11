@@ -32,6 +32,8 @@ class TablePlan:
     canvas: dict | None = None             # {project, space, subject, diagram} crudos
     column_counts: dict[str, int] = field(default_factory=lambda: {"create": 0, "update": 0, "unchanged": 0})
     column_rows: list[int] = field(default_factory=list)
+    # Doc 87: vistas `_vu` de la fila (create | unchanged; nunca update).
+    view_counts: dict[str, int] = field(default_factory=lambda: {"create": 0, "update": 0, "unchanged": 0})
 
 
 class TableIndex:

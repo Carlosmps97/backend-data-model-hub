@@ -158,9 +158,16 @@ def test_publish_flow_end_to_end(api):
     assert ana.post(f"/api/changesets/{cs5}/withdraw")["status"] == "draft"
     beto.post(f"/api/changesets/{cs5}/review", {"decision": "approve"}, expect=409)   # ya no está en revisión
     ana.post(f"/api/changesets/{cs5}/submit", {"reviewers": ["beto"]})
+    beto.post(f"/api/changesets/{cs5}/review", {"decision": "reject"}, expect=422)          # doc 88 §5: motivo obligatorio
     rejected = beto.post(f"/api/changesets/{cs5}/review", {"decision": "reject", "note": "no"})
-    assert rejected["status"] == "rejected" and rejected["reviewNote"] == "no"
-    assert ana.post(f"/api/changesets/{cs5}/reopen")["status"] == "draft"
+    # Doc 88 §6: el rechazo devuelve la versión DIRECTO a draft; la solicitud
+    # queda en el historial con su motivo (y el ciclo retirado antes, también).
+    assert rejected["status"] == "draft" and rejected["reviewNote"] == "no" and rejected["submittedAt"] is None
+    assert [r["outcome"] for r in rejected["requests"]] == ["withdrawn", "rejected"]
+    assert rejected["requests"][-1]["note"] == "no" and rejected["requests"][-1]["decidedBy"] == "beto"
+    assert rejected["requests"][-1]["decisions"]["beto"]["status"] == "rejected"
+    ana.post(f"/api/changesets/{cs5}/reopen", expect=409)                                     # ya es draft: nada que reabrir
+    assert next(r for r in ana.get("/api/versions") if r["id"] == cs5)["lastRequest"]["outcome"] == "rejected"
     assert ana.get(f"/api/projects/{pid}/catalog/tables?q=TEMP") == []           # nunca llegó a producción
     assert ana.post(f"/api/changesets/{cs5}/comments", {"text": "hola"})["comments"][0]["author"] == "ana"
 

@@ -205,7 +205,7 @@ app/
     ├── views/                      /api/views (vistas SQL versionadas, multifuente sources[])
     ├── summary/                    /api/summary (contadores del Home)
     ├── settings/                   /api/projects/{pid}/settings/naming (separador/case por scope) — standards.edit
-    ├── bulk_upload/                /api/changesets/{cs_id}/uploads (carga masiva desde Excel, doc 55)
+    ├── bulk_upload/                /api/changesets/{cs_id}/uploads (carga masiva desde Excel, docs 55/78/87)
     │   └── profiles/               /api/projects/{pid}/upload-profiles (perfiles de carga, doc 78)
     └── reporting/                  /api/reporting/tables|filters|columns|views (tabla de metadata por proyecto)
         └── query/                  Motor de consulta: spec (projectId obligatorio), schema (Field Catalog), compiler,
@@ -759,7 +759,7 @@ La superficie total es de **143 rutas repartidas en 26 routers** montados en `ma
 | `/api` | identity | `GET /users?can=` | sesión |
 | `/api/projects/{pid}/catalog` `/api/catalog` | catalog | `GET/POST /tables`, `GET /columns` (búsqueda por columna), `GET /search`, `GET /inventory` (por proyecto) + columns por tabla, usage, `inspect/*` (por id) | `model.edit` (escritura) |
 | `/api/changesets` `/api/versions` `/api/projects/{pid}/versions` `/api/requests` | changesets | snapshot (`projectId`), changes, submit, review, diff (`impact.deletesProject`), `POST /{cs_id}/diff/details` (§6.5), rollback, history, versions (todas o del proyecto), published del proyecto, compare | `model.edit` / `review.decide` / `rollback` |
-| `/api/changesets/{cs_id}/uploads` | bulk_upload | carga masiva desde Excel según un perfil de carga (job validate/apply) | `model.edit` |
+| `/api/changesets/{cs_id}/uploads` | bulk_upload | carga masiva desde Excel según un perfil de carga (job validate/apply); doc 87: vistas `_vu` automáticas (normal + DAC), upsert garantizado y proyecto destino (`GET …/uploads/targets`) cuando hay capa de proyectos internos | `model.edit` |
 | `/api/projects/{pid}/upload-profiles` | bulk_upload/profiles | perfiles de carga (doc 78): hojas, fila de cabecera, mapeo cabecera → campo / UDP L y/o F, reglas con severidad, políticas; catálogo, validate, suggest, built-in «Plantilla BCP» | `model.edit` |
 | `/api/projects/{pid}/ddl-rules` | ddl_rules | 8 rutas: reglas, config, artifacts, templates (lectura) + validate, test, impact (cómputo) + render | sesión; `render` exige `export` |
 | `/api` | projects | `GET/POST /projects` (crear con `copyFrom`), `GET /projects/{pid}/counts`, subject-areas, layout, views, diagram | `model.edit` (escritura) |

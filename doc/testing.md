@@ -25,7 +25,7 @@ flowchart TD
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>45 tests contra el Postgres real en schema efimero"]
     I["Integracion en proceso · tests/integration (doc 82)<br/>app REAL sobre BD en memoria (mongomock): flujos por HTTP, merge, aislamiento, barrido anti-500"]
     C["Arquitectura · tests/architecture<br/>invariantes de capas, alcance por proyecto, firmas reales, funciones truncadas, contrato de rutas front↔back"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 294 tests (suite normal, verde 2026-09-09) · services/models/schemas sin DB"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros)<br/>1 389 tests (suite normal, verde 2026-09-11) · services/models/schemas sin DB"]
 
     D --> C --> I --> L --> B --> A
 
@@ -48,23 +48,23 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-09, doc 82):** la suite normal son **1 294 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 339** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-11, doc 88):** la suite normal son **1 389 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 434** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
-| `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**) | 12 | 51 |
+| `tests/core` (config, ratelimit, indexes, db, identidad, naming, versioning, facets, **scope**, orden de display de columnas) | 13 | 63 |
 | `tests/architecture` (invariantes de capas, legado retirado, alcance, firmas, funciones truncadas, fakes, rutas front↔back) | 7 | 16 |
-| `tests/integration` (app real sobre BD en memoria: flujos por HTTP, merge, aislamiento, barrido anti-500, escrituras directas — doc 82) | 5 | 22 |
-| `tests/features` (todas las features; incluye los de `bulk_upload`, docs 55/78, `health` y el repositorio de changesets contra la BD falsa) | 144 | 1 050 |
-| `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único) | 9 | 91 |
+| `tests/integration` (app real sobre BD en memoria: flujos por HTTP, merge, aislamiento, barrido anti-500, escrituras directas — doc 82) | 6 | 23 |
+| `tests/features` (todas las features; incluye los de `bulk_upload`, docs 55/78/87, `health`, el repositorio de changesets contra la BD falsa y, doc 88, la cascada de membresía y el historial de solicitudes) | 151 | 1 126 |
+| `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único, built-ins) | 9 | 97 |
 | `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, `seed_ddl_export_rules` y `seed_upload_profiles` por proyecto, `reset_for_migration`) | 6 | 51 |
 | `tests/test_smoke.py` (app + health) | 1 | 2 |
 | `tests/lakebase/test_translate.py` + `test_project_column.py` (traducción pura; corren en la suite normal) | 2 | 11 |
-| **Subtotal — suite normal** | **186** | **1 294** |
+| **Subtotal — suite normal** | **195** | **1 389** |
 | `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 45 |
-| **Total recolectado** | **187** | **1 339** |
+| **Total recolectado** | **196** | **1 434** |
 
-La carga masiva desde Excel (`tests/features/bulk_upload/`, 22 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*`/`policies`/`udp_facets` son puros (workbook YA interpretado por un perfil, armado a mano con `helpers.py`); los perfiles de carga (doc 78) prueban puro el modelo (`profiles_model`: catálogo + `validate_profile`), el built-in (`builtin_profile` contra el catálogo fijo de UDPs), `suggest`, `rules` y `profile_apply` (hojas, fila de cabecera, cabeceras, políticas), y con mocks el repositorio scoped (`profiles_repository`), el service (`profiles_service`: nombre único, 422, default único) y el router (`profiles_router`, con `project_client`); `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
+La carga masiva desde Excel (`tests/features/bulk_upload/`, 24 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*`/`policies`/`udp_facets` son puros (workbook YA interpretado por un perfil, armado a mano con `helpers.py`); doc 87 suma `planner_views` (vistas `_vu` normal + DAC, esquema `_vu`, columnas efectivas en orden de display, vista existente intacta, canvas) y `planner_upsert` (invariante: nunca `delete`, lo no mencionado no aparece), más el proyecto destino en `planner_structure` (`upload_targets` / `resolve_base_folder`), `service` y `router` (`GET …/uploads/targets`); los perfiles de carga (doc 78) prueban puro el modelo (`profiles_model`: catálogo + `validate_profile`), el built-in (`builtin_profile` contra el catálogo fijo de UDPs), `suggest`, `rules` y `profile_apply` (hojas, fila de cabecera, cabeceras, políticas), y con mocks el repositorio scoped (`profiles_repository`), el service (`profiles_service`: nombre único, 422, default único) y el router (`profiles_router`, con `project_client`); `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`.
 
 ---
 
@@ -114,10 +114,10 @@ tests/
 ├── features/                        # 133 archivos · 959 tests
 │   ├── admin/           (1)         # RBAC, guards anti-lockout, hash de password, auditoria
 │   ├── auth/            (3)         # permisos efectivos, login/lockout, token-first + warmup SSO + SSO login
-│   ├── bulk_upload/     (13)        # carga masiva desde Excel (doc 55): normalize, parser, planners, loader, router
+│   ├── bulk_upload/     (24)        # carga masiva desde Excel (docs 55/78/87): normalize, parser, planners (tablas, columnas, estructura, vistas, upsert), perfiles, loader, service, router
 │   ├── catalog/         (9)         # columnas aditivas, derivacion de tipo, search_columns, usage, search_model,
 │   │                                # inventory, inspect, list_tables por esquema, campos de faceta
-│   ├── changesets/      (26)        # politica de versionado, payloads, effective+search, duplicados,
+│   ├── changesets/      (33)        # politica de versionado, payloads, effective+search, duplicados, cascada de membresía + historial de solicitudes (doc 88),
 │   │                                # schemas versionados, diffdetail, rollback a cualquier version, compare,
 │   │                                # lote de cambios (doc 39), asof, historial, acceso (doc 70 §12),
 │   │                                # guard cross-project, borrado de proyecto y versiones por proyecto (doc 75)

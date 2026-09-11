@@ -204,7 +204,7 @@ def analyze_vs_db(fa: FileAnalysis, db, project_id: str | None) -> dict:
 
     ex_dom = {(d.get("name") or "").upper() for d in scoped("parent_domains", {"name": 1})}
     out["domains_new"] = sorted(d.name for d in fa.m.domains.values()
-                                if not d.builtin and not d.name.startswith("<")
+                                if not d.name.startswith("<")   # built-in con nombre también se siembran (2026-09-11)
                                 and d.name.upper() not in ex_dom)
 
     # Doc 69: cruce por (nombre, nivel, FACETA); defs pre-doc 69 sin `view` = físicas.

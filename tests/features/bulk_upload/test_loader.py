@@ -60,7 +60,9 @@ def test_load_context_proyecta_las_tablas_y_carga_estandares_por_scope(monkeypat
     tables_call = next(c for c in calls if c[0] == "canonical_tables")
     assert tables_call[2] == loader.TABLE_PROJECTION
     assert tables_call[1] == {"projectId": "p1"}                 # doc 75: alcance por proyecto
-    assert {c[0] for c in calls} == {"folders", "subject_areas", "schemas", "canonical_tables"}
+    assert {c[0] for c in calls} == {"folders", "subject_areas", "schemas", "canonical_tables", "views"}
+    views_call = next(c for c in calls if c[0] == "views")
+    assert (views_call[1], views_call[2]) == ({"projectId": "p1"}, loader.VIEW_PROJECTION)   # doc 87
     assert all(c[1] == {"projectId": "p1"} for c in calls)
     assert ctx.udp_defs[0]["name"] == "Universal"
     assert ctx.domains[0]["name"] == "Codigo"

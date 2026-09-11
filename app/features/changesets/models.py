@@ -70,6 +70,14 @@ class ChangesetDoc(BaseModel):
     # key = userId · value = {status: 'approved'|'rejected', note?: str, at: str}
     approvals: dict[str, dict] = Field(default_factory=dict)
     comments: list[dict] = Field(default_factory=list)    # {author, text, at}
+    # Doc 88 §6: historial de SOLICITUDES de publicación, un registro por ciclo
+    # de envío — {id, cycle, submittedAt, submittedBy, title, description,
+    # reviewers, outcome: 'pending'|'approved'|'rejected'|'withdrawn',
+    # decidedAt?, decidedBy?, note?, decisions?: {user: {status, note?, at}}}.
+    # Un rechazo devuelve la versión a `draft` (el owner sigue editando) pero
+    # la solicitud, su motivo y sus decisiones quedan acá (Review las lista).
+    # Aditivo (invariante §2.6): declarado acá Y en el TS `RequestCycle`.
+    requests: list[dict] = Field(default_factory=list)
     # ── Timestamps / compat de revisión single (M-series) ─────────────────
     createdAt: str | None = None
     updatedAt: str | None = None

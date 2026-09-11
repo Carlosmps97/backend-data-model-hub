@@ -238,8 +238,10 @@ def test_reopen_vuelve_a_draft_y_limpia_metadata_de_review(monkeypatch):
     assert res == {"id": "c1", "status": "draft"}
     cs_id, from_status, fields = tr.await_args.args
     assert (cs_id, from_status) == ("c1", "rejected")
+    history = fields.pop("requests")           # doc 88 §6: doc legacy → ciclo sintetizado, no se pierde
     assert fields == {"status": "draft", "approvals": {}, "submittedAt": None,
                       "reviewedBy": None, "reviewedAt": None, "reviewNote": None}
+    assert history[-1]["outcome"] == "rejected" and history[-1]["cycle"] == 1
 
 
 def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
@@ -420,6 +422,9 @@ def test_add_change_es_owner_only(monkeypatch):
 
     set_change = AsyncMock(return_value={"id": "c1", "status": "draft"})
     monkeypatch.setattr(service.repository, "set_change", set_change)
+    # Doc 88 §4: el delete de una tabla cascadea su membresía (lee pendientes y publicado).
+    monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value={"subject_areas": {}}))
+    monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=[]))
     res_ok = asyncio.run(service.add_change("c1", "ana", "canonical_tables", "t1", "delete", None))
     assert res_ok == {"id": "c1", "status": "draft"}
 

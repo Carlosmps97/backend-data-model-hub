@@ -1,6 +1,7 @@
 """Endpoints de la carga masiva (doc 55 §7), bajo el changeset destino:
 
   POST   /api/changesets/{cs}/uploads                → 202 job en `validating`
+  GET    /api/changesets/{cs}/uploads/targets        → capa de proyectos internos (doc 87)
   GET    /api/changesets/{cs}/uploads/{job}          → estado / reporte / resultado
   POST   /api/changesets/{cs}/uploads/{job}/apply    → 202 job en `applying`
   DELETE /api/changesets/{cs}/uploads/{job}          → descarta (cancela si sigue validando)
@@ -62,6 +63,13 @@ async def start_validation(cs_id: str, body: UploadWorkbookBody, user: dict = De
     except TooManyJobsError as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     return ok(_mapped(res))
+
+
+# Declarada ANTES de `/{job_id}`: FastAPI resuelve en orden de declaración y
+# «targets» sería tomado como id de job.
+@router.get("/targets")
+async def targets(cs_id: str, user: dict = Depends(_can_edit)):
+    return ok(_mapped(await service.targets(cs_id, user["username"])))
 
 
 @router.get("/{job_id}")

@@ -1,9 +1,13 @@
-"""Planner de la carga masiva (doc 55 §5-6 · doc 78): del workbook ya
-interpretado por el perfil (`profiles/apply`) + contexto efectivo a un `Plan`
-— reporte (errores/warnings/resumen), cambios en orden de dependencia (docs
-COMPLETOS) y canvases afectados. Puro y determinista (los ids nuevos se
+"""Planner de la carga masiva (doc 55 §5-6 · doc 78 · doc 87): del workbook
+ya interpretado por el perfil (`profiles/apply`) + contexto efectivo a un
+`Plan` — reporte (errores/warnings/resumen), cambios en orden de dependencia
+(docs COMPLETOS) y canvases afectados. Puro y determinista (los ids nuevos se
 inyectan). `PlanOptions` trae lo que el perfil decide sobre el planner:
 `mustExist` por campo y las políticas `onExisting*`.
+
+INVARIANTE (doc 87 §3.6): la carga es UPSERT, nunca destructiva — todo cambio
+es `op: "upsert"`; lo que el workbook no menciona (tablas, columnas, vistas,
+canvases, carpetas) no aparece en el plan y queda intacto.
 """
 from __future__ import annotations
 
@@ -15,13 +19,20 @@ from .context import UploadContext
 from .normalize import clean_text, norm_name
 from .parser import ParsedWorkbook
 from .plan_columns import plan_columns
-from .plan_structure import SchemaResolver, StructurePlanner, zero_counts
+from .plan_structure import (
+    SchemaResolver, StructurePlanner, resolve_base_folder, target_error_message, upload_targets, zero_counts,
+)
 from .plan_tables import TableIndex, TablePlan, plan_tables, resolve_identity
+from .plan_views import plan_views
 from .report import SHEET_COLUMNS, SHEET_TABLES, ReportBuilder
 from .standards import Standards
 
-# Orden de dependencia para el apply (mismo criterio que VERSIONED).
-_ORDER = ("projects", "folders", "subject_areas", "schemas", "canonical_tables", "canonical_columns")
+# Orden de ESCRITURA al draft (doc 87 §3.4): cada colección referencia solo
+# colecciones anteriores (columnas → tablas; vistas → tablas; canvases →
+# carpetas, tablas y vistas), así toda referencia ya está en los pendientes del
+# changeset cuando llega su tanda de `add_changes_bulk` (tandas de 1000). El
+# orden del apply al publicar es el de VERSIONED (approve), no este.
+_ORDER = ("projects", "folders", "schemas", "canonical_tables", "canonical_columns", "views", "subject_areas")
 _FATAL = frozenset({"missing-sheet", "empty-workbook", "missing-header"})
 
 
@@ -57,7 +68,7 @@ class Plan:
 
 
 def _empty_counts() -> dict:
-    return {k: zero_counts() for k in ("projects", "folders", "canvases", "schemas", "tables", "columns")}
+    return {k: zero_counts() for k in ("projects", "folders", "canvases", "schemas", "tables", "columns", "views")}
 
 
 def referenced_table_ids(parsed: ParsedWorkbook, ctx: UploadContext) -> list[str]:
@@ -99,13 +110,15 @@ def _breakdown(table_plans: list[TablePlan], rb: ReportBuilder) -> list[dict]:
         issues += rb.issues_in(SHEET_COLUMNS, tp.column_rows)
         rows.append({
             "row": tp.row, "logicalName": tp.logical, "physicalName": tp.physical, "schema": tp.schema,
-            "action": tp.action, "canvas": _canvas_label(tp), "columns": dict(tp.column_counts), "issues": issues,
+            "action": tp.action, "canvas": _canvas_label(tp), "columns": dict(tp.column_counts),
+            "views": dict(tp.view_counts), "issues": issues,
         })
     return rows
 
 
 def build_plan(parsed: ParsedWorkbook, ctx: UploadContext,
-               new_id: Callable[[], str] | None = None, options: PlanOptions | None = None) -> Plan:
+               new_id: Callable[[], str] | None = None, options: PlanOptions | None = None,
+               target_folder_id: str | None = None) -> Plan:
     new_id = new_id or (lambda: str(uuid.uuid4()))
     options = options or PlanOptions()
     rb = ReportBuilder(sheet_names=parsed.sheet_names)
@@ -115,15 +128,28 @@ def build_plan(parsed: ParsedWorkbook, ctx: UploadContext,
     if parsed.fatal or any(i.code in _FATAL for i in parsed.issues):
         return Plan(report=rb.build(counts, [], **meta), counts=counts, has_errors=True)
 
+    # Doc 87 §3.5: proyecto destino (capa de proyectos internos). Un error acá
+    # bloquea el Upload pero el resto se sigue validando para reportarlo junto.
+    targets = upload_targets(ctx.folders, ctx.canvases)
+    base_folder_id, target_err = resolve_base_folder(targets, target_folder_id)
+    if target_err:
+        rb.error(SHEET_TABLES, target_err, target_error_message(target_err, targets))
+
     std = Standards(ctx)
     schemas = SchemaResolver(ctx, rb, new_id)
     table_plans = plan_tables(parsed, ctx, std, schemas, parsed.table_udp, rb, new_id, options)
     column_plans = plan_columns(parsed, ctx, std, table_plans, parsed.column_udp, rb, new_id, options)
 
-    structure = StructurePlanner(ctx, rb, new_id, headers=parsed.headers.get("tables"), must_exist=options.must_exist)
+    structure = StructurePlanner(ctx, rb, new_id, headers=parsed.headers.get("tables"), must_exist=options.must_exist,
+                                 base_folder_id=base_folder_id)
     for tp in table_plans:
         if tp.from_sheet and tp.action != "error":
             structure.place(tp)
+    # Doc 87 §3.1: vistas `_vu` (normal + DAC) de cada tabla de la hoja; van
+    # DESPUÉS de colocar las tablas (entran al mismo canvas) y ANTES de los
+    # warnings/cambios de estructura (que ya las cuentan).
+    view_plans = plan_views(table_plans, column_plans, ctx, schemas, structure, rb, new_id,
+                            lambda f, fallback: parsed.header("tables", f, fallback))
     structure.canvas_warnings()
     diagram_header = parsed.header("tables", "diagram", "DIAGRAMA")
     for tp in table_plans:
@@ -135,6 +161,11 @@ def build_plan(parsed: ParsedWorkbook, ctx: UploadContext,
     by_coll: dict[str, list[dict]] = {k: [] for k in _ORDER}
     for ch in structure.changes() + schemas.changes():
         by_coll[ch["collection"]].append(ch)
+    for vp in view_plans:
+        counts["views"][vp.action] += 1
+        vp.table.view_counts[vp.action] += 1
+        if vp.action == "create":
+            by_coll["views"].append({"collection": "views", "entityId": vp.id, "op": "upsert", "payload": vp.doc})
     for tp in table_plans:
         if tp.action in ("create", "update"):
             counts["tables"][tp.action] += 1

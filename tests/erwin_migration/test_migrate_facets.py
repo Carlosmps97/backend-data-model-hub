@@ -8,7 +8,7 @@ from scripts.erwin_migration import erwin_parser as ep
 from scripts.erwin_migration import policies as pol
 from scripts.erwin_migration.migrate import Migrator
 
-from test_migrate_override import FakeDb  # mismo dir de tests (sin __init__.py): import por basename
+from test_migrate_override import FakeColl, FakeDb  # mismo dir de tests (sin __init__.py): import por basename
 
 
 def _attr(aid, owner, logical, phys, order, *, ptype="STRING", ltype="", dom=None,
@@ -194,3 +194,92 @@ def test_dominio_estandar_hereda_nombre_y_definicion_doc79():
     assert doms["FecRutina"]["description"] == "Fecha de la rutina."
     assert doms["Codigo"]["inheritsName"] is False
     assert doms["Codigo"]["description"] == "Se asigna a atributos con codificacion."
+
+
+# ── Doc 85 §11.2: el fast path del adaptador Lakebase colapsa ops repetidos por _id ──
+
+class BatchFakeColl(FakeColl):
+    """Semántica de `PgCollection._bulk_update_by_id` (Lakebase): UN lote =
+    `UPDATE … FROM unnest` sobre los docs que YA existían (una sola fila fuente
+    por id) + `INSERT … ON CONFLICT DO NOTHING` de los faltantes ⇒ el SEGUNDO op
+    del mismo `_id` dentro del lote se pierde si el doc era nuevo. Un `$set`
+    posterior sobre un doc recién sembrado sólo sobrevive en OTRO lote."""
+
+    def bulk_write(self, ops):
+        existing = set(self.docs)
+        patched: set[str] = set()
+        for op in ops:                                   # UPDATE: solo pre-existentes, 1 patch por id
+            _id = op._filter["_id"]
+            if _id in existing and _id not in patched:
+                self.docs[_id].update(op._doc.get("$set") or {})
+                patched.add(_id)
+        for op in ops:                                   # INSERT … ON CONFLICT DO NOTHING
+            _id = op._filter["_id"]
+            if _id in self.docs or not getattr(op, "_upsert", False):
+                continue
+            self.docs[_id] = {"_id": _id, **(op._doc.get("$setOnInsert") or {}), **(op._doc.get("$set") or {})}
+
+
+class BatchFakeDb(FakeDb):
+    def __getitem__(self, name):
+        return BatchFakeColl(self.data.setdefault(name, {}))
+
+
+def test_udp_del_dominio_sobreviven_al_fast_path_del_adaptador_doc85():
+    """Prueba viva del owner (2026-09-10): los dominios llegaban con físico pero
+    SIN udpValues — la segunda pasada caía en el MISMO lote que el insert del
+    dominio y el adaptador la descartaba. El kit debe vaciar el buffer entre
+    pasadas."""
+    db = BatchFakeDb()
+    Migrator(db, _modelo(), "Proyecto F", None).run()
+    doms = {d["name"]: d for d in db.data["parent_domains"].values()}
+    assert doms["Codigo Clave"]["physicalName"] == "CodigoClave"                        # 1ª pasada intacta
+    assert doms["Codigo Clave"]["udpValues"] == {_UDP_LOG_COLUMN: "No", _UDP_PHYS_COLUMN_CC: "No"}
+    assert doms["Codigo"]["udpValues"] == {}
+
+
+# ── Built-ins de Erwin con nombre (Number · String · Datetime · Blob) SÍ se siembran ──
+
+def _modelo_builtins():
+    m = ep.ErwinModel(name="Modelo Builtins")
+    m.domains = {
+        "D-ROOT": ep.ErwinDomain(id="D-ROOT", name="<root>", builtin=True, data_type="CHAR(18)", parent_ref=None,
+                                 definition="", physical_type="", physical_name="_root_"),
+        "D-DEF": ep.ErwinDomain(id="D-DEF", name="<default>", builtin=True, data_type="CHAR(18)", parent_ref="D-ROOT",
+                                definition="", physical_type="CHAR(18)", physical_name="_default_"),
+        "D-NUM": ep.ErwinDomain(id="D-NUM", name="Number", builtin=True, data_type="INTEGER", parent_ref="D-DEF",
+                                definition="", physical_type="INT", physical_name="Number"),
+        "D-COD": ep.ErwinDomain(id="D-COD", name="Codigo", builtin=False, data_type="VARCHAR(20)", parent_ref="D-DEF",
+                                definition="Codigos", physical_type="VARCHAR(30)", physical_name="CODIGO"),
+    }
+    e1 = ep.ErwinEntity(id="E1", name="cliente", physical="CLIENTE", physical_was_macro=False, definition="",
+                        comment="", attributes=[
+                            _attr("A1", "E1", "edad", "EDAD", 1, ptype="INT", ltype="INTEGER", dom="D-NUM"),
+                            _attr("A2", "E1", "monto", "MONTO", 2, ptype="BIGINT", ltype="INTEGER", dom="D-NUM"),   # override físico real
+                            _attr("A3", "E1", "nota", "NOTA", 3, ptype="STRING", ltype="", dom="D-DEF"),           # <default> = sin dominio
+                        ], pk_attr_ids=set(), pk_attr_order=[])
+    m.entities = {"E1": e1}
+    m.hive_dbs = {"S1": ["E1"]}
+    m.udp_values = [("D-NUM", "Domain", "AC", "No")]
+    m.udp_defs = {"AC": _udp("AC", "Attribute", "Logical", "Atributo Cross", allowed=["No Definido", "Si", "No"])}
+    return m
+
+
+def test_builtins_con_nombre_se_siembran_y_los_placeholders_no():
+    """Pedido del owner (2026-09-11): «Number» no aparecía como parent domain.
+    Es el built-in de Erwin (Built_In_Id=3, INTEGER/INT) que usan 14 023
+    atributos en MODELO DDV. Se siembran los built-in con nombre (Number,
+    String, Datetime, Blob); `<root>`/`<default>` son placeholders (usarlos =
+    «sin dominio») y siguen fuera."""
+    db = FakeDb()
+    Migrator(db, _modelo_builtins(), "Proyecto B", None).run()
+    doms = {d["name"]: d for d in db.data["parent_domains"].values()}
+    assert set(doms) == {"Number", "Codigo"}
+    num = doms["Number"]
+    # INT se homologa a INTEGER (doc 62) en ambas facetas
+    assert (num["defaultDataType"], num["logicalDataType"], num["inheritsName"]) == ("INTEGER", "INTEGER", False)
+    assert num["physicalName"] == "Number"        # físico de Erwin «Number» ≠ derivado NUMBER ⇒ override (D1)
+    cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
+    assert cols["EDAD"]["parentDomainId"] == num["_id"] and cols["EDAD"]["typeOverridden"] is False
+    assert cols["MONTO"]["parentDomainId"] == num["_id"] and cols["MONTO"]["typeOverridden"] is True
+    assert cols["NOTA"]["parentDomainId"] is None

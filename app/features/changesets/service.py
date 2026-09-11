@@ -7,6 +7,8 @@ La política de aprobación vive en funciones **puras** (testables sin DB):
 """
 from __future__ import annotations
 
+import uuid
+
 import re
 from datetime import datetime, timezone
 
@@ -103,6 +105,48 @@ def next_version_label(existing_labels) -> str:
         if m:
             nums.append(int(m.group(1)))
     return f"v{(max(nums) + 1) if nums else 1}"
+
+
+class RejectionReasonRequired(ValueError):
+    """Doc 88 §5: un rechazo SIN motivo no se registra (el router la convierte
+    en 422). Buena práctica pedida por los modeladores: quien rechaza explica."""
+
+
+def open_cycle(cs: dict, actor: str, submitted_at: str, title: str | None,
+               description: str | None, reviewers: list[str] | None) -> list[dict]:
+    """Doc 88 §6: historial + el ciclo `pending` de este envío. Puro."""
+    history = [dict(r) for r in (cs.get("requests") or [])]
+    history.append({
+        "id": str(uuid.uuid4()), "cycle": len(history) + 1,
+        "submittedAt": submitted_at, "submittedBy": actor,
+        "title": title if title is not None else cs.get("title"),
+        "description": description if description is not None else cs.get("description"),
+        "reviewers": list(reviewers if reviewers is not None else (cs.get("reviewers") or [])),
+        "outcome": "pending",
+    })
+    return history
+
+
+def close_cycle(cs: dict, outcome: str, actor: str | None = None, note: str | None = None,
+                decisions: dict | None = None) -> list[dict]:
+    """Doc 88 §6: cierra el ciclo `pending` con `outcome` (approved | rejected |
+    withdrawn). Un doc legacy sin historial (enviado antes del doc 88) gana un
+    registro sintetizado desde su cabecera para no perder la solicitud. Puro."""
+    history = [dict(r) for r in (cs.get("requests") or [])]
+    if not history or history[-1].get("outcome") != "pending":
+        history.append({
+            "id": str(uuid.uuid4()), "cycle": len(history) + 1,
+            "submittedAt": cs.get("submittedAt"), "submittedBy": cs.get("owner"),
+            "title": cs.get("title"), "description": cs.get("description"),
+            "reviewers": list(cs.get("reviewers") or []), "outcome": "pending",
+        })
+    last = history[-1]
+    last.update({"outcome": outcome, "decidedAt": _now(), "decidedBy": actor})
+    if note:
+        last["note"] = note
+    if decisions:
+        last["decisions"] = {k: dict(v) for k, v in decisions.items()}
+    return history
 
 
 def is_assigned(reviewers, actor: str) -> bool:
@@ -247,6 +291,12 @@ def version_row(cs: dict, deletes_project: bool = False) -> dict:
         "submittedAt": cs.get("submittedAt"),
         "appliedAt": cs.get("appliedAt"),
         "restoredFrom": cs.get("restoredFrom"),
+        # Doc 88 §6: historial de solicitudes + último ciclo (badge de Review).
+        "requests": list(cs.get("requests") or []),
+        "lastRequest": (cs.get("requests") or [None])[-1],
+        "reviewedBy": cs.get("reviewedBy"),
+        "reviewedAt": cs.get("reviewedAt"),
+        "reviewNote": cs.get("reviewNote"),
     }
 
 
@@ -457,6 +507,51 @@ async def _resolve_owners(cs: dict, refs: dict[str, set[str]], pending: dict[str
     return owners
 
 
+# Doc 88 §4: campos de MEMBRESÍA de un canvas → colección referida.
+_MEMBERSHIP_FIELDS = {"tableIds": "canonical_tables", "viewIds": "views"}
+_MEMBERSHIP_COLLS = frozenset(_MEMBERSHIP_FIELDS.values())
+
+
+def prune_deleted_members(payload: dict | None, pending: dict[str, dict]) -> dict | None:
+    """Doc 88 §4: un payload de canvas descarta de `tableIds` / `viewIds` (y de
+    `layout`) los ids cuyo cambio pendiente EN ESTE changeset es un delete.
+    Borrar una tabla o una vista es trabajo normal del modelador: su membresía
+    residual en los canvases no puede convertirse en «View X doesn't exist in
+    this project» al mover una tabla o al publicar. Un id que no existe o es de
+    otro proyecto sigue fallando en el gate. `viewIds` None (canvas legacy,
+    doc 70) se conserva. Puro."""
+    if not payload:
+        return payload
+    gone: set[str] = set()
+    for field, coll in _MEMBERSHIP_FIELDS.items():
+        ids = payload.get(field)
+        if not isinstance(ids, list):
+            continue
+        per = pending.get(coll) or {}
+        gone |= {str(i) for i in ids if (per.get(str(i)) or {}).get("op") == "delete"}
+    if not gone:
+        return payload
+    out = dict(payload)
+    for field in _MEMBERSHIP_FIELDS:
+        if isinstance(out.get(field), list):
+            out[field] = [i for i in out[field] if str(i) not in gone]
+    if isinstance(out.get("layout"), dict):
+        out["layout"] = {k: v for k, v in out["layout"].items() if k not in gone}
+    return out
+
+
+async def _pruned_payload(cs: dict, collection: str, op: str, payload: dict | None,
+                          pending: dict[str, dict] | None = None) -> dict | None:
+    """Doc 88 §4: payload a persistir — un upsert de canvas vuelve PODADO de los
+    miembros que este changeset borra (ver `prune_deleted_members`); el resto
+    pasa tal cual. Corre ANTES del gate de referencias."""
+    if collection != "subject_areas" or op == "delete" or not payload:
+        return payload
+    if pending is None:
+        pending = await repository.changes_map(cs["id"], sorted(_MEMBERSHIP_COLLS))
+    return prune_deleted_members(payload, pending)
+
+
 async def _cross_project_check(cs: dict, collection: str, entity_id: str, op: str, payload: dict | None,
                                pending: dict[str, dict] | None = None) -> None:
     """Doc 75 I2/D7: toda referencia de un cambio se resuelve DENTRO del proyecto
@@ -474,6 +569,51 @@ async def _cross_project_check(cs: dict, collection: str, entity_id: str, op: st
     err = cross_project_error(cs["projectId"], refs, await _resolve_owners(cs, refs, pending))
     if err:
         raise CrossProjectError(err)
+
+
+def _without_members(payload: dict, ids: list[str]) -> dict:
+    """Canvas sin esos miembros (membresía + layout). Puro."""
+    gone = set(ids)
+    out = dict(payload)
+    for field in _MEMBERSHIP_FIELDS:
+        if isinstance(out.get(field), list):
+            out[field] = [i for i in out[field] if i not in gone]
+    if isinstance(out.get("layout"), dict):
+        out["layout"] = {k: v for k, v in out["layout"].items() if k not in gone}
+    return out
+
+
+async def _membership_cascade(cs: dict, collection: str, entity_id: str,
+                              pending_sas: dict[str, dict] | None = None) -> list[dict]:
+    """Doc 88 §4: al BORRAR una tabla o una vista, los canvases del proyecto que
+    la listan — publicados y/o con upsert pendiente en este changeset — reciben
+    un upsert de su doc EFECTIVO sin el id (membresía + `layout`). Devuelve los
+    ítems `{collection, entityId, op, payload}` a grabar en el MISMO request,
+    antes del delete. El borrado de tabla ya lo cascadeaba el front canvas por
+    canvas; el de vista no tenía cascada alguna."""
+    field = next((f for f, c in _MEMBERSHIP_FIELDS.items() if c == collection), None)
+    if field is None:
+        return []
+    if pending_sas is None:
+        pending_sas = (await repository.changes_map(cs["id"], ["subject_areas"])).get("subject_areas", {})
+    effective: dict[str, dict] = {
+        str(d["id"]): d for d in await repository.published("subject_areas", scoped(cs["projectId"], {field: entity_id}))
+    }
+    for sid, ch in pending_sas.items():
+        # El pendiente PISA al publicado (overlay): si ya no la lista, no hay nada que sanear.
+        effective.pop(sid, None)
+        if ch.get("op") != "delete" and entity_id in ((ch.get("payload") or {}).get(field) or []):
+            effective[sid] = {**(ch.get("payload") or {}), "id": sid}
+    items: list[dict] = []
+    for sid, doc in effective.items():
+        if entity_id not in (doc.get(field) or []):
+            continue
+        payload = {k: v for k, v in doc.items() if k not in ("flgactive", "deletedAt")}
+        payload[field] = [i for i in payload[field] if i != entity_id]
+        if isinstance(payload.get("layout"), dict):
+            payload["layout"] = {k: v for k, v in payload["layout"].items() if k != entity_id}
+        items.append({"collection": "subject_areas", "entityId": sid, "op": "upsert", "payload": payload})
+    return items
 
 
 async def _table_name_grandfathered(project_id: str, entity_id: str, payload: dict | None) -> bool:
@@ -620,8 +760,18 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
         key_err = await _relationship_key_error(cs_id, payload)
         if key_err:
             raise RelationshipKeyMismatchError(key_err)
+    # Doc 88 §4: un canvas se graba podado de los miembros que este draft borró.
+    payload = await _pruned_payload(cs, collection, op, payload)
     # Doc 75 I2: toda referencia se resuelve dentro del proyecto del changeset.
     await _cross_project_check(cs, collection, entity_id, op, payload)
+    # Doc 88 §4: borrar una tabla/vista saca su membresía de los canvases que la
+    # listan, en el MISMO request y antes del delete (cascada server-side).
+    if op == "delete" and collection in _MEMBERSHIP_COLLS:
+        for it in await _membership_cascade(cs, collection, entity_id):
+            sa_payload = _stamp_project(cs, "subject_areas", "upsert", it["payload"])
+            await _cross_project_check(cs, "subject_areas", it["entityId"], "upsert", sa_payload)
+            if await repository.set_change(cs_id, "subject_areas", it["entityId"], "upsert", sa_payload) is None:
+                return "locked" if await repository.get(cs_id) else None
     # Doc 83: reglas de naming (case del físico de columnas + override, doc 68)
     # ANTES de unicidad/longitud: esos chequeos ven el nombre que se persiste.
     await _apply_naming_rules(cs["projectId"], [{"collection": collection, "op": op, "payload": payload}])
@@ -717,6 +867,21 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
     ordered = list(deduped.values())
     if not ordered:
         return cs
+    # Doc 88 §4: los deletes de tablas/vistas del lote cascadean su membresía a
+    # los canvases que NO vienen en el lote (los del lote se podan en el gate).
+    gone = [it for it in ordered if it["op"] == "delete" and it["collection"] in _MEMBERSHIP_COLLS]
+    if gone:
+        pending_sas = (await repository.changes_map(cs_id, ["subject_areas"])).get("subject_areas", {})
+        cascade: dict[str, dict] = {}
+        for it in gone:
+            for extra in await _membership_cascade(cs, it["collection"], it["entityId"], pending_sas):
+                if ("subject_areas", extra["entityId"]) in deduped:
+                    continue
+                prev = cascade.get(extra["entityId"])
+                if prev is not None:   # dos borrados sobre el mismo canvas: se acumulan
+                    extra["payload"] = _without_members(prev["payload"], [i["entityId"] for i in gone])
+                cascade[extra["entityId"]] = extra
+        ordered = list(cascade.values()) + ordered
     for it in ordered:                                            # doc 75 I1
         it["payload"] = _stamp_project(cs, it["collection"], it["op"], it.get("payload"))
 
@@ -753,6 +918,7 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
             {"op": "delete"} if it["op"] == "delete" else {"op": "upsert", "payload": it.get("payload") or {}})
     merged = {c: {**(pending_refs.get(c) or {}), **(lote.get(c) or {})} for c in set(pending_refs) | set(lote)}
     for it in ordered:
+        it["payload"] = await _pruned_payload(cs, it["collection"], it["op"], it.get("payload"), merged)   # doc 88 §4
         await _cross_project_check(cs, it["collection"], it["entityId"], it["op"], it.get("payload"), merged)
 
     # Doc 83: reglas de naming (case del físico de columnas + override) ANTES
@@ -991,6 +1157,8 @@ async def submit(cs_id: str, actor: str, title: str | None = None, description: 
         fields["description"] = description
     if reviewers is not None:
         fields["reviewers"] = reviewers
+    # Doc 88 §6: cada envío es un ciclo del historial de solicitudes.
+    fields["requests"] = open_cycle(cs, actor, fields["submittedAt"], title, description, reviewers)
     return await repository.transition(cs_id, "draft", fields)
 
 
@@ -1348,7 +1516,10 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
     if final is None:
         return None
     changes = changes_in_cycle(await repository.changes_map(cs_id), submitted_at)
-    _revert = {"status": "submitted", "reviewedBy": None, "reviewedAt": None, "approvals": {}}
+    # Doc 88 §6: al revertir el claim, el ciclo vuelve a `pending` (el cierre
+    # `approved` del historial se deshace junto con el estado).
+    _revert = {"status": "submitted", "reviewedBy": None, "reviewedAt": None, "approvals": {},
+               "requests": list(cs.get("requests") or [])}
     invalid = validation.validate_changes(changes)
     if invalid:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
@@ -1376,9 +1547,12 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
             + " | ".join(in_use[:5]) + (f" | +{len(in_use) - 5} more" if len(in_use) > 5 else ""),
             items=[{"kind": "schema", "message": m} for m in in_use], next_step=PUBLISH_NEXT_STEP)
     # Doc 75 I2 (gate autoritativo): ninguna referencia del plan cruza proyectos.
+    # Doc 88 §4: los canvases se publican PODADOS de los miembros que el mismo
+    # request borra (la poda muta el plan en memoria antes del apply).
     try:
         for coll, per in changes.items():
             for eid, ch in per.items():
+                ch["payload"] = await _pruned_payload(cs, coll, ch.get("op"), ch.get("payload"), changes)
                 await _cross_project_check(cs, coll, eid, ch.get("op"), ch.get("payload"), changes)
     except CrossProjectError:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
@@ -1510,6 +1684,9 @@ async def review(cs_id: str, actor: str, decision: str, note: str | None) -> dic
         return None
     if not is_assigned(cs.get("reviewers", []), actor):
         return "forbidden"
+    # Doc 88 §5: rechazar exige motivo (antes de registrar nada).
+    if decision == "reject" and not (note or "").strip():
+        raise RejectionReasonRequired("A rejection must include the reason: tell the owner what to fix.")
     await ensure_project_alive(cs)
 
     # Decisión con $set atómico en `approvals.<actor>`: decisiones concurrentes
@@ -1523,17 +1700,22 @@ async def review(cs_id: str, actor: str, decision: str, note: str | None) -> dic
 
     if outcome == "approved":
         return await _apply_and_finalize(
-            updated, {"status": "approved", "reviewedBy": actor, "reviewedAt": _now()},
+            updated, {"status": "approved", "reviewedBy": actor, "reviewedAt": _now(),
+                      "requests": close_cycle(updated, "approved", actor, decisions=updated.get("approvals"))},
             submitted_at=updated.get("submittedAt"),
         )
     if outcome == "rejected":
-        # Guard atómico también en el cierre negativo: un withdraw concurrente
-        # (submitted→draft) no debe quedar pisado por un 'rejected' tardío, y
-        # el expect por submittedAt evita rechazar un RE-envío que el revisor
-        # nunca vio (ABA withdraw→resubmit).
+        # Doc 88 §6: el rechazo devuelve la versión DIRECTO a `draft` (el owner
+        # sigue editando sin pasar por Reopen); la solicitud, su motivo y las
+        # decisiones quedan en el historial. Guard atómico también en el cierre
+        # negativo: un withdraw concurrente (submitted→draft) no debe quedar
+        # pisado por un rechazo tardío, y el expect por submittedAt evita
+        # rechazar un RE-envío que el revisor nunca vio (ABA withdraw→resubmit).
         return await repository.transition(
             cs_id, "submitted",
-            {"status": "rejected", "reviewedBy": actor, "reviewedAt": _now(), "reviewNote": note},
+            {"status": "draft", "approvals": {}, "submittedAt": None,
+             "reviewedBy": actor, "reviewedAt": _now(), "reviewNote": note,
+             "requests": close_cycle(updated, "rejected", actor, note, decisions=updated.get("approvals"))},
             expect={"submittedAt": updated.get("submittedAt")},
         )
     # Aún faltan aprobaciones: la decisión ya quedó registrada; sigue en revisión.
@@ -1552,7 +1734,9 @@ async def withdraw(cs_id: str, actor: str) -> dict | str | None:
     if cs.get("owner") != actor:
         return "forbidden"
     return await repository.transition(
-        cs_id, "submitted", {"status": "draft", "approvals": {}, "submittedAt": None}
+        cs_id, "submitted",
+        {"status": "draft", "approvals": {}, "submittedAt": None,
+         "requests": close_cycle(cs, "withdrawn", actor)},          # doc 88 §6
     )
 
 
@@ -1568,11 +1752,15 @@ async def reopen(cs_id: str, actor: str) -> dict | str | None:
     if cs.get("owner") != actor:
         return "forbidden"
     await ensure_project_alive(cs)
-    return await repository.transition(
-        cs_id, "rejected",
-        {"status": "draft", "approvals": {}, "submittedAt": None,
-         "reviewedBy": None, "reviewedAt": None, "reviewNote": None},
-    )
+    history = cs.get("requests") or []
+    fields = {"status": "draft", "approvals": {}, "submittedAt": None,
+              "reviewedBy": None, "reviewedAt": None, "reviewNote": None}
+    if not history or history[-1].get("outcome") == "pending":
+        # Doc 88 §6: doc rechazado ANTES del historial — se sintetiza el ciclo
+        # para que la solicitud (y su motivo) no se pierdan al reabrir.
+        fields["requests"] = close_cycle(cs, "rejected", cs.get("reviewedBy"), cs.get("reviewNote"),
+                                         decisions=cs.get("approvals"))
+    return await repository.transition(cs_id, "rejected", fields)
 
 
 async def add_comment(cs_id: str, actor: str, text: str) -> dict | None:

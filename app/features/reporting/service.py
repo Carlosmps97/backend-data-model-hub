@@ -6,8 +6,12 @@ Semántica de una fila de tabla (`GET /api/reporting/tables`):
     (la def funcional de la tabla es `description`).
   - columnCount        : nº de columnas activas de la tabla (`canonical_columns`).
   - relationshipCount  : nº de relaciones donde la tabla es source O target.
-  - subjectAreas       : nombres de los canvases (`subject_areas`) cuyo
-    `tableIds` incluye la tabla. Ordenados, sin duplicados.
+  - subjectAreas       : doc 88 §7 — nombres de las CARPETAS que contienen
+    los canvases (`subject_areas`) cuyo `tableIds` incluye la tabla (DDV: las
+    hijas de CPYBCA/Otros; UDV: «1. Party»…). Un canvas en la raíz del
+    proyecto no aporta. Ordenados, sin duplicados.
+  - diagrams           : nombres de esos canvases (lo que ANTES se llamaba
+    subject area). Ordenados, sin duplicados.
   - projects           : doc 75: el reporte es de UN proyecto y toda tabla le
     pertenece (esté o no en un canvas), así que la lista trae ese único nombre
     (la columna se conserva en la hoja exportada).
@@ -38,10 +42,19 @@ def _index_tables_to_canvases(
 
 
 def _canvas_names(table_id: str, tables_to_canvases: dict[str, list[dict]]) -> list[str]:
-    """Nombres de los canvases que referencian la tabla, ordenados y sin
-    duplicados. Puro."""
+    """Nombres de los canvases (diagramas) que referencian la tabla, ordenados
+    y sin duplicados. Puro."""
     canvases = tables_to_canvases.get(table_id, [])
     return sorted({(c.get("name") or "") for c in canvases if c.get("name")})
+
+
+def _folder_names(table_id: str, tables_to_canvases: dict[str, list[dict]],
+                  folder_name: dict[str, str]) -> list[str]:
+    """Doc 88 §7: subject areas = carpetas que contienen los canvases de la
+    tabla (sin carpeta ⇒ nada). Puro."""
+    canvases = tables_to_canvases.get(table_id, [])
+    names = {folder_name.get(str(c.get("folderId"))) for c in canvases if c.get("folderId")}
+    return sorted(n for n in names if n)
 
 
 def _udp_named(raw: dict | None, name_by_id: dict[str, str]) -> dict:
@@ -65,16 +78,19 @@ def table_rows(
     filters: dict | None = None,
     limit: int | None = None,
     udp_defs: list[dict] | None = None,
+    folders: list[dict] | None = None,
 ) -> list[dict]:
     """Construye las filas del reporte por tabla. Puro. Ver docstring del módulo.
 
     `column_counts` = {tableId: nº columnas activas}, YA agregado server-side
     (no se materializan las columnas — ver `repository.column_counts`).
     `limit` (opcional) acota la cantidad de filas DESPUÉS de ordenar (carga
-    inicial liviana del front); `None` = sin tope.
+    inicial liviana del front); `None` = sin tope. `folders` (doc 88 §7)
+    resuelve el subject area (carpeta) de cada canvas.
     """
     filters = filters or {}
     tables_to_canvases = _index_tables_to_canvases(subject_areas)
+    folder_name = {str(f.get("id")): str(f.get("name") or "") for f in (folders or [])}
     proj_names = sorted({p.get("name") for p in projects if p.get("name")})
     udp_name_by_id = udp_display_names(udp_defs or [])   # doc 69: «X (Logical)» para la faceta lógica
 
@@ -90,13 +106,13 @@ def table_rows(
     rows: list[dict] = []
     for t in tables:
         tid = t["id"]
-        sa_names = _canvas_names(tid, tables_to_canvases)
         row = {
             "id": tid,
             "physicalName": t.get("physicalName"),
             "logicalName": t.get("logicalName"),
             "schema": t.get("schema"),
-            "subjectAreas": sa_names,
+            "subjectAreas": _folder_names(tid, tables_to_canvases, folder_name),
+            "diagrams": _canvas_names(tid, tables_to_canvases),
             "columnCount": col_count.get(tid, 0),
             "relationshipCount": rel_count.get(tid, 0),
             "projects": proj_names,
@@ -197,7 +213,7 @@ async def list_table_rows(project_id: str, filters: dict | None = None,
         data = await repository.report_inputs(project_id)
     return table_rows(
         data["tables"], data["columnCounts"], data["relationships"],
-        data["subjectAreas"], projects, filters, limit, udp_defs,
+        data["subjectAreas"], projects, filters, limit, udp_defs, data.get("folders"),
     )
 
 

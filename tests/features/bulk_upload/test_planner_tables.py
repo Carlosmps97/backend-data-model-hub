@@ -46,7 +46,7 @@ def test_identidad_por_fisico_ci_actualiza_con_doc_completo():
                              "physicalNameOverridden": False,
                              "logicalOnly": False, "physicalOnly": False,   # doc 69 (facetas)
                              "description": "Def", "udpValues": {}}
-    assert codes(plan, "warning") == ["rename", "existing-table"]   # físico cambia de grafía
+    assert codes(plan, "warning") == ["rename", "existing-table", "view-no-columns"]   # físico cambia de grafía
     assert plan.report["summary"]["tables"] == {"create": 0, "update": 1, "unchanged": 0}
 
 
@@ -55,7 +55,7 @@ def test_update_sin_fisico_declarado_conserva_el_fisico_existente():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", description="Def")]), c)
     ch = _table_change(plan)
     assert ch["payload"]["physicalName"] == "CLIENTE"
-    assert codes(plan, "warning") == ["existing-table"]
+    assert codes(plan, "warning") == ["existing-table", "view-no-columns"]
     assert "description" in plan.report["warnings"][0]["message"]
 
 
@@ -64,7 +64,7 @@ def test_fallback_por_logico_unico_conserva_fisico_y_avisa():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", description="Def")]), c)
     ch = _table_change(plan)
     assert ch["entityId"] == "t1" and ch["payload"]["physicalName"] == "CLI"
-    assert codes(plan, "warning") == ["matched-by-logical", "existing-table"]
+    assert codes(plan, "warning") == ["matched-by-logical", "existing-table", "view-no-columns"]
 
 
 def test_logico_ambiguo_es_error():
@@ -79,7 +79,7 @@ def test_fisico_declarado_nuevo_con_logico_existente_crea_y_avisa():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", physical="CLIENTE2", schema="ddv")]), c, new_id=seq_ids())
     ch = _table_change(plan)
     assert ch["entityId"] == "n1" and ch["payload"]["physicalName"] == "CLIENTE2"
-    assert codes(plan, "warning") == ["logical-exists", "no-canvas"]
+    assert codes(plan, "warning") == ["logical-exists", "view-no-columns", "no-canvas"]
 
 
 def test_nombre_fisico_derivado_muy_largo_es_error():
@@ -134,7 +134,7 @@ def test_udp_vacio_toma_el_default_al_crear():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"UDP_Universal": ""})],
                              table_udp=_udp_map()), c)
     assert _table_change(plan)["payload"]["udpValues"] == {"u1": "No Definido"}
-    assert plan.report["warnings"] == [] or codes(plan, "warning") == ["no-canvas"]
+    assert codes(plan, "warning") == ["view-no-columns", "no-canvas"]
 
 
 def test_udp_lista_valida_case_insensitive_y_guarda_grafia_canonica():
@@ -191,7 +191,7 @@ def test_rename_logico_por_fisico_declarado_avisa():
     c = ctx(schemas=_schemas(), tables=[_existing()])
     plan = build_plan(parsed(tables=[trow(3, "Cliente Final", physical="CLIENTE")]), c)
     assert _table_change(plan)["payload"]["logicalName"] == "Cliente Final"
-    assert codes(plan, "warning") == ["rename", "existing-table"]
+    assert codes(plan, "warning") == ["rename", "existing-table", "view-no-columns"]
 
 
 def test_desglose_por_tabla_en_el_reporte():
@@ -200,5 +200,6 @@ def test_desglose_por_tabla_en_el_reporte():
                                      trow(4, "Nueva", schema="ddv")]), c)
     rows = plan.report["tables"]
     assert [(r["row"], r["action"], r["canvas"]) for r in rows] == [(3, "update", "P / D"), (4, "create", None)]
-    assert rows[0]["issues"] == 1 and rows[1]["issues"] == 1    # existing-table / no-canvas
+    assert rows[0]["issues"] == 2 and rows[1]["issues"] == 2    # existing-table + view-no-columns / view-no-columns + no-canvas
+    assert rows[0]["views"] == {"create": 0, "update": 0, "unchanged": 0}   # doc 87: desglose de vistas por tabla
     assert rows[0]["columns"] == {"create": 0, "update": 0, "unchanged": 0}

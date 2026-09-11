@@ -12,6 +12,8 @@ class ReportTableRow(BaseModel):
     logicalName: str | None = None
     sql_schema: str | None = Field(default=None, alias="schema")
     subjectAreas: list[str] = Field(default_factory=list)
+    # Doc 88 §7: subjectAreas = carpetas de los canvases; diagrams = los canvases.
+    diagrams: list[str] = Field(default_factory=list)
     columnCount: int = 0
     relationshipCount: int = 0
     projects: list[str] = Field(default_factory=list)

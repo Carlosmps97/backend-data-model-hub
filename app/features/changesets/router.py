@@ -266,6 +266,8 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
     único de decisión — /review, /approve y /reject pasan por acá."""
     try:
         res = await service.review(cs_id, actor, decision, note)
+    except service.RejectionReasonRequired as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc          # doc 88 §5
     except ProjectDeletedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (CrossProjectError, DuplicateEntityError, SchemaInUseError) as exc:

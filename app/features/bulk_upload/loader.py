@@ -6,6 +6,8 @@ repositories de las features dueñas (invariante del store); ninguna escritura.
   completos por request no es viable) y estándares vivos por scope.
 - `load_columns`: columnas efectivas SOLO de las tablas existentes que el
   workbook referencia (tandas de 500 ids, índice `tableId`).
+- `load_folders`: solo las carpetas efectivas (doc 87: candidatas a proyecto
+  destino para el popup).
 - `load_profile`: el perfil de carga del proyecto (doc 78).
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from .context import UploadContext
 from .profiles import repository as profiles_repo
 
 TABLE_PROJECTION = {"physicalName": 1, "logicalName": 1, "schema": 1, "description": 1, "udpValues": 1}
+VIEW_PROJECTION = {"name": 1, "schema": 1, "sourceTableIds": 1}
 _SCOPES = ("table", "column")
 _ID_BATCH = 500
 
@@ -47,6 +50,7 @@ async def load_context(cs_id: str) -> UploadContext:
         canvases=await _effective(cs_id, "subject_areas", scoped(pid)),
         schemas=await _effective(cs_id, "schemas", scoped(pid)),
         tables=await _effective(cs_id, "canonical_tables", scoped(pid), projection=TABLE_PROJECTION),
+        views=await _effective(cs_id, "views", scoped(pid), projection=VIEW_PROJECTION),
         udp_defs=await udp_repo.list_udp(pid),
         domains=await domains_repo.list_domains(pid),
     )
@@ -55,6 +59,14 @@ async def load_context(cs_id: str) -> UploadContext:
         entries = await glossary_repo.list_entries(pid, scope)
         ctx.glossary[scope] = {e["term"]: e["abbrev"] for e in entries}
     return ctx
+
+
+async def load_folders(cs_id: str) -> list[dict]:
+    """Carpetas EFECTIVAS del proyecto del changeset (doc 87 §3.5): alimentan
+    `upload_targets` para el popup, sin cargar el resto del contexto."""
+    cs = await cs_repo.get(cs_id)
+    pid = (cs or {}).get("projectId") or ""
+    return await _effective(cs_id, "folders", scoped(pid)) if pid else []
 
 
 async def load_columns(cs_id: str, table_ids: list[str]) -> dict[str, list[dict]]:

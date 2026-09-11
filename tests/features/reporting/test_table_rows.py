@@ -24,16 +24,24 @@ def _fixture():
         {"parentTableId": "t1", "childTableId": "t2"},  # t1+1, t2+1
         {"parentTableId": "t2", "childTableId": "t3"},  # t2+1, t3+1
     ]
+    # Doc 88 §7: el subject area es la CARPETA del canvas (sa1/sa2 cuelgan de
+    # carpetas; sa3 está en la raíz y no aporta subject area, sólo diagrama).
     subject_areas = [
-        {"id": "sa1", "projectId": "p1", "name": "Banking", "tableIds": ["t1", "t2"]},
-        {"id": "sa2", "projectId": "p1", "name": "Risk", "tableIds": ["t2", "t3"]},
+        {"id": "sa1", "projectId": "p1", "name": "Banking", "tableIds": ["t1", "t2"], "folderId": "f-retail"},
+        {"id": "sa2", "projectId": "p1", "name": "Risk", "tableIds": ["t2", "t3"], "folderId": "f-risk"},
+        {"id": "sa3", "projectId": "p1", "name": "Scratch", "tableIds": ["t3"], "folderId": None},
     ]
     projects = [{"id": "p1", "name": "Core Banking"}]      # doc 75: el reporte es de UN proyecto
     return tables, column_counts, relationships, subject_areas, projects
 
 
+FOLDERS = [{"id": "f-retail", "name": "1. Retail", "parentFolderId": "f-root"},
+           {"id": "f-risk", "name": "3. Riesgos", "parentFolderId": "f-root"},
+           {"id": "f-root", "name": "CPYBCA", "parentFolderId": None}]
+
+
 def test_table_rows_counts_and_names():
-    rows = table_rows(*_fixture())
+    rows = table_rows(*_fixture(), folders=FOLDERS)
     by_id = {r["id"]: r for r in rows}
 
     # columnCount
@@ -46,10 +54,13 @@ def test_table_rows_counts_and_names():
     assert by_id["t2"]["relationshipCount"] == 2
     assert by_id["t3"]["relationshipCount"] == 1
 
-    # subjectAreas = canvases que referencian la tabla (vía tableIds);
+    # Doc 88 §7: subjectAreas = CARPETAS de los canvases que referencian la
+    # tabla; diagrams = los canvases (sa3 en la raíz: diagrama sin subject area).
     # projects = el proyecto del reporte, en TODAS las filas (doc 75).
-    assert by_id["t2"]["subjectAreas"] == ["Banking", "Risk"]
-    assert by_id["t1"]["subjectAreas"] == ["Banking"]
+    assert by_id["t2"]["subjectAreas"] == ["1. Retail", "3. Riesgos"]
+    assert by_id["t1"]["subjectAreas"] == ["1. Retail"]
+    assert by_id["t3"]["subjectAreas"] == ["3. Riesgos"] and by_id["t3"]["diagrams"] == ["Risk", "Scratch"]
+    assert by_id["t2"]["diagrams"] == ["Banking", "Risk"]
     assert all(r["projects"] == ["Core Banking"] for r in rows)
 
     # passthrough de campos de tabla
@@ -77,7 +88,7 @@ def test_table_rows_ignora_filtros_desconocidos():
 def test_table_with_no_references_has_empty_lists():
     tables = [{"id": "t9", "physicalName": "ORPHAN", "logicalName": "Orphan"}]
     rows = table_rows(tables, {}, [], [], [])
-    assert rows[0]["subjectAreas"] == []
+    assert rows[0]["subjectAreas"] == [] and rows[0]["diagrams"] == []
     assert rows[0]["projects"] == []
     assert rows[0]["columnCount"] == 0
     assert rows[0]["relationshipCount"] == 0

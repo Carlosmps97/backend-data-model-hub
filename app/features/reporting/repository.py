@@ -36,7 +36,8 @@ async def _find_active(collection: str, project_id: str,
 # El reporte sólo usa estos campos de cada colección. Proyectarlos evita traer
 # los campos PESADOS de `subject_areas` (`layout`/`drawings` de un canvas de 100
 # tablas son varios KB — 150 canvases eran ~1.7s sólo por el tamaño del doc).
-_SA_LITE = {"name": 1, "projectId": 1, "tableIds": 1, "viewIds": 1}   # viewIds: doc 70
+_SA_LITE = {"name": 1, "projectId": 1, "tableIds": 1, "viewIds": 1, "folderId": 1}   # viewIds: doc 70 · folderId: doc 88
+_FOLDER_LITE = {"name": 1, "parentFolderId": 1}
 _REL_LITE = {"parentTableId": 1, "childTableId": 1,
              "sourceTableId": 1, "targetTableId": 1}  # legacy: docs pre-backfill
 
@@ -51,6 +52,12 @@ async def _subject_areas(project_id: str, ids: list[str] | None = None) -> list[
         query["tableIds"] = {"$in": ids}
     docs = await db["subject_areas"].find(query, _SA_LITE).to_list(None)
     return [_strip(d) for d in docs]
+
+
+async def _folders(project_id: str) -> list[dict]:
+    """Carpetas del proyecto (id/name/parentFolderId): doc 88 §7, el subject
+    area de una tabla es la CARPETA que contiene el canvas, no el canvas."""
+    return await _find_active("folders", project_id, _FOLDER_LITE)
 
 
 async def _relationships(project_id: str, ids: list[str] | None = None) -> list[dict]:
@@ -71,16 +78,18 @@ async def _relationships(project_id: str, ids: list[str] | None = None) -> list[
 async def filter_options(project_id: str) -> dict:
     """Doc 70 §4.1: universo de los filtros del reporte tabular SIN paginar —
     esquemas distintos de las tablas activas del proyecto (agregación `$group`,
-    no se materializan las 10k tablas) y nombres de sus canvases activos.
+    no se materializan las 10k tablas) y, doc 88 §7, nombres de las CARPETAS
+    que contienen sus canvases activos (un canvas en la raíz no aporta).
     Devuelve listas CRUDAS (con None/vacíos); `service.filter_option_lists`
     las limpia y ordena."""
     db = await get_db()
     pipeline = [{"$match": scoped(project_id, ACTIVE)},
                 {"$group": {"_id": "$schema", "n": {"$sum": 1}}}]
     schemas = await db["canonical_tables"].aggregate(pipeline).to_list(None)
-    canvases = await db["subject_areas"].find(scoped(project_id, ACTIVE), {"name": 1}).to_list(None)
+    canvases = await db["subject_areas"].find(scoped(project_id, ACTIVE), {"folderId": 1}).to_list(None)
+    folder_name = {f["id"]: f.get("name") for f in await _folders(project_id)}
     return {"schemas": [s.get("_id") for s in schemas],
-            "subjectAreas": [c.get("name") for c in canvases]}
+            "subjectAreas": [folder_name.get(str(c.get("folderId"))) for c in canvases if c.get("folderId")]}
 
 
 async def column_counts(project_id: str) -> dict[str, int]:
@@ -105,6 +114,7 @@ async def report_inputs(project_id: str) -> dict:
         "columnCounts": await column_counts(project_id),
         "relationships": await _relationships(project_id),
         "subjectAreas": await _subject_areas(project_id),
+        "folders": await _folders(project_id),
     }
 
 
@@ -126,6 +136,7 @@ async def report_inputs_page(project_id: str, limit: int) -> dict:
         "columnCounts": {r["_id"]: r["n"] for r in rows if r.get("_id") is not None},
         "relationships": await _relationships(project_id, ids),
         "subjectAreas": await _subject_areas(project_id, ids),
+        "folders": await _folders(project_id),
     }
 
 

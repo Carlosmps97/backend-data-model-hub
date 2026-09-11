@@ -2507,6 +2507,8 @@ Respuesta: `201 Created` — draft con `owner = actor` y `projectId`.
 
 ### 8.4 GET /api/changesets/{cs_id}
 
+> Doc 88 §6: el documento trae además `requests[]` (historial de solicitudes de publicación, ver 8.9) — Review pinta con él la tarjeta «Request history» y bloquea acciones/comentarios cuando el ciclo no está en revisión.
+
 Propósito: un changeset por id, enriquecido con `diff` (resumen por colección `{added, modified, removed}` con slice por ids cambiados — compat M-series para el aprobador) y `deletesProject`.
 
 ```bash
@@ -2514,6 +2516,8 @@ curl http://localhost:8000/api/changesets/cs-9
 ```
 
 ### 8.5 PUT /api/changesets/{cs_id}/changes
+
+> Doc 88 §4: un `delete` de `views` o `canonical_tables` **cascadea** su membresía — los canvases del proyecto que listan el id (publicados y/o con upsert pendiente en el draft) reciben en el mismo request un upsert sin él (`tableIds`/`viewIds` + `layout`); y todo upsert de `subject_areas` se graba **podado** de los miembros cuyo cambio pendiente en el draft es un delete (también en el lote y en el gate del publish). Un id inexistente o de otro proyecto sigue siendo 409.
 
 Propósito: registra un cambio en el working copy (upsert/delete de una entidad). Permiso `model.edit`. Body `ChangeBody`:
 
@@ -2649,13 +2653,15 @@ curl -X POST http://localhost:8000/api/changesets/cs-9/review \
   -d '{"decision":"approve"}'
 ```
 
-Errores: **403** no asignado; **409** ya no está en revisión (fue retirado o ya decidido); **422** el publish falló por un payload inválido; **409** el publish falló por una carrera de nombres con otro publish (`DuplicateEntityError`) o por un delete de esquema con tablas/vistas efectivas (`SchemaInUseError`). En los tres casos de fallo del publish el claim se revirtió y producción quedó intacta; el owner debe retirar, corregir y re-enviar.
+Doc 88 §5-6: con `decision: "reject"` la `note` es **obligatoria** (422 «A rejection must include the reason…» si viene vacía). Un rechazo devuelve la versión **directo a `draft`** (approvals y `submittedAt` limpios; `reviewedBy` / `reviewedAt` / `reviewNote` estampados) y cierra el ciclo en `requests[]`; un approve lo cierra `approved`. `requests[]` = historial de solicitudes, un registro por envío: `{id, cycle, submittedAt, submittedBy, title, description, reviewers, outcome: pending | approved | rejected | withdrawn, decidedAt?, decidedBy?, note?, decisions?}` — sobrevive a que la versión vuelva a draft, se re-envíe o se publique (Review lo lista).
+
+Errores: **403** no asignado; **409** ya no está en revisión (fue retirado o ya decidido); **422** rechazo sin motivo (doc 88 §5); **422** el publish falló por un payload inválido; **409** el publish falló por una carrera de nombres con otro publish (`DuplicateEntityError`) o por un delete de esquema con tablas/vistas efectivas (`SchemaInUseError`). En los tres casos de fallo del publish el claim se revirtió y producción quedó intacta; el owner debe retirar, corregir y re-enviar.
 
 ### 8.10 POST /api/changesets/{cs_id}/approve · POST /api/changesets/{cs_id}/reject
 
 Propósito: compat M-series. **Delegan en la misma política** que `/review` (unanimidad + `is_assigned`). Permiso `review.decide`.
 - `/approve`: sin body → equivale a `{"decision":"approve"}`.
-- `/reject`: body `ReviewBody` = `{ "note": "..." }` (opcional).
+- `/reject`: body `ReviewBody` = `{ "note": "..." }` (**obligatoria**, doc 88 §5: 422 si viene vacía).
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/approve -H "X-Dev-User: luis"
@@ -2665,13 +2671,13 @@ curl -X POST http://localhost:8000/api/changesets/cs-9/reject  -H "X-Dev-User: l
 
 ### 8.11 POST /api/changesets/{cs_id}/withdraw
 
-Propósito: retira un request en revisión (`submitted → draft`) para seguir editando. Owner-only; las decisiones registradas se invalidan. Permiso `model.edit`.
+Propósito: retira un request en revisión (`submitted → draft`) para seguir editando. Owner-only; las decisiones registradas se invalidan; el ciclo queda `withdrawn` en `requests[]` (doc 88 §6). Permiso `model.edit`.
 
 Errores: **403** no owner; **409** ya no está en revisión.
 
 ### 8.12 POST /api/changesets/{cs_id}/reopen
 
-Propósito: reabre un request **rechazado** (`rejected → draft`) para corregir y re-enviar. Owner-only; limpia decisiones/metadata de review. Permiso `model.edit`.
+Propósito: reabre un request **rechazado** (`rejected → draft`) para corregir y re-enviar. Owner-only; limpia decisiones/metadata de review. Permiso `model.edit`. Desde el doc 88 un rechazo ya deja la versión en `draft`, así que este endpoint sólo aplica a docs legacy en `rejected` (su ciclo se sintetiza en `requests[]` para no perder el motivo).
 
 Errores: **403** no owner; **409** no está en `rejected`.
 
@@ -2784,18 +2790,19 @@ La entidad `schemas` opera dentro del changeset con endpoints propios (doc 18): 
 
 ### 8.18 Carga masiva desde Excel (`/api/changesets/{cs_id}/uploads`)
 
-Propósito (doc 55 · doc 78): crear o actualizar **carpetas, canvases, esquemas, tablas y columnas** dentro del draft a partir de un workbook Excel interpretado por un **perfil de carga** del proyecto (§8.19). El front lee el `.xlsx` (SheetJS) y manda **todas las hojas como grillas crudas** + `profileId`; el backend ubica hojas y cabeceras según el perfil, mapea cada columna a un campo o a uno o varios UDP (lógico y/o físico), corre las reglas y políticas del perfil, y recién valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos; arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** (perfil releído) y escribe por `add_changes_bulk` (tandas de 1000, orden carpetas → canvases → esquemas → tablas → columnas). Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403), la versión estar en `draft` (409) y el perfil existir en el proyecto de la versión (404).
+Propósito (doc 55 · doc 78 · doc 87): crear o actualizar **carpetas, canvases, esquemas, tablas, columnas y vistas `_vu`** dentro del draft a partir de un workbook Excel interpretado por un **perfil de carga** del proyecto (§8.19). El front lee el `.xlsx` (SheetJS) y manda **todas las hojas como grillas crudas** + `profileId`; el backend ubica hojas y cabeceras según el perfil, mapea cada columna a un campo o a uno o varios UDP (lógico y/o físico), corre las reglas y políticas del perfil, y recién valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos; arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** (perfil releído) y escribe por `add_changes_bulk` (tandas de 1000, orden carpetas → esquemas → tablas → columnas → vistas → canvases: cada colección después de las que referencia, doc 87 §3.4). Doc 87: por cada fila de la hoja de tablas se crean además sus **vistas `_vu`** (la normal siempre; `<TABLA>DAC` si el UDP de tabla «Clasificacion del Dato» = DAC) en `<esquema>_vu` (se crea con `kind: views` si falta), réplica de todas las columnas efectivas en orden de display; una vista que ya existe no se toca. La carga es **upsert**: nunca emite deletes. Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403), la versión estar en `draft` (409) y el perfil existir en el proyecto de la versión (404).
 
 | Método y ruta | Cuerpo / respuesta |
 |---|---|
-| `POST …/uploads` | `UploadWorkbookBody` = `{fileName, profileId, sheets: [{name, rows: [{row, cells: string[]}]}]}` (todas las hojas del workbook, filas vacías fuera, `row` = nº de fila Excel). Topes: 30 hojas, 20,000 filas por hoja y 200 celdas por fila (413); más de 20 jobs activos del usuario → 429; `profileId` inexistente en el proyecto → 404. Responde **202** con el job en `validating` |
+| `POST …/uploads` | `UploadWorkbookBody` = `{fileName, profileId, sheets: [{name, rows: [{row, cells: string[]}]}], targetFolderId?}` (todas las hojas del workbook, filas vacías fuera, `row` = nº de fila Excel; `targetFolderId` = carpeta «proyecto interno» destino, doc 87 §3.5 — obligatoria solo con `mode: choose`). Topes: 30 hojas, 20,000 filas por hoja y 200 celdas por fila (413); más de 20 jobs activos del usuario → 429; `profileId` inexistente en el proyecto → 404. Responde **202** con el job en `validating` |
+| `GET …/uploads/targets` | Doc 87 §3.5: capa de proyectos internos del proyecto de la versión (carpetas raíz EFECTIVAS con subcarpetas): `{mode: 'none' \| 'auto' \| 'choose', candidates: [{id, name, folders, canvases}]}`. `none` = sin capa (SPACE/SUBJECT/DIAGRAMA cuelgan de la raíz), `auto` = una sola (el backend la toma solo), `choose` = 2+ (el popup exige elegir). Mismos guards que subir (404/403/409) |
 | `GET …/uploads/{job_id}` | `{id, csId, fileName, status, progress: {phase, done, total}, report, result, error, createdAt, updatedAt}`. 404 si el job no existe o expiró (reinicio del proceso) — el front pide validar de nuevo |
 | `POST …/uploads/{job_id}/apply` | **202** con el job en `applying`; 409 si no está `validated`, si el reporte tiene errores, si hay otro apply en curso sobre la misma versión, o si el draft ya no acepta cambios |
 | `DELETE …/uploads/{job_id}` | `{deleted: true}`; cancela la validación si sigue corriendo; 409 mientras aplica (cancelar a mitad dejaría tandas sin el resto) |
 
-Estados: `validating → validated | failed`; `validated → applying → applied | failed`. Fases de progreso: Reading workbook → Loading profile → Applying profile and rules → Loading columns of referenced tables → Validating rows → Building report. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount, profile: {id, name}, sheets: [{role, name, found, headerRow, rows}]}` con `Issue = {severity, sheet, row, column, code, message}` — `sheet` es el nombre REAL de la hoja del perfil (o `Workbook` / `Profile`) y `column` la cabecera real del Excel (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
+Estados: `validating → validated | failed`; `validated → applying → applied | failed`. Fases de progreso: Reading workbook → Loading profile → Applying profile and rules → Loading columns of referenced tables → Validating rows → Building report. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns|views: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, views, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount, profile: {id, name}, sheets: [{role, name, found, headerRow, rows}]}` con `Issue = {severity, sheet, row, column, code, message}` — `sheet` es el nombre REAL de la hoja del perfil (o `Workbook` / `Profile`) y `column` la cabecera real del Excel (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
 
-Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft.
+Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft. Doc 87: `target-folder-required` / `target-folder-invalid` (proyecto destino, error sin fila); `view-no-columns` / `view-no-schema` (warning: la tabla no tiene columnas o esquema, sus vistas no se crean); `view-schema-kind` (error: `<esquema>_vu` catalogado como esquema de tablas); `existing-canvas` cuenta también las vistas que entran al canvas.
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/uploads \
@@ -2871,7 +2878,7 @@ Router hermano — `versions_router`, prefijo `/api/versions`.
 
 ### 10.1 GET /api/versions?projectId=
 
-Propósito: filas de versión para Home/Review (proyección `version_row`, sin el `changes` crudo): sin `projectId`, las de TODOS los proyectos (cada fila con su `projectId` y `deletesProject`; el Home las agrupa por proyecto); con `projectId`, sólo las de ese proyecto.
+Propósito: filas de versión para Home/Review (proyección `version_row`, sin el `changes` crudo): sin `projectId`, las de TODOS los proyectos (cada fila con su `projectId` y `deletesProject`; el Home las agrupa por proyecto); con `projectId`, sólo las de ese proyecto. Doc 88 §6: la fila trae `requests` (historial de solicitudes), `lastRequest` (último ciclo o `null`), `reviewedBy`, `reviewedAt` y `reviewNote` — Review lista toda versión que fue enviada alguna vez y la etiqueta por su último ciclo.
 
 ```bash
 curl http://localhost:8000/api/versions
@@ -2933,15 +2940,15 @@ Cada fila (`ReportTableRow`):
 ```json
 {
   "id": "t-1", "physicalName": "DIM_CLIENTE", "logicalName": "Cliente",
-  "schema": "ventas", "subjectAreas": ["Ventas core"],
+  "schema": "ventas", "subjectAreas": ["1. Retail"], "diagrams": ["Ventas core"],
   "columnCount": 12, "relationshipCount": 3,
   "projects": ["Ventas"], "description": "Dimensión de clientes"
 }
 ```
 
-> Semántica: `columnCount` (columnas activas), `relationshipCount` (source o target; una relación auto-referencial cuenta 1), `subjectAreas` (canvases del proyecto que la referencian), `projects` (el nombre del proyecto del reporte, en todas las filas).
+> Semántica: `columnCount` (columnas activas), `relationshipCount` (source o target; una relación auto-referencial cuenta 1), `subjectAreas` (doc 88 §7: nombres de las **carpetas** que contienen los canvases donde está la tabla — en DDV las hijas de CPYBCA/Otros; un canvas en la raíz no aporta), `diagrams` (los canvases que la referencian — lo que antes se llamaba subject area), `projects` (el nombre del proyecto del reporte, en todas las filas).
 
-**GET /api/reporting/filters?projectId=** — opciones de los filtros del reporte (`{ schemas: [], subjectAreas: [] }`) del proyecto (doc 70).
+**GET /api/reporting/filters?projectId=** — opciones de los filtros del reporte (`{ schemas: [], subjectAreas: [] }`) del proyecto (doc 70); `subjectAreas` = carpetas de los canvases activos (doc 88 §7).
 
 ### 11.2 GET /api/reporting/columns · GET /api/reporting/views
 
@@ -3424,6 +3431,7 @@ Las 89 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | GET | `/api/changesets/{cs_id}/schemas/{schema_id}/impact` | 8.17 |
 | POST | `/api/changesets/{cs_id}/schemas/{schema_id}/rename` `/delete` | 8.17 |
 | POST | `/api/changesets/{cs_id}/uploads` | 8.18 |
+| GET | `/api/changesets/{cs_id}/uploads/targets` | 8.18 |
 | GET/DELETE | `/api/changesets/{cs_id}/uploads/{job_id}` | 8.18 |
 | POST | `/api/changesets/{cs_id}/uploads/{job_id}/apply` | 8.18 |
 | GET/POST | `/api/projects/{project_id}/upload-profiles` | 8.19 |
