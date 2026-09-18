@@ -13,7 +13,7 @@ _NAMES = {"t1": "core.CLIENTE", "t2": "core.CUENTA"}
 def _views():
     return [
         {"id": "v1", "name": "VW_CLIENTE", "schema": "core_vu",
-         "sourceTableIds": ["t1"], "filter": "FLGREGELIMINADO = 'N'",
+         "sourceTableIds": ["t1"],
          "showOnCanvas": True, "description": "Vista 1:1", "sql": "SELECT …",
          "sources": [
              {"tableId": "t1", "column": "CODCLI", "outputAlias": "COD_CLIENTE",
@@ -22,7 +22,8 @@ def _views():
              {"tableId": "t1"},  # source vacío (sin column ni expression) → se omite
          ]},
         {"id": "v2", "name": "VW_MIX", "schema": "core_vu",
-         "sourceTableIds": ["t1", "t2"], "joinOverride": "t1.ID = t2.ID",
+         "sourceTableIds": ["t1", "t2"],
+         "customSql": "CREATE VIEW core_vu.VW_MIX AS SELECT t2.CODCTA FROM core.CLIENTE t1, core.CUENTA t2",
          "sources": [{"tableId": "t2", "column": "CODCTA"}]},
         # legacy: sin sourceTableIds, solo tableId
         {"id": "v3", "name": "VW_LEGACY", "tableId": "t1",
@@ -36,7 +37,8 @@ def test_view_rows_resolves_sources_and_columns():
 
     v1 = by_id["v1"]
     assert v1["sourceTables"] == ["core.CLIENTE"]
-    assert v1["filter"] == "FLGREGELIMINADO = 'N'"
+    assert "filter" not in v1 and "joinOverride" not in v1     # doc 91 D2/D5
+    assert v1["customSql"] is None
     # el source vacío se omite; alias cae al nombre de columna si no hay alias
     assert len(v1["columns"]) == 2
     assert v1["columns"][0] == {
@@ -46,7 +48,7 @@ def test_view_rows_resolves_sources_and_columns():
 
     v2 = by_id["v2"]
     assert v2["sourceTables"] == ["core.CLIENTE", "core.CUENTA"]
-    assert v2["joinOverride"] == "t1.ID = t2.ID"
+    assert v2["customSql"].startswith("CREATE VIEW core_vu.VW_MIX")   # User-Defined SQL viaja al reporte
     assert v2["columns"][0]["sourceTable"] == "core.CUENTA"
 
 

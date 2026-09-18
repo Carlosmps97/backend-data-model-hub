@@ -84,3 +84,17 @@ def partition_correlative(value) -> int | None:
 def norm_type(value) -> str:
     """Clave de comparación de tipos de dato: MAYÚSCULAS sin espacios."""
     return re.sub(r"\s+", "", clean_text(value)).upper()
+
+
+def clean_logical(text: str, sheet: str, row, column: str, rb) -> str:
+    """Doc 92 D8: nombre lógico sin caracteres especiales (letras, dígitos,
+    espacio y `_`). Si la celda traía otros caracteres, deja el valor limpio y
+    lo AVISA en el reporte de carga (`special-chars-removed`) — el choke point
+    del changeset lo limpiaría igual, pero así el modelador lo ve."""
+    from app.core.naming.logical import sanitize_logical_name
+    clean = sanitize_logical_name(text)
+    if clean != (text or "").strip():
+        rb.warning(sheet, "special-chars-removed",
+                   f"'{text}' has special characters — saved as '{clean}' (letters, digits, spaces and _ only).",
+                   row=row, column=column)
+    return clean

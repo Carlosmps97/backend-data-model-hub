@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timezone
 
 from app.core.logging import get_logger
+from app.core.naming.logical import sanitize_logical_name
 from app.core.naming import apply_case
 from app.core.scope import PROJECT_SCOPED, ProjectDeletedError, scoped
 from app.core.versioning import overlay, summarize_diff
@@ -21,8 +22,7 @@ from app.features.projects import repository as projects_repo
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas import service as schemas_service
 from app.features.settings import service as settings_service
-from app.features.views.custom_sql import CustomSqlError, parse_custom_sql
-from app.features.views.models import normalize_source_tables
+from app.features.views.models import normalize_custom_sql, normalize_source_tables
 
 from . import diffdetail, repository, validation
 from . import asof
@@ -61,17 +61,9 @@ def apply_plan(changes: dict) -> list[tuple]:
                 # (build_canvas_query matchea SOLO sourceTableIds). También
                 # sanea drafts pendientes legacy.
                 payload = normalize_source_tables(payload)
-                # Doc 61: customColumns se RE-derivan del script al publicar
-                # (el payload del draft pudo mentir); sin script → Regular.
-                sql = (payload.get("customSql") or "").strip()
-                if sql:
-                    try:
-                        payload = {**payload, "customSql": sql,
-                                   "customColumns": parse_custom_sql(sql)["columns"]}
-                    except CustomSqlError:
-                        pass  # el gate validate_changes ya lo rechazó; defensivo
-                else:
-                    payload = {**payload, "customSql": None, "customColumns": []}
+                # Doc 91 D6: el User-Defined SQL se publica VERBATIM (solo
+                # strip; vacío ⇒ Regular). Sin parse ni columnas derivadas.
+                payload = normalize_custom_sql(payload)
             plan.append((collection, eid, ch.get("op"), payload))
     return plan
 
@@ -772,8 +764,10 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
             await _cross_project_check(cs, "subject_areas", it["entityId"], "upsert", sa_payload)
             if await repository.set_change(cs_id, "subject_areas", it["entityId"], "upsert", sa_payload) is None:
                 return "locked" if await repository.get(cs_id) else None
-    # Doc 83: reglas de naming (case del físico de columnas + override, doc 68)
-    # ANTES de unicidad/longitud: esos chequeos ven el nombre que se persiste.
+    # Doc 92 D8: el lógico sin caracteres especiales; doc 83: reglas de naming
+    # (case del físico de columnas + override, doc 68) — ambos ANTES de
+    # unicidad/longitud: esos chequeos ven el nombre que se persiste.
+    sanitize_logical_names([{"collection": collection, "op": op, "payload": payload}])
     await _apply_naming_rules(cs["projectId"], [{"collection": collection, "op": op, "payload": payload}])
     # Unicidad de nombres (spec 10 §9) POR PROYECTO: tablas por physicalName y
     # columnas por physicalName dentro de su tableId — contra publicado activo
@@ -799,6 +793,31 @@ _OVERRIDE_SCOPES = {"canonical_tables": "table", "canonical_columns": "column"}
 # Sólo columnas (alcance del pedido owner 2026-09-10); las tablas siguen
 # entrando tal cual — extender = sumar la colección acá.
 _CASE_NORMALIZED = ("canonical_columns",)
+
+
+# Doc 92 D8: colecciones cuyo `logicalName` se limpia de caracteres especiales.
+_LOGICAL_NAME_COLLS = ("canonical_tables", "canonical_columns")
+
+
+def sanitize_logical_names(items: list[dict]) -> list[dict]:
+    """Doc 92 D8: `logicalName` de tablas/columnas SIN caracteres especiales
+    (letras, dígitos, espacio y `_`) en TODO upsert que entre por el changeset —
+    paneles, popup, CTAS, paste, bulk upload, API. Mismo criterio que el case
+    del físico (doc 83): lo legacy se sana al escribir. Muta los payloads en
+    sitio y devuelve los ítems tocados (para tests/log). Puro (sin I/O)."""
+    touched: list[dict] = []
+    for it in items:
+        payload = it.get("payload")
+        if it.get("op") != "upsert" or it.get("collection") not in _LOGICAL_NAME_COLLS or not payload:
+            continue
+        raw = payload.get("logicalName")
+        if not isinstance(raw, str):
+            continue
+        clean = sanitize_logical_name(raw)
+        if clean != raw:
+            payload["logicalName"] = clean
+            touched.append(it)
+    return touched
 
 
 async def _apply_naming_rules(project_id: str, items: list[dict]) -> None:
@@ -921,8 +940,10 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
         it["payload"] = await _pruned_payload(cs, it["collection"], it["op"], it.get("payload"), merged)   # doc 88 §4
         await _cross_project_check(cs, it["collection"], it["entityId"], it["op"], it.get("payload"), merged)
 
-    # Doc 83: reglas de naming (case del físico de columnas + override) ANTES
-    # de unicidad/longitud — mismo orden que add_change.
+    # Doc 92 D8 + doc 83: lógico sin caracteres especiales y reglas de naming
+    # (case del físico + override) ANTES de unicidad/longitud — mismo orden que
+    # add_change.
+    sanitize_logical_names(ordered)
     await _apply_naming_rules(cs["projectId"], ordered)
 
     upserts = [it for it in ordered if it["op"] == "upsert" and it["collection"] in _UNIQUE_COLLS]

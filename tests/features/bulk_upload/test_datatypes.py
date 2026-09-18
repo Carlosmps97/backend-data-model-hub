@@ -109,13 +109,14 @@ def test_extra_tambien_vale_dentro_de_un_complejo():
     ("variant", "VARIANT"),
     ("  string  ", "STRING"),
     ("ARRAY<STRING>", "ARRAY<STRING>"),    # complejo válido pasa intacto
+    ("STRUCT<a:INT>", "STRUCT<a:INTEGER>"),  # doc 92 D6: sinónimo ANIDADO también homologa
     ("VARCHAR(120)", "VARCHAR(120)"),
 ])
 def test_canonicalize_homologa(raw, expected):
     assert canonicalize_default_type(raw) == expected
 
 
-@pytest.mark.parametrize("verbatim", ["Tipo Raro", "RAW(16)", "STRUCT<a:INT>"])
+@pytest.mark.parametrize("verbatim", ["Tipo Raro", "RAW(16)", "STRUCT<@p:STRING>"])
 def test_canonicalize_lo_desconocido_queda_verbatim(verbatim):
     # Jamás se inventa: si no se reconoce, se conserva la grafía original.
     assert canonicalize_default_type(verbatim) == verbatim

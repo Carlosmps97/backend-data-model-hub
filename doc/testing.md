@@ -48,7 +48,7 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-11, doc 88):** la suite normal son **1 389 tests** (verde). `pytest tests/ --collect-only -q` recolecta **1 434** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
+**Conteo confirmado (2026-09-17, doc 91):** la suite normal son **1 390 tests** (verde; el desglose por área de abajo es la foto del doc 88 con 1 389 — desde entonces: +16 del doc 90, −24 del parser/endpoint de custom SQL retirados en el doc 91 y +9 nuevos de views/kit). `pytest tests/ --collect-only -q` recolecta **1 434** porque incluye además los **45** de la suite viva del adaptador Lakebase (que sin `LAKEBASE_TESTS=1` se saltan como skipped). Este es el desglose por área:
 
 | Área | Archivos | Tests |
 |------|---------:|------:|

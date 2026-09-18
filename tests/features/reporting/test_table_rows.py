@@ -163,8 +163,8 @@ def _wire_repo(monkeypatch):
         return {"tables": [{"id": "t1", "physicalName": "A", "schema": "core"}],
                 "columnCounts": {}, "relationships": [], "subjectAreas": []}
 
-    async def _page(project_id, limit):
-        calls["page"] = (project_id, limit)
+    async def _page(project_id, limit, offset=0):
+        calls["page"] = (project_id, limit) if not offset else (project_id, limit, offset)
         return {"tables": [{"id": "t1", "physicalName": "A", "schema": "core"}],
                 "columnCounts": {}, "relationships": [], "subjectAreas": []}
 

@@ -95,4 +95,5 @@ def test_conflict_flag_respects_the_column_granularity(api, world):
     assert all(e["conflict"] is False for e in diff["collections"]["canonical_columns"]["edited"])
     beto.post(f"/api/changesets/{dy}/review", {"decision": "approve"})
     prod = _cols(ana, t1)
-    assert prod["CODCLIENTE"]["logicalName"] == "Codigo (Ana)" and prod["NBRCLIENTE"]["logicalName"] == "Nombre (Carla)"
+    # Doc 92 D8: el choke point quita los paréntesis (caracteres especiales) del lógico.
+    assert prod["CODCLIENTE"]["logicalName"] == "Codigo Ana" and prod["NBRCLIENTE"]["logicalName"] == "Nombre Carla"

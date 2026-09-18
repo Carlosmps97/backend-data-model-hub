@@ -17,11 +17,21 @@ async def report_tables(
     projectId: str = Query(min_length=1),
     schema: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=0),
+    offset: int = Query(default=0, ge=0),
 ):
     """Filas del reporte por tabla del proyecto. Filtro opcional por `schema`;
-    `limit` acota la cantidad (carga inicial liviana del front)."""
+    `limit` acota la cantidad (carga inicial liviana del front) y `offset`
+    (doc 92 D3) pagina el scroll infinito — sólo aplica en el fast path sin
+    filtros (orden `physicalName`)."""
     filters = {"schema": schema} if schema is not None else {}
-    return ok(await service.list_table_rows(projectId, filters, limit))
+    return ok(await service.list_table_rows(projectId, filters, limit, offset))
+
+
+@router.get("/tables/count")
+async def report_tables_count(projectId: str = Query(min_length=1)):
+    """Doc 92 D4: total de tablas activas del proyecto (conteo real de la barra
+    del Reporting y del Select all, aunque la grilla tenga sólo una página)."""
+    return ok({"total": await service.count_tables(projectId)})
 
 
 @router.get("/filters")

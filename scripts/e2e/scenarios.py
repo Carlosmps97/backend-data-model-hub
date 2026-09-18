@@ -707,7 +707,6 @@ def s17_vistas_multifuente() -> Suite:
     vname = _uid("VW_CLIENTE_360")
     body = {"name": vname, "schema": "e2e", "sql": "",
             "sourceTableIds": [t1, t2], "showOnCanvas": True,
-            "joinOverride": "t1.id_cliente = t2.id_cliente",
             "sources": [
                 {"tableId": t1, "column": "nombre_cliente", "outputAlias": "nombre"},
                 {"tableId": t2, "column": "saldo_actual", "castType": "DECIMAL(18,2)",
@@ -722,7 +721,8 @@ def s17_vistas_multifuente() -> Suite:
     s.check("sources conservan castType/alias",
             any(x.get("castType") == "DECIMAL(18,2)" for x in v.get("sources") or []))
     fresh = next((x for x in (mod.get(f"/api/views?tableId={t1}").data or []) if x["id"] == vid), {})
-    s.eq("joinOverride round-trip (Mongo)", fresh.get("joinOverride"), "t1.id_cliente = t2.id_cliente")
+    # Doc 91 D5: sin joinOverride (el DDL lista `FROM t1, t2`); el campo no viaja.
+    s.check("joinOverride ya no existe en el doc (doc 91 D5)", "joinOverride" not in fresh)
 
     # 2) GET ?tableId= matchea por CUALQUIER fuente (no solo la primera)
     for t in (t1, t2):
@@ -763,8 +763,11 @@ def s17_vistas_multifuente() -> Suite:
     s.check("vista legacy NO sale en canvas (showOnCanvas default False)",
             not any(x["id"] == vid2 for x in (mod.get(f"/api/subject-areas/{ca2}/diagram").data or {}).get("views") or []))
 
-    # 7) PUT es full-replace (contrato): el body legacy SIN joinOverride lo limpia
-    s.eq("PUT full-replace limpia joinOverride omitido (contrato)", got.get("joinOverride"), None)
+    # 7) User-Defined SQL (doc 91 D6): se guarda VERBATIM aunque no parsee
+    bad_sql = f"CREATE VIEW e2e.{vname} AS SELEC nombre_cliente FRM e2e.cliente"
+    r = mod.put(f"/api/views/{vid}", {**legacy_body, "customSql": bad_sql})
+    s.eq("PUT con User-Defined SQL inválido responde 200", r.status, 200)
+    s.eq("customSql round-trip verbatim", (r.data or {}).get("customSql"), bad_sql)
     return s
 
 

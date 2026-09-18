@@ -75,6 +75,15 @@ def norm_type(value) -> str:
     return re.sub(r"\s+", "", clean_text(value)).upper()
 
 
+def fold_type_whitespace(value) -> str:
+    """Doc 92 D6: texto de un tipo en UNA línea compacta — saltos de línea y
+    tabulaciones a un espacio, y sin espacios pegados a `< > , : ( )`. Para
+    tipos complejos que no parsean (p.ej. campos `@param1`) y que igual deben
+    salir enteros en el DDL. Casing intacto."""
+    text = re.sub(r"\s+", " ", clean_text(value))
+    return re.sub(r"\s*([<>,:()])\s*", r"\1", text).strip()
+
+
 def _split_top(inner: str, sep: str) -> list[str]:
     """Corta por `sep` a profundidad 0 (respeta `<>` y `()` anidados)."""
     out: list[str] = []
@@ -115,7 +124,7 @@ def _simple(text: str) -> str | None:
     return f"{base}({','.join(args)})"
 
 
-def _complex(text: str, extra_norm: dict[str, str]) -> str | None:
+def _complex(text: str, extra_norm: dict[str, str], aliases: bool = False) -> str | None:
     m = _COMPLEX_RE.match(text)
     if not m:
         return None
@@ -123,41 +132,56 @@ def _complex(text: str, extra_norm: dict[str, str]) -> str | None:
     if not inner:
         return None
     if kind == "ARRAY":
-        elem = _canonical(inner, extra_norm)
+        elem = _canonical(inner, extra_norm, aliases)
         return f"ARRAY<{elem}>" if elem else None
     if kind == "MAP":
         parts = _split_top(inner, ",")
         if len(parts) != 2:
             return None
-        key, val = (_canonical(p, extra_norm) for p in parts)
+        key, val = (_canonical(p, extra_norm, aliases) for p in parts)
         return f"MAP<{key},{val}>" if key and val else None
     fields: list[str] = []
     for part in _split_top(inner, ","):
         name_type = _split_top(part, ":")
         if len(name_type) != 2:
             return None
-        name, ftype = name_type[0].strip(), _canonical(name_type[1], extra_norm)
+        name, ftype = name_type[0].strip(), _canonical(name_type[1], extra_norm, aliases)
         if not _FIELD_NAME_RE.match(name) or not ftype:
             return None
         fields.append(f"{name}:{ftype}")
     return f"STRUCT<{','.join(fields)}>" if fields else None
 
 
-def _canonical(text: str, extra_norm: dict[str, str]) -> str | None:
+def _simple_alias(text: str) -> str | None:
+    """`_simple` tras mapear la base por sinónimo de dialecto (`int` →
+    `INTEGER`, `bool` → `BOOLEAN`). Sólo para HOMOLOGAR (aliases=True)."""
+    base_part, sep, rest = text.partition("(")
+    alias = _BASE_ALIASES.get(norm_type(base_part))
+    return _simple(alias + (sep + rest if sep else "")) if alias else None
+
+
+def _canonical(text: str, extra_norm: dict[str, str], aliases: bool = False) -> str | None:
     t = clean_text(text)
     if not t:
         return None
     if "<" in t or ">" in t:
-        return _complex(t, extra_norm)
-    return _simple(t) or extra_norm.get(norm_type(t))
+        return _complex(t, extra_norm, aliases)
+    hit = _simple(t)
+    if hit is None and aliases:
+        # Doc 92 D6: los sinónimos también valen DENTRO de un tipo complejo
+        # (`struct<numorden:int, fecha:date>` de Erwin) — antes sólo en la base.
+        hit = _simple_alias(t)
+    return hit or extra_norm.get(norm_type(t))
 
 
-def canonical_type(text, extra: Iterable[str] = ()) -> str | None:
+def canonical_type(text, extra: Iterable[str] = (), aliases: bool = False) -> str | None:
     """Forma canónica del tipo o None si no es válido. `extra` = tipos
     aceptados tal cual (defaults de parent domains), comparados sin caso ni
-    espacios; se devuelve la grafía con la que existen en la plataforma."""
+    espacios; se devuelve la grafía con la que existen en la plataforma.
+    `aliases=True` acepta además los sinónimos de dialecto en cualquier nivel
+    (homologación); la carga masiva NO los pasa (gramática estricta)."""
     extra_norm = {norm_type(e): clean_text(e) for e in extra if clean_text(e)}
-    return _canonical(clean_text(text) if text is not None else "", extra_norm)
+    return _canonical(clean_text(text) if text is not None else "", extra_norm, aliases)
 
 
 def canonicalize_default_type(text) -> str:
@@ -178,13 +202,9 @@ def canonicalize_default_type(text) -> str:
     m = _BARE_COMPLEX_RE.match(t)
     if m:
         return f"{m.group(1).upper()}<>"
-    hit = canonical_type(t)
+    hit = canonical_type(t, aliases=True)
     if hit is not None:
         return hit
-    base_part, sep, rest = t.partition("(")
-    alias = _BASE_ALIASES.get(norm_type(base_part))
-    if alias:
-        hit = canonical_type(alias + (sep + rest if sep else ""))
-        if hit is not None:
-            return hit
-    return t
+    # Doc 92 D6: un complejo que no parsea (p.ej. campos `@param1`) sale
+    # verbatim pero en UNA línea compacta — jamás partido por saltos de línea.
+    return fold_type_whitespace(t) if "<" in t else t

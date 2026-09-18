@@ -205,21 +205,19 @@ Un doc por relación Erwin con **todos** sus pares de columnas (FK compuesta = v
 | id | str | uuid4 | PK |
 | projectId | str | — | ref `projects.id` (alcance; las fuentes son tablas del mismo proyecto) |
 | name | str | — | |
-| sql | str | "" | `CREATE VIEW` original (referencia congelada; el Export DDL regenera desde `sources`) |
+| sql | str | "" | `CREATE VIEW` original (referencia congelada; el Export DDL regenera desde `sources` o emite `customSql`) |
 | description | str? | null | definición funcional a nivel **vista** (F5) |
 | tableId | str? | null | compat = `sourceTableIds[0]` |
 | **schema** | str? | null | alias de `sql_schema` (ref `schemas.name` por nombre) |
-| tags | list[str] | [] | |
-| filter | str? | null | cláusula WHERE |
 | sources | list[dict] | [] | proyección **columna a columna** (ver shape abajo); list[dict] sin sub-schema estricto |
 | outputAlias | str? | null | |
 | expression | str? | null | |
 | sourceTableIds | list[str] | [] | refs `canonical_tables.id`; el **orden** define los alias `t1, t2…` |
 | showOnCanvas | bool | false | flag GLOBAL: la vista aparece en todo canvas con ≥1 fuente presente |
-| joinOverride | str? | null | condición JOIN manual (la consume el DDL del front; el backend no la valida) |
-| customSql | str? | null | doc 61: script del modo **Personalizada** — NO vacío ⇒ el cuerpo del `CREATE VIEW` ES este script (validado con sqlglot `databricks` al escribir; anti-`SELECT *`); null ⇒ **Regular** (DDL desde `sources`) |
-| customColumns | list[dict] | [] | doc 61: columnas de salida `{name, expression?}` DERIVADAS del parse de `customSql` — el backend las RE-deriva en cada escritura (create/update directo y apply del changeset) |
+| customSql | str? | null | doc 61 → doc 91: **User-Defined SQL** (modo Personalizada) — NO vacío ⇒ el Export DDL emite este texto **verbatim** (sentencia `CREATE VIEW …` completa, como el `User_Defined_SQL` de Erwin; un cuerpo suelto legacy se envuelve en el front). **Sin validación** (se guarda lo que el modelador escribió; el motor de reglas deja intacto lo que no parsea). null ⇒ **Regular** (DDL desde `sources`). En modo User-Defined `sources` = todas las columnas de las fuentes |
 | udpValues | dict | {} | doc 61: `{udpDefId: value}` — keys de `udp_definitions` con `level='view'` (mismo contrato que tablas/columnas/canvas) |
+
+> Doc 91 (2026-09-17): `tags`, `filter`, `joinOverride` y `customColumns` se retiraron (`extra="ignore"` descarta los valores legacy al leer; desaparecen al próximo write). Con 2+ fuentes el DDL lista `FROM t1, t2` sin JOIN (como Erwin).
 
 **Shape de cada item de `sources`** (free-form; las claves nuevas persisten): `{ column?, tableId?, outputAlias?, expression?, castType?, description? }`.
 - `column` = columna origen (por **nombre**); `tableId` = de qué fuente viene (F3 multi-fuente); `castType` = override de tipo (DDL emite `CAST(...) AS`); `description` = definición funcional propia de la columna-de-vista (F5, override del origen físico).

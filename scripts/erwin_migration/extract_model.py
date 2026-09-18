@@ -115,7 +115,10 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
             })
         views.append({"schema": schema_for(v.id), "name": v.name,
                       "definition": v.definition or None,
-                      "sql": v.sql or None, "columns": rows})
+                      "sql": v.sql or None,
+                      # Doc 91 D8: sentencia escrita a mano (User Defined SQL de Erwin)
+                      "userDefinedSql": v.user_defined_sql or None,
+                      "columns": rows})
     views.sort(key=lambda w: (w["schema"], w["name"]))
 
     pairs = model.fk_pairs()

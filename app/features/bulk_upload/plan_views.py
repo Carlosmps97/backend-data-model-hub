@@ -101,8 +101,8 @@ def view_doc(vid: str, project_id: str, name: str, schema: str, tp: TablePlan, c
         "description": clean_text(table.get("description")) or None,
         "tableId": tp.id, "sourceTableIds": [tp.id],
         "sources": [{"tableId": tp.id, "column": c["physicalName"], "outputAlias": c["physicalName"]} for c in cols],
-        "tags": [], "filter": None, "outputAlias": None, "expression": None,
-        "showOnCanvas": True, "joinOverride": None, "customSql": None, "customColumns": [], "udpValues": {},
+        "outputAlias": None, "expression": None,
+        "showOnCanvas": True, "customSql": None, "udpValues": {},
     }).model_dump(by_alias=True)
 
 

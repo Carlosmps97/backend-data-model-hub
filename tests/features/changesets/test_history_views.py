@@ -69,7 +69,7 @@ def test_historial_de_vista_resuelve_tablas_y_custom_sql(monkeypatch):
     edited = out["items"][0]
     assert edited["action"] == "edited"
     labels = {f["label"] for f in edited["fields"]}
-    # El script custom SÍ es revisable (no es ruido como el `sql` congelado).
-    assert "Custom SQL" in labels
+    # El User-Defined SQL SÍ es revisable (no es ruido como el `sql` congelado).
+    assert "User-Defined SQL" in labels
     # Las filas de sources resuelven la tabla por NOMBRE (res["tables"]).
     assert any("M_CLIENTE" in lbl for lbl in labels)

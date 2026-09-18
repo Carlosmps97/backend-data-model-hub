@@ -18,8 +18,8 @@ Chequeos (C1–C9) y su fix:
      sources[].tableId fuera de sourceTableIds
        → poda fuentes muertas (vista sin fuentes → soft-delete);
          re-normaliza tableId; re-apunta sources.tableId en single-source.
-  C5 vistas multi-fuente sin joinOverride NI relación modelada entre fuentes
-       → REPORTE (el DDL emitiría fallback comentado; decisión humana).
+  C5 (retirado, doc 91 D12): multi-fuente sin join ya no es anomalía — el
+     DDL las lista `FROM t1, t2` como Erwin; un JOIN vive en el User-Defined SQL.
   C6 relaciones huérfanas (tabla o columna de un extremo muerta/inexistente)
        → soft-delete (cierra el stock viejo del bug #21).
   C7 columnas con parentDomainId muerto → unset del campo.
@@ -141,8 +141,7 @@ def main():
     bulk("glossary_terms", [UpdateOne({"_id": t["_id"]}, {"$set": {
         "flgactive": False, "deletedAt": now()}}) for t in tdups])
 
-    # ── C4/C5 · vistas ───────────────────────────────────────────────────────
-    rel_pairs: set[frozenset] = set()
+    # ── C4 · vistas ──────────────────────────────────────────────────────────
     rels = list(db.relationships.find(ACTIVE, {
         "_id": 1, "parentTableId": 1, "childTableId": 1, "pairs": 1,
         "sourceTableId": 1, "sourceColumnId": 1,
@@ -153,14 +152,10 @@ def main():
         return (r.get("parentTableId") or r.get("targetTableId"),
                 r.get("childTableId") or r.get("sourceTableId"))
 
-    for r in rels:
-        rel_pairs.add(frozenset(_rel_ends(r)))
-
     v_dead_src = v_fix_tid = v_fix_sources = v_orphan = 0
-    multi_nojoin: list[str] = []
     vops: list[UpdateOne] = []
     for v in db.views.find(ACTIVE, {"_id": 1, "name": 1, "tableId": 1,
-                                    "sourceTableIds": 1, "sources": 1, "joinOverride": 1}):
+                                    "sourceTableIds": 1, "sources": 1}):
         src = [s for s in (v.get("sourceTableIds") or []) if s]
         alive = [s for s in src if s in active_tids]
         upd: dict = {}
@@ -191,18 +186,11 @@ def main():
         if upd:
             upd["updatedAt"] = now()
             vops.append(UpdateOne({"_id": v["_id"]}, {"$set": upd}))
-        if len(alive) > 1 and not (v.get("joinOverride") or "").strip():
-            connected = all(any(frozenset((a, b)) in rel_pairs for b in alive if b != a)
-                            for a in alive)
-            if not connected:
-                multi_nojoin.append(v.get("name"))
     report("C4a vistas con fuentes muertas (podadas)", v_dead_src)
     report("C4b vistas sin NINGUNA fuente viva (soft-delete)", v_orphan)
     report("C4c vistas con tableId ≠ 1ª fuente (re-normalizado)", v_fix_tid)
     report("C4d sources[].tableId fuera de las fuentes (re-apuntado)", v_fix_sources)
     bulk("views", vops)
-    report("C5 multi-fuente sin join NI relación (INFORME, no auto-fix)",
-           len(multi_nojoin), f"{multi_nojoin[:5]}")
 
     # ── C6 · relaciones huérfanas ────────────────────────────────────────────
     def _rel_orphan(r: dict) -> bool:

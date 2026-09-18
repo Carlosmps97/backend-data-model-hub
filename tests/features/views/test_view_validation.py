@@ -2,8 +2,8 @@
 
 - POST sin ninguna fuente (ni sourceTableIds ni tableId legacy) → 409 (patrón
   del repo: HTTPException 409 con detalle en español para reglas de negocio).
-- 2+ fuentes SIN joinOverride → se permite guardar (D2: el JOIN se infiere en
-  el DDL del front; el backend NO valida joins).
+- 2+ fuentes → se permite guardar (doc 91 D5: el DDL las lista `FROM t1, t2`;
+  el backend NO valida joins).
 - PUT normaliza tableId=sourceTableIds[0] ANTES del $set: repository.update
   escribe el dict tal cual (solo la respuesta se re-valida vía ViewDoc), sin
   normalizar el doc Mongo quedaría inconsistente.
@@ -45,8 +45,8 @@ def test_create_con_tableid_legacy_pasa(monkeypatch):
     assert res == {"success": True, "data": {"id": "v1"}}
 
 
-def test_create_multifuente_sin_joinoverride_pasa(monkeypatch):
-    # D2: con 2+ fuentes y sin joinOverride se guarda igual.
+def test_create_multifuente_pasa(monkeypatch):
+    # Doc 91 D5: con 2+ fuentes se guarda igual (FROM t1, t2 en el DDL).
     monkeypatch.setattr(views_router.service, "create",
                         AsyncMock(return_value={"id": "v1"}))
     body = ViewBody.model_validate({"name": "v", "sourceTableIds": ["t1", "t2"]})

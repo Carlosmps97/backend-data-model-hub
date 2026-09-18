@@ -328,6 +328,49 @@ def test_vista_espejo_cuelga_de_la_tabla_viva(corrida):
     assert vistas[0]["sources"][0]["column"] == "CODA"
 
 
+def test_columna_con_tipo_complejo_multilinea_se_persiste_canonica_en_una_linea():
+    """Doc 92 D6: el `Array<struct<…>>` multilínea de Erwin se guarda canónico
+    (sinónimos anidados incluidos); un simple queda tal cual."""
+    db = base_db()
+    m = modelo_archivo_2()
+    erwin = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30),\n\tnumorden: int\n\t>\n>"
+    # E2 (TAB_B) se CREA en esta corrida (E1 es la tabla adoptada, que no re-escribe columnas).
+    m.entities["E2"].attributes.append(attr("A9", "E2", "PAYLOAD", 9, dtype=erwin))
+    mig = Migrator(db, m, "Familia DDV", None)
+    mig.run()
+    tb = mig.pid("E2")
+    cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values() if c.get("tableId") == tb}
+    assert cols["PAYLOAD"]["dataType"] == "ARRAY<STRUCT<codcampania:VARCHAR(30),numorden:INTEGER>>"
+    assert cols["CODA"]["dataType"] == "STRING"
+
+
+def test_vista_regular_no_lleva_campos_retirados_doc91(corrida):
+    db, _ = corrida
+    v = next(v for v in db.data["views"].values() if v.get("name") == "TAB_A_VU")
+    for k in ("tags", "filter", "joinOverride", "customColumns"):
+        assert k not in v
+    assert v["customSql"] is None
+
+
+def test_vista_con_user_defined_sql_es_personalizada_verbatim():
+    """Doc 91 D8: `User_Defined_SQL` de Erwin → `customSql` tal cual (aunque no
+    parsee) + UDP fijo «Tipo de Vista» = Personalizada; las columnas siguen
+    siendo las que Erwin declara en la vista (S5)."""
+    from scripts.erwin_migration import policies as _pol
+    db = base_db()
+    m = modelo_archivo_2()
+    uds = "create view S1V.TAB_A_VU as selec a.CODA frm S1.TAB_A a where a.CODA is not null;"
+    m.views["V1"].user_defined_sql = uds
+    mig = Migrator(db, m, "Familia DDV", None)
+    mig.run()
+    v = next(v for v in db.data["views"].values() if v.get("name") == "TAB_A_VU")
+    assert v["customSql"] == uds
+    assert v["sources"][0]["column"] == "CODA"          # columnas Erwin, no «todas las de la fuente»
+    tipo_pid = mig.fixed_pid[("view", "physical", _pol.norm_enum("Tipo de Vista"))]
+    assert v["udpValues"][tipo_pid] == "Personalizada"
+    assert mig.stats["vistas con User-Defined SQL (Personalizada)"] == 1
+
+
 # ── Doc 61 r2 · catálogo FIJO (reemplaza la poda A4) ──────────────────────
 def test_def_udp_basura_no_se_crea(corrida):
     from scripts.erwin_migration.standard_udps import FIXED_UDPS

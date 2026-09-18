@@ -1,5 +1,6 @@
-"""Doc 61: el camino CHANGESET valida el customSql al grabar (payload_error)
-y RE-deriva customColumns en apply_plan (no se confía en el cliente)."""
+"""Doc 91 D6: el camino CHANGESET ya NO valida el User-Defined SQL (se guarda lo
+que el modelador escribió) y `apply_plan` sólo lo normaliza (strip; vacío ⇒
+Regular). Sin `customColumns`."""
 from __future__ import annotations
 
 from app.features.changesets import validation
@@ -17,10 +18,10 @@ def test_payload_error_acepta_custom_sql_valido():
     assert validation.payload_error("views", "v1", "upsert", p) is None
 
 
-def test_payload_error_rechaza_custom_sql_invalido():
-    p = _view_payload(customSql="SELECT * FROM t")
-    err = validation.payload_error("views", "v1", "upsert", p)
-    assert err is not None and "custom SQL" in err
+def test_payload_error_acepta_custom_sql_que_no_parsea():
+    # Doc 91 D6: sintaxis inválida, SELECT * o varios statements ya no bloquean.
+    for sql in ("SELEC x FRM t", "SELECT * FROM t", "SELECT 1; SELECT 2"):
+        assert validation.payload_error("views", "v1", "upsert", _view_payload(customSql=sql)) is None
 
 
 def test_payload_error_ignora_custom_sql_vacio_y_deletes():
@@ -34,25 +35,19 @@ def test_payload_error_no_afecta_otras_colecciones():
         {"id": "t1", "projectId": "p1", "physicalName": "M_X", "logicalName": "X"}) is None
 
 
-# ── apply_plan re-deriva customColumns ──────────────────────────────────────
+# ── apply_plan normaliza customSql ──────────────────────────────────────────
 
-def test_apply_plan_rederiva_custom_columns():
+def test_apply_plan_publica_custom_sql_verbatim_con_strip():
     changes = {"views": {"v1": {"op": "upsert", "payload": _view_payload(
-        customSql="SELECT id, UPPER(n) AS n_up FROM t1",
-        customColumns=[{"name": "INVENTADA"}])}}}
-    plan = apply_plan(changes)
-    payload = plan[0][3]
-    assert payload["customColumns"] == [
-        {"name": "id"}, {"name": "n_up", "expression": "UPPER(n)"}]
+        customSql="  CREATE VIEW s.v_x AS SELEC id FRM t1 \n")}}}
+    payload = apply_plan(changes)[0][3]
+    assert payload["customSql"] == "CREATE VIEW s.v_x AS SELEC id FRM t1"
+    assert "customColumns" not in payload
 
 
-def test_apply_plan_limpia_custom_columns_sin_custom_sql():
-    changes = {"views": {"v1": {"op": "upsert", "payload": _view_payload(
-        customSql="  ", customColumns=[{"name": "zombi"}])}}}
-    plan = apply_plan(changes)
-    payload = plan[0][3]
-    assert payload["customSql"] is None
-    assert payload["customColumns"] == []
+def test_apply_plan_custom_sql_vacio_es_regular():
+    changes = {"views": {"v1": {"op": "upsert", "payload": _view_payload(customSql="  ")}}}
+    assert apply_plan(changes)[0][3]["customSql"] is None
 
 
 def test_apply_plan_sigue_normalizando_fuentes():

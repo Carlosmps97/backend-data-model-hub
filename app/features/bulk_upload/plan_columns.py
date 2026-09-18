@@ -13,7 +13,7 @@ from typing import Callable
 
 from app.features.catalog.models import CanonicalColumnDoc
 
-from .normalize import clean_text, is_pk_mark, norm_ci, norm_key, norm_name, norm_type, partition_correlative
+from .normalize import clean_logical, clean_text, is_pk_mark, norm_ci, norm_key, norm_name, norm_type, partition_correlative
 from .parser import ColumnRow, ParsedWorkbook
 from .plan_tables import TableIndex, TablePlan, changed_fields
 from .report import SHEET_COLUMNS, ReportBuilder
@@ -155,7 +155,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
               std: Standards, udp_map: dict[str, list[dict]], partition_header: str | None, rb: ReportBuilder,
               new_id: Callable[[], str], seen_phys: dict[str, int], seen_logical: dict[str, int],
               max_len: int, h: Callable[[str, str], str], options) -> ColumnPlan:
-    logical = clean_text(r.logical)
+    logical = clean_logical(clean_text(r.logical), SHEET_COLUMNS, r.row, h("logicalName", "CAMPO_LOGICO"), rb)
     if not logical:
         rb.error(SHEET_COLUMNS, "missing-required", f"{h('logicalName', 'CAMPO_LOGICO')} is required.",
                  row=r.row, column=h("logicalName", "CAMPO_LOGICO"))

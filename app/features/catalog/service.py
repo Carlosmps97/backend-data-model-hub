@@ -407,8 +407,10 @@ def view_row(v: dict) -> dict:
     if "columnCount" in v:
         return v
     from app.features.views.membership import view_sources
+    # Doc 91 D7: en ambos modos las columnas de salida son `sources` (en
+    # User-Defined SQL = todas las columnas de las fuentes).
     custom = bool((v.get("customSql") or "").strip())
-    cols = v.get("customColumns") if custom else v.get("sources")
+    cols = v.get("sources")
     return {
         "id": v.get("id"),
         "name": v.get("name") or "",
@@ -508,9 +510,9 @@ async def project_inventory(project_id: str, changeset_id: str | None = None) ->
 
 async def view_columns(view_id: str, changeset_id: str | None = None) -> list[dict] | None:
     """Columnas de SALIDA de UNA vista, para expandirla en el Explorer — el
-    inventario sólo trae el conteo, igual que con las tablas. Vista Regular →
-    sus `sources`; Personalizada (doc 61) → sus `customColumns`. Con
-    `changeset_id` aplica el overlay del draft. None si la vista no existe en el
+    inventario sólo trae el conteo, igual que con las tablas. En ambos modos
+    son sus `sources` (doc 91 D7: en User-Defined SQL = todas las columnas de
+    las fuentes). Con `changeset_id` aplica el overlay del draft. None si la vista no existe en el
     estado efectivo (el router responde 404).
 
     Forma UNIFORME (las dos clases de vista salen igual, así el cliente tiene un
@@ -529,10 +531,8 @@ async def view_columns(view_id: str, changeset_id: str | None = None) -> list[di
     view = next((v for v in docs if v.get("id") == view_id), None)
     if view is None:
         return None
-    if bool((view.get("customSql") or "").strip()):
-        return [{"outputAlias": c.get("name"), "column": None, "tableId": None,
-                 "table": None, "castType": None, "expression": c.get("expression")}
-                for c in (view.get("customColumns") or [])]
+    # Doc 91 D7: `sources` en ambos modos (User-Defined SQL ⇒ todas las
+    # columnas de las fuentes, persistidas al guardar).
     return [{"outputAlias": s.get("outputAlias"), "column": s.get("column"),
              "tableId": s.get("tableId"), "table": s.get("table"),
              "castType": s.get("castType"), "expression": s.get("expression")}

@@ -12,7 +12,7 @@ from typing import Callable
 
 from app.features.catalog.models import CanonicalTableDoc
 
-from .normalize import clean_text, norm_ci, norm_name
+from .normalize import clean_logical, clean_text, norm_ci, norm_name
 from .parser import ParsedWorkbook, TableRow
 from .report import SHEET_TABLES, ReportBuilder
 from .standards import Standards, apply_udps
@@ -108,7 +108,7 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
               rb: ReportBuilder, new_id: Callable[[], str], seen_phys: dict[str, int],
               seen_logical: dict[str, int], max_len: int, project_id: str,
               h: Callable[[str, str], str], options) -> TablePlan:
-    logical = clean_text(r.logical)
+    logical = clean_logical(clean_text(r.logical), SHEET_TABLES, r.row, h("logicalName", "TABLA_LOGICO"), rb)
     if not logical:
         rb.error(SHEET_TABLES, "missing-required", f"{h('logicalName', 'TABLA_LOGICO')} is required.",
                  row=r.row, column=h("logicalName", "TABLA_LOGICO"))

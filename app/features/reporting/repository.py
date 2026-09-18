@@ -118,14 +118,18 @@ async def report_inputs(project_id: str) -> dict:
     }
 
 
-async def report_inputs_page(project_id: str, limit: int) -> dict:
-    """Como `report_inputs` pero SOLO las primeras `limit` tablas (orden físico,
-    índice `physicalName`) y sus conteos de columna (agregación acotada por
-    `tableId $in`). Es el camino de la carga inicial del front (`limit=50`): evita
-    tocar las 10k tablas / 400k columnas → sub-segundo en vez de varios segundos.
-    Sólo válido SIN filtros (con `schema` hace falta el barrido completo)."""
+async def report_inputs_page(project_id: str, limit: int, offset: int = 0) -> dict:
+    """Como `report_inputs` pero SOLO una PÁGINA de tablas (orden físico,
+    índice `physicalName`; `offset` = doc 92 D3, scroll infinito del front) y
+    sus conteos de columna (agregación acotada por `tableId $in`). Es el camino
+    de la carga inicial del front (`limit=50`): evita tocar las 10k tablas /
+    400k columnas → sub-segundo en vez de varios segundos. Sólo válido SIN
+    filtros (con `schema` hace falta el barrido completo)."""
     db = await get_db()
-    docs = await db["canonical_tables"].find(scoped(project_id, ACTIVE)).sort("physicalName", 1).limit(limit).to_list(limit)
+    cur = db["canonical_tables"].find(scoped(project_id, ACTIVE)).sort("physicalName", 1)
+    if offset:
+        cur = cur.skip(offset)
+    docs = await cur.limit(limit).to_list(limit)
     tables = [_strip(d) for d in docs]
     ids = [t["id"] for t in tables]
     pipeline = [{"$match": scoped(project_id, {**ACTIVE, "tableId": {"$in": ids}})},
@@ -138,6 +142,14 @@ async def report_inputs_page(project_id: str, limit: int) -> dict:
         "subjectAreas": await _subject_areas(project_id, ids),
         "folders": await _folders(project_id),
     }
+
+
+async def count_tables(project_id: str) -> int:
+    """Doc 92 D4: total de tablas ACTIVAS del proyecto (conteo real para la
+    barra del Reporting y el Select all, aunque la grilla tenga cargada sólo
+    una página)."""
+    db = await get_db()
+    return int(await db["canonical_tables"].count_documents(scoped(project_id, ACTIVE)))
 
 
 async def columns(project_id: str, table_id: str | None = None,

@@ -125,6 +125,18 @@ def test_apply_column_types_sql_reescribe_solo_los_tipos_del_create():
     assert all(e["rule"] == "char_a_varchar" and e["artifact"] == "ddl.tabla_fisica" for e in log)
 
 
+def test_apply_column_types_sql_no_toca_un_tipo_complejo_anidado_y_mapea_el_char_vecino():
+    # Doc 92 D6: el tokenizador separa `>>>` en tres GT; el ARRAY<STRUCT<…>> queda
+    # intacto y el CHAR de la columna vecina se mapea a VARCHAR.
+    sql = ("CREATE TABLE s.t (\n"
+           "  `payload` ARRAY<STRUCT<codcampania:VARCHAR(30),v:MAP<VARCHAR(30),DECIMAL(11,2)>>>,\n"
+           "  `codigo` CHAR(3)\n)")
+    ctx = {**CTX, "payload": {"udp": {}, "column": {"name": "payload"}}, "codigo": {"udp": {}, "column": {"name": "codigo"}}}
+    out, _log = render.apply_column_types_sql(sql, [CHAR_VARCHAR], "ddl.tabla_fisica", BASE, ctx, CONFIG)
+    assert "ARRAY<STRUCT<codcampania:VARCHAR(30),v:MAP<VARCHAR(30),DECIMAL(11,2)>>>" in out
+    assert "`codigo` VARCHAR(3)" in out
+
+
 def test_apply_column_types_sql_respeta_la_condicion_por_columna():
     solo_dac = {**CHAR_VARCHAR, "condition": 'columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\''}
     out, log = render.apply_column_types_sql(BASE_SQL, [solo_dac], "ddl.tabla_fisica", BASE, CTX, CONFIG)

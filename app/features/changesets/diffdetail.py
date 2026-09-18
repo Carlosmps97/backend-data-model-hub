@@ -30,8 +30,9 @@ NOISE_BY_COLLECTION: dict[str, set[str]] = {
     "canonical_columns": {"tableId", "typeOverridden"},
     # tableId/sourceTableIds: compat — las filas por fuente (sources) los cubren;
     # sql: derivado del editor de vistas (sources es el canónico).
-    # customColumns: derivadas del customSql (el campo revisable es el script).
-    "views": {"tableId", "sourceTableIds", "sql", "customColumns"},
+    # Doc 91: tags/filter/joinOverride/customColumns ya no existen en el modelo;
+    # si un doc legacy los trae, no son revisables.
+    "views": {"tableId", "sourceTableIds", "sql", "customColumns", "tags", "filter", "joinOverride"},
     # subtypeSymbolId: UUID interno del grupo de subcategoría (doc 53) — el
     # revisor ya ve "Subcategory" + padre/hijo; el id del símbolo es ruido.
     "relationships": {"subtypeSymbolId"},
@@ -53,9 +54,7 @@ FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "views": (
         ("name", "Name"), ("schema", "Schema"), ("description", "Definition"),
-        ("showOnCanvas", "On canvas"), ("filter", "Filter"),
-        ("joinOverride", "Join condition"), ("tags", "Tags"),
-        ("customSql", "Custom SQL"),
+        ("showOnCanvas", "On canvas"), ("customSql", "User-Defined SQL"),
     ),
     "relationships": (
         ("parentTableId", "Parent table"), ("childTableId", "Child table"),

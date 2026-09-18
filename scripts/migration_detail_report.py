@@ -187,7 +187,7 @@ def extract(files: list[dict]) -> dict:
         "subcategory": 1, "flgactive": 1, "deletedAt": 1, "erwinLongId": 1})}
     r_active = {rid for rid, r in rels.items() if r.get("flgactive") is not False}
     views = {v["_id"]: v for v in db.views.find(ACTIVE, {
-        "name": 1, "schema": 1, "sourceTableIds": 1, "sources": 1, "joinOverride": 1,
+        "name": 1, "schema": 1, "sourceTableIds": 1, "sources": 1,
         "erwinLongId": 1})}
     udp_defs = {d["_id"]: d for d in db.udp_definitions.find(ACTIVE)}
 
@@ -610,26 +610,9 @@ def extract(files: list[dict]) -> dict:
                            f"una sola (la copia más usada/completa)",
                 "canvases": canv,
             })
-    rel_pairs_set = {frozenset((rels[rid].get("parentTableId"), rels[rid].get("childTableId")))
-                     for rid in r_active}
+    # Doc 91 D12: el caso «Multi-fuente sin join declarado» (audit C5) se
+    # retiró — el DDL lista las fuentes `FROM t1, t2` como Erwin.
     n_multi = 0
-    for vid, v in views.items():           # c) multi-fuente sin join (audit C5)
-        alive = [s for s in (v.get("sourceTableIds") or []) if s in t_active]
-        if len(alive) <= 1 or (v.get("joinOverride") or "").strip():
-            continue
-        if all(any(frozenset((a, b)) in rel_pairs_set for b in alive if b != a) for a in alive):
-            continue
-        n_multi += 1
-        fuentes = "\n".join(sorted(tname(s) for s in alive))
-        tag_of = (view_file.get(v.get("erwinLongId")) or ["?"])[0]
-        rows.append({
-            "archivo": tag_of, "proyecto": project_of(layout_of_node.get(vid, [])),
-            "caso": "Multi-fuente sin join declarado",
-            "esquema": v.get("schema") or "", "vista": v.get("name") or "",
-            "detalle": "Tiene 2+ tablas fuente sin join declarado ni relación entre ellas; "
-                       "declarar el join en el editor de vistas\nFuentes:\n" + fuentes,
-            "canvases": cap_paths(paths_of(layout_of_node.get(vid, []))),
-        })
     n_vcol = 0
     for tag, m in models.items():          # d) columnas de vista sin origen
         proj, dom = proj_of_tag[tag], dom_of_tag[tag]

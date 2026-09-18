@@ -46,7 +46,8 @@ QUERY = {
     "/api/catalog/inspect/views/{view_id}": "changesetId={cs2}",
     "/api/changesets/{cs_id}/effective/{collection}": "tableId={t1}",
     "/api/changesets/history/{collection}/{entity_id}": "limit=10",
-    "/api/reporting/tables": "projectId={pid}",
+    "/api/reporting/tables": "projectId={pid}&limit=50&offset=0",
+    "/api/reporting/tables/count": "projectId={pid}",
     "/api/reporting/columns": "projectId={pid}",
     "/api/reporting/views": "projectId={pid}",
     "/api/reporting/filters": "projectId={pid}",
@@ -72,7 +73,6 @@ READ_POSTS = [
     ("/api/projects/{project_id}/ddl-rules/impact", {"rule": {"name": "r", "condition": "", "action": {}}}),
     ("/api/projects/{project_id}/ddl-rules/render", {"tableIds": ["{t1}"]}),
     ("/api/projects/{project_id}/upload-profiles/suggest", {"headers": ["Tabla", "Columna"]}),
-    ("/api/views/sql/parse", {"sql": "SELECT a FROM t"}),
     ("/api/reporting/query/validate", {"entity": "columns", "filters": [], "projectId": "{pid}"}),
 ]
 

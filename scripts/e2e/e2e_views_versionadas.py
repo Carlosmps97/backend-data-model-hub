@@ -45,8 +45,8 @@ doc = {
     "tableId": tid, "sourceTableIds": [tid],
     "sources": [{"tableId": tid, "column": "TIPESTADOFINANCIEROCTA",
                  "outputAlias": "TIPESTADOFINANCIEROCTA"}],
-    "showOnCanvas": True, "tags": [], "filter": None,
-    "outputAlias": None, "expression": None, "joinOverride": None, "description": "e2e",
+    "showOnCanvas": True,
+    "outputAlias": None, "expression": None, "customSql": None, "description": "e2e",
 }
 r = C.put(f"{B}/api/changesets/{cs}/changes",
           json={"collection": "views", "entityId": vid, "op": "upsert", "payload": doc},

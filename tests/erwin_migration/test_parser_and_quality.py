@@ -100,7 +100,9 @@ FIXTURE = textwrap.dedent(f"""\
    </Entity>
   </Entity_Groups>
   <View_Groups>
-   <View id="V1" name="MD_CLIENTETEST_VU"><ViewProps><Name>MD_CLIENTETEST_VU</Name></ViewProps>
+   <View id="V1" name="MD_CLIENTETEST_VU"><ViewProps><Name>MD_CLIENTETEST_VU</Name>
+     <SQL>CREATE VIEW S1V.MD_CLIENTETEST_VU ( CODCLI ) AS SELECT CODCLI FROM S1.MD_CLIENTETEST;</SQL>
+     <User_Defined_SQL>create view S1V.MD_CLIENTETEST_VU as select a.CODCLI from S1.MD_CLIENTETEST a where a.CODCLI is not null;</User_Defined_SQL></ViewProps>
     <Attribute_Groups>
      <Attribute id="VA1" name="CODCLI"><AttributeProps><Name>CODCLI</Name>
       <User_Formatted_Physical_Name>CODCLI</User_Formatted_Physical_Name>
@@ -189,6 +191,10 @@ def test_vistas_con_columnas_y_derivacion(model):
     v1 = model.views["V1"]
     assert [a.physical for a in v1.attributes] == ["CODCLI", "HUERFANA"]
     assert v1.attributes[0].parent_attr_ref == "A1"
+    # Doc 91 D8: SQL generado por Erwin y sentencia escrita a mano, por separado.
+    assert v1.sql.startswith("CREATE VIEW S1V.MD_CLIENTETEST_VU")
+    assert v1.user_defined_sql.startswith("create view S1V.MD_CLIENTETEST_VU as select a.CODCLI")
+    assert model.views["V2"].user_defined_sql == ""
     rels = model.view_source_rels()
     assert [r.parent_ref for r in rels["V1"]] == ["E1"]
     assert "V2" not in rels

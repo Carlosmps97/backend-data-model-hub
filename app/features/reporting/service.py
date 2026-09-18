@@ -199,22 +199,27 @@ async def _project_list(project_id: str) -> list[dict]:
 
 
 async def list_table_rows(project_id: str, filters: dict | None = None,
-                          limit: int | None = None) -> list[dict]:
+                          limit: int | None = None, offset: int = 0) -> list[dict]:
     """Filas del reporte por tabla del proyecto (filtradas en Python).
 
-    Fast-path de la carga inicial: con `limit` y SIN filtros se traen sólo las
-    primeras `limit` tablas (orden físico) + sus conteos, en vez de barrer las
-    10k/400k (`report_inputs_page`)."""
+    Fast-path de la carga inicial: con `limit` y SIN filtros se trae sólo una
+    PÁGINA de tablas (orden físico; `offset` = doc 92 D3) + sus conteos, en vez
+    de barrer las 10k/400k (`report_inputs_page`)."""
     udp_defs = await repository.udp_definitions(project_id)
     projects = await _project_list(project_id)
     if limit is not None and limit >= 0 and not (filters or {}):
-        data = await repository.report_inputs_page(project_id, limit)
+        data = await repository.report_inputs_page(project_id, limit, offset)
     else:
         data = await repository.report_inputs(project_id)
     return table_rows(
         data["tables"], data["columnCounts"], data["relationships"],
         data["subjectAreas"], projects, filters, limit, udp_defs, data.get("folders"),
     )
+
+
+async def count_tables(project_id: str) -> int:
+    """Doc 92 D4: total de tablas activas del proyecto."""
+    return await repository.count_tables(project_id)
 
 
 def view_rows(views: list[dict], table_name_by_id: dict[str, str],
@@ -224,9 +229,10 @@ def view_rows(views: list[dict], table_name_by_id: dict[str, str],
     Fuentes resueltas a `schema.tabla` legible y `columns` = detalle columna a
     columna del editor de vistas: alias de salida, tabla/columna de origen,
     casteo (`castType`) y transformación (`expression`). Se incluyen además
-    `filter` (WHERE de la vista), `joinOverride`, el `sql` completo y
+    el `sql` (referencia congelada), `customSql` (User-Defined SQL, doc 91) y
     `canvases` (doc 70): nombres de los canvases donde la vista es miembro
     (membresía explícita `viewIds` o regla legacy en canvases sin lista).
+    Doc 91 D2/D5: `filter` y `joinOverride` dejaron de existir.
     """
     sas = subject_areas or []
     rows: list[dict] = []
@@ -252,12 +258,11 @@ def view_rows(views: list[dict], table_name_by_id: dict[str, str],
             "name": v.get("name"),
             "sourceTableIds": src_ids,
             "sourceTables": sorted({table_name_by_id.get(t, t) for t in src_ids}),
-            "filter": v.get("filter"),
-            "joinOverride": v.get("joinOverride"),
             "showOnCanvas": bool(v.get("showOnCanvas")),
             "canvases": canvases,
             "description": v.get("description"),
             "sql": v.get("sql") or None,
+            "customSql": v.get("customSql") or None,
             "columns": cols,
         })
     rows.sort(key=lambda r: ((r.get("schema") or ""), (r.get("name") or "").lower()))

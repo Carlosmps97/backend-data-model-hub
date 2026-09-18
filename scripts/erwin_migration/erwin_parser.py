@@ -104,6 +104,10 @@ class ErwinView:
     definition: str
     comment: str
     sql: str = ""              # CREATE VIEW original (ViewProps.SQL — doc 19 §12)
+    # Doc 91 D8: sentencia escrita A MANO por el modelador (ViewProps.
+    # User_Defined_SQL, checkbox «User Defined SQL» de Erwin). Vacío = la
+    # vista es Regular (Erwin genera el SQL desde sus columnas).
+    user_defined_sql: str = ""
     attributes: list[ErwinAttribute] = field(default_factory=list)
 
 
@@ -389,6 +393,7 @@ def parse(xml_path: str) -> ErwinModel:
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
                 sql=_txt(p, "SQL").strip(),
+                user_defined_sql=_txt(p, "User_Defined_SQL").strip(),
                 attributes=_phys_sorted(el, "ViewProps", attrs_of.pop(id(el), [])),
             )
             m.views[v.id] = v

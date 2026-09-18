@@ -75,9 +75,10 @@ async def rows_of_project(project_id: str) -> list[dict]:
     db = await get_db()
     pipeline = [
         {"$match": {"projectId": project_id, "flgactive": {"$ne": False}}},
+        # Doc 91 D7: en ambos modos las columnas de salida son `sources`
+        # (User-Defined SQL ⇒ todas las columnas de las fuentes, persistidas).
         {"$project": {"name": 1, "schema": 1, "sourceTableIds": 1, "tableId": 1, "customSql": 1,
-                      "nSources": {"$size": {"$ifNull": ["$sources", []]}},
-                      "nCustom": {"$size": {"$ifNull": ["$customColumns", []]}}}},
+                      "nSources": {"$size": {"$ifNull": ["$sources", []]}}}},
     ]
     docs = await db[COLL].aggregate(pipeline).to_list(None)
     rows = []
@@ -89,7 +90,7 @@ async def rows_of_project(project_id: str) -> list[dict]:
             "name": d.get("name") or "",
             "schema": d.get("schema"),
             "sourceTableIds": list(d.get("sourceTableIds") or ([tid] if tid else [])),
-            "columnCount": (d.get("nCustom") or 0) if custom else (d.get("nSources") or 0),
+            "columnCount": d.get("nSources") or 0,
             "custom": custom,
         })
     return rows

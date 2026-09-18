@@ -10,14 +10,7 @@ from app.features.changesets.access import ensure_changeset_visible
 from app.core.api.envelope import ok
 
 from . import service
-from .custom_sql import CustomSqlError, parse_custom_sql
-from .schemas import SqlParseBody, ViewBody
-
-
-def _custom_sql_422(e: CustomSqlError) -> HTTPException:
-    # detail estructurado: el sandbox pinta el caret con line/col.
-    return HTTPException(status_code=422, detail={
-        "message": e.message, "line": e.line, "col": e.col})
+from .schemas import ViewBody
 
 router = APIRouter(prefix="/api/views", tags=["views"],
                    dependencies=[Depends(write_guard("model.edit"))])
@@ -49,32 +42,20 @@ async def for_table(tableId: str = Query(...), changesetId: str | None = Query(d
 async def create(body: ViewBody):
     if not (body.sourceTableIds or body.tableId):
         # F3: una vista sin tabla fuente no puede derivar nada (ni DDL ni
-        # canvas). Con 2+ fuentes SIN joinOverride SÍ se permite guardar:
-        # el JOIN se infiere de las relaciones al generar el DDL en el front.
+        # canvas). Con 2+ fuentes el DDL las lista `FROM t1, t2` (doc 91 D5);
+        # cualquier JOIN/WHERE vive en el User-Defined SQL.
         raise HTTPException(status_code=409,
                             detail="The view needs at least one source table.")
-    try:
-        return ok(await service.create(body))
-    except CustomSqlError as e:
-        raise _custom_sql_422(e) from e
+    return ok(await service.create(body))
 
 
-@router.post("/sql/parse")
-async def parse_sql(body: SqlParseBody):
-    """Doc 61: valida e interpreta el SQL custom SIN guardar (botón Validate
-    del sandbox de Query SQL). Devuelve columnas de salida y tablas referidas."""
-    try:
-        return ok(parse_custom_sql(body.sql))
-    except CustomSqlError as e:
-        raise _custom_sql_422(e) from e
+# Doc 91 D6: `POST /api/views/sql/parse` (sandbox de validación, doc 61) se
+# RETIRÓ — el User-Defined SQL se guarda verbatim, sin validar.
 
 
 @router.put("/{vid}")
 async def update(vid: str, body: ViewBody):
-    try:
-        res = await service.update(vid, body)
-    except CustomSqlError as e:
-        raise _custom_sql_422(e) from e
+    res = await service.update(vid, body)
     if res is None:
         raise HTTPException(status_code=404, detail="View not found.")
     return ok(res)

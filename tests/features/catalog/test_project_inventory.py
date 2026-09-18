@@ -154,9 +154,9 @@ def test_view_row_normaliza_fila_slim_y_doc_del_draft():
         "columnCount": 2, "custom": False}                             # `sql`/`description` NO viajan
 
     custom = {"id": "v3", "name": "V3", "customSql": "SELECT 1", "tableId": "t9",
-              "customColumns": [{"name": "c1"}], "sources": [{"column": "ignorada"}]}
+              "sources": [{"column": "a", "tableId": "t9"}, {"column": "b", "tableId": "t9"}]}
     row = service.view_row(custom)
-    assert row["custom"] is True and row["columnCount"] == 1            # cuenta customColumns, no sources
+    assert row["custom"] is True and row["columnCount"] == 2            # doc 91 D7: también cuenta `sources`
     assert row["sourceTableIds"] == ["t9"]                              # fallback legacy `tableId`
 
 
@@ -175,11 +175,12 @@ def test_view_columns_regular_custom_y_404(monkeypatch):
     assert cols == [{"outputAlias": "cli", "column": "CODCLI", "tableId": "t1",
                      "table": None, "castType": "STRING", "expression": None}]
 
-    _view_wire(monkeypatch, {"id": "v2", "customSql": "SELECT 1",
-                             "customColumns": [{"name": "x", "expression": "1+1"}]})
+    # Doc 91 D7: una vista User-Defined SQL también lista sus `sources`.
+    _view_wire(monkeypatch, {"id": "v2", "customSql": "SELEC 1",
+                             "sources": [{"column": "x", "tableId": "t1"}]})
     assert asyncio.run(service.view_columns("v2")) == [
-        {"outputAlias": "x", "column": None, "tableId": None, "table": None,
-         "castType": None, "expression": "1+1"}]
+        {"outputAlias": None, "column": "x", "tableId": "t1", "table": None,
+         "castType": None, "expression": None}]
 
     _view_wire(monkeypatch, None)
     assert asyncio.run(service.view_columns("nope")) is None           # el router responde 404

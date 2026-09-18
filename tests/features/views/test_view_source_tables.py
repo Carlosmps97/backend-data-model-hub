@@ -44,7 +44,7 @@ def test_view_doc_defaults_f3():
     v = ViewDoc.model_validate({"projectId": "p1", "name": "v"})
     assert v.sourceTableIds == []
     assert v.showOnCanvas is False
-    assert v.joinOverride is None
+    assert not hasattr(v, "joinOverride")   # doc 91 D5: retirado
 
 
 def test_view_doc_normaliza_legacy_en_lectura():
@@ -58,14 +58,12 @@ def test_view_doc_normaliza_legacy_en_lectura():
 def test_view_doc_multi_fuente_roundtrip():
     dumped = ViewDoc.model_validate({"projectId": "p1", 
         "name": "v", "sourceTableIds": ["t1", "t2"], "showOnCanvas": True,
-        "joinOverride": "t1.id = t2.cliente_id",
         "sources": [{"column": "id", "tableId": "t1",
                      "outputAlias": "cid", "castType": "STRING"}],
     }).model_dump(by_alias=True)
     assert dumped["sourceTableIds"] == ["t1", "t2"]
     assert dumped["tableId"] == "t1"  # compat legacy = primera fuente
     assert dumped["showOnCanvas"] is True
-    assert dumped["joinOverride"] == "t1.id = t2.cliente_id"
     # sources es list[dict]: tableId/castType pasan sin cambio de schema.
     assert dumped["sources"][0]["castType"] == "STRING"
     assert dumped["sources"][0]["tableId"] == "t1"
@@ -76,16 +74,14 @@ def test_view_doc_multi_fuente_roundtrip():
 def test_view_body_acepta_campos_f3():
     body = ViewBody.model_validate({
         "name": "v", "sourceTableIds": ["t1", "t2"], "showOnCanvas": True,
-        "joinOverride": "t1.id = t2.id",
     })
     dumped = body.model_dump(by_alias=True)
     assert dumped["sourceTableIds"] == ["t1", "t2"]
     assert dumped["showOnCanvas"] is True
-    assert dumped["joinOverride"] == "t1.id = t2.id"
 
 
 def test_view_body_defaults_f3():
     body = ViewBody.model_validate({"name": "v"})
     assert body.sourceTableIds == []
     assert body.showOnCanvas is False
-    assert body.joinOverride is None
+    assert not hasattr(body, "joinOverride")

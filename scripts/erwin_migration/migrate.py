@@ -100,6 +100,17 @@ def _norm_type(t: str) -> str:
     return re.sub(r"\s+", "", (t or "").upper())
 
 
+def _col_type(t: str) -> str:
+    """Doc 92 D6: tipo físico persistido. Los complejos (`<`) que Erwin trae
+    multilínea con tabulaciones se guardan canónicos (`ARRAY<STRUCT<a:VARCHAR(30),
+    …>>`, sinónimos anidados incluidos) o, si no parsean (`@param1`), plegados
+    a UNA línea compacta. Los simples quedan tal cual (vacío ⇒ STRING)."""
+    raw = (t or "").strip()
+    if "<" in raw:
+        return canonicalize_default_type(raw) or raw
+    return raw or "STRING"
+
+
 class Migrator:
     def __init__(self, db, model: ep.ErwinModel, project_name: str | None,
                  only_sa: str | None, keep_unused_udp_defs: bool = False,
@@ -456,6 +467,9 @@ class Migrator:
         # catálogo → no se crean (al reporte).
         self.udp_fixed: dict[str, dict] = {}   # clave `level|view|name` → def FIJA
         fixed_pid: dict[tuple[str, str, str], str] = {}
+        # Doc 91 D8: ids de plataforma de las defs FIJAS por (level, view,
+        # nombre normalizado) — `views()` estampa «Tipo de Vista» con esto.
+        self.fixed_pid = fixed_pid
         for fx in std_udps.FIXED_UDPS:
             lookup_key = (fx["name"].strip().upper(), fx["level"], fx["view"])
             existing = self.ex_udp.get(lookup_key)
@@ -747,7 +761,7 @@ class Migrator:
                     "tableId": pid, "physicalName": a.physical,
                     "physicalNameOverridden": c_override,
                     "logicalName": a.name, "parentDomainId": dom_pid,
-                    "dataType": a.data_type or "STRING",
+                    "dataType": _col_type(a.data_type),
                     "typeOverridden": overridden,
                     "logicalDataType": col_log,
                     "logicalTypeOverridden": log_overridden,
@@ -949,7 +963,7 @@ class Migrator:
                 origin = self.attr_idx.get(a.parent_attr_ref or "")
                 origin_tid = (self.table_pid.get(origin.owner_id)
                               if origin and origin.owner_kind == "Entity" else None)
-                cast = (a.data_type if origin
+                cast = (_col_type(a.data_type) if origin
                         and _norm_type(origin.data_type) != _norm_type(a.data_type)
                         else None)
                 src = {
@@ -970,20 +984,33 @@ class Migrator:
                     src["description"] = vdef
                     self.stats["columnas de vista con definición propia"] += 1
                 sources.append(src)
+            # Doc 91 D8: `User_Defined_SQL` de Erwin → `customSql` VERBATIM (la
+            # vista es Personalizada: el export la emite tal cual) y el UDP fijo
+            # «Tipo de Vista» = Personalizada (mismo contrato que el front). Las
+            # columnas siguen siendo las que Erwin declara en la vista (S5).
+            udp_values = self._udp_values_for(v.id, "view")
+            custom_sql = (v.user_defined_sql or "").strip() or None
+            if custom_sql:
+                tipo_pid = self.fixed_pid.get(("view", "physical", pol.norm_enum("Tipo de Vista")))
+                if tipo_pid:
+                    udp_values[tipo_pid] = "Personalizada"
+                self.stats["vistas con User-Defined SQL (Personalizada)"] += 1
             self._upsert("views", pid, {
                 # `sql` = el CREATE VIEW ORIGINAL de Erwin (ViewProps.SQL, doc 19
                 # §12). El export DDL sigue generando desde `sources` (estructura);
                 # esto preserva la definición fuente como metadata de referencia.
+                # Doc 91: sin `tags`/`filter`/`joinOverride` (retirados del modelo).
                 "name": v.name, "schema": schema, "sql": v.sql or "",
                 "description": v.definition or v.comment or None,
                 "tableId": source_pids[0], "sourceTableIds": source_pids,
-                "sources": sources, "tags": [], "filter": None,
+                "sources": sources,
                 "outputAlias": None, "expression": None,
+                "customSql": custom_sql,
                 # doc 61 r2: nivel UDP 'view' (Tipo de Vista si el XML lo trae;
                 # sin valor ⇒ rige el default Regular de la def fija).
-                "udpValues": self._udp_values_for(v.id, "view"),
+                "udpValues": udp_values,
                 # decisión owner: TODAS las vistas visibles en canvas
-                "showOnCanvas": True, "joinOverride": None,
+                "showOnCanvas": True,
                 "erwinLongId": v.id})
             self.stats["vistas"] += 1
 

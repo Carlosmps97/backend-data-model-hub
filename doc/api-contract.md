@@ -2316,16 +2316,17 @@ class ViewDoc:
     description: str | None       # definición funcional a nivel VISTA (F5)
     tableId: str | None           # compat (fuente única legacy)
     schema: str | None            # via alias (populate_by_name)
-    tags: list[str] = []
-    filter: str | None
     sources: list[dict] = []      # cada source: {column?, tableId?, outputAlias?,
                                   #   expression?, castType?, description?}
     outputAlias: str | None
     expression: str | None
     sourceTableIds: list[str] = []  # F3: fuentes multi-tabla
     showOnCanvas: bool = False      # la vista se pinta como nodo en el canvas
-    joinOverride: str | None        # condición de JOIN manual (si no, se infiere)
+    customSql: str | None           # doc 91: User-Defined SQL (sentencia completa, VERBATIM)
+    udpValues: dict[str, str] = {}  # doc 61: UDPs de nivel 'view'
 ```
+
+> Doc 91 (2026-09-17): `tags`, `filter`, `joinOverride` y `customColumns` se **retiraron** del modelo (los UDP de vista reemplazan a las etiquetas; cualquier WHERE/JOIN vive en el User-Defined SQL; las columnas de salida son siempre `sources`). Un doc legacy que los traiga los pierde al validar (`extra="ignore"`).
 
 > Nota: `schema` es palabra reservada de Pydantic; internamente es `sql_schema` con alias `schema`. El campo viaja como `schema` en ambos sentidos. `sources[].description` es la definición funcional de la columna EN la vista (doc 22 F5).
 
@@ -2343,7 +2344,7 @@ curl "http://localhost:8000/api/views?tableIds=t-1,t-2,t-3"
 
 ### 6.2 POST /api/views
 
-Propósito: crea una vista. Body `ViewBody`. **409** si no trae ninguna fuente (`sourceTableIds` vacío y sin `tableId`): `{ "detail": "The view needs at least one source table." }` — una vista sin tabla fuente no puede derivar ni DDL ni canvas. Con 2 o más fuentes SIN `joinOverride` sí se permite guardar (el JOIN se infiere de las relaciones al generar el DDL en el front).
+Propósito: crea una vista. Body `ViewBody`. **409** si no trae ninguna fuente (`sourceTableIds` vacío y sin `tableId`): `{ "detail": "The view needs at least one source table." }` — una vista sin tabla fuente no puede derivar ni DDL ni canvas. Con 2 o más fuentes el DDL del front las lista `FROM t1, t2` (doc 91 D5, como Erwin); el backend no valida joins.
 
 ```bash
 curl -X POST http://localhost:8000/api/views \
@@ -2354,34 +2355,25 @@ curl -X POST http://localhost:8000/api/views \
         "schema":"reporting",
         "sourceTableIds":["t-1"],
         "showOnCanvas":true,
-        "tags":["kpi","ventas"],
         "sources":[{"column":"CLIENTE_ID","tableId":"t-1","outputAlias":"cli_id"}]
       }'
 ```
 
 Respuesta: `201 Created`.
 
-`customSql` (doc 61, modo **Personalizada**): si viene NO vacío, el backend lo valida con sqlglot (dialecto `databricks`; un solo statement, raíz SELECT — `WITH … AS` y set-ops soportados —, anti-`SELECT *`, expresiones con alias) y **re-deriva** `customColumns` (no se confía en el cliente). Inválido → **422** `{ "detail": { "message", "line", "col" } }`. Vacío/ausente → modo Regular (`customSql=null`, `customColumns=[]`). El camino changeset valida igual al grabar el cambio (`payload_error`) y re-deriva en el apply.
+`customSql` (doc 61 → doc 91, **User-Defined SQL**, modo Personalizada): si viene NO vacío se guarda **verbatim** (sólo `strip()`), **sin validación** de sintaxis — es la sentencia `CREATE VIEW …` completa tal como la escribió el modelador (igual que el `User_Defined_SQL` de Erwin) y el Export DDL la emite tal cual. Vacío/ausente → modo Regular (`customSql=null`). El camino changeset hace la misma normalización en el apply; `payload_error` ya no lo parsea. En ese modo, `sources` lista todas las columnas de las tablas fuente (lo que pinta el canvas).
 
 ### 6.3 PUT /api/views/{vid}
 
-Propósito: actualiza. **404** (`"Vista no encontrada."`) si no existe. Misma validación/derivación de `customSql` que el POST.
+Propósito: actualiza. **404** (`"View not found."`) si no existe. Misma normalización de `customSql` que el POST.
 
 ### 6.4 DELETE /api/views/{vid}
 
 Propósito: elimina. **404** si no existe. Respuesta: `{ "id": "<vid>" }`.
 
-### 6.5 POST /api/views/sql/parse *(doc 61)*
+### 6.5 ~~POST /api/views/sql/parse~~ *(retirado, doc 91 D6)*
 
-Propósito: valida e interpreta el SQL custom **sin guardar** (botón Validate del sandbox de Query SQL del panel de vista). Body `{ "sql": "<script>" }`.
-
-Respuesta (`data`): `{ "columns": [{ "name", "expression"? }], "tables": ["schema.tabla", …] }` — `columns` = proyección del SELECT final; `tables` = tablas referenciadas reales (CTEs excluidos, para diagnóstico). Inválido → **422** `{ "detail": { "message", "line", "col" } }` (posiciones 1-based para el caret del editor).
-
-```bash
-curl -X POST http://localhost:8000/api/views/sql/parse \
-  -H "Content-Type: application/json" \
-  -d '{ "sql": "WITH b AS (SELECT id FROM core.t1) SELECT id AS codigo FROM b" }'
-```
+El sandbox de validación del doc 61 se eliminó: el User-Defined SQL no se valida ni se interpreta (no hay columnas derivadas). Cualquier llamada responde **404**.
 
 ---
 
@@ -2931,10 +2923,14 @@ Propósito: filas del reporte a **nivel tabla** del proyecto. Params:
 | `schema` | string | igualdad exacta sobre el schema de la tabla |
 | `subjectArea` | string | canvas (nombre) |
 | `limit` | int (≥0) | acota tras ordenar (carga inicial liviana; fast-path sin filtros) |
+| `offset` | int (≥0, def 0) | doc 92 D3: página del scroll infinito del front — sólo aplica en el fast-path sin filtros (orden `physicalName`) |
 
 ```bash
 curl "http://localhost:8000/api/reporting/tables?projectId=p-001&schema=ventas&limit=50"
+curl "http://localhost:8000/api/reporting/tables?projectId=p-001&limit=50&offset=100"
 ```
+
+**GET /api/reporting/tables/count?projectId=** *(doc 92 D4)* — `{ "total": <int> }`: tablas activas del proyecto. Es el conteo REAL que muestra la barra del Reporting y el que usa «Select all» aunque la grilla tenga cargada sólo una página.
 
 Cada fila (`ReportTableRow`):
 ```json
@@ -2969,7 +2965,7 @@ curl "http://localhost:8000/api/reporting/columns?projectId=p-001&tableId=t-1"
 
 Cada fila (`ReportColumnRow`): `tableId`, `physicalName`, `logicalName`, `dataType`, `parentDomain` (nombre del dominio, no id), `isPrimaryKey`, `isForeignKey`, `isNullable`, `isPartition`, `description`, `ordinal`. Ordenadas por `(tableId, ordinal)`.
 
-**GET /api/reporting/views** — vistas para el export por niveles: fuentes resueltas a `schema.tabla` legible, `filter` (WHERE de la vista), `joinOverride`, el `sql` completo y el detalle columna a columna del editor de vistas (`outputAlias`, tabla/columna de origen, `castType`, `expression`). Params:
+**GET /api/reporting/views** — vistas para el export por niveles: fuentes resueltas a `schema.tabla` legible, el `sql` (referencia congelada), `customSql` (User-Defined SQL, doc 91) y el detalle columna a columna del editor de vistas (`outputAlias`, tabla/columna de origen, `castType`, `expression`). Doc 91: sin `filter` ni `joinOverride`. Params:
 
 | Param | Tipo | Nota |
 |---|---|---|
