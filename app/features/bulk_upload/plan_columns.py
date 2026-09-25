@@ -2,8 +2,9 @@
 su tabla por lógico (fila de la hoja de tablas o tabla efectiva única);
 identidad por físico (declarado/derivado) con fallback por lógico único; tipo
 heredado del parent domain o declarado (gramática de la plataforma); PK
-autoritativa con `pkPosition` por orden de la hoja; UDP por el mapeo del
-perfil (una cabecera → N defs). Defaults solo en columnas nuevas;
+autoritativa para las columnas listadas (doc 94: sin orden de llave aparte —
+las columnas nuevas nacen PK primero y el orden único rige al mostrar y
+exportar); UDP por el mapeo del perfil (una cabecera → N defs). Defaults solo en columnas nuevas;
 `onExistingColumn: reject` corta las existentes. Puro.
 """
 from __future__ import annotations
@@ -31,7 +32,7 @@ class ColumnPlan:
     existing: dict | None = None
     doc: dict | None = None
     pk: bool = False
-    fields: dict | None = None       # campos resueltos antes del cierre (pkPosition)
+    fields: dict | None = None       # campos resueltos antes del cierre (ordinal, projectId)
 
 
 def column_doc(fields: dict) -> dict:
@@ -135,17 +136,11 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
         cp.fields["ordinal"] = next_ordinal
         next_ordinal += 1
 
-    # PK: la hoja es autoritativa para las columnas listadas; las PK existentes
-    # NO listadas conservan su posición y las de la hoja van después, en orden.
-    listed_ids = {cp.id for cp in plans if cp.action != "error"}
-    base = sum(1 for c in existing_cols if c.get("isPrimaryKey") and str(c.get("id")) not in listed_ids)
-    pk_index = 0
+    # PK: la hoja es autoritativa para las columnas listadas (doc 94: la llave
+    # no tiene orden aparte — lo da el ordinal; las existentes lo conservan).
     for cp in plans:
         if cp.action == "error":
             continue
-        if cp.pk:
-            cp.fields["pkPosition"] = base + pk_index
-            pk_index += 1
         cp.fields["projectId"] = ctx.project_id            # doc 75 I1
         _close(cp, rb, tp, h)
     return plans
@@ -273,7 +268,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     cp.fields = {
         "id": cid, "tableId": tp.id, "physicalName": physical, "logicalName": logical,
         "parentDomainId": domain_id, "dataType": data_type, "typeOverridden": type_overridden,
-        "isPrimaryKey": True if r.pk else None, "pkPosition": None,
+        "isPrimaryKey": True if r.pk else None,
         "isForeignKey": (existing or {}).get("isForeignKey"),
         "isNullable": is_nullable, "isPartition": is_partition, "description": description,
         "ordinal": int(existing.get("ordinal") or 0) if existing is not None else 0,

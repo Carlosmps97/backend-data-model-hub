@@ -3,7 +3,7 @@ puede pisar ni eliminar términos HOY bloqueados (bloqueado = intocable para
 TODOS hasta que un admin desbloquee; ese unlock queda auditado).
 
 Refinamiento (E2E en vivo): D4 protege el CONTENIDO de la entrada
-(term/abbrev/scope/wordType) — los campos de lock NO cuentan en la comparación
+(term/abbrev/scope) — los campos de lock NO cuentan en la comparación
 y el lock vigente NUNCA se revierte: entrada bloqueada con contenido idéntico
 en el snapshot = se PRESERVA (ni upsert ni soft-delete), sin 409."""
 from __future__ import annotations
@@ -18,7 +18,7 @@ from app.features.data_standards import repository as ds_repo, service
 
 
 LOCKED_NOW = {"id": "t1", "term": "codigo", "abbrev": "COD", "scope": "column",
-              "wordType": None, "locked": True, "lockedBy": "admin",
+              "locked": True, "lockedBy": "admin",
               "lockedAt": "2026-07-11T00:00:00+00:00"}
 
 

@@ -160,6 +160,18 @@ def test_apply_column_types_sql_multi_statement_solo_toca_la_lista_de_columnas()
     assert out == EXPECTED_SQL + base[len(BASE_SQL):]
 
 
+def test_apply_column_types_sql_con_nombres_sin_comillas_que_son_palabras_clave():
+    """Doc 93 D13: sin comillas, una columna llamada `char` o `array` se
+    tokeniza como palabra clave — igual es la cabeza de su definición."""
+    sql = ("CREATE OR REPLACE TABLE bcp_ddv.hd_venta (\n  codclavecic char(10),\n  char char(3),\n"
+           "  array string\n)\nUSING DELTA;")
+    ctx = {**CTX, "ARRAY": {**CTX["CHAR"], "nombre": "ARRAY", "tipo": "STRING"}}
+    out, log = render.apply_column_types_sql(sql, [CHAR_VARCHAR], "ddl.tabla_fisica", BASE, ctx, CONFIG)
+    assert out == (sql.replace("codclavecic char(10)", "codclavecic varchar(10)")
+                      .replace("char char(3)", "char varchar(3)"))
+    assert [e["column"] for e in log if e["status"] == "applied"] == ["codclavecic", "char"]
+
+
 def test_apply_column_types_sql_texto_no_tokenizable_queda_intacto():
     raw = "CREATE TABLE t (`a` CHAR(3) COMMENT 'sin cerrar);"
     out, log = render.apply_column_types_sql(raw, [CHAR_VARCHAR], "ddl.tabla_fisica", BASE,
@@ -173,23 +185,24 @@ def test_apply_column_types_sql_texto_no_tokenizable_queda_intacto():
 def test_generador_mapea_los_tipos_que_conserva_la_rej():
     stmts, log = g.run_generators([REJ, CHAR_VARCHAR], TABLE, COLS, BASE, CTX, CONFIG, {"identifierCase": "lower"})
     sql = stmts[0]["sql"]
-    assert re.search(r"`codmes`\s+VARCHAR\(6\)", sql)          # partición: conserva el tipo → mapeado
-    assert re.search(r"`codclavecic`\s+STRING", sql)           # force_type manda en las demás
-    assert re.search(r"`tiporeject`\s+STRING", sql)
+    assert re.search(r"\n  codmes varchar\(6\)\n", sql)          # partición: conserva el tipo → mapeado
+    assert re.search(r"\n  codclavecic string,", sql)            # force_type manda en las demás
+    assert re.search(r"\n  tiporeject string,", sql)
     assert [e for e in log if e.get("rule") == "char_a_varchar"] == [
         {"rule": "char_a_varchar", "column": "CODMES", "status": "applied", "artifact": "ddl.tabla_rej",
          "object": "CHAR(6) → VARCHAR(6)"}]
     # sin la regla sobre la _rej (appliesTo solo física) la partición sale tal cual
     solo_fisica = {**CHAR_VARCHAR, "appliesTo": ["ddl.tabla_fisica"]}
     stmts2, _ = g.run_generators([REJ, solo_fisica], TABLE, COLS, BASE, CTX, CONFIG, {"identifierCase": "lower"})
-    assert re.search(r"`codmes`\s+CHAR\(6\)", stmts2[0]["sql"])
+    assert re.search(r"\n  codmes char\(6\)\n", stmts2[0]["sql"])
 
 
 def test_pipeline_fisica_y_rej_e_idempotencia():
     out = pipeline.render_export(PAYLOAD, [CHAR_VARCHAR, REJ], CONFIG, DEFS, {})
     by_art = {s["artifact"]: s["sql"] for s in out["statements"]}
     assert by_art["ddl.tabla_fisica"] == EXPECTED_SQL
-    assert "VARCHAR(6)" in by_art["ddl.tabla_rej"] and "CHAR(6)" not in by_art["ddl.tabla_rej"].replace("VARCHAR", "")
+    rej = by_art["ddl.tabla_rej"]
+    assert "varchar(6)" in rej and "char(6)" not in rej.replace("varchar", "")
     applied = [(e["artifact"], e["column"]) for e in out["log"] if e.get("rule") == "char_a_varchar"]
     assert applied == [("ddl.tabla_fisica", "codclavecic"), ("ddl.tabla_fisica", "char"),
                        ("ddl.tabla_fisica", "codmes"), ("ddl.tabla_rej", "CODMES")]
@@ -260,7 +273,7 @@ def test_service_test_rule_types_solo_lista_las_columnas_que_cambian(monkeypatch
     assert out["matched"] == 3 and out["total"] == 5
     frags = {f["column"]: f for f in out["fragments"]}
     assert set(frags) == {"CODCLAVECIC", "CHAR", "CODMES"}
-    assert frags["CODCLAVECIC"]["sql"] == "`codclavecic` VARCHAR(10)"
+    assert frags["CODCLAVECIC"]["sql"] == "codclavecic varchar(10)"
     assert frags["CODCLAVECIC"]["why"] == "CHAR(10) → VARCHAR(10)"
 
 

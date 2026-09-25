@@ -48,11 +48,11 @@ async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody) -
     if existing.get("locked"):
         raise HTTPException(
             status_code=409,
-            detail=(f"El término '{existing['term']}' está bloqueado por ADMIN; "
-                    "desbloquealo antes de editarlo."))
-    # Solo se re-valida si CAMBIA el texto del término (editar la abreviatura o
-    # el wordType no dispara el chequeo de corpus). Se excluye a sí mismo del
-    # chequeo de duplicados.
+            detail=(f"The term '{existing['term']}' is locked by an admin; "
+                    "unlock it before editing it."))
+    # Solo se re-valida si CAMBIA el texto del término (editar la abreviatura
+    # no dispara el chequeo de corpus). Se excluye a sí mismo del chequeo de
+    # duplicados.
     if body.term.strip().lower() != (existing.get("term") or "").strip().lower():
         await ensure_term_valid(project_id, body.term, body.scope, exclude_id=entry_id)
     return await repository.update_entry(entry_id, body.model_dump())
@@ -63,8 +63,8 @@ async def delete_entry(entry_id: str) -> bool:
     if existing is not None and existing.get("locked"):
         raise HTTPException(
             status_code=409,
-            detail=(f"El término '{existing['term']}' está bloqueado por ADMIN; "
-                    "desbloquealo antes de eliminarlo."))
+            detail=(f"The term '{existing['term']}' is locked by an admin; "
+                    "unlock it before deleting it."))
     return await repository.delete_entry(entry_id)
 
 
@@ -123,7 +123,7 @@ async def validate_term(project_id: str, term: str, scope: str, exclude_id: str 
     `total` = corpus + 1 si hay duplicado."""
     entries = await repository.list_entries(project_id, scope)
     dup = find_glossary_duplicate(term, entries, exclude_id)
-    corpus, corpus_total = await repository.corpus_conflicts(project_id, corpus_regex(term))
+    corpus, corpus_total = await repository.corpus_conflicts(project_id, corpus_regex(term), scope)
     total = corpus_total + (1 if dup else 0)
     return {"ok": total == 0,
             "conflicts": {"glossaryDuplicate": dup, "corpus": corpus, "total": total}}
@@ -136,11 +136,12 @@ async def ensure_term_valid(project_id: str, term: str, scope: str,
     result = await validate_term(project_id, term, scope, exclude_id)
     if not result["ok"]:
         total = result["conflicts"]["total"]
+        kind = "table" if scope == "table" else "column"
         raise HTTPException(
             status_code=409,
-            detail=(f"El término '{term}' ya existe en el glosario o aparece en "
-                    f"nombres lógicos del catálogo ({total} conflicto"
-                    f"{'s' if total != 1 else ''})."),
+            detail=(f"The term '{term}' can't be added: it already exists in the glossary or "
+                    f"appears as a full phrase in logical {kind} names ({total} conflict"
+                    f"{'s' if total != 1 else ''}). Adding it would rename those {kind}s."),
         )
 
 
@@ -217,6 +218,61 @@ async def _rephysicalize_scope(project_id: str, scope: str) -> int:
     entities = await repository.entities_for_rephysicalize(project_id, scope)
     updates = compute_rephysicalize(entities, mappings, cfg["separator"], cfg["case"])
     return await repository.update_physical_names(scope, updates)
+
+
+# ── Dry-run del re-derivado (doc 94 D7): el aviso del glosario solo con impacto real ──
+
+IMPACT_SAMPLE_CAP = 20
+
+
+def simulate_terms(current: list[dict], upserts: list[dict], deletes: list[str]) -> list[dict]:
+    """Términos de UN scope tal como quedarían tras el batch del borrador:
+    borra `deletes`, reemplaza texto/abreviatura de los `upserts` con id
+    existente y agrega los nuevos. Puro."""
+    gone = set(deletes or [])
+    by_id = {t.get("id"): dict(t) for t in current if t.get("id") not in gone}
+    added: list[dict] = []
+    for u in upserts or []:
+        term, abbrev = (u.get("term") or "").strip(), (u.get("abbrev") or "").strip()
+        if not term or not abbrev:
+            continue
+        if u.get("id") and u["id"] in by_id:
+            by_id[u["id"]].update(term=term, abbrev=abbrev)
+        elif not (u.get("id") and u["id"] in gone):
+            added.append({"term": term, "abbrev": abbrev})
+    return [*by_id.values(), *added]
+
+
+async def impact_preview(project_id: str, scope: str, terms_upsert: list[dict],
+                         terms_delete: list[str], naming: dict | None = None) -> dict:
+    """Cuántos nombres físicos cambiaría el apply del glosario con estos cambios
+    del borrador en `scope` (doc 94 D7). NO escribe. Recorre AMBOS scopes, igual
+    que el apply (`rephysicalize` sin scope): el editado con los términos y el
+    naming simulados, el otro con lo vigente (un desfase previo también se
+    repararía). Devuelve `{columns, columnTables, tables, sample}`; muestra cap
+    20 (`{entity, table, from, to}`)."""
+    changed: dict[str, list[tuple[dict, str]]] = {}
+    for sc in _REPHYS_SCOPES:
+        cfg = await settings_service.get_naming_for(project_id, sc)
+        current = await repository.list_entries(project_id, sc)
+        terms = simulate_terms(current, terms_upsert, terms_delete) if sc == scope else current
+        sep, case = cfg["separator"], cfg["case"]
+        if sc == scope and naming:
+            sep = naming.get("separator", sep) if naming.get("separator") is not None else sep
+            case = naming.get("case") or case
+        entities = await repository.entities_for_rephysicalize(project_id, sc)
+        by_id = {str(e.get("_id", e.get("id"))): e for e in entities}
+        changed[sc] = [(by_id[i], new) for i, new in
+                       compute_rephysicalize(entities, to_mappings(terms), sep, case)]
+    cols, tabs = changed["column"], changed["table"]
+    sample_cols = cols[:IMPACT_SAMPLE_CAP]
+    names = await repository.table_physical_names([e.get("tableId") for e, _ in sample_cols]) if sample_cols else {}
+    sample = [{"entity": "column", "table": names.get(e.get("tableId"), ""),
+               "from": e.get("physicalName"), "to": new} for e, new in sample_cols]
+    sample += [{"entity": "table", "table": e.get("physicalName"), "from": e.get("physicalName"), "to": new}
+               for e, new in tabs[:max(0, IMPACT_SAMPLE_CAP - len(sample))]]
+    return {"columns": len(cols), "columnTables": len({e.get("tableId") for e, _ in cols if e.get("tableId")}),
+            "tables": len(tabs), "sample": sample}
 
 
 async def rephysicalize(project_id: str, scope: str | None = None) -> dict:

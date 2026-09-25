@@ -55,7 +55,10 @@ todos al MISMO proyecto. Dentro de un proyecto los estándares
 (glosario/dominios/defs UDP) se **reúsan por clave natural** — unión
 DISTINTA entre sus archivos: el primero gana y una discrepancia (abreviatura
 o tipo de dominio distinto) va al reporte (`glossary_conflicts`,
-`domain_conflicts`). Entre proyectos NADA se comparte (doc 75).
+`domain_conflicts`). Entre proyectos NADA se comparte (doc 75): un dominio que solo
+define un XML UDV (p. ej. «CodUsuarioProceso», «UnidadMedida») aparece en los Parent Domains de ese
+proyecto UDV, no en «MODELO DDV» (doc 94 §4). El kit siembra todo dominio del XML (con o sin columnas);
+solo salta los placeholders `<root>`/`<default>`.
 
 ## Decisiones aplicadas (owner 2026-07-12 — doc 12 §8)
 
@@ -68,7 +71,7 @@ o tipo de dominio distinto) va al reporte (`glossary_conflicts`,
 | Anotaciones de diagrama | se **descartan** |
 | Índices (Key_Group IF*) | **no se migran** (pendiente feature web) |
 | UDP | Entity→table, Attribute→column, Model→canvas, View→view; **cada faceta Logical/Physical es una def propia** (doc 69: clave `level\|view\|name`, ids `udpfix\|level\|[logical\|]name`) — los valores de ambas facetas van al MISMO `udpValues`; niveles Key_Group/Relationship se omiten |
-| Glosario | scope=column, wordType=None; término duplicado exacto → 1º; full outer join entre archivos — término nuevo se SUMA; **misma palabra con abreviatura distinta = conflicto detectado y reportado (gana la vigente, jamás se pisa)**; `quality a.xml b.xml` lo chequea pre-carga |
+| Glosario | scope=column; término duplicado exacto → 1º; full outer join entre archivos — término nuevo se SUMA; **misma palabra con abreviatura distinta = conflicto detectado y reportado (gana la vigente, jamás se pisa)**; `quality a.xml b.xml` lo chequea pre-carga |
 | Relaciones de subtipo (Type 9 + Subtype_Symbol) | se migran como **subcategorías** (doc 53): `subcategory=true` + `subtypeSymbolId` compartido por grupo |
 
 ## Mapeo
@@ -76,7 +79,7 @@ o tipo de dominio distinto) va al reporte (`glossary_conflicts`,
 Modelo→`projects` · Subject Area→`folders` · ER_Diagram→`subject_areas`
 (canvas, layout inicial en grilla) · Hive_Database→`schemas` (entidad,
 `sch-<name>`) · Entity→`canonical_tables` · Attribute→`canonical_columns`
-(isPk + `pkPosition` del Key_Group PK, `ordinal` único — ver «Orden único de columnas», parentDomainId del
+(isPk del Key_Group PK, `ordinal` único — ver «Orden único de columnas», parentDomainId del
 Parent_Domain_Ref, typeOverridden si difiere del default del dominio,
 `isNullable`, `isPartition` del UDP Particion) · Relationship 2/7→
 `relationships` (**v2, doc 19: UN doc por relación con TODOS sus pares** en
@@ -143,8 +146,8 @@ se comparaba físico vs lógico y ~20k columnas quedaban como falsos overrides.
 Erwin guarda por entidad tres órdenes de atributos/columnas (Attribute order, Column order y Physical
 order) más el de la llave; la plataforma maneja **UN solo orden** (`ordinal`, el mismo en el modelo lógico y
 el físico). El kit lo hereda como el «físico normal» del owner (`policies.column_order`): **las llaves
-primarias primero, en el orden de la llave** (`Key_Group_Members_Order_Ref_Array`, que además es
-`pkPosition`), y después el resto en el **Column order** de Erwin (`Columns_Order_Ref_Array` — lo que el
+primarias primero, en el orden de la llave** (`Key_Group_Members_Order_Ref_Array`; doc 94: ya no se
+guarda un orden de llave aparte), y después el resto en el **Column order** de Erwin (`Columns_Order_Ref_Array` — lo que el
 diagrama y el Table Column Editor muestran por default; sin array cae al Attribute order y, sin éste, al
 `Physical_Order`). El orden físico de la BD (`Physical_Columns_Order_Ref_Array`) sólo ordena los atributos
 para deduplicar homónimas. Los rangos se calculan sobre las columnas conservadas (0..n-1) y las marcas de

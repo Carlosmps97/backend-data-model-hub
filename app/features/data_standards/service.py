@@ -20,6 +20,7 @@ from app.features.ddl_rules import repository as rules_repo
 from app.features.ddl_rules import service as rules_svc
 from app.features.ddl_rules.engine import generators as ddl_generators
 from app.features.ddl_rules.engine import validate as ddl_validate
+from app.features.ddl_rules.output import normalize_output as ddl_normalize_output
 from app.features.glossary import repository as dict_repo, service as dict_svc
 from app.features.domains import repository as dom_repo, service as dom_svc
 from app.features.settings import repository as set_repo, service as set_svc
@@ -51,7 +52,7 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
             for d in domains
         ],
         "dict": [
-            {k: t.get(k) for k in ("id", "term", "abbrev", "scope", "wordType",
+            {k: t.get(k) for k in ("id", "term", "abbrev", "scope",
                                    "locked", "lockedBy", "lockedAt")}
             for t in terms
         ],
@@ -76,7 +77,8 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
             for r in (ddl_rules or [])
         ],
         "ddlConfig": {"lookups": (ddl_config or {}).get("lookups") or {},
-                      "functions": (ddl_config or {}).get("functions") or []},
+                      "functions": (ddl_config or {}).get("functions") or [],
+                      "output": (ddl_config or {}).get("output") or {}},
     }
 
 
@@ -116,6 +118,8 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
             edited.append(f"DDL lookups · {len(patch.lookups)} defined")
         if patch.functions is not None:
             edited.append(f"DDL functions · {len(patch.functions)} defined")
+        if patch.output is not None:
+            edited.append("DDL output settings")
 
     for t in body.termsUpsert:
         label = f"{t.term} → {t.abbrev}"
@@ -161,8 +165,11 @@ def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, di
 def _naming_key(snap: dict):
     """Parte del snapshot que determina los nombres físicos (glosario + naming).
     Dos snapshots con el mismo `_naming_key` producen los mismos physicalName →
-    un rollback entre ellos no necesita re-physicalizar. Puro."""
-    terms = sorted((snap.get("dict") or []), key=lambda t: t.get("id") or "")
+    un rollback entre ellos no necesita re-physicalizar. Solo cuentan los campos
+    que usa el motor (doc 94 D11): ni el lock ni metadata retirada como
+    `wordType` de snapshots viejos disparan un re-derivado. Puro."""
+    terms = sorted(({k: t.get(k) for k in ("id", "term", "abbrev", "scope")}
+                    for t in (snap.get("dict") or [])), key=lambda t: t.get("id") or "")
     return (terms, snap.get("namingConfig") or {})
 
 
@@ -176,7 +183,7 @@ def _domains_key(snap: dict):
 # lockedAt) NO cuentan en la comparación — el lock vigente nunca lo revierte un
 # rollback (los snapshots pre-bloqueo traen locked=False: compararlos daba 409
 # a TODO rollback con términos bloqueados, aunque el contenido fuera idéntico).
-_TERM_CONTENT_KEYS = ("term", "abbrev", "scope", "wordType")
+_TERM_CONTENT_KEYS = ("term", "abbrev", "scope")   # doc 94 D11: sin wordType
 
 
 def remap_udp_values(values: dict | None, udp_map: dict[str, str]) -> dict[str, str] | None:
@@ -276,6 +283,13 @@ async def apply(actor: str, project_id: str, body) -> dict:
     rules_upsert = getattr(body, "rulesUpsert", []) or []
     rules_delete = set(getattr(body, "rulesDelete", []) or [])
     ddl_patch = getattr(body, "ddlConfigPatch", None)
+    # Doc 93 D1: las Output settings se validan ANTES de escribir nada (fail-fast).
+    ddl_output = None
+    if ddl_patch is not None and ddl_patch.output is not None:
+        try:
+            ddl_output = ddl_normalize_output(ddl_patch.output)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
     # Estado de reglas POST-batch: (previas − borradas) pisadas por los upserts.
     post_rules: dict[str, dict] = {rid: r for rid, r in before_rules.items()
@@ -378,22 +392,22 @@ async def apply(actor: str, project_id: str, body) -> dict:
     # medias). Entradas bloqueadas (D4) → 409 para todos; validación contra
     # glosario + corpus de nombres lógicos (misma regla que el CRUD directo:
     # altas y renombres de texto validan (renombres con exclude_id); edits de
-    # abbrev/wordType no. El botón Validar del front es cortesía).
+    # abbrev no. El botón Validar del front es cortesía).
     for tid in body.termsDelete:
         prev = before_terms.get(tid)
         if prev and prev.get("locked"):
             raise HTTPException(
                 status_code=409,
-                detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
-                        "desbloquealo antes de eliminarlo."))
+                detail=(f"The term '{prev['term']}' is locked by an admin; "
+                        "unlock it before deleting it."))
     claimed: set[tuple[str, str]] = set()  # (término normalizado, scope) que ESTE batch da de alta/renombra
     for t in body.termsUpsert:
         prev = before_terms.get(t.id) if t.id else None
         if prev and prev.get("locked"):
             raise HTTPException(
                 status_code=409,
-                detail=(f"El término '{prev['term']}' está bloqueado por ADMIN; "
-                        "desbloquealo antes de editarlo."))
+                detail=(f"The term '{prev['term']}' is locked by an admin; "
+                        "unlock it before editing it."))
         renamed = prev is not None and (
             (t.term or "").strip().lower() != (prev.get("term") or "").strip().lower())
         if prev is None or renamed:
@@ -405,9 +419,9 @@ async def apply(actor: str, project_id: str, body) -> dict:
             if key in claimed:
                 raise HTTPException(
                     status_code=409,
-                    detail=(f"El término '{t.term}' aparece más de una vez en este "
-                            f"batch (scope '{t.scope}'); quitá el duplicado antes "
-                            "de aplicar."))
+                    detail=(f"The term '{t.term}' appears more than once in this "
+                            f"batch (scope '{t.scope}'); remove the duplicate before "
+                            "applying."))
             claimed.add(key)
         if prev is None:  # término AÑADIDO (id nuevo o inexistente)
             await dict_svc.ensure_term_valid(project_id, t.term, t.scope)
@@ -476,9 +490,11 @@ async def apply(actor: str, project_id: str, body) -> dict:
             await rules_repo.update_rule(r.id, {k: v for k, v in data.items() if k != "id"})
         else:
             await rules_repo.create_rule(project_id, data)
-    # 4c) Config del ruleset (lookups/functions): cada bloque no-None reemplaza.
-    if ddl_patch is not None and (ddl_patch.lookups is not None or ddl_patch.functions is not None):
-        await rules_repo.set_config(project_id, lookups=ddl_patch.lookups, functions=ddl_patch.functions)
+    # 4c) Config del ruleset (lookups/functions/output): cada bloque no-None reemplaza.
+    if ddl_patch is not None and (ddl_patch.lookups is not None or ddl_patch.functions is not None
+                                  or ddl_output is not None):
+        await rules_repo.set_config(project_id, lookups=ddl_patch.lookups,
+                                    functions=ddl_patch.functions, output=ddl_output)
     # 4d) Cambios de UDP re-validan las reglas NO tocadas del batch: un valor
     #     eliminado de una lista las marca 'stale' (spec §4); un rename se
     #     re-canoniza vía udpRefs. Colección chica (docenas) — barato.
@@ -540,8 +556,8 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
         names = ", ".join(f"'{t}'" for t in locked)
         raise HTTPException(
             status_code=409,
-            detail=(f"El rollback pisaría o eliminaría términos bloqueados por "
-                    f"ADMIN ({names}); desbloquealos antes de restaurar."))
+            detail=(f"The rollback would overwrite or delete terms locked by an "
+                    f"admin ({names}); unlock them before restoring."))
     preserve = locked_ids_preserved(snap.get("dict") or [], cur.get("dict") or [])
 
     naming_changed = (_naming_key(snap) != _naming_key(cur))
@@ -584,7 +600,7 @@ COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl")
 _UDP_KEYS = ("name", "level", "view", "dataType", "defaultValue", "allowedValues", "description")
 _DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description", "inheritsName",
                 "physicalName", "physicalDescription")   # doc 85 (`udpValues` se remapea aparte)
-_TERM_KEYS = ("term", "abbrev", "scope", "wordType")
+_TERM_KEYS = ("term", "abbrev", "scope")
 _RULE_KEYS = ("name", "description", "kind", "target", "sourceArtifact", "condition", "action",
               "appliesTo", "priority", "enabled")
 
@@ -645,7 +661,7 @@ async def copy_standards(actor: str, target_project_id: str, source_project_id: 
         lookups = {name: {**lk, "fromUdpId": udp_map.get((lk or {}).get("fromUdpId"))}
                    for name, lk in (cfg.get("lookups") or {}).items()}
         await rules_repo.set_config(target_project_id, lookups=lookups,
-                                    functions=cfg.get("functions") or [])
+                                    functions=cfg.get("functions") or [], output=cfg.get("output") or {})
     diff = {"added": [f"{b} copied from «{label}»" for b in wanted], "edited": [], "removed": []}
     version = await _record(actor, target_project_id, "copy",
                             f"Copied from «{label}»: {', '.join(wanted)}", None, diff,

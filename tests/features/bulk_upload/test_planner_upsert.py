@@ -18,7 +18,7 @@ def _table(tid, physical, logical):
 def _col(cid, table, physical, ordinal):
     return {"id": cid, "projectId": "p1", "tableId": table, "physicalName": physical, "logicalName": physical,
             "parentDomainId": None, "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None,
-            "pkPosition": None, "isForeignKey": None, "isNullable": True, "isPartition": False,
+            "isForeignKey": None, "isNullable": True, "isPartition": False,
             "description": None, "ordinal": ordinal, "udpValues": {}}
 
 

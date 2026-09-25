@@ -128,18 +128,18 @@ def test_table_rows_metadata_completa_doc70():
 def test_column_rows_metadata_completa_doc70():
     columns = [{"id": "c1", "tableId": "t1", "physicalName": "COD", "logicalName": "codigo",
                 "dataType": "VARCHAR(30)", "parentDomainId": "d1", "ordinal": 3,
-                "pkPosition": 0, "isPrimaryKey": True, "typeOverridden": True,
+                "pkPosition": 0, "isPrimaryKey": True, "typeOverridden": True,   # pkPosition: dato viejo
                 "logicalTypeOverridden": False, "physicalNameOverridden": True, "logicalOnly": True},
                {"id": "c2", "tableId": "t1", "physicalName": "X", "logicalName": "x", "dataType": "INT", "ordinal": 4}]
     rows = {r["id"]: r for r in column_rows(columns, [{"id": "d1", "name": "Codigo"}])}
     c1 = rows["c1"]
     assert c1["parentDomain"] == "Codigo" and c1["parentDomainId"] == "d1"
-    assert (c1["ordinal"], c1["pkPosition"]) == (3, 0)
+    assert c1["ordinal"] == 3 and "pkPosition" not in c1                # doc 94 D1: campo retirado
     assert "logicalOrdinal" not in c1 and "columnOrdinal" not in c1   # doc 74: un solo orden
     assert (c1["typeOverridden"], c1["logicalTypeOverridden"], c1["physicalNameOverridden"]) == (True, False, True)
     assert (c1["logicalOnly"], c1["physicalOnly"]) == (True, False)
     c2 = rows["c2"]
-    assert c2["parentDomainId"] is None and c2["pkPosition"] is None
+    assert c2["parentDomainId"] is None and "pkPosition" not in c2
     assert (c2["typeOverridden"], c2["physicalNameOverridden"], c2["logicalOnly"], c2["physicalOnly"]) == (False, False, False, False)
 
 

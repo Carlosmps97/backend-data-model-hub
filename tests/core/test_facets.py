@@ -44,7 +44,8 @@ def test_contratos_sin_campos_repetidos_entre_facetas():
     assert "dataType" in fx.COLUMN_FACET_FIELDS["physical"]
     assert "logicalDataType" in fx.COLUMN_FACET_FIELDS["logical"]
     # Doc 74: un solo orden de columnas, compartido por ambas facetas.
-    assert "ordinal" in fx.COLUMN_FACET_FIELDS["shared"] and "pkPosition" in fx.COLUMN_FACET_FIELDS["shared"]
+    # Doc 94 D1: sin orden de llave aparte (`pkPosition` retirado).
+    assert "ordinal" in fx.COLUMN_FACET_FIELDS["shared"] and "pkPosition" not in fx.COLUMN_FACET_FIELDS["shared"]
     assert "defaultDataType" in fx.DOMAIN_FACET_FIELDS["physical"]
 
 

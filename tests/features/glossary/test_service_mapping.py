@@ -13,10 +13,10 @@ def test_to_mappings():
     assert to_mappings(entries) == {"monto": "MTO", "dólares": "USD"}
 
 
-def test_to_mappings_ignora_campos_scope_wordtype():
-    # scope/wordType no afectan el mapa término→abbrev que ve el motor.
+def test_to_mappings_ignora_el_scope():
+    # el scope no afecta el mapa término→abbrev que ve el motor.
     entries = [
-        {"id": "a", "term": "cuenta", "abbrev": "CTA", "scope": "table", "wordType": "prime"},
+        {"id": "a", "term": "cuenta", "abbrev": "CTA", "scope": "table"},
     ]
     assert to_mappings(entries) == {"cuenta": "CTA"}
 

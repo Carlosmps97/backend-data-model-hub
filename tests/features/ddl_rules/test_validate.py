@@ -295,3 +295,31 @@ def test_generator_add_columns_incompletas_son_error():
     msgs = [e["message"] for e in rep["errors"]]
     assert rep["state"] == "invalid"
     assert any("#2" in m for m in msgs) and any("#3" in m for m in msgs)
+
+
+# ── Doc 93 D8 · ANY_COLUMN en reglas de tabla y generadores ────────────────
+
+def test_any_column_en_regla_de_tabla_es_valida_y_enlaza_el_udp_de_columna():
+    r = rule(target="table", appliesTo=["ddl.vista_negocio"],
+             condition='ANY_COLUMN(columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\')',
+             action={"tags": {"isDAC": "True"}})
+    rep = v.validate_rule(r, DEFS, CONFIG, ARTS)
+    assert rep["state"] == "valid", rep["errors"]
+    assert rep["udpRefs"] == [{"udpId": "u-dac-col", "level": "column"}]
+    # fuera del agregado, `columna.*` sigue sin existir en una regla de tabla
+    bad = v.validate_rule(rule(target="table", condition="columna.pk = true AND ANY_COLUMN(columna.pk = true)"),
+                          DEFS, CONFIG, ARTS)
+    assert bad["state"] == "invalid" and "columna" in bad["errors"][0]["message"]
+    # dentro del agregado se sigue validando el valor del UDP de columna (trampa DAC)
+    trap = v.validate_rule(rule(target="table",
+                                condition='ANY_COLUMN(columna.udp["Clasificacion del Dato"] = \'DAC\')'),
+                           DEFS, CONFIG, ARTS)
+    assert any(e["check"] == "Value allowed for UDP" for e in trap["errors"])
+
+
+def test_any_column_en_condicion_de_generador():
+    g = {"name": "g", "kind": "generator", "target": None, "sourceArtifact": "ddl.tabla_fisica",
+         "condition": 'ANY_COLUMN(columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\')', "udpRefs": [],
+         "action": {"emit": {"artifact": "ddl.vista_x", "type": "view", "name": "{tabla.nombre}_x"}},
+         "appliesTo": [], "priority": 100, "enabled": True}
+    assert v.validate_rule(g, DEFS, CONFIG, ARTS)["state"] == "valid"

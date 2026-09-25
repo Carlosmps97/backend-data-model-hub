@@ -18,10 +18,10 @@ def _table(tid="t1", physical="CLIENTE", logical="Cliente"):
             "description": None, "udpValues": {}}
 
 
-def _col(cid, physical, logical, ordinal, pk=False, pk_pos=None, **kw):
+def _col(cid, physical, logical, ordinal, pk=False, **kw):
     doc = {"id": cid, "projectId": "p1", "tableId": "t1", "physicalName": physical, "logicalName": logical,
            "parentDomainId": None, "dataType": "STRING", "typeOverridden": False,
-           "isPrimaryKey": True if pk else None, "pkPosition": pk_pos, "isForeignKey": None,
+           "isPrimaryKey": True if pk else None, "isForeignKey": None,
            "isNullable": not pk, "isPartition": False, "description": None, "ordinal": ordinal, "udpValues": {}}
     doc.update(kw)
     return doc
@@ -78,16 +78,17 @@ def test_tipo_extra_del_dominio_se_acepta_con_su_grafia():
     assert (a["dataType"], a["typeOverridden"]) == ("NUMBER(22,3)", False)
 
 
-def test_pk_posiciones_por_orden_de_la_hoja_y_no_nulable():
+def test_pk_no_nulable_y_sin_orden_de_llave_aparte_doc94():
     p = parsed(tables=[trow(3, "Cliente", schema="ddv")],
                columns=[crow(3, "Cliente", "A", data_type="STRING", pk=True),
                         crow(4, "Cliente", "B", data_type="STRING"),
                         crow(5, "Cliente", "C", data_type="STRING", pk=True)])
     plan = build_plan(p, ctx(schemas=_SCHEMAS))
     a, b, c = (x["payload"] for x in _cols(plan))
-    assert (a["isPrimaryKey"], a["pkPosition"], a["isNullable"]) == (True, 0, False)
-    assert (b["isPrimaryKey"], b["pkPosition"], b["isNullable"]) == (None, None, True)
-    assert (c["isPrimaryKey"], c["pkPosition"], c["isNullable"]) == (True, 1, False)
+    assert (a["isPrimaryKey"], a["isNullable"], a["ordinal"]) == (True, False, 0)
+    assert (b["isPrimaryKey"], b["isNullable"], b["ordinal"]) == (None, True, 2)
+    assert (c["isPrimaryKey"], c["isNullable"], c["ordinal"]) == (True, False, 1)
+    assert all("pkPosition" not in x for x in (a, b, c))              # doc 94 D1: campo retirado
 
 
 def test_solo_atributos_agrega_columnas_a_tabla_existente_por_logico():
@@ -136,18 +137,18 @@ def test_fallback_por_logico_en_columnas_conserva_fisico():
     assert codes(plan, "warning") == ["matched-by-logical", "existing-column"]
 
 
-def test_pk_existente_no_listada_conserva_su_posicion_y_las_nuevas_van_despues():
-    c = ctx(schemas=_SCHEMAS, tables=[_table()], columns_by_table={"t1": [_col("c1", "COD", "Codigo", 0, pk=True, pk_pos=0)]})
+def test_pk_existente_no_listada_conserva_su_ordinal_y_las_nuevas_van_despues():
+    c = ctx(schemas=_SCHEMAS, tables=[_table()], columns_by_table={"t1": [_col("c1", "COD", "Codigo", 0, pk=True)]})
     plan = build_plan(parsed(columns=[crow(3, "Cliente", "Fecha", data_type="DATE", pk=True)]), c)
     (col,) = _cols(plan)
-    assert (col["payload"]["pkPosition"], col["payload"]["ordinal"]) == (1, 1)
+    assert col["payload"]["ordinal"] == 1 and "pkPosition" not in col["payload"]
 
 
 def test_pk_quitada_en_la_hoja_avisa():
-    c = ctx(schemas=_SCHEMAS, tables=[_table()], columns_by_table={"t1": [_col("c1", "COD", "Codigo", 0, pk=True, pk_pos=0)]})
+    c = ctx(schemas=_SCHEMAS, tables=[_table()], columns_by_table={"t1": [_col("c1", "COD", "Codigo", 0, pk=True)]})
     plan = build_plan(parsed(columns=[crow(3, "Cliente", "Codigo", physical="COD")]), c)
     (col,) = _cols(plan)
-    assert (col["payload"]["isPrimaryKey"], col["payload"]["pkPosition"], col["payload"]["isNullable"]) == (None, None, False)
+    assert (col["payload"]["isPrimaryKey"], col["payload"]["isNullable"]) == (None, False)
     assert codes(plan, "warning") == ["pk-removed", "existing-column"]
 
 
@@ -231,10 +232,8 @@ def test_ordinal_pk_primero_en_tabla_nueva_doc81():
     # PKs primero (orden de hoja entre PKs), la no-PK al final.
     assert ordinal == {"Codigo Clave Party Cliente": 0, "Tipo Rol Cliente": 1,
                        "Codigo Clave Cuenta Evaluada": 2, "xd": 3}
-    # pkPosition = orden de llave (mismo orden de hoja entre PKs).
-    assert by_logical["Codigo Clave Party Cliente"]["pkPosition"] == 0
-    assert by_logical["Tipo Rol Cliente"]["pkPosition"] == 1
-    assert by_logical["Codigo Clave Cuenta Evaluada"]["pkPosition"] == 2
+    # Doc 94: no hay orden de llave aparte — la llave sigue el ordinal.
+    assert all("pkPosition" not in pl for pl in by_logical.values())
     assert by_logical["xd"]["isPrimaryKey"] in (None, False)
 
 

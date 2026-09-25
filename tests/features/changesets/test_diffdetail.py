@@ -203,3 +203,13 @@ def test_collect_ref_ids_junta_tablas_y_columnas_de_rel_y_vistas():
     tids, cids = collect_ref_ids(entries)
     assert tids == {"t1", "t2", "t3", "t4", "t5"}
     assert cids == {"c1", "c2", "c9"}
+
+
+def test_pk_position_retirado_no_es_revisable():
+    """Final review #5: `pkPosition` se retiró (doc 94 D1). Un doc viejo que aún
+    lo trae no debe mostrar «Pk position: 0 → —» al editar la columna."""
+    before = {"physicalName": "COD", "logicalName": "cod", "isPrimaryKey": True, "ordinal": 0, "pkPosition": 0}
+    change = {"op": "upsert", "payload": {"physicalName": "COD", "logicalName": "cod", "isPrimaryKey": True,
+                                          "ordinal": 1}}
+    d = entity_detail("canonical_columns", "c9", change, before, RES)
+    assert set(_fields_by_key(d)) == {"ordinal"}

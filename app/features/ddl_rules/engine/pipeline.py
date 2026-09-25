@@ -13,9 +13,13 @@ doc 76):
         sentencias `after` → artefactos generados (orden topológico, cada uno
         con sus propios tags/sentencias)
     después, las vistas de negocio (en el orden del payload), cada una con sus
-    `ALTER VIEW … SET TAGS` de objeto y de columna.
+    `ALTER TABLE … SET TAGS` de objeto y de columna (doc 93 D6: `ALTER VIEW` solo
+    con la Output setting `viewTagsAs = 'view'`).
 """
 from __future__ import annotations
+
+from app.core.column_order import display_order
+from app.core.facets import is_logical_udp
 
 from . import generators as gen
 from . import render
@@ -51,9 +55,9 @@ def _layout_log(run: list[dict], layout: dict) -> list[dict]:
         parts: list[str] = []
         if lay.get("partitionColumns") == "last":
             parts.append("partition columns last")
-        udp = str(lay.get("partitionOrderUdp") or "").strip()
-        if udp and udp == layout.get("partitionOrderUdp"):
-            parts.append(f"ordered by UDP '{udp}'")
+        udp = gen.partition_udp_of(lay)
+        if udp and udp == layout.get("partitionUdp"):
+            parts.append(f"partitions from UDP '{udp}'")
         if parts:
             out.append({"rule": r.get("name"), "status": "applied", "artifact": PHYSICAL,
                         "object": "column layout: " + " · ".join(parts)})
@@ -87,7 +91,19 @@ def render_export(payload: dict, rules: list[dict], config: dict,
     # Opciones del export del canvas: los artefactos generados salen ESPEJO del
     # físico (casing/USING/particiones/LOCATION — pedido owner 07-20).
     export_options = payload.get("options") or {}
-    log += _layout_log(run, gen.layout_from_rules(run))
+    # Doc 93 D10: el UDP de particiones debe existir en el proyecto como def de
+    # COLUMNA física — la MISMA regla que el front (`withUdpPartitions`), así la
+    # física y la _rej nunca eligen particiones distintas (final review #7); si
+    # no, las particiones vuelven al flag de la plataforma y queda en el log.
+    layout = gen.layout_from_rules(run)
+    part_udp = layout.get("partitionUdp")
+    if part_udp and not any(d.get("name") == part_udp and (d.get("level") or "column") == "column"
+                            and not is_logical_udp(d) for d in udp_defs or []):
+        log.append({"rule": None, "status": "skipped", "artifact": PHYSICAL,
+                    "reason": f"Partition UDP '{part_udp}' doesn't exist in this project — partitions "
+                              "come from the platform's partition flag"})
+        layout = {**layout, "partitionUdp": None}
+    log += _layout_log(run, layout)
 
     statements: list[dict] = []
     cols_ctx_by_table: dict[str, dict[str, dict]] = {}
@@ -97,11 +113,12 @@ def render_export(payload: dict, rules: list[dict], config: dict,
         table = entry.get("table") or {}
         cols = entry.get("columns") or []
         t_ctx = table_ctx(table, n_by_id)
-        base_ctx = {"tabla": t_ctx, "modelo": m_ctx}
         cols_ctx = {}
-        for c in sorted(cols, key=lambda x: (x.get("ordinal") or 0)):
-            ctx = column_ctx(c, n_by_id, dom_names)
-            cols_ctx[ctx["nombre"]] = ctx
+        for c in display_order(cols):                        # doc 94: orden único, PK primero
+            col = column_ctx(c, n_by_id, dom_names)
+            cols_ctx[col["nombre"]] = col
+        # Doc 93 D8: `columnas` = las columnas del objeto en curso (ANY_COLUMN).
+        base_ctx = {"tabla": t_ctx, "modelo": m_ctx, "columnas": list(cols_ctx.values())}
         tid = table.get("id") or t_ctx["nombre"]
         cols_ctx_by_table[tid] = cols_ctx
         base_ctx_by_table[tid] = base_ctx
@@ -126,7 +143,8 @@ def render_export(payload: dict, rules: list[dict], config: dict,
             statements.append({"artifact": PHYSICAL, "schema": t_ctx.get("esquema"),
                                "name": t_ctx["nombre"], "sql": base_sql})
         # 2) tags de tabla — una sentencia por regla (doc 76 D4)
-        t_stmts, l = render.table_tag_statements(run, PHYSICAL, ctx, config, full, object_kind="table")
+        t_stmts, l = render.table_tag_statements(run, PHYSICAL, ctx, config, full, object_kind="table",
+                                                 options=export_options)
         log += l
         # 3) tags de columna — una sentencia por columna (spec §8.2)
         c_stmts, l = render.column_tag_statements(run, PHYSICAL, ctx, cols_ctx, config, full,
@@ -138,7 +156,7 @@ def render_export(payload: dict, rules: list[dict], config: dict,
         statements += _addenda(PHYSICAL, t_ctx.get("esquema"), t_ctx["nombre"], t_stmts + c_stmts, after)
         # 5) generadores en cascada (spec §7.3)
         gen_stmts, l = gen.run_generators(run, table, cols, base_ctx, cols_ctx,
-                                          config, export_options)
+                                          config, export_options, layout)
         log += l
         statements += gen_stmts
 
@@ -158,7 +176,7 @@ def render_export(payload: dict, rules: list[dict], config: dict,
                 cols_ctx.setdefault(name, ctx_c)
         base_ctx = (base_ctx_by_table.get(src_ids[0])
                     if src_ids and src_ids[0] in base_ctx_by_table
-                    else {"tabla": {"nombre": "", "udp": {}}, "modelo": m_ctx})
+                    else {"tabla": {"nombre": "", "udp": {}}, "modelo": m_ctx, "columnas": []})
         view_sql = view.get("sql") or ""
         # El objeto se referencia EXACTO como lo creó el front (esquema por
         # default incluido): se lee del propio CREATE VIEW.
@@ -174,13 +192,17 @@ def render_export(payload: dict, rules: list[dict], config: dict,
             continue
         statements.append({"artifact": BUSINESS_VIEW, "schema": view.get("schema"),
                            "name": view.get("name"), "sql": sql})
-        t_stmts, l = render.table_tag_statements(run, BUSINESS_VIEW, v_ctx, config, v_full, object_kind="view")
-        log += l
         proj_ctx = render.projected_cols_ctx(sql, cols_ctx)
-        c_stmts, l = render.column_tag_statements(run, BUSINESS_VIEW, v_ctx, proj_ctx, config, v_full,
+        # Doc 93 D8: para las reglas de OBJETO, `columnas` = lo que la vista
+        # proyecta; si su SQL no se puede leer, se desconoce (ANY_COLUMN se salta).
+        obj_ctx = {**v_ctx, "columnas": list(proj_ctx.values()) if render.readable_select(sql) else None}
+        t_stmts, l = render.table_tag_statements(run, BUSINESS_VIEW, obj_ctx, config, v_full, object_kind="view",
+                                                 options=export_options)
+        log += l
+        c_stmts, l = render.column_tag_statements(run, BUSINESS_VIEW, obj_ctx, proj_ctx, config, v_full,
                                                   export_options, object_kind="view")
         log += l
-        after, l = render.statement_snippets(run, BUSINESS_VIEW, v_ctx, config, "after")
+        after, l = render.statement_snippets(run, BUSINESS_VIEW, obj_ctx, config, "after")
         log += l
         statements += _addenda(BUSINESS_VIEW, view.get("schema"), view.get("name") or "",
                                t_stmts + c_stmts, after)

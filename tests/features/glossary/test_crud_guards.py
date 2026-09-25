@@ -12,7 +12,7 @@ from app.features.glossary.schemas import AbbreviationBody
 
 
 LOCKED = {"id": "t1", "term": "codigo", "abbrev": "COD", "scope": "column",
-          "wordType": None, "locked": True, "lockedBy": "admin",
+          "locked": True, "lockedBy": "admin",
           "lockedAt": "2026-07-10T00:00:00+00:00"}
 UNLOCKED = {**LOCKED, "locked": False, "lockedBy": None, "lockedAt": None}
 
@@ -52,7 +52,8 @@ def test_update_locked_409_sin_tocar(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="codigo", abbrev="CD")))
     assert exc.value.status_code == 409
-    assert "bloqueado" in exc.value.detail
+    # Doc 94 D8: los 409 del glosario van en inglés (la UI lo es).
+    assert exc.value.detail == "The term 'codigo' is locked by an admin; unlock it before editing it."
     updated.assert_not_awaited()
 
 

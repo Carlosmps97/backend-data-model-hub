@@ -20,10 +20,10 @@ def _table(tid="t1", physical="CLIENTE", logical="Cliente", schema="ddv", udp=No
             "description": description, "udpValues": udp or {}}
 
 
-def _col(cid, physical, ordinal, pk=False, pos=None, table="t1"):
+def _col(cid, physical, ordinal, pk=False, table="t1"):
     return {"id": cid, "projectId": "p1", "tableId": table, "physicalName": physical, "logicalName": physical.title(),
             "parentDomainId": None, "dataType": "STRING", "typeOverridden": False,
-            "isPrimaryKey": True if pk else None, "pkPosition": pos, "isForeignKey": None, "isNullable": not pk,
+            "isPrimaryKey": True if pk else None, "isForeignKey": None, "isNullable": not pk,
             "isPartition": False, "description": None, "ordinal": ordinal, "udpValues": {}}
 
 
@@ -101,13 +101,14 @@ def test_sufijo_dac_sigue_el_case_del_naming_de_tablas():
     assert [v["name"] for v in _views(build_plan(parsed(tables=[trow(3, "Cliente")]), c))] == ["cliente", "clientedac"]
 
 
-def test_tabla_existente_sin_cambios_gana_su_vista_con_las_columnas_efectivas_en_orden_de_llave():
+def test_tabla_existente_sin_cambios_gana_su_vista_con_las_columnas_efectivas_en_orden_unico():
+    """Doc 94: el orden único — PK primero y cada bloque por ordinal (sin orden de llave aparte)."""
     c = ctx(schemas=SCHEMAS, tables=[_table(description="Def")],
-            columns_by_table={"t1": [_col("c1", "B", 0), _col("c2", "K2", 1, pk=True, pos=1), _col("c3", "K1", 2, pk=True, pos=0)]})
+            columns_by_table={"t1": [_col("c1", "B", 0), _col("c2", "K2", 1, pk=True), _col("c3", "K1", 2, pk=True)]})
     plan = build_plan(parsed(tables=[trow(3, "Cliente")]), c, new_id=seq_ids())
     assert [ch["collection"] for ch in plan.changes] == ["schemas", "views"]     # la tabla queda intacta
     (view,) = _views(plan)
-    assert [s["column"] for s in view["sources"]] == ["K1", "K2", "B"] and view["description"] == "Def"
+    assert [s["column"] for s in view["sources"]] == ["K2", "K1", "B"] and view["description"] == "Def"
     assert plan.report["summary"]["tables"] == {"create": 0, "update": 0, "unchanged": 1}
     assert plan.report["summary"]["views"] == {"create": 1, "update": 0, "unchanged": 0}
 

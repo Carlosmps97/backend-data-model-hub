@@ -41,3 +41,19 @@ def test_validate_term_vacio_no_llama_al_service(project_client, monkeypatch):
         "data": {"ok": True,
                  "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}},
     }
+
+
+def test_impact_route_registrada_y_delegada(project_client, monkeypatch):
+    """Doc 94 D7: dry-run de solo lectura (sesión, sin standards.edit)."""
+    from unittest.mock import AsyncMock
+    from app.features.glossary import service
+
+    spy = AsyncMock(return_value={"columns": 0, "columnTables": 0, "tables": 0, "sample": []})
+    monkeypatch.setattr(service, "impact_preview", spy)
+    body = {"scope": "column", "termsUpsert": [{"id": "t1", "term": "cliente", "abbrev": "CLTE"}],
+            "termsDelete": ["t2"], "namingConfig": {"separator": "", "case": "upper"}}
+    resp = project_client.post("/api/projects/p1/glossary/impact", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"columns": 0, "columnTables": 0, "tables": 0, "sample": []}
+    spy.assert_awaited_once_with("p1", "column", [{"id": "t1", "term": "cliente", "abbrev": "CLTE"}],
+                                 ["t2"], {"separator": "", "case": "upper"})

@@ -13,7 +13,6 @@ class TermEdit(BaseModel):
     term: str
     abbrev: str
     scope: str                        # 'column' | 'table'
-    wordType: str | None = None
 
 
 class DomainEdit(BaseModel):
@@ -84,9 +83,10 @@ class DdlRuleEdit(BaseModel):
 
 class DdlConfigPatch(BaseModel):
     """Patch del ruleset config: cada bloque que venga no-None REEMPLAZA el set
-    completo (payload chico; sin deltas)."""
+    completo (payload chico; sin deltas). `output` = Output settings (doc 93)."""
     lookups: dict | None = None
     functions: list | None = None
+    output: dict | None = None
 
 
 class ApplyBody(BaseModel):
@@ -103,7 +103,7 @@ class ApplyBody(BaseModel):
     udpDelete: list[str] = []         # ids de definiciones UDP a borrar
     rulesUpsert: list[DdlRuleEdit] = []   # reglas de DDL Export a crear/editar
     rulesDelete: list[str] = []           # ids de reglas a borrar
-    ddlConfigPatch: DdlConfigPatch | None = None  # lookups/functions del ruleset
+    ddlConfigPatch: DdlConfigPatch | None = None  # lookups/functions/output del ruleset
 
 
 class RollbackBody(BaseModel):

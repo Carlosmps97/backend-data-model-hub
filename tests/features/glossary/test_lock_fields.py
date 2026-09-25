@@ -28,7 +28,7 @@ def test_snapshot_of_incluye_lock():
     snap = snapshot_of(
         domains=[],
         terms=[{"id": "t1", "term": "codigo", "abbrev": "COD", "scope": "column",
-                "wordType": "prime", "locked": True, "lockedBy": "admin",
+                "locked": True, "lockedBy": "admin",
                 "lockedAt": "2026-07-10T00:00:00+00:00"}],
         naming={"column": {"separator": "_", "case": "upper"},
                 "table": {"separator": "", "case": "upper"}},

@@ -168,7 +168,6 @@ Desde el doc 75 el pool de tablas/columnas es **por proyecto**: `projectId` en c
 | dataType | str | — | tipo físico |
 | typeOverridden | bool | false | true = `dataType` es override manual (no hereda del dominio) |
 | isPrimaryKey | bool? | null | |
-| pkPosition | int? | null | orden **0-based dentro de la PK** (≠ `ordinal`; ver doc 19 §12b) |
 | isForeignKey | bool? | null | |
 | isNullable | bool | true | |
 | isPartition | bool | false | columna de partición (DDL emite `PARTITIONED BY`) |
@@ -176,7 +175,7 @@ Desde el doc 75 el pool de tablas/columnas es **por proyecto**: `projectId` en c
 | ordinal | int | 0 | **orden único** de la columna en la tabla (el mismo en el modelo lógico y el físico; doc 74) |
 | udpValues | dict[str,str] | {} | `{udpDefId: value}` |
 
-> Dos órdenes distintos y **ambos** persistidos: `ordinal` (orden de columnas, único para ambas facetas) y `pkPosition` (orden de la llave). Erwin/DDL usan el de la llave para `PRIMARY KEY(...)`. La migración Erwin llena `ordinal` con «llaves primero + Column order» (doc 74).
+> Un solo orden (doc 74 · doc 94): `ordinal`, único para ambas facetas, con las PK **siempre primero** y, entre PK, también por `ordinal` — no hay orden de llave aparte (`pkPosition` se retiró en el doc 94; un doc viejo que lo traiga lo pierde al leer). `PRIMARY KEY(...)` del DDL, bloque PK del canvas y vistas usan ese orden. La migración Erwin llena `ordinal` con «llaves primero (en el orden de la llave de Erwin) + Column order» (doc 74).
 
 ---
 
@@ -306,7 +305,6 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | term | str | — | palabra lógica |
 | abbrev | str | — | abreviatura física |
 | scope | str | "column" | `column` \| `table` |
-| wordType | str? | null | `prime` \| `class` \| `modifier` |
 | locked | bool | false | lock por admin (intocable para todos hasta desbloquear) |
 | lockedBy | str? | null | |
 | lockedAt | str? | null | |

@@ -13,13 +13,16 @@ artefacto (tabla de rechazos, vistas técnicas…). PURO.
   prueba de fuego: generador y regla no se conocen).
 
 Doc 76 (macro BCP): las columnas de un artefacto se guardan en ORDEN FÍSICO
-(+ añadidas al final); la disposición «particiones al final» y el orden de
-las particiones por UDP (`layout.partitionOrderUdp`) se aplican SOLO al
-emitir un CREATE TABLE. Las vistas listan `col AS col` en orden físico.
+(+ añadidas al final); la disposición «particiones al final» y las
+particiones por UDP (`layout.partitionUdp`, doc 93 D10: qué columnas y en qué
+orden) se aplican SOLO al emitir un CREATE TABLE. Las vistas listan
+`col AS col` en orden físico.
 """
 from __future__ import annotations
 
 import re
+
+from app.core.column_order import display_order
 
 from . import conditions as cond
 from . import render
@@ -28,13 +31,16 @@ from .expressions import RenderError, expand_template
 ROOTS = ("ddl.tabla_fisica", "ddl.vista_negocio")
 
 
-# ── Doc 73/76 · Column layout ───────────────────────────────────────────────
+# ── Doc 73/76/93 · Column layout ────────────────────────────────────────────
 # Decisión del owner (2026-09-06): las particiones se DISTRIBUYEN desde las
 # reglas del DDL, no cambiando el orden físico del modelo. `layout` admite:
 #   partitionColumns: 'last' | 'keep'   → las de partición al final del CREATE
-#   partitionOrderUdp: 'Particion'      → orden de las particiones (bloque final
-#                                          y PARTITIONED BY) por el correlativo
-#                                          PART_nn del UDP de columna (doc 76 D3)
+#   partitionUdp: 'Particion'           → doc 93 D10: las columnas de partición
+#                                          SON las que tienen PART_nn en ese UDP
+#                                          de columna (el flag `isPartition` de la
+#                                          plataforma se ignora), ordenadas por nn
+#                                          (bloque final y PARTITIONED BY).
+#                                          Alias legado: `partitionOrderUdp`.
 
 # Misma convención del kit (`scripts/erwin_migration/policies.py`): PART_01 → 1.
 _PARTITION_RE = re.compile(r"^PART[_-]?(\d+)$", re.IGNORECASE)
@@ -47,12 +53,19 @@ def partition_correlative(value: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def partition_udp_of(layout: dict | None) -> str | None:
+    """UDP de particiones de un `action.layout` (doc 93 D10): `partitionUdp` o su
+    alias legado `partitionOrderUdp` (reglas guardadas antes del doc 93)."""
+    lay = layout or {}
+    name = str(lay.get("partitionUdp") or lay.get("partitionOrderUdp") or "").strip()
+    return name or None
+
+
 def layout_from_rules(rules: list[dict]) -> dict:
-    """{'partitionsLast': bool, 'partitionOrderUdp': str|None} a partir de las
-    reglas que CORREN (kind='rule', target='table', `action.layout`, appliesTo
-    ∋ ddl.tabla_fisica). Varias reglas de layout se combinan (la primera en
-    run_order que declare el UDP de orden gana)."""
-    out: dict = {"partitionsLast": False, "partitionOrderUdp": None}
+    """{'partitionsLast': bool, 'partitionUdp': str|None} a partir de las reglas
+    que CORREN (kind='rule', target='table', `action.layout`, appliesTo ∋
+    ddl.tabla_fisica). La primera en run_order que declare el UDP gana."""
+    out: dict = {"partitionsLast": False, "partitionUdp": None}
     for r in render.run_order(rules):
         if (r.get("kind") or "rule") != "rule" or r.get("target") != "table":
             continue
@@ -61,9 +74,9 @@ def layout_from_rules(rules: list[dict]) -> dict:
             continue
         if lay.get("partitionColumns") == "last":
             out["partitionsLast"] = True
-        udp = str(lay.get("partitionOrderUdp") or "").strip()
-        if udp and not out["partitionOrderUdp"]:
-            out["partitionOrderUdp"] = udp
+        udp = partition_udp_of(lay)
+        if udp and not out["partitionUdp"]:
+            out["partitionUdp"] = udp
     return out
 
 
@@ -216,51 +229,42 @@ def emit_for_table(gen: dict, produced: dict[str, dict], base_ctx: dict,
 
 def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
                  options: dict | None = None) -> str:
-    """SQL del artefacto generado — ESPEJO del export del canvas (pedido owner
-    07-20): mismos backticks, mismo `identifierCase`, mismo `USING <format>`,
-    mismas particiones heredadas y misma `LOCATION` (carpeta = nombre final con
-    el casing de carpeta del export, p.ej. `…/TBL_X_REJ`) cuando el export es
-    external. Tablas: heredadas → añadidas → PARTICIONES al final (pedido owner
-    07-20), ordenadas por su correlativo cuando el ruleset lo declara (doc 76).
-    Vistas: `col AS col` con el casing del export, sin backticks, en el orden
-    guardado (físico + añadidas al final). Determinista (spec §7.6)."""
+    """SQL del artefacto generado — MISMO estilo que el CREATE físico del front
+    (doc 93 D4): identificadores según `quoteIdentifiers`, tipos con `typeCase`,
+    CREATE según `createTable`, `USING` en mayúscula, `NOT NULL` solo con
+    `includeKeys` (y sin `strip: not_null`), particiones al final ordenadas por su
+    correlativo y `PARTITIONED BY` solo con nombres; LOCATION = base + carpeta
+    con el casing de carpeta (nombre final con su sufijo, p.ej. `…/TBL_X_REJ`).
+    Vistas: `col AS col` en el orden guardado (físico + añadidas al final).
+    Determinista (spec §7.6)."""
     o = options or {}
-    ident = lambda s: render.ident(s, o)                             # noqa: E731 — mismo funnel (doc 71 H2)
     full = render.full_name(art.get("schema"), art["name"], o)
     cols = art.get("columns") or []
     if art.get("kind") == "table":
         meta = source_cols_meta or {}
-        keep_not_null = "not_null" not in (art.get("strip") or set())
-        emitted = layout_columns(cols, {"partitionsLast": True})
-        names = [ident(c["name"]) for c in emitted]
-        width = max((len(n) for n in names), default=0) + 2
+        keep_not_null = bool(o.get("includeKeys")) and "not_null" not in (art.get("strip") or set())
         lines = []
-        for c, n in zip(emitted, names):
-            line = f"  {n:<{width}}{c['type']}"
+        for c in layout_columns(cols, {"partitionsLast": True}):
+            line = f"  {render.ident(c['name'], o)} {render.type_text(c['type'], o)}"
             src = meta.get(c["name"]) or {}
             if keep_not_null and (src.get("nullable") is False or src.get("pk")):
                 line += " NOT NULL"
             lines.append(line)
-        out = f"CREATE {'EXTERNAL ' if o.get('external') else ''}TABLE IF NOT EXISTS {full} (\n"
-        out += ",\n".join(lines) + "\n)"
-        out += f"\nUSING {o.get('tableFormat') or 'delta'}"
+        out = f"{render.create_table_sql(o)} {full} (\n" + ",\n".join(lines) + "\n)"
+        out += f"\nUSING {str(o.get('tableFormat') or 'delta').upper()}"
         if o.get("includePartitions", True):
-            parts = [ident(c["name"]) for c in ordered_partitions(cols)]
+            parts = [render.ident(c["name"], o) for c in ordered_partitions(cols)]
             if parts:
                 out += f"\nPARTITIONED BY ({', '.join(parts)})"
         if o.get("external"):
             base = str(o.get("location") or "").rstrip("/")
-            # misma convención del front: carpeta = nombre final del artefacto
-            # (con su sufijo) con el casing de carpeta del export (doc 76 D9).
             out += f"\nLOCATION '{base}/{render.location_folder(art['name'], o)}'"
         return out + ";"
     src = art.get("sourceRef") or {}
-    src_full = (f"{ident(src.get('schema'))}.{ident(src.get('name'))}"
-                if src.get("schema") else ident(src.get("name") or ""))
-    # Proyecciones `col AS col` con el casing del export y SIN backticks (doc
-    # 76 D8): identificadores del modelo, como las escribe la macro y como
-    # emite el front las vistas de negocio.
-    names = [render.cased(c["name"], o) for c in cols]
+    src_full = render.full_name(src.get("schema"), src.get("name") or "", o)
+    # Proyecciones `col AS col` con el casing del export; comillas solo si el
+    # nombre las necesita (doc 76 D8 · doc 93 D2).
+    names = [render.proj_ident(c["name"], o) for c in cols]
     proj = ",\n  ".join(f"{n} AS {n}" for n in names) or "*"
     return f"CREATE OR REPLACE VIEW {full} AS\nSELECT\n  {proj}\nFROM {src_full};"
 
@@ -280,26 +284,32 @@ def artifact_cols_ctx(art: dict, cols_ctx_by_name: dict[str, dict]) -> dict[str,
 
 
 def physical_columns(table_cols: list[dict], cols_ctx_by_name: dict[str, dict],
-                     partition_order_udp: str | None) -> list[dict]:
-    """Columnas de la tabla física en ORDEN FÍSICO explícito (no el de llegada,
-    doc 73 O2) con su flag de partición y, si el ruleset declara el UDP de
-    orden (doc 76 D3), el correlativo PART_nn leído del contexto de la columna."""
+                     partition_udp: str | None) -> list[dict]:
+    """Columnas de la tabla física en su ORDEN ÚNICO explícito (doc 73 O2 · doc
+    94 D5: PK primero y cada bloque por `ordinal`, igual que el CREATE del
+    front). Doc 93 D10: si el ruleset declara el UDP de particiones, una columna
+    ES de partición si y solo si su valor es PART_nn (el flag `isPartition` de la
+    plataforma se ignora) y se ordena por nn; sin UDP, rige el flag. El tipo es
+    el que emite el front (`ddlType`, doc 93 D4) o, si no viene, el del modelo."""
     out: list[dict] = []
-    for c in sorted(table_cols, key=lambda x: (x.get("ordinal") or 0)):
+    for c in display_order(table_cols):
         name = c.get("physicalName") or c.get("name")
-        is_part = bool(c.get("isPartition"))
-        order = None
-        if is_part and partition_order_udp:
+        if partition_udp:
             udp = (cols_ctx_by_name.get(name) or {}).get("udp") or {}
-            order = partition_correlative(udp.get(partition_order_udp))
-        out.append({"name": name, "type": c.get("dataType") or c.get("type") or "STRING",
+            order = partition_correlative(udp.get(partition_udp))
+            is_part = order is not None
+        else:
+            is_part, order = bool(c.get("isPartition")), None
+        out.append({"name": name,
+                    "type": c.get("ddlType") or c.get("dataType") or c.get("type") or "STRING",
                     "partition": is_part, "partitionOrder": order, "added": False})
     return out
 
 
 def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
                    base_ctx: dict, cols_ctx_by_name: dict[str, dict],
-                   config: dict, options: dict | None = None) -> tuple[list[dict], list[dict]]:
+                   config: dict, options: dict | None = None,
+                   layout: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Cascada completa para UNA tabla física: ejecuta los generadores en orden
     topológico, decora las VISTAS generadas con las reglas de columna que las
     tengan en `appliesTo` y aplica a cada artefacto las reglas de tabla que lo
@@ -308,21 +318,23 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
     TBLPROPERTIES (tablas), tags de objeto (`ALTER TABLE|VIEW … SET TAGS`, una
     sentencia por regla), tags de columna (en vistas, solo sobre las columnas
     proyectadas) y sentencias `after`. `options` = opciones del export del
-    canvas para que los artefactos salgan ESPEJO del físico. Devuelve
-    (statements, log): statements = [{artifact, name, schema, sql, generator}]."""
+    canvas para que los artefactos salgan ESPEJO del físico. `layout` = el del
+    pipeline (ya validado contra los UDP del proyecto, doc 93 D10); sin él se
+    deriva de las reglas. Devuelve (statements, log): statements = [{artifact,
+    name, schema, sql, generator}]."""
     runnable_rules, log = render.runnable(rules)
     gens_ordered, unreachable = generator_order(runnable_rules)
     for g in unreachable:
         log.append({"rule": g.get("name"), "status": "skipped",
                     "reason": "unresolved source artifact (cycle or missing generator)"})
-    layout = layout_from_rules(runnable_rules)
+    layout = layout if layout is not None else layout_from_rules(runnable_rules)
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     produced: dict[str, dict] = {
         "ddl.tabla_fisica": {
             "schema": base_ctx.get("tabla", {}).get("esquema"),
             "name": base_ctx.get("tabla", {}).get("nombre"),
-            "columns": physical_columns(table_cols, cols_ctx_by_name, layout.get("partitionOrderUdp")),
+            "columns": physical_columns(table_cols, cols_ctx_by_name, layout.get("partitionUdp")),
         },
     }
     meta = {(c.get("physicalName") or c.get("name")): {
@@ -344,14 +356,16 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
         if art["kind"] == "table":
             # Doc 90: las columnas del artefacto pasan por las reglas `types`
             # que lo nombren (la _rej conserva el tipo de sus particiones →
-            # también mapean) ANTES de emitir el CREATE.
+            # también mapean) ANTES de emitir el CREATE. Doc 93 D8: `columnas`
+            # = las del artefacto.
+            art_ctx = artifact_cols_ctx(art, cols_ctx_by_name)
+            ctx = {**ctx, "columnas": list(art_ctx.values())}
             art["columns"], l_ty = render.apply_column_types(
-                art["columns"], runnable_rules, art["artifact"], ctx,
-                artifact_cols_ctx(art, cols_ctx_by_name), config)
+                art["columns"], runnable_rules, art["artifact"], ctx, art_ctx, config)
             log.extend(l_ty)
         sql = artifact_sql(art, meta, options)
-        extra_stmts: list[dict] = []
         if art["kind"] == "view":
+            # Las reglas de COLUMNA decoran con `columnas` = las de la fuente.
             sql, sub_log = render.decorate_view_sql(
                 sql, art["artifact"], runnable_rules, config, ctx, cols_ctx_by_name)
             log.extend(sub_log)
@@ -360,8 +374,10 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
                             "reason": f"{art['schema']}.{art['name']}: every column was excluded — view not emitted"})
                 continue
             view_ctx = render.projected_cols_ctx(sql, cols_ctx_by_name)
+            ctx = {**ctx, "columnas": list(view_ctx.values())}       # doc 93 D8: lo que proyecta
             t_stmts, l_t = render.table_tag_statements(
-                runnable_rules, art["artifact"], ctx, config, full_art, object_kind="view")
+                runnable_rules, art["artifact"], ctx, config, full_art, object_kind="view",
+                options=options)
             c_stmts, l_c = render.column_tag_statements(
                 runnable_rules, art["artifact"], ctx, view_ctx, config, full_art, options,
                 object_kind="view")
@@ -375,8 +391,10 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
             if before:
                 sql = "\n".join(before) + "\n" + sql
             art_ctx = artifact_cols_ctx(art, cols_ctx_by_name)
+            ctx = {**ctx, "columnas": list(art_ctx.values())}
             t_stmts, l_t = render.table_tag_statements(
-                runnable_rules, art["artifact"], ctx, config, full_art, object_kind="table")
+                runnable_rules, art["artifact"], ctx, config, full_art, object_kind="table",
+                options=options)
             c_stmts, l_c = render.column_tag_statements(
                 runnable_rules, art["artifact"], ctx, art_ctx, config, full_art, options,
                 object_kind="table")

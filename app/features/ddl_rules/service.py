@@ -26,12 +26,8 @@ from .engine import validate as engine_validate
 from .engine.context import column_ctx, names_by_id, table_ctx
 from .engine.expressions import RenderError, build_expression, expand_template
 from .models import ROOT_ARTIFACTS
-from .templates import SEED_LOOKUPS, SEED_RULES, TEMPLATES
-
-# Doc 76 D9: el bench «Test» del editor muestra los fragmentos con el MISMO
-# perfil de casing que el export por default (identificadores en minúscula);
-# el export real usa las opciones del modal.
-BENCH_OPTIONS = {"identifierCase": "lower"}
+from .output import effective_output
+from .templates import SEED_LOOKUPS, SEED_OUTPUT, SEED_RULES, TEMPLATES
 
 
 async def list_rules(project_id: str) -> list[dict]:
@@ -111,7 +107,8 @@ async def templates_payload(project_id: str) -> dict:
         udp_id = by_level_name.get((lk.get("fromLevel"), lk.pop("fromUdpName", None)))
         if udp_id:
             lk["fromUdpId"] = udp_id
-    return {"templates": TEMPLATES, "seedRules": SEED_RULES, "seedLookups": lookups}
+    return {"templates": TEMPLATES, "seedRules": SEED_RULES, "seedLookups": lookups,
+            "seedOutput": copy.deepcopy(SEED_OUTPUT)}
 
 
 # ── Test contra una tabla real + impacto (bench del editor, 16c) ──────────
@@ -146,6 +143,9 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     Devuelve los FRAGMENTOS generados de las columnas/objetos que matchean —
     no el DDL completo (eso es del export)."""
     defs, config, n_by_id, domains = await _engine_inputs(project_id)
+    # Doc 93 D1: el bench muestra los fragmentos con las Output settings del
+    # proyecto (mismo estilo que el export por default).
+    bench = effective_output(config.get("output"))
     tables = await catalog_repo.list_tables_by_ids([table_id])
     if not tables:
         raise HTTPException(status_code=404, detail="That table doesn't exist.")
@@ -160,7 +160,7 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     full = f"{t_ctx['esquema']}.{t_ctx['nombre']}" if t_ctx.get("esquema") else t_ctx["nombre"]
     # Los fragmentos de tags salen calificados como en el export (doc 71 H2),
     # con el casing por default del export (doc 76 D9).
-    full_ident = engine_render.full_name(t_ctx.get("esquema"), t_ctx["nombre"], BENCH_OPTIONS)
+    full_ident = engine_render.full_name(t_ctx.get("esquema"), t_ctx["nombre"], bench)
     artifact = (rule.get("appliesTo") or ["ddl.tabla_fisica"])[0]
     # Doc 76 D5: el fragmento respeta el TIPO del artefacto destino (ALTER
     # TABLE | ALTER VIEW). El bench muestra el objeto con el nombre de la tabla
@@ -168,8 +168,9 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     obj_kind = artifact_kinds(await repository.list_rules(project_id)).get(artifact) \
         or ("view" if "vista" in artifact else "table")
     base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
+                "columnas": list(cols_ctx.values()),                  # doc 93 D8: ANY_COLUMN
                 "artefacto": engine_render.artifact_ctx(t_ctx.get("esquema"), t_ctx["nombre"], obj_kind,
-                                                        BENCH_OPTIONS)}
+                                                        bench)}
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     fragments: list[dict] = []
@@ -179,7 +180,7 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
         cond_ast = engine_cond.parse_condition(rule.get("condition") or "")
         if rule.get("kind") == "generator":
             stmts, _ = engine_generators.run_generators(
-                [rule], table, cols_sorted, base_ctx, cols_ctx, config)
+                [rule], table, cols_sorted, base_ctx, cols_ctx, config, bench)
             matched = 1 if stmts else 0
             fragments = [{"label": s["artifact"], "sql": s["sql"]} for s in stmts]
             total = 1
@@ -197,7 +198,8 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                         fragments += [{"label": f"{full} · {position}", "sql": s, "why": why} for s in stmts]
                 if action.get("tags"):
                     stmts, _ = engine_render.table_tag_statements(
-                        [rule], artifact, base_ctx, config, full_ident, object_kind=obj_kind)
+                        [rule], artifact, base_ctx, config, full_ident, object_kind=obj_kind,
+                        options=bench)
                     fragments += [{"label": full, "sql": s, "why": why} for s in stmts]
                 if action.get("tblproperties"):
                     pairs = []
@@ -211,18 +213,18 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                                           "sql": "TBLPROPERTIES (" + ", ".join(pairs) + ")",
                                           "why": why})
                 if action.get("layout"):
-                    # Doc 73/76: muestra el orden de EMISIÓN resultante de las
-                    # columnas (particiones al final, ordenadas por el UDP).
+                    # Doc 73/76/93: orden de EMISIÓN resultante (particiones al
+                    # final); con UDP, las particiones salen de sus PART_nn.
                     lay = action["layout"]
-                    order_udp = str(lay.get("partitionOrderUdp") or "").strip() or None
-                    cols_light = engine_generators.physical_columns(cols_sorted, cols_ctx, order_udp)
+                    part_udp = engine_generators.partition_udp_of(lay)
+                    cols_light = engine_generators.physical_columns(cols_sorted, cols_ctx, part_udp)
                     emitted = engine_generators.layout_columns(
                         cols_light, {"partitionsLast": lay.get("partitionColumns") == "last"})
                     moved = [c["name"] for c in engine_generators.ordered_partitions(cols_light)]
                     detail = ("partition columns last: " + ", ".join(moved)) if moved \
                         else "no partition columns in this table"
-                    if moved and order_udp:
-                        detail += f" · ordered by UDP '{order_udp}'"
+                    if moved and part_udp:
+                        detail += f" · from UDP '{part_udp}'"
                     fragments.append({"label": full,
                                       "sql": "-- column order: " + ", ".join(c["name"] for c in emitted),
                                       "why": detail})
@@ -243,7 +245,8 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                         continue
                     matched += 1
                     fragments.append({"column": name,
-                                      "sql": f"{engine_render.ident(name, BENCH_OPTIONS)} {new_type}",
+                                      "sql": f"{engine_render.ident(name, bench)} "
+                                             f"{engine_render.type_text(new_type, bench)}",
                                       "why": f"{ctx.get('tipo')} → {new_type}"})
                     continue
                 matched += 1
@@ -253,7 +256,7 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                 elif expr_tpl:
                     # La proyección llega al motor con el casing del export
                     # (doc 76 D8): el bench la muestra igual.
-                    col_name = engine_render.cased(name, BENCH_OPTIONS)
+                    col_name = engine_render.cased(name, bench)
                     ast = build_expression(expr_tpl, cctx, sqlglot.parse_one(col_name, read="databricks"),
                                            lookups, functions)
                     alias = expand_template(alias_tpl, cctx, lookups, functions) if alias_tpl else col_name
@@ -263,7 +266,7 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                     fragments.append({"column": name, "sql": f"{sql} AS {alias or col_name}", "why": why})
                 elif action.get("tags"):
                     stmts, _ = engine_render.column_tag_statements(
-                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident, BENCH_OPTIONS,
+                        [rule], artifact, base_ctx, {name: ctx}, config, full_ident, bench,
                         object_kind=obj_kind)
                     fragments += [{"column": name, "sql": s, "why": why} for s in stmts]
                 else:
@@ -316,9 +319,15 @@ async def impact(project_id: str, rule: dict) -> dict:
         tables = await repository.tables_light(project_id)
         t_ctx_by_id = {t["id"]: table_ctx(t, n_by_id) for t in tables}
         if rule.get("kind") == "generator" or rule.get("target") == "table":
+            # Doc 93 D8: ANY_COLUMN evalúa las columnas de cada tabla (estimado:
+            # para reglas de vista cuenta las columnas FÍSICAS de su tabla).
+            cols_by_table: dict[str, list[dict]] = {}
+            if "ANY_COLUMN" in (rule.get("condition") or "").upper():
+                for c in await repository.columns_light(project_id):
+                    cols_by_table.setdefault(c.get("tableId"), []).append(column_ctx(c, n_by_id, domains))
             hit = 0
             for tid, t_ctx in t_ctx_by_id.items():
-                ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}}}
+                ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}}, "columnas": cols_by_table.get(tid, [])}
                 if engine_cond.eval_condition(cond_ast, ctx, rule.get("condition") or ""):
                     hit += 1
             return {"columns": 0, "tables": hit}
@@ -326,6 +335,13 @@ async def impact(project_id: str, rule: dict) -> dict:
         # Doc 90 · Data types: cuenta SOLO las columnas cuyo tipo cambia.
         type_maps = ([(rule.get("name"), engine_render.type_map_of(rule))]
                      if (rule.get("action") or {}).get("types") else [])
+        col_ctx = {id(c): column_ctx(c, n_by_id, domains) for c in cols}
+        # Doc 93 D8/§7: una regla de COLUMNA también puede usar ANY_COLUMN — ve
+        # las columnas de la tabla de cada columna (final review #3).
+        cols_by_table: dict[str, list[dict]] = {}
+        if "ANY_COLUMN" in (rule.get("condition") or "").upper():
+            for c in cols:
+                cols_by_table.setdefault(c.get("tableId"), []).append(col_ctx[id(c)])
         matched_cols = 0
         matched_tables: set[str] = set()
         for c in cols:
@@ -333,7 +349,7 @@ async def impact(project_id: str, rule: dict) -> dict:
             if t_ctx is None:
                 continue
             ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
-                   "columna": column_ctx(c, n_by_id, domains)}
+                   "columna": col_ctx[id(c)], "columnas": cols_by_table.get(c.get("tableId"), [])}
             if engine_cond.eval_condition(cond_ast, ctx, rule.get("condition") or ""):
                 if type_maps and not engine_render.map_type_text(
                         ctx["columna"].get("tipo") or "", type_maps)[1]:

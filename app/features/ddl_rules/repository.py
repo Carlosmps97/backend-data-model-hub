@@ -161,15 +161,17 @@ async def get_config(project_id: str) -> dict:
 
 
 async def set_config(project_id: str, lookups: dict | None = None,
-                     functions: list | None = None) -> dict:
+                     functions: list | None = None, output: dict | None = None) -> dict:
     """Reemplaza el/los bloque(s) que vengan no-None (el patch del apply manda
-    el set COMPLETO de lookups/functions, no deltas — payload chico)."""
+    el set COMPLETO de lookups/functions/output, no deltas — payload chico)."""
     db = await get_db()
     sets: dict = {"updatedAt": _now(), "projectId": project_id}
     if lookups is not None:
         sets["lookups"] = lookups
     if functions is not None:
         sets["functions"] = functions
+    if output is not None:
+        sets["output"] = output
     await db[CONFIG_COLL].update_one(
         {"_id": project_id},
         {"$set": sets, "$setOnInsert": {"createdAt": _now()}}, upsert=True)
@@ -184,6 +186,6 @@ async def restore_config(project_id: str, snapshot: dict) -> None:
         {**(snapshot or {}), "id": project_id, "projectId": project_id}).model_dump()
     await db[CONFIG_COLL].update_one(
         {"_id": project_id},
-        {"$set": {"lookups": cfg["lookups"], "functions": cfg["functions"],
+        {"$set": {"lookups": cfg["lookups"], "functions": cfg["functions"], "output": cfg["output"],
                   "projectId": project_id, "updatedAt": _now()},
          "$setOnInsert": {"createdAt": _now()}}, upsert=True)

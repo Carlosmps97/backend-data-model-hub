@@ -90,44 +90,49 @@ async def get_entry(entry_id: str) -> dict | None:
     return AbbreviationDoc.model_validate(_to_doc(doc)).model_dump() if doc else None
 
 
-async def corpus_conflicts(project_id: str, pattern: str) -> tuple[list[dict], int]:
-    """Apariciones del patrón (frase completa) en `logicalName` de tablas y
-    columnas ACTIVAS DEL PROYECTO. Devuelve (muestra cap 50, conteo total). El regex corre
-    case-insensitive server-side; es un scan aceptable como acción on-demand
-    (botón Validar / save), no per-keystroke (riesgo medido en el doc 10)."""
+async def corpus_conflicts(project_id: str, pattern: str, scope: str = "column") -> tuple[list[dict], int]:
+    """Apariciones del patrón (frase completa) en `logicalName` de las entidades
+    ACTIVAS DEL PROYECTO del `scope` del término (doc 94 D9): un término de
+    columna solo deriva nombres de columnas, así que solo lo bloquean nombres
+    lógicos de columnas; uno de tabla, solo de tablas. Devuelve (muestra cap 50,
+    conteo total). El regex corre case-insensitive server-side; es un scan
+    aceptable como acción on-demand (botón Validar / save), no per-keystroke
+    (riesgo medido en el doc 10)."""
     db = await get_db()
     flt = scoped(project_id, {"logicalName": {"$regex": pattern, "$options": "i"},
                               "flgactive": {"$ne": False}})
-    total_tables = await db[TABLES_COLL].count_documents(flt)
-    total_columns = await db[COLUMNS_COLL].count_documents(flt)
+    if scope == "table":
+        total = await db[TABLES_COLL].count_documents(flt)
+        t_docs = await db[TABLES_COLL].find(
+            flt, {"_id": 1, "physicalName": 1, "logicalName": 1},
+        ).limit(CORPUS_SAMPLE_CAP).to_list(None)
+        return [{"entity": "table", "tableName": t.get("physicalName") or "",
+                 "columnName": None, "logicalName": t.get("logicalName") or ""} for t in t_docs], total
 
+    total = await db[COLUMNS_COLL].count_documents(flt)
     sample: list[dict] = []
-    t_docs = await db[TABLES_COLL].find(
-        flt, {"_id": 1, "physicalName": 1, "logicalName": 1},
-    ).limit(CORPUS_SAMPLE_CAP).to_list(None)
-    for t in t_docs:
-        sample.append({"entity": "table", "tableName": t.get("physicalName") or "",
-                       "columnName": None, "logicalName": t.get("logicalName") or ""})
-
-    remaining = CORPUS_SAMPLE_CAP - len(sample)
-    if remaining > 0 and total_columns > 0:
+    if total > 0:
         c_docs = await db[COLUMNS_COLL].find(
             flt, {"physicalName": 1, "logicalName": 1, "tableId": 1},
-        ).limit(remaining).to_list(None)
+        ).limit(CORPUS_SAMPLE_CAP).to_list(None)
         # Nombres de tabla en batch (NO $lookup, joins en Python a propósito).
-        table_ids = list({c.get("tableId") for c in c_docs if c.get("tableId")})
-        names: dict[str, str] = {}
-        if table_ids:
-            for t in await db[TABLES_COLL].find(
-                {"_id": {"$in": table_ids}}, {"physicalName": 1},
-            ).to_list(None):
-                names[t["_id"]] = t.get("physicalName") or ""
+        names = await table_physical_names([c.get("tableId") for c in c_docs if c.get("tableId")])
         for c in c_docs:
             sample.append({"entity": "column",
                            "tableName": names.get(c.get("tableId"), ""),
                            "columnName": c.get("physicalName"),
                            "logicalName": c.get("logicalName") or ""})
-    return sample, total_tables + total_columns
+    return sample, total
+
+
+async def table_physical_names(table_ids: list[str]) -> dict[str, str]:
+    """`{tableId: physicalName}` de las tablas pedidas (una sola lectura)."""
+    ids = list({t for t in table_ids if t})
+    if not ids:
+        return {}
+    db = await get_db()
+    return {t["_id"]: t.get("physicalName") or ""
+            for t in await db[TABLES_COLL].find({"_id": {"$in": ids}}, {"physicalName": 1}).to_list(None)}
 
 
 async def set_lock(entry_id: str, locked: bool, actor: str) -> dict | None:
@@ -158,7 +163,8 @@ async def entities_for_rephysicalize(project_id: str, scope: str) -> list[dict]:
     coll = ENTITY_COLL[scope]
     return await db[coll].find(
         scoped(project_id, {"flgactive": {"$ne": False}, "physicalNameOverridden": {"$ne": True}}),
-        {"_id": 1, "logicalName": 1, "physicalName": 1, "physicalNameOverridden": 1},
+        {"_id": 1, "logicalName": 1, "physicalName": 1, "physicalNameOverridden": 1,
+         "tableId": 1},                 # doc 94 D7: el dry-run cuenta tablas afectadas
     ).to_list(None)
 
 

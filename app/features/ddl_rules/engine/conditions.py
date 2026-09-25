@@ -74,6 +74,16 @@ _ALLOWED_NODES = (
     exp.Literal, exp.Boolean, exp.Null, exp.Tuple,
 )
 
+# Doc 93 D8: agregado sobre las columnas del OBJETO en curso — «el objeto
+# tiene al menos una columna que cumple X». Vale en reglas de tabla, de columna
+# y generadores; dentro, `columna.*` es cada columna del objeto.
+ANY_COLUMN = "ANY_COLUMN"
+
+
+def is_any_column(node: exp.Expression) -> bool:
+    """True si el nodo es `ANY_COLUMN(...)` (sin distinguir mayúsculas)."""
+    return isinstance(node, exp.Anonymous) and str(node.name).upper() == ANY_COLUMN
+
 
 def parse_condition(text: str) -> exp.Expression:
     """Texto → AST validado contra la allowlist. Condición vacía ≡ `true`
@@ -90,11 +100,21 @@ def parse_condition(text: str) -> exp.Expression:
             "The condition couldn't be parsed. Check operators and quotes.",
             line=first.get("line") or 1, col=first.get("col") or 1) from e
     for node in ast.walk():
+        if is_any_column(node):
+            if len(node.expressions) != 1:
+                raise CondError(
+                    "ANY_COLUMN(...) takes exactly one column condition, e.g. "
+                    "ANY_COLUMN(columna.udp[\"Clasificacion del Dato\"] LIKE 'DAC-%').",
+                    col=_col_of(src, "ANY_COLUMN"), token="ANY_COLUMN")
+            if any(is_any_column(n) for n in node.expressions[0].walk()):
+                raise CondError("ANY_COLUMN(...) can't be nested.",
+                                col=_col_of(src, "ANY_COLUMN"), token="ANY_COLUMN")
+            continue
         if not isinstance(node, _ALLOWED_NODES):
             tok = node.sql(dialect="databricks")
             raise CondError(
                 f"'{tok}' is not supported in conditions. Allowed: comparisons, "
-                "IN, LIKE, IS NULL, STARTS/ENDS WITH, AND, OR, NOT.",
+                "IN, LIKE, IS NULL, STARTS/ENDS WITH, AND, OR, NOT, ANY_COLUMN(...).",
                 col=_col_of(src, tok), token=tok)
     return ast
 
@@ -157,6 +177,24 @@ def extract_refs(ast: exp.Expression, text: str = "") -> list[tuple[str, ...]]:
             for inner in node.this.walk():
                 skip.add(id(inner))
         _check_path(path, text)
+        refs.append(path)
+    return refs
+
+
+def refs_outside_any_column(ast: exp.Expression, text: str = "") -> list[tuple[str, ...]]:
+    """Referencias de contexto FUERA de todo `ANY_COLUMN(...)`: en una regla de
+    tabla o en un generador, `columna.*` solo existe dentro del agregado."""
+    inside = {id(n) for agg in ast.walk() if is_any_column(agg) for n in agg.walk()}
+    refs: list[tuple[str, ...]] = []
+    skip: set[int] = set()
+    for node in ast.walk():
+        if id(node) in inside or id(node) in skip:
+            continue
+        path = _path_of(node, text)
+        if path is None:
+            continue
+        if isinstance(node, exp.Bracket):
+            skip.update(id(inner) for inner in node.this.walk())
         refs.append(path)
     return refs
 
@@ -266,6 +304,13 @@ def eval_condition(ast: exp.Expression, ctx: dict, text: str = "") -> bool:
         return eval_condition(ast.this, ctx, text) or eval_condition(ast.expression, ctx, text)
     if isinstance(ast, exp.Not):
         return not eval_condition(ast.this, ctx, text)
+    if is_any_column(ast):
+        cols = ctx.get("columnas")
+        if cols is None:
+            raise CondError("ANY_COLUMN(...) needs the columns of the object, and they aren't known "
+                            "here (e.g. a view whose SQL couldn't be read).", token="ANY_COLUMN")
+        inner = ast.expressions[0]
+        return any(eval_condition(inner, {**ctx, "columna": col}, text) for col in cols)
     if isinstance(ast, exp.Is):
         val = _resolve(ast.this, ctx, text)
         if isinstance(ast.expression, exp.Null):

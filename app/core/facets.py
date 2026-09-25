@@ -29,10 +29,10 @@ COLUMN_FACET_FIELDS: dict[str, tuple[str, ...]] = {
     # Doc 85: `physicalDescription` = Comment de Erwin (el DDL lo emite como COMMENT).
     PHYSICAL: ("physicalName", "physicalNameOverridden", "dataType", "typeOverridden",
                "isNullable", "isPartition", "physicalOnly", "physicalDescription"),
-    # Doc 74: `ordinal` es el orden ÚNICO de la columna (lógico = físico),
-    # como `pkPosition` es el único orden de la llave.
+    # Doc 74/94: `ordinal` es el orden ÚNICO de la columna (lógico = físico) y
+    # también el de la llave (las PK primero; sin orden de llave aparte).
     "shared": ("id", "projectId", "tableId", "parentDomainId", "description", "isPrimaryKey",
-               "isForeignKey", "pkPosition", "ordinal", "udpValues"),
+               "isForeignKey", "ordinal", "udpValues"),
 }
 # Doc 85 §3.1: el dominio tiene UN objeto con dos facetas, como Erwin
 # (`Name`/`Physical_Name`, `Logical_Data_Type`/`Physical_Data_Type`,

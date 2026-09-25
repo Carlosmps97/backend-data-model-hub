@@ -1,4 +1,5 @@
-"""Dictionary R1c: scope/wordType en el modelo + ruta acepta ?scope=."""
+"""Dictionary R1c: scope en el modelo + ruta acepta ?scope=. Doc 94 D11: el
+`wordType` se retiró — un doc o body viejo que lo traiga lo pierde al leer."""
 from __future__ import annotations
 
 from app.features.glossary.models import AbbreviationDoc
@@ -8,30 +9,27 @@ from app.features.glossary.schemas import AbbreviationBody, PhysicalizeBody
 # ── Modelo: invariante de persistencia (campo nuevo persiste con default) ──
 
 
-def test_doc_default_scope_column_y_wordtype_none():
+def test_doc_default_scope_column():
     d = AbbreviationDoc.model_validate({"projectId": "p1", "term": "monto", "abbrev": "MTO"})
-    dumped = d.model_dump()
-    assert dumped["scope"] == "column"
-    assert dumped["wordType"] is None
+    assert d.model_dump()["scope"] == "column"
 
 
-def test_doc_persiste_scope_y_wordtype():
+def test_doc_persiste_scope_y_descarta_wordtype_viejo():
     d = AbbreviationDoc.model_validate({"projectId": "p1", "term": "cuenta", "abbrev": "CTA", "scope": "table", "wordType": "prime"}
     )
     dumped = d.model_dump()
     assert dumped["scope"] == "table"
-    assert dumped["wordType"] == "prime"
+    assert "wordType" not in dumped
 
 
-def test_body_acepta_scope_wordtype_con_defaults():
+def test_body_acepta_scope_con_default_y_descarta_wordtype():
     b = AbbreviationBody.model_validate({"term": "x", "abbrev": "X"})
     assert b.scope == "column"
-    assert b.wordType is None
     b2 = AbbreviationBody.model_validate(
         {"term": "y", "abbrev": "Y", "scope": "table", "wordType": "class"}
     )
     assert b2.scope == "table"
-    assert b2.wordType == "class"
+    assert "wordType" not in b2.model_dump()
 
 
 def test_physicalize_body_scope_y_separator_opcionales():

@@ -174,7 +174,7 @@ async def glossary_usage(project_id: str, limit: int = 200) -> list[dict]:
             scoped(project_id, {**ACTIVE, "physicalName": {"$regex": f"(^|_){re.escape(ab)}(_|$)"}}),
             maxTimeMS=_MAXMS) if ab else 0
         rows.append({"term": t.get("term"), "abbrev": t.get("abbrev"), "scope": t.get("scope"),
-                     "wordType": t.get("wordType"), "columnUsage": cnt, "isUnused": cnt == 0})
+                     "columnUsage": cnt, "isUnused": cnt == 0})
     rows.sort(key=lambda r: -r["columnUsage"])
     return rows
 

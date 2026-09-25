@@ -14,7 +14,7 @@ Reglas aprobadas:
     Doc 69: las defs Logical/Physical con el mismo nombre son defs DISTINTAS
     de plataforma (clave `level|view|nombre`) — cada faceta conserva su valor
     (antes se colapsaban y la Physical pisaba la Logical).
-  - Glosario: scope='column', wordType=None (defaults de plataforma).
+  - Glosario: scope='column' (default de plataforma; doc 94 retiró wordType).
   - Cardinalidad del lado PADRE: del Null_Option_Type de la relación
     ("100" nulls allowed → 0..1; "101"/otro → exactamente 1) — 2026-07-17.
   - Orden ÚNICO de columnas (doc 74, owner 2026-09-07): la plataforma maneja

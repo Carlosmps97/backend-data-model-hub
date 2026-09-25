@@ -453,8 +453,7 @@ class Migrator:
             self.ex_gloss[key] = abbrev
             self.gloss_scope["column"][term] = abbrev
             self._upsert("glossary_terms", self.pid(f"gloss|{key}"), {
-                "term": term, "abbrev": abbrev, "scope": "column",
-                "wordType": None, "locked": False})
+                "term": term, "abbrev": abbrev, "scope": "column", "locked": False})
             self.stats["glosario creado"] += 1
 
         # defs UDP — CATÁLOGO FIJO (doc 61 ronda 2, owner 2026-08-30): las
@@ -714,9 +713,9 @@ class Migrator:
                 self.report["cols_dropped"].append({"table": nat_key, "column": a.physical})
             self.stats["columnas duplicadas descartadas"] += len(dropped)
 
-            pk_pos = {aid: i for i, aid in enumerate(e.pk_attr_order)}
-            # Doc 74: orden ÚNICO de la plataforma — llaves primero (orden de la
-            # llave) + resto en el Column order de Erwin; `ordinal` = índice.
+            # Doc 74/94: orden ÚNICO de la plataforma — llaves primero (en el
+            # orden de la llave de Erwin) + resto en el Column order; `ordinal`
+            # = índice. No hay orden de llave aparte (pkPosition se retiró).
             cols = pol.column_order(cols, e.pk_attr_ids, e.pk_attr_order)
             # Partición v2 (R6): PART_nn SIEMPRE marca; incongruencias =
             # reasignadas por el orden de columnas, al reporte.
@@ -767,7 +766,6 @@ class Migrator:
                     "logicalTypeOverridden": log_overridden,
                     "logicalOnly": a.logical_only, "physicalOnly": a.physical_only,
                     "isPrimaryKey": a.id in e.pk_attr_ids,
-                    "pkPosition": pk_pos.get(a.id),
                     "isForeignKey": bool(a.parent_attr_ref),
                     "isNullable": a.nullable, "isPartition": a.id in part_ids,
                     "description": a.definition or a.comment or None,

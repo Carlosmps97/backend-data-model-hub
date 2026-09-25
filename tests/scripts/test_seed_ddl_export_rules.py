@@ -35,7 +35,7 @@ def test_referenced_udps_cubre_condiciones_lookups_y_layout():
     assert ("column", "Clasificacion del Dato") in refs      # condiciones LIKE 'DAC-%' + dac_map
     assert ("table", "Clasificacion del Dato") in refs       # generadores DAC + dac_flag_map
     assert ("table", "Frecuencia Vacuum") in refs            # vacuum_map / update_frequency_map
-    assert ("column", "Particion") in refs                   # layout.partitionOrderUdp
+    assert ("column", "Particion") in refs                   # layout.partitionUdp
     assert ("table", "Tipo de Vista") not in refs            # ya no se usa
 
 

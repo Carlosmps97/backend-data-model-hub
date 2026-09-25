@@ -87,19 +87,20 @@ def test_ciclo_se_detecta_al_validar_no_en_runtime():
 
 
 def test_golden_tabla_rechazos_spec_8_5():
-    """all STRING, sin PK/NOT NULL (strip), + columnas rej_*; DATE sale STRING.
-    Formato ESPEJO del export del canvas: backticks + `USING delta`."""
+    """all STRING, sin PK/NOT NULL (strip), + columnas rej_*; DATE sale string.
+    Doc 93 D4: MISMO estilo que el CREATE físico del front (sin comillas, tipos
+    en minúscula, CREATE OR REPLACE, USING DELTA)."""
     stmts, log = g.run_generators([TABLA_REJ], TABLE, COLS, BASE, COLS_CTX, {})
     assert len(stmts) == 1
     sql = stmts[0]["sql"]
     assert sql == (
-        "CREATE TABLE IF NOT EXISTS `core`.`tbl_cliente_rej` (\n"
-        "  `cod_cliente`  STRING,\n"
-        "  `nom_cliente`  STRING,\n"
-        "  `fec_alta`     STRING,\n"
-        "  `rej_motivo`   STRING,\n"
-        "  `rej_fecha`    TIMESTAMP\n"
-        ")\nUSING delta;"
+        "CREATE OR REPLACE TABLE core.tbl_cliente_rej (\n"
+        "  cod_cliente string,\n"
+        "  nom_cliente string,\n"
+        "  fec_alta string,\n"
+        "  rej_motivo string,\n"
+        "  rej_fecha timestamp\n"
+        ")\nUSING DELTA;"
     )
     assert "NOT NULL" not in sql                       # strip[not_null, pk]
     assert stmts[0]["artifact"] == "ddl.tabla_rej"
@@ -116,14 +117,14 @@ def test_rej_espejo_del_fisico_casing_location_particiones():
     stmts, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE,
                                 COLS_CTX, {}, opts)
     sql = stmts[0]["sql"]
-    assert "CREATE EXTERNAL TABLE IF NOT EXISTS `CORE`.`TBL_CLIENTE_REJ`" in sql
-    assert "`COD_CLIENTE`" in sql and "STRING" in sql          # casing + force_type
-    assert "PARTITIONED BY (`FEC_ALTA`)" in sql                # partición heredada
+    assert "CREATE OR REPLACE TABLE CORE.TBL_CLIENTE_REJ (" in sql
+    assert "  COD_CLIENTE string," in sql                  # casing + force_type (tipo en minúscula)
+    assert "PARTITIONED BY (FEC_ALTA)" in sql              # partición heredada
     # Doc 76 D9: carpeta del LOCATION = nombre final con el casing de carpeta
     # del export (default MAYÚSCULA, convención ADLS de la macro).
     assert "LOCATION 's3://dl/warehouse/TBL_CLIENTE_REJ'" in sql
     # Orden (pedido owner): heredadas → añadidas → columnas de PARTICIÓN al final.
-    order = [sql.index(f"`{n}`") for n in ("COD_CLIENTE", "REJ_MOTIVO", "FEC_ALTA")]
+    order = [sql.index(f"  {n} ") for n in ("COD_CLIENTE", "REJ_MOTIVO", "FEC_ALTA")]
     assert order == sorted(order)
     # sin includePartitions no se emite la cláusula (igual que la física)
     stmts2, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
@@ -133,6 +134,10 @@ def test_rej_espejo_del_fisico_casing_location_particiones():
     stmts3, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
                                  {**opts, "locationFolderCase": "as-is"})
     assert "LOCATION 's3://dl/warehouse/tbl_cliente_rej'" in stmts3[0]["sql"]
+    # estilo anterior disponible por setting (doc 93 D1)
+    stmts4, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
+                                 {**opts, "createTable": "if-not-exists", "quoteIdentifiers": "always"})
+    assert "CREATE EXTERNAL TABLE IF NOT EXISTS `CORE`.`TBL_CLIENTE_REJ`" in stmts4[0]["sql"]
 
 
 def test_cascada_completa_fisica_rej_vista_rej():
@@ -141,8 +146,8 @@ def test_cascada_completa_fisica_rej_vista_rej():
     stmts, _ = g.run_generators([VISTA_REJ, TABLA_REJ], TABLE, COLS, BASE, COLS_CTX, {})
     assert [s["artifact"] for s in stmts] == ["ddl.tabla_rej", "ddl.vista_rej"]
     view = stmts[1]["sql"]
-    assert "CREATE OR REPLACE VIEW `core_v`.`tbl_cliente_rej` AS" in view
-    assert "rej_motivo" in view and "FROM `core`.`tbl_cliente_rej`;" in view
+    assert "CREATE OR REPLACE VIEW core_v.tbl_cliente_rej AS" in view
+    assert "rej_motivo" in view and "FROM core.tbl_cliente_rej;" in view
     sqlglot.parse_one(view.rstrip(";"), read="databricks")
 
 
@@ -151,7 +156,7 @@ def test_composicion_generador_mas_regla_spec_8_7():
     decora SOLO porque lo tiene en appliesTo — no se conocen entre sí."""
     stmts, log = g.run_generators([VISTA_TEC, ENMASCARAR], TABLE, COLS, BASE, COLS_CTX, {})
     view = stmts[0]["sql"]
-    assert "CREATE OR REPLACE VIEW `core_v`.`tbl_cliente` AS" in view
+    assert "CREATE OR REPLACE VIEW core_v.tbl_cliente AS" in view
     assert "sha2(nom_cliente, 512) AS nom_cliente" in view
     assert "cod_cliente" in view and "sha2(cod_cliente" not in view
     assert any(e.get("rule") == "enmascarar_dac" and e["status"] == "applied" for e in log)
@@ -245,9 +250,9 @@ def test_reglas_de_tags_y_tblproperties_aplican_a_la_tabla_generada():
     stmts, log = g.run_generators([TABLA_REJ, TAGS_REJ, PROPS_REJ], TABLE, COLS, BASE, COLS_CTX, {})
     assert [s["artifact"] for s in stmts] == ["ddl.tabla_rej", "ddl.tabla_rej.tags"]
     rej = stmts[0]["sql"]
-    assert rej.endswith("USING delta\nTBLPROPERTIES (\n  'quality' = 'rejected'\n);")
-    assert "`cod_cliente`  STRING" in rej                      # el CREATE conserva su formato
-    assert stmts[1]["sql"] == ("ALTER TABLE `core`.`tbl_cliente_rej` ALTER COLUMN `nom_cliente` "
+    assert rej.endswith("USING DELTA\nTBLPROPERTIES (\n  'quality' = 'rejected'\n);")
+    assert "  cod_cliente string," in rej                      # el CREATE conserva su formato
+    assert stmts[1]["sql"] == ("ALTER TABLE core.tbl_cliente_rej ALTER COLUMN nom_cliente "
                                "SET TAGS ('clasificacion_dato' = 'DAC-NOMBRE');")
     assert any(e.get("rule") == "tags_rej" and e["status"] == "applied" for e in log)
 
@@ -255,7 +260,7 @@ def test_reglas_de_tags_y_tblproperties_aplican_a_la_tabla_generada():
 def test_tags_sobre_generada_respetan_casing_del_export():
     stmts, _ = g.run_generators([TABLA_REJ, TAGS_REJ], TABLE, COLS, BASE, COLS_CTX, {},
                                 {"identifierCase": "upper"})
-    assert stmts[1]["sql"].startswith("ALTER TABLE `CORE`.`TBL_CLIENTE_REJ` ALTER COLUMN `NOM_CLIENTE` SET TAGS (")
+    assert stmts[1]["sql"].startswith("ALTER TABLE CORE.TBL_CLIENTE_REJ ALTER COLUMN NOM_CLIENTE SET TAGS (")
 
 
 def test_columna_anadida_homonima_reemplaza_a_la_heredada():
@@ -264,8 +269,10 @@ def test_columna_anadida_homonima_reemplaza_a_la_heredada():
                                                             {"name": "", "type": "STRING"}]}}}
     stmts, _ = g.run_generators([gen], TABLE, COLS, BASE, COLS_CTX, {})
     sql = stmts[0]["sql"]
-    assert sql.count("`cod_cliente`") == 1 and "`cod_cliente`  BIGINT" in sql   # una sola definición
-    assert "``" not in sql                                                       # la vacía se ignora
+    body = sql.split("(\n", 1)[1].split("\n)", 1)[0]
+    assert [line.split()[0] for line in body.split(",\n")] == \
+        ["cod_cliente", "nom_cliente", "fec_alta"]      # una sola definición; la añadida vacía se ignora
+    assert "  cod_cliente bigint," in sql
 
 
 def test_artifact_cols_ctx_hereda_udp_y_tipo_del_artefacto():

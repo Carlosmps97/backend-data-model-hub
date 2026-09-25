@@ -1037,8 +1037,8 @@ def s21_bulk_upload() -> Suite:
     tid = next((t["id"] for t in eff if t["physicalName"] == p_uno), None)
     cols = mod.get(f"/api/changesets/{cs}/effective/canonical_columns?tableId={tid}").data or []
     s.eq("la tabla uno tiene sus 2 columnas", len(cols), 2)
-    s.check("la PK quedó marcada con posición 0",
-            any(c.get("isPrimaryKey") and c.get("pkPosition") == 0 for c in cols))
+    s.check("la PK quedó marcada y primera en el orden único (doc 94)",
+            any(c.get("isPrimaryKey") and c.get("ordinal") == 0 for c in cols))
     prod = mod.get("/api/catalog/tables").data or []
     s.check("producción NO ve las tablas (draft aislado)", not any(t["physicalName"] == p_uno for t in prod))
 

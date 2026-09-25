@@ -16,11 +16,11 @@ class AbbreviationDoc(BaseModel):
     projectId: str
     term: str
     abbrev: str
-    # R1c: el diccionario se parte por scope (UDP per-column vs per-table) y cada
-    # término puede tipificarse (prime/class/modifier) para los badges del UDP.
-    # Default 'column' = compat con docs/clientes previos a R1c.
+    # R1c: el diccionario se parte por scope (UDP per-column vs per-table).
+    # Default 'column' = compat con docs/clientes previos a R1c. Doc 94 D11: el
+    # `wordType` (prime/class/modifier) se retiró — `extra="ignore"` descarta el
+    # campo de los docs viejos al leer.
     scope: str = "column"  # 'column' | 'table'
-    wordType: str | None = None  # 'prime' | 'class' | 'modifier'
     # F2 #1 (D4): lock por ADMIN — una entrada bloqueada es intocable para
     # TODOS (editar/eliminar → 409, tanto CRUD directo como standards/apply)
     # hasta que un admin la desbloquee. Round-trip: estas keys viajan también

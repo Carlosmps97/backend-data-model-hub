@@ -57,12 +57,10 @@ class CanonicalColumnDoc(BaseModel):
     # Doc 68: override manual del NOMBRE físico (paridad con typeOverridden,
     # que cubre solo el tipo). Debe existir acá Y en el TS CanonicalColumn.
     physicalNameOverridden: bool = False
+    # Doc 94 D1: la llave NO tiene un orden aparte (`pkPosition` se retiró; los
+    # docs viejos que lo traen lo pierden al leer): las PK van primero en el
+    # `ordinal` y entre ellas manda el `ordinal`.
     isPrimaryKey: bool | None = None
-    # Posición dentro de la LLAVE primaria (0-based; None si no es PK o si la
-    # PK se marcó a mano sin orden). Es INDEPENDIENTE del `ordinal`: Erwin
-    # ordena el bloque PK del diagrama y el PRIMARY KEY(...) del DDL por el
-    # orden de la llave, no por el de las columnas (doc 19 §12b).
-    pkPosition: int | None = None
     isForeignKey: bool | None = None
     # Aditivos (invariante §2.6): nulabilidad, columna de partición y
     # descripción (def funcional a nivel columna).

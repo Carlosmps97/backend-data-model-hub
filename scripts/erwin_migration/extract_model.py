@@ -81,8 +81,7 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
     for e in model.entities.values():
         cols, dropped = pol.dedupe_columns(e.attributes)
         dropped_total += len(dropped)
-        pk_pos = {aid: i for i, aid in enumerate(e.pk_attr_order)}
-        # Doc 74: mismo orden ÚNICO que migrate (llaves primero + Column order).
+        # Doc 74/94: mismo orden ÚNICO que migrate (llaves primero + Column order).
         cols = pol.column_order(cols, e.pk_attr_ids, e.pk_attr_order)
         tables.append({
             "schema": schema_for(e.id),
@@ -93,7 +92,6 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
                 "physicalName": a.physical, "logicalName": a.name,
                 "dataType": a.data_type or None, "nullable": a.nullable,
                 "isPrimaryKey": a.id in e.pk_attr_ids,
-                "pkPosition": pk_pos.get(a.id),
                 "ordinal": i,
                 "isForeignKey": bool(a.parent_attr_ref),
                 "domain": dom_name.get(a.domain_ref or "") or None,

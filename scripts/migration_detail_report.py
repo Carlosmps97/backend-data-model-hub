@@ -169,7 +169,7 @@ def extract(files: list[dict]) -> dict:
 
     cols = {c["_id"]: c for c in db.canonical_columns.find(
         {}, {"tableId": 1, "physicalName": 1, "logicalName": 1, "isPrimaryKey": 1,
-             "pkPosition": 1, "ordinal": 1, "flgactive": 1, "deletedAt": 1, "erwinLongId": 1})}
+             "ordinal": 1, "flgactive": 1, "deletedAt": 1, "erwinLongId": 1})}
     c_active = {cid for cid, c in cols.items() if c.get("flgactive") is not False}
     act_colnames: dict[str, set] = defaultdict(set)
     pk_of_table: dict[str, list] = defaultdict(list)
@@ -177,8 +177,8 @@ def extract(files: list[dict]) -> dict:
         c = cols[cid]
         act_colnames[c["tableId"]].add((c.get("physicalName") or "").upper())
         if c.get("isPrimaryKey"):
-            pk_of_table[c["tableId"]].append(
-                (c.get("pkPosition") if c.get("pkPosition") is not None else 999, cid))
+            # Doc 94: la llave sigue el orden único (ordinal), sin pkPosition.
+            pk_of_table[c["tableId"]].append((int(c.get("ordinal") or 0), cid))
     for tid in pk_of_table:
         pk_of_table[tid].sort()
 

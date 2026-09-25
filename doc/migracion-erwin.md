@@ -285,17 +285,14 @@ muestra el plan sin abrir conexión a la BD.
   desde Erwin; los LAYOUTS de canvas trabajados en la plataforma se PRESERVAN.
   El `views.sql` (CREATE VIEW original) es referencia congelada: el Export DDL
   de la plataforma siempre genera desde la estructura (`sources`).
-- **DOS órdenes distintos (doc 19 §12b · doc 74):**
-  1. *Orden único de columnas* (`ordinal`, el mismo en el modelo lógico y el
-     físico): las llaves primarias primero, en el orden de la llave, y después
-     el resto en el Column order de Erwin (`Columns_Order_Ref_Array`; sin
-     array cae al Attribute order y, sin éste, al `Physical_Order`). Es el
-     «físico normal» que pidió el owner (PK al inicio); el orden físico de la
-     BD de Erwin (`Physical_Columns_Order_Ref_Array`) ya no se persiste.
-  2. *Orden de la LLAVE* (`pkPosition`, 0-based): el orden de miembros del
-     Key_Group PK. Erwin ordena el bloque PK del diagrama y el
-     `PRIMARY KEY(...)` del DDL por ESTE orden — la plataforma hace lo mismo
-     (canvas + Export DDL).
+- **UN solo orden (doc 74 · doc 94):** `ordinal`, el mismo en el modelo
+  lógico y el físico: las llaves primarias primero, en el orden de la llave de
+  Erwin (miembros del Key_Group PK), y después el resto en el Column order
+  (`Columns_Order_Ref_Array`; sin array cae al Attribute order y, sin éste, al
+  `Physical_Order`). Es el «físico normal» que pidió el owner (PK al inicio).
+  No hay orden de llave aparte: el `PRIMARY KEY(...)` del DDL y el bloque PK
+  del canvas siguen el `ordinal` (doc 94 retiró `pkPosition`). El orden físico
+  de la BD de Erwin (`Physical_Columns_Order_Ref_Array`) ya no se persiste.
 - **Idempotente y NO destructivo:** ids deterministas
   (`uuid5("<projectId>|<Long_Id de Erwin>")`) → re-correr el mismo archivo al
   mismo proyecto actualiza en su sitio. Los estándares ya existentes del
@@ -344,14 +341,17 @@ vistas multi-fuente, C8b grafías variantes fieles al XML).
 ## 6b. `seed_ddl_export_rules` — ruleset base del DDL Export
 
 Siembra, como UNA versión de Data Standards del proyecto ("Base — DDL export
-rules"), las **14 reglas activas** del Export DDL que reproducen los 7 DDL de
+rules"), los **17 elementos (12 reglas + 5 generadores) + Output settings**
+del Export DDL que reproducen los 7 DDL de
 la macro BCP (doc 76 de plan-implementacion/): `-- DROP` comentado,
-TBLPROPERTIES de vacuum, tags `updateFrecuency`/`isDAC`/`DAC`, tabla de
+TBLPROPERTIES de vacuum, tags `updateFrequency`/`isDAC`/`DAC`, tabla de
 rechazos `_rej` (+ `tiporeject`, particiones con su tipo), vistas técnicas
 NoDAC/DAC (`{tabla}` / `{tabla}dac`), vistas de rechazos NoDAC/DAC y la
 desencriptación `bcp_encrypt_function.decrypt_column_view` en las vistas DAC y
-de negocio, **más los lookups `vacuum_map` / `update_frequency_map` /
-`dac_flag_map` / `dac_map`** (el «case when» de la macro). Doc 75: el ruleset
+de negocio (con su `isDAC` según tengan o no columnas DAC — doc 93), **más los
+lookups `vacuum_map` / `update_frequency_map` / `dac_flag_map` / `dac_map`**
+(el «case when» de la macro) y las **Output settings** (cómo se escribe el
+DDL y cómo se nombran los archivos del zip — doc 93). Doc 75: el ruleset
 es POR PROYECTO — `--project "P"` o `--all-projects` (obligatorio uno); en un
 proyecto que ya tiene reglas se salta con aviso.
 
@@ -368,7 +368,7 @@ proyecto que ya tiene reglas se salta con aviso.
   `CUSTOM_90 days`) y enlaza a ella todos los lookups que nacen de ese UDP.
   Idempotente. Desde el doc 76 la vista técnica ya no depende de "Tipo de
   Vista" (la macro la genera siempre) y esa def dejó de auto-crearse.
-  Cualquier OTRO UDP que las reglas, los lookups o el `partitionOrderUdp`
+  Cualquier OTRO UDP que las reglas, los lookups o el `partitionUdp`
   del layout necesiten y falte («Clasificacion del Dato» de tabla y columna,
   «Particion») = modelo sin migrar → aborta limpio con la lista.
 

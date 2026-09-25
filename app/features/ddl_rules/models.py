@@ -74,3 +74,5 @@ class DdlRulesetConfigDoc(BaseModel):
     lookups: dict = Field(default_factory=dict)
     # [{name, params: [str], body: str}]
     functions: list = Field(default_factory=list)
+    # Doc 93 D1: Output settings del Export DDL (ver `output.py`).
+    output: dict = Field(default_factory=dict)

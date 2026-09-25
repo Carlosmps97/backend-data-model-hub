@@ -11,6 +11,7 @@ from app.features.projects.deps import alive_project
 from . import service
 from .schemas import (
     AbbreviationBody,
+    ImpactBody,
     PhysicalizeBody,
     RephysicalizeBody,
     ValidateTermBody,
@@ -82,6 +83,18 @@ async def validate_term(project_id: str, body: ValidateTermBody,
         return ok({"ok": True,
                    "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
     return ok(await service.validate_term(project_id, term, body.scope))
+
+
+@router.post("/impact")
+async def impact(project_id: str, body: ImpactBody,
+                 principal: Principal = Depends(current_principal)):
+    """Doc 94 D7: dry-run del re-derivado que haría aplicar el borrador del
+    glosario — `{columns, columnTables, tables, sample}`. No muta. Sesión, sin
+    standards.edit (igual que /validate): el front decide con esto si avisa."""
+    return ok(await service.impact_preview(
+        project_id, body.scope,
+        [t.model_dump(exclude_none=True) for t in body.termsUpsert], body.termsDelete,
+        body.namingConfig.model_dump(exclude_none=True) if body.namingConfig else None))
 
 
 @router.post("/{entry_id}/lock")

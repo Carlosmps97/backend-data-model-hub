@@ -519,6 +519,7 @@ def test_glosario_conflicto_vs_bd_se_reporta_y_la_bd_gana():
     assert db.data["glossary_terms"]["g1"]["abbrev"] == "MTO"
     created = [g for g in db.data["glossary_terms"].values() if g.get("term") == "Codigo"]
     assert len(created) == 1 and created[0]["abbrev"] == "COD"
+    assert "wordType" not in created[0]           # doc 94 D11: campo retirado
     # ambas incongruencias quedan reportadas (vs BD y duplicado interno)
     conflicts = {(c["term"], c["kept"], c["ignored"])
                  for c in mig.report["glossary_conflicts"]}

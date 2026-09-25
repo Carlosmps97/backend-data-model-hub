@@ -126,7 +126,7 @@ tests/
 │   ├── ddl_rules/       (10)        # motor de reglas del DDL Export (incluye golden tests del render)
 │   ├── domains/         (6)         # cascada de ParentDomain (filter, impact, propagate, namingTerm, tipos)
 │   ├── folders/         (2)         # descendant_ids (cascada) + modelo/rutas
-│   ├── glossary/        (9)         # rephysicalize, scope/wordType, validate, lock/unlock, guards CRUD
+│   ├── glossary/        (9)         # rephysicalize, scope, validate, lock/unlock, guards CRUD
 │   ├── identity/        (1)         # /api/users (ruta)
 │   ├── projects/        (6)         # diagrama (tablas y vistas), layout, subject area aditiva + UDP,
 │   │                                # ciclo de vida (crear directo + copyFrom + v1; counts)
@@ -430,7 +430,7 @@ Módulo de estándares versionado (dominios + diccionario + naming + reglas DDL,
 ### 5.7 Glossary + naming (`tests/features/glossary` 47 + `tests/core/naming` 13)
 
 - **Motor de naming (`core/naming`, 13):** `physicalize` con longest-match multi-palabra, tokens no mapeados en mayúscula, `case` (`upper`/`lower`/`camel`) y `separator` configurables (incluido `""` para nombres de tabla tipo `CTARIESGO`). `case` inválido levanta `ValueError`. (`logicalize` se retiró en el doc 75 D14.)
-- **Glossary (`features/glossary`, 47 en 9 archivos):** `compute_rephysicalize` re-deriva el físico desde el `logicalName` y devuelve **solo** las entidades que cambian (usando separador/case del scope), salta las sin `logicalName`, y normaliza `_id` vs `id`; `to_mappings` arma el dict término→abbrev ignorando `scope`/`wordType`; invariantes de persistencia de `scope`/`wordType` en el modelo y el body; guards del CRUD (`test_crud_guards.py`); validación de nombres contra el glosario en sus tres capas (`test_validate_pure.py` / `test_validate_service.py` / `test_validate_route.py`); y el lock/unlock de términos (campos de lock + endpoints `/{entry_id}/lock` y `/unlock`, solo `admin.manage`).
+- **Glossary (`features/glossary`, 47 en 9 archivos):** `compute_rephysicalize` re-deriva el físico desde el `logicalName` y devuelve **solo** las entidades que cambian (usando separador/case del scope), salta las sin `logicalName`, y normaliza `_id` vs `id`; `to_mappings` arma el dict término→abbrev ignorando `scope`; invariante de persistencia de `scope` en el modelo y el body (un `wordType` viejo se descarta, doc 94); guards del CRUD (`test_crud_guards.py`); validación de nombres contra el glosario en sus tres capas (`test_validate_pure.py` / `test_validate_service.py` / `test_validate_route.py`); y el lock/unlock de términos (campos de lock + endpoints `/{entry_id}/lock` y `/unlock`, solo `admin.manage`).
 
 ### 5.8 Reporting (`tests/features/reporting`, 59 tests en 13 archivos)
 
@@ -569,7 +569,7 @@ Hay **21 escenarios** (`s01`–`s21`), cada uno aislado con tag único y auto-li
 | `s18_udp_canvas_models` | UDP a nivel canvas | Definición con `level=canvas`; el reporting filtra models por UDP de canvas, expone `models.tableCount` derivado en el catálogo y el insight udp-coverage lista la key de canvas. |
 | `s19_bulk_changes` | Lote de cambios (doc 39) | `PUT /changes/bulk`: tabla+columnas en un lote (effective las muestra); dup intra-lote → 409 sin grabar NADA; payload inválido y colección no versionada → 422; no-owner → 403; cascada de deletes en lote (effective deja de mostrar la tabla, producción intacta pre-publish). |
 | `s20_composite_key_relationships` | Relaciones con llave compuesta (doc 47) | La relación debe migrar la llave COMPLETA del padre (N=N): pares incompletos → 409; llave completa + columnas hijas en el mismo lote → 200 y effective trae los pares. |
-| `s21_bulk_upload` | Carga masiva desde Excel (doc 55) | `POST /uploads` → job `validated` con reporte limpio (2 tablas, 2 columnas, 1 canvas a crear); job de otro usuario → 403; `apply` → `applied` con 1 canvas afectado, tablas/columnas en effective (PK con `pkPosition` 0) y producción intacta; tipo inválido → reporte con error y `apply` 409; re-carga idéntica → todo `unchanged`; `DELETE` del job → 200. |
+| `s21_bulk_upload` | Carga masiva desde Excel (doc 55) | `POST /uploads` → job `validated` con reporte limpio (2 tablas, 2 columnas, 1 canvas a crear); job de otro usuario → 403; `apply` → `applied` con 1 canvas afectado, tablas/columnas en effective (la PK primera en el orden único, `ordinal` 0 — doc 94) y producción intacta; tipo inválido → reporte con error y `apply` 409; re-carga idéntica → todo `unchanged`; `DELETE` del job → 200. |
 
 Cada escenario imprime un JSON como este (formato `Suite.summary()`):
 

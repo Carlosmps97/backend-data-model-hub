@@ -1,7 +1,10 @@
 """Doc 76 · los 7 DDL de la macro BCP salen del ruleset base + las acciones
 nuevas del motor: `statements` (before/after), `exclude`, tags sobre vistas
 (ALTER VIEW), tags de tabla una sentencia por regla, `keep_partition_type`,
-orden de particiones por UDP y LOCATION con carpeta en MAYÚSCULA."""
+orden de particiones por UDP y LOCATION con carpeta en MAYÚSCULA.
+Doc 93: sin comillas (salvo nombres que las necesitan), `updateFrequency`,
+`ALTER TABLE` también sobre vistas, CREATE OR REPLACE, tipos en minúscula e
+isDAC de la vista de negocio por las columnas que proyecta."""
 from __future__ import annotations
 
 from app.features.ddl_rules.engine import generators as g
@@ -45,15 +48,15 @@ COLS = [
 OPTIONS = {"identifierCase": "lower", "tableFormat": "delta", "external": True,
            "location": "abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>",
            "locationFolderCase": "upper", "includePartitions": True, "partitionsLast": True}
-# El CREATE físico lo emite el FRONT (ya con casing lower, particiones al final
-# ordenadas por el UDP y la carpeta del LOCATION en MAYÚSCULA).
-BASE_SQL = ("CREATE EXTERNAL TABLE IF NOT EXISTS `bcp_ddv`.`hd_venta` (\n"
-            "  `codclavecic` STRING NOT NULL,\n  `nomcliente` STRING,\n  `mtosaldo` DECIMAL(18,2),\n"
-            "  `fecdia` DATE,\n  `codmes` INT NOT NULL\n)\nUSING delta\nPARTITIONED BY (`fecdia`, `codmes`)\n"
+# El CREATE físico lo emite el FRONT (doc 93: sin comillas, tipos en minúscula,
+# CREATE OR REPLACE, particiones al final ordenadas por el UDP, carpeta MAYÚSCULA).
+BASE_SQL = ("CREATE OR REPLACE TABLE bcp_ddv.hd_venta (\n"
+            "  codclavecic string,\n  nomcliente string,\n  mtosaldo decimal(18,2),\n"
+            "  fecdia date,\n  codmes int\n)\nUSING DELTA\nPARTITIONED BY (fecdia, codmes)\n"
             "LOCATION 'abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>/HD_VENTA';")
 # Vista de negocio modelada (con alias y una fuente DAC).
-VU_SQL = ("CREATE OR REPLACE VIEW `bcp_udv_v`.`venta_vu` AS\nSELECT\n  codclavecic AS codclavecic,\n"
-          "  nomcliente AS nombre,\n  mtosaldo AS mtosaldo\nFROM `bcp_ddv`.`hd_venta`;")
+VU_SQL = ("CREATE OR REPLACE VIEW bcp_udv_v.venta_vu AS\nSELECT\n  codclavecic AS codclavecic,\n"
+          "  nomcliente AS nombre,\n  mtosaldo AS mtosaldo\nFROM bcp_ddv.hd_venta;")
 PAYLOAD = {"model": {"name": "DDV", "udpValues": {}}, "options": OPTIONS,
            "tables": [{"table": TABLE, "columns": COLS, "baseSql": BASE_SQL}],
            "views": [{"name": "venta_vu", "schema": "bcp_udv_v", "sql": VU_SQL, "sourceTableIds": ["t1"]}]}
@@ -89,14 +92,14 @@ def test_tabla_dac_produce_los_7_artefactos_con_sus_nombres():
 def test_1_tabla_fisica():
     out = _run()
     sql = _by_artifact(out)["ddl.tabla_fisica"]
-    assert sql.startswith("-- DROP TABLE IF EXISTS `bcp_ddv`.`hd_venta`;\nCREATE EXTERNAL TABLE")
+    assert sql.startswith("-- DROP TABLE IF EXISTS bcp_ddv.hd_venta;\nCREATE OR REPLACE TABLE bcp_ddv.hd_venta (")
     assert sql.endswith("LOCATION 'abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>/HD_VENTA'\n"
                         "TBLPROPERTIES (\n  'delta.deletedFileRetentionDuration' = '15 days',\n"
                         "  'delta.logRetentionDuration' = '15 days'\n);")
     assert _tags(out, "ddl.tabla_fisica") == [
-        "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('updateFrecuency' = 'DAILY');",
-        "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('isDAC' = 'True');",
-        "ALTER TABLE `bcp_ddv`.`hd_venta` ALTER COLUMN `nomcliente` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE bcp_ddv.hd_venta SET TAGS ('updateFrequency' = 'DAILY');",
+        "ALTER TABLE bcp_ddv.hd_venta SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE bcp_ddv.hd_venta ALTER COLUMN nomcliente SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
@@ -104,23 +107,23 @@ def test_2_tabla_rejectados():
     out = _run()
     sql = _by_artifact(out)["ddl.tabla_rej"]
     assert sql == (
-        "-- DROP TABLE IF EXISTS `bcp_ddv`.`hd_venta_rej`;\n"
-        "CREATE EXTERNAL TABLE IF NOT EXISTS `bcp_ddv`.`hd_venta_rej` (\n"
-        "  `codclavecic`  STRING,\n"
-        "  `nomcliente`   STRING,\n"
-        "  `mtosaldo`     STRING,\n"
-        "  `tiporeject`   STRING,\n"
-        "  `fecdia`       DATE,\n"
-        "  `codmes`       INT\n"
-        ")\nUSING delta\nPARTITIONED BY (`fecdia`, `codmes`)\n"
+        "-- DROP TABLE IF EXISTS bcp_ddv.hd_venta_rej;\n"
+        "CREATE OR REPLACE TABLE bcp_ddv.hd_venta_rej (\n"
+        "  codclavecic string,\n"
+        "  nomcliente string,\n"
+        "  mtosaldo string,\n"
+        "  tiporeject string,\n"
+        "  fecdia date,\n"
+        "  codmes int\n"
+        ")\nUSING DELTA\nPARTITIONED BY (fecdia, codmes)\n"
         "LOCATION 'abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>/HD_VENTA_REJ'\n"
         "TBLPROPERTIES (\n  'delta.deletedFileRetentionDuration' = '15 days',\n"
         "  'delta.logRetentionDuration' = '15 days'\n);"
     )
     assert _tags(out, "ddl.tabla_rej") == [
-        "ALTER TABLE `bcp_ddv`.`hd_venta_rej` SET TAGS ('updateFrecuency' = 'DAILY');",
-        "ALTER TABLE `bcp_ddv`.`hd_venta_rej` SET TAGS ('isDAC' = 'True');",
-        "ALTER TABLE `bcp_ddv`.`hd_venta_rej` ALTER COLUMN `nomcliente` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE bcp_ddv.hd_venta_rej SET TAGS ('updateFrequency' = 'DAILY');",
+        "ALTER TABLE bcp_ddv.hd_venta_rej SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE bcp_ddv.hd_venta_rej ALTER COLUMN nomcliente SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
@@ -128,43 +131,43 @@ def test_3_vista_tecnica_nodac():
     out = _run()
     sql = _by_artifact(out)["ddl.vista_tecnica"]
     # orden FÍSICO (las particiones no se mueven) y SIN la columna DAC
-    assert sql == ("CREATE OR REPLACE VIEW `bcp_ddv_v`.`hd_venta` AS\nSELECT\n  codmes AS codmes,\n"
+    assert sql == ("CREATE OR REPLACE VIEW bcp_ddv_v.hd_venta AS\nSELECT\n  codmes AS codmes,\n"
                    "  codclavecic AS codclavecic,\n  mtosaldo AS mtosaldo,\n  fecdia AS fecdia\n"
-                   "FROM `bcp_ddv`.`hd_venta`;")
+                   "FROM bcp_ddv.hd_venta;")
     assert _tags(out, "ddl.vista_tecnica") == [
-        "ALTER VIEW `bcp_ddv_v`.`hd_venta` SET TAGS ('updateFrecuency' = 'DAILY');",
-        "ALTER VIEW `bcp_ddv_v`.`hd_venta` SET TAGS ('isDAC' = 'False');",
+        "ALTER TABLE bcp_ddv_v.hd_venta SET TAGS ('updateFrequency' = 'DAILY');",
+        "ALTER TABLE bcp_ddv_v.hd_venta SET TAGS ('isDAC' = 'False');",
     ]
 
 
 def test_4_vista_tecnica_dac():
     out = _run()
     sql = _by_artifact(out)["ddl.vista_tecnica_dac"]
-    assert sql == ("CREATE OR REPLACE VIEW `bcp_ddv_v`.`hd_ventadac` AS\nSELECT\n  codmes AS codmes,\n"
+    assert sql == ("CREATE OR REPLACE VIEW bcp_ddv_v.hd_ventadac AS\nSELECT\n  codmes AS codmes,\n"
                    "  codclavecic AS codclavecic,\n"
                    "  bcp_encrypt_function.decrypt_column_view(nomcliente, 'NOMBRE') AS nomcliente,\n"
-                   "  mtosaldo AS mtosaldo,\n  fecdia AS fecdia\nFROM `bcp_ddv`.`hd_venta`;")
+                   "  mtosaldo AS mtosaldo,\n  fecdia AS fecdia\nFROM bcp_ddv.hd_venta;")
     assert _tags(out, "ddl.vista_tecnica_dac") == [
-        "ALTER VIEW `bcp_ddv_v`.`hd_ventadac` SET TAGS ('updateFrecuency' = 'DAILY');",
-        "ALTER VIEW `bcp_ddv_v`.`hd_ventadac` SET TAGS ('isDAC' = 'True');",
-        "ALTER VIEW `bcp_ddv_v`.`hd_ventadac` ALTER COLUMN `nomcliente` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE bcp_ddv_v.hd_ventadac SET TAGS ('updateFrequency' = 'DAILY');",
+        "ALTER TABLE bcp_ddv_v.hd_ventadac SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE bcp_ddv_v.hd_ventadac ALTER COLUMN nomcliente SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
 def test_5_y_6_vistas_rejectados():
     out = _run()
     nodac = _by_artifact(out)["ddl.vista_rej"]
-    assert nodac == ("CREATE OR REPLACE VIEW `bcp_ddv_v`.`hd_venta_rej` AS\nSELECT\n  codmes AS codmes,\n"
+    assert nodac == ("CREATE OR REPLACE VIEW bcp_ddv_v.hd_venta_rej AS\nSELECT\n  codmes AS codmes,\n"
                      "  codclavecic AS codclavecic,\n  mtosaldo AS mtosaldo,\n  fecdia AS fecdia,\n"
-                     "  tiporeject AS tiporeject\nFROM `bcp_ddv`.`hd_venta_rej`;")
+                     "  tiporeject AS tiporeject\nFROM bcp_ddv.hd_venta_rej;")
     dac = _by_artifact(out)["ddl.vista_rej_dac"]
-    assert "`bcp_ddv_v`.`hd_ventadac_rej`" in dac
+    assert "bcp_ddv_v.hd_ventadac_rej" in dac
     assert "decrypt_column_view(nomcliente, 'NOMBRE') AS nomcliente" in dac
-    assert dac.rstrip(";").endswith("tiporeject AS tiporeject\nFROM `bcp_ddv`.`hd_venta_rej`")
-    assert _tags(out, "ddl.vista_rej")[1] == "ALTER VIEW `bcp_ddv_v`.`hd_venta_rej` SET TAGS ('isDAC' = 'False');"
+    assert dac.rstrip(";").endswith("tiporeject AS tiporeject\nFROM bcp_ddv.hd_venta_rej")
+    assert _tags(out, "ddl.vista_rej")[1] == "ALTER TABLE bcp_ddv_v.hd_venta_rej SET TAGS ('isDAC' = 'False');"
     assert _tags(out, "ddl.vista_rej_dac")[1:] == [
-        "ALTER VIEW `bcp_ddv_v`.`hd_ventadac_rej` SET TAGS ('isDAC' = 'True');",
-        "ALTER VIEW `bcp_ddv_v`.`hd_ventadac_rej` ALTER COLUMN `nomcliente` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE bcp_ddv_v.hd_ventadac_rej SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE bcp_ddv_v.hd_ventadac_rej ALTER COLUMN nomcliente SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
@@ -175,9 +178,9 @@ def test_7_vista_negocio_con_alias():
     sql = _by_artifact(out)["ddl.vista_negocio"]
     assert "bcp_encrypt_function.decrypt_column_view(nomcliente, 'NOMBRE') AS nombre" in sql
     assert _tags(out, "ddl.vista_negocio") == [
-        "ALTER VIEW `bcp_udv_v`.`venta_vu` SET TAGS ('updateFrecuency' = 'DAILY');",
-        "ALTER VIEW `bcp_udv_v`.`venta_vu` SET TAGS ('isDAC' = 'True');",
-        "ALTER VIEW `bcp_udv_v`.`venta_vu` ALTER COLUMN `nombre` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE bcp_udv_v.venta_vu SET TAGS ('updateFrequency' = 'DAILY');",
+        "ALTER TABLE bcp_udv_v.venta_vu SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE bcp_udv_v.venta_vu ALTER COLUMN nombre SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
@@ -187,21 +190,21 @@ def test_tabla_no_dac_sin_artefactos_dac_y_columnas_completas():
     arts = _by_artifact(out)
     assert set(arts) == {"ddl.tabla_fisica", "ddl.tabla_rej", "ddl.vista_tecnica", "ddl.vista_rej", "ddl.vista_negocio"}
     assert "nomcliente AS nomcliente" in arts["ddl.vista_tecnica"]      # no se excluye: la tabla no es DAC
-    assert _tags(out, "ddl.tabla_fisica")[1] == "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('isDAC' = 'False');"
+    assert _tags(out, "ddl.tabla_fisica")[1] == "ALTER TABLE bcp_ddv.hd_venta SET TAGS ('isDAC' = 'False');"
     # la columna sigue clasificada DAC-NOMBRE → su tag de columna se mantiene
-    assert _tags(out, "ddl.tabla_fisica")[2].endswith("ALTER COLUMN `nomcliente` SET TAGS ('DAC' = 'NOMBRE');")
+    assert _tags(out, "ddl.tabla_fisica")[2].endswith("ALTER COLUMN nomcliente SET TAGS ('DAC' = 'NOMBRE');")
 
 
 def test_tabla_sin_udp_cae_a_los_defaults_de_los_lookups():
     """Sin Frecuencia Vacuum ni Clasificacion del Dato (como el DDV real):
-    updateFrecuency=CUSTOM, isDAC=False, retención 90 days (enfoque B)."""
+    updateFrequency=CUSTOM, isDAC=False, retención 90 days (enfoque B)."""
     table = {**TABLE, "udpValues": {}}
     out = _run({**PAYLOAD, "tables": [{"table": table, "columns": COLS, "baseSql": BASE_SQL}], "views": []})
     fisica = _by_artifact(out)["ddl.tabla_fisica"]
     assert "'delta.logRetentionDuration' = '90 days'" in fisica
     assert _tags(out, "ddl.tabla_fisica")[:2] == [
-        "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('updateFrecuency' = 'CUSTOM');",
-        "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('isDAC' = 'False');",
+        "ALTER TABLE bcp_ddv.hd_venta SET TAGS ('updateFrequency' = 'CUSTOM');",
+        "ALTER TABLE bcp_ddv.hd_venta SET TAGS ('isDAC' = 'False');",
     ]
 
 
@@ -212,7 +215,7 @@ def test_vista_con_todas_las_columnas_excluidas_no_se_emite():
     assert "ddl.vista_tecnica" not in arts and "ddl.vista_tecnica_dac" in arts
     assert not any(s["artifact"] == "ddl.vista_tecnica.tags" for s in out["statements"])   # sin objeto, sin anexos
     # la vista de rechazos conserva `tiporeject` (no es DAC) → sí se emite, solo con esa columna
-    assert arts["ddl.vista_rej"].endswith("SELECT\n  tiporeject AS tiporeject\nFROM `bcp_ddv`.`hd_venta_rej`;")
+    assert arts["ddl.vista_rej"].endswith("SELECT\n  tiporeject AS tiporeject\nFROM bcp_ddv.hd_venta_rej;")
     assert any("every column was excluded" in (e.get("reason") or "") for e in out["log"])
 
 
@@ -232,9 +235,9 @@ def test_statement_snippets_before_after_y_placeholders():
                                       "after": ["OPTIMIZE {artefacto.ref};", "  ", "-- vacuum {lookup:vacuum_map}"]}},
             "appliesTo": ["ddl.tabla_fisica"], "priority": 10, "enabled": True, "validationState": "valid"}
     before, log = render.statement_snippets([rule], "ddl.tabla_fisica", BASE, CONFIG_R, "before")
-    assert before == ["-- DROP TABLE IF EXISTS `bcp_ddv`.`hd_venta`;"]
+    assert before == ["-- DROP TABLE IF EXISTS bcp_ddv.hd_venta;"]
     after, _ = render.statement_snippets([rule], "ddl.tabla_fisica", BASE, CONFIG_R, "after")
-    assert after == ["OPTIMIZE `bcp_ddv`.`hd_venta`;", "-- vacuum 15 days"]     # la línea en blanco se omite
+    assert after == ["OPTIMIZE bcp_ddv.hd_venta;", "-- vacuum 15 days"]     # la línea en blanco se omite
     assert any(e["status"] == "applied" and e["object"] == "statements.before" for e in log)
     # otro artefacto → nada
     assert render.statement_snippets([rule], "ddl.tabla_rej", BASE, CONFIG_R, "before")[0] == []
@@ -253,8 +256,12 @@ def test_table_tags_una_sentencia_por_regla_y_key_repetida_no_se_duplica():
         "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('isDAC' = 'True', 'owner' = 'x');",
         "ALTER TABLE `bcp_ddv`.`hd_venta` SET TAGS ('zone' = 'raw');",          # isDAC ya lo emitió la de mayor prioridad
     ]
+    # Doc 93 D6: sobre vistas, ALTER TABLE por default; ALTER VIEW solo por setting
     view_stmts, _ = render.table_tag_statements([r1], "ddl.tabla_fisica", BASE, CONFIG, "`v`.`x`", object_kind="view")
-    assert view_stmts[0].startswith("ALTER VIEW `v`.`x` SET TAGS (")
+    assert view_stmts[0].startswith("ALTER TABLE `v`.`x` SET TAGS (")
+    view_stmts2, _ = render.table_tag_statements([r1], "ddl.tabla_fisica", BASE, CONFIG, "v.x", object_kind="view",
+                                                 options={"viewTagsAs": "view"})
+    assert view_stmts2[0].startswith("ALTER VIEW v.x SET TAGS (")
 
 
 def test_exclude_y_matching_case_insensitive():

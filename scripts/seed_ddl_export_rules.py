@@ -3,20 +3,24 @@ como UNA versión de Data Standards — POR PROYECTO (doc 75: cada proyecto tien
 sus reglas, lookups, UDPs y su historial). `--project "Nombre"` siembra uno;
 `--all-projects`, todos (el one-shot usa este último).
 
-Qué crea (10 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente):
+Qué crea (12 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente):
   - excluir_dac_vista_sin_dac  vista NoDAC de tabla DAC → quita las columnas DAC-*
   - desencriptar_dac           columna DAC-% → bcp_encrypt_function.decrypt_column_view({col}, '<sufijo>')
                                [vistas DAC + vista de negocio]
   - tags_dac_columna           ALTER … ALTER COLUMN … SET TAGS ('DAC' = '<sufijo>')
   - char_a_varchar             columna CHAR(n) → VARCHAR(n) en la física y la _rej (acción `types`, doc 90)
   - drop_comentado             -- DROP TABLE IF EXISTS … comentado antes del CREATE (física y _rej)
-  - tags_update_frequency      SET TAGS ('updateFrecuency' = …) [lookup update_frequency_map]
-  - tags_isdac / tags_isdac_sin_dac   SET TAGS ('isDAC' = 'True'|'False')
+  - tags_update_frequency      SET TAGS ('updateFrequency' = …) [lookup update_frequency_map]
+  - tags_isdac / tags_isdac_sin_dac   SET TAGS ('isDAC' = 'True'|'False') (física, _rej y vistas técnicas)
+  - tags_isdac_vista_negocio(_sin_dac) isDAC de las vistas de negocio según las columnas que
+                               proyectan (condición ANY_COLUMN, doc 93)
   - tblproperties_vacuum       delta.logRetentionDuration + deletedFileRetentionDuration [lookup vacuum_map]
-  - particiones_al_final       particiones al final del CREATE, ordenadas por el UDP «Particion»
+  - particiones_al_final       particiones = columnas con PART_nn en el UDP «Particion», al final del CREATE
   - tabla_rechazos             generador: _rej todo STRING (particiones conservan tipo) + tiporeject
   - vista_tecnica / vista_tecnica_dac / vista_rechazos / vista_rechazos_dac   generadores de vistas _v
   Lookups: vacuum_map · update_frequency_map · dac_flag_map · dac_map.
+  Output settings (doc 93): cómo se escribe el DDL y cómo se nombran los archivos del zip
+  (convenciones de la macro BCP; editables en Data Standards → DDL export rules → Output).
 
 Robustez en BD recién migrada: el kit siembra el catálogo fijo completo de UDPs
 (doc 68), pero si «Frecuencia Vacuum» faltara (cargas viejas con la política
@@ -94,7 +98,8 @@ def select_projects(projects: list[dict], project: str | None, all_projects: boo
 
 def _referenced_udps(seeds: list[dict], seed_lookups: dict | None = None) -> set[tuple[str, str]]:
     """(level, name) de todo UDP que las semillas usan: condiciones, `{udp:…}`
-    de las acciones, `layout.partitionOrderUdp` (UDP de columna, doc 76) y el
+    de las acciones, `layout.partitionUdp` (UDP de columna, doc 93; alias legado
+    `partitionOrderUdp`) y el
     UDP de ORIGEN de cada lookup (`fromUdpName`/`fromLevel`). Puro."""
     refs: set[tuple[str, str]] = set()
     for s in seeds:
@@ -104,7 +109,8 @@ def _referenced_udps(seeds: list[dict], seed_lookups: dict | None = None) -> set
         action = s.get("action") or {}
         for name in _ACTION_REF.findall(str(action)):
             refs.add((level, name))
-        order_udp = str((action.get("layout") or {}).get("partitionOrderUdp") or "").strip()
+        lay = action.get("layout") or {}
+        order_udp = str(lay.get("partitionUdp") or lay.get("partitionOrderUdp") or "").strip()
         if order_udp:
             refs.add(("column", order_udp))
     for lk in (seed_lookups or {}).values():
@@ -121,7 +127,7 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
     from app.features.data_standards.schemas import ApplyBody, DdlConfigPatch, DdlRuleEdit, UdpEdit
     from app.features.ddl_rules import repository as rules_repo
     from app.features.ddl_rules import service as rules_svc
-    from app.features.ddl_rules.templates import SEED_LOOKUPS
+    from app.features.ddl_rules.templates import SEED_LOOKUPS, SEED_OUTPUT
     from app.features.udp import repository as udp_repo
 
     print(f"\n{'═' * 72}\nPROYECTO «{project_name}» ({project_id[:8]}…)")
@@ -183,6 +189,7 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
               f"{len(lk.get('values') or {})} valores · default={lk.get('default')!r} · {state}")
     for s in seeds:
         print(f"   regla {s['name']} [{s['kind']}]")
+    print(f"   output settings: {len(SEED_OUTPUT)} claves (convenciones de la macro BCP, doc 93)")
 
     if not apply:
         print("── DRY-RUN — nada escrito. Con --apply se crea la versión "
@@ -199,7 +206,7 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
                      "NoDAC/DAC, vistas de rechazos y decoración de las vistas de negocio."),
         udpUpsert=udp_upsert,
         rulesUpsert=[DdlRuleEdit(**s) for s in seeds],
-        ddlConfigPatch=DdlConfigPatch(lookups=lookups),
+        ddlConfigPatch=DdlConfigPatch(lookups=lookups, output=SEED_OUTPUT),
     )
     try:
         version = await std_service.apply("system", project_id, body)

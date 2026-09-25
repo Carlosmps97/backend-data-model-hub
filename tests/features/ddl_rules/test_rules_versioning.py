@@ -51,7 +51,7 @@ def test_snapshot_of_incluye_reglas_y_config():
 
 def test_snapshot_of_sin_reglas_emite_vacios():
     snap = service.snapshot_of(domains=[], terms=[], naming={})
-    assert snap["ddlRules"] == [] and snap["ddlConfig"] == {"lookups": {}, "functions": []}
+    assert snap["ddlRules"] == [] and snap["ddlConfig"] == {"lookups": {}, "functions": [], "output": {}}
 
 
 def test_build_diff_reglas_y_config():
@@ -126,7 +126,8 @@ def test_apply_reglas_crea_version_y_muta(monkeypatch):
     updated.assert_awaited_once()                       # r1 existente → update
     created.assert_awaited_once()                       # tags_tabla nueva → create
     assert created.await_args.args[1]["updatedBy"] == "maria.rojas"
-    set_cfg.assert_awaited_once_with("p1", lookups=None, functions=[{"name": "f", "params": [], "body": "1"}])
+    set_cfg.assert_awaited_once_with("p1", lookups=None, functions=[{"name": "f", "params": [], "body": "1"}],
+                                     output=None)
     assert "Rule tags_tabla" in inserted["diff"]["added"]
     deleted.assert_not_awaited()                        # el batch no traía rulesDelete
 

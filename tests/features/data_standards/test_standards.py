@@ -13,14 +13,14 @@ from app.features.data_standards.schemas import ApplyBody, DomainEdit, NamingEdi
 def test_snapshot_of_limpia_campos():
     snap = service.snapshot_of(
         domains=[{"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)", "extra": "x"}],
-        terms=[{"id": "t1", "term": "monto", "abbrev": "MTO", "scope": "column", "wordType": "prime", "junk": 1}],
+        terms=[{"id": "t1", "term": "monto", "abbrev": "MTO", "scope": "column", "wordType": "prime", "junk": 1}],  # wordType: retirado (doc 94)
         naming={"column": {"separator": "_", "case": "upper"}, "table": {"separator": "", "case": "upper"}},
     )
     assert snap["domains"][0] == {"id": "d1", "name": "Importe", "defaultDataType": "DECIMAL(18,2)",
                                    "namingTerm": None, "description": None, "logicalDataType": None,
                                    "inheritsName": None,                       # doc 79: aditivo al snapshot
                                    "physicalName": None, "physicalDescription": None, "udpValues": None}  # doc 85
-    assert "junk" not in snap["dict"][0]
+    assert "junk" not in snap["dict"][0] and "wordType" not in snap["dict"][0]
     assert snap["namingConfig"]["column"] == {"separator": "_", "case": "upper", "maxLength": None}
 
 

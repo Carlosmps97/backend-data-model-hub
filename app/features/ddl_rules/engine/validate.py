@@ -140,11 +140,12 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
     ast = None
     try:
         ast = cond.parse_condition(condition)
-        refs = cond.extract_refs(ast, condition)
+        cond.extract_refs(ast, condition)          # valida la forma de TODAS las referencias
         checks["Condition syntax"]["detail"] = "parsed" if condition.strip() else "empty = always applies"
-        # columna.* solo existe en reglas de columna
+        # columna.* solo existe en reglas de columna — y, doc 93 D8, dentro de
+        # ANY_COLUMN(...) en cualquier regla o generador.
         if target != "column":
-            for path in refs:
+            for path in cond.refs_outside_any_column(ast, condition):
                 if path[0] == "columna":
                     fail("Condition syntax",
                          f"'columna.*' is not available in a {kind if kind == 'generator' else 'table'} "
@@ -257,10 +258,11 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
         errors.append({"check": "Action", "message": message, "token": token,
                        "suggestion": None, "snippet": None, "line": 1, "col": 1})
 
-    # Doc 73/76 · Column layout: acción de TABLA sobre la física, sin condición
-    # y sin mezclarse con otras acciones (es un estándar del ruleset, no una
-    # regla por UDP). `partitionOrderUdp` enlaza un UDP de COLUMNA (faceta
-    # física) cuyos valores PART_nn ordenan las particiones.
+    # Doc 73/76/93 · Column layout: acción de TABLA sobre la física, sin
+    # condición y sin mezclarse con otras acciones (es un estándar del ruleset,
+    # no una regla por UDP). `partitionUdp` (alias legado `partitionOrderUdp`)
+    # enlaza un UDP de COLUMNA (faceta física) cuyos valores PART_nn DEFINEN las
+    # particiones — qué columnas y en qué orden (doc 93 D10).
     layout = action.get("layout")
     if layout is not None:
         allowed = {"partitionColumns": ("keep", "last")}
@@ -268,16 +270,16 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
             _bad("Column layout needs at least one setting (partitionColumns: last).")
         else:
             for k, val in layout.items():
-                if k == "partitionOrderUdp":
+                if k in ("partitionUdp", "partitionOrderUdp"):
                     name = str(val or "").strip()
                     if not name:
-                        _bad("Column layout 'partitionOrderUdp' needs the name of a column UDP (e.g. Particion).")
+                        _bad("Column layout 'partitionUdp' needs the name of a column UDP (e.g. Particion).")
                         continue
                     d = by_level.get("column", {}).get(name)
                     if d is None:
                         sug = _closest(name, list(by_level.get("column", {}).keys()))
                         fail("UDP exists in catalog",
-                             f"Unknown column UDP '{name}' in column layout (partitionOrderUdp)."
+                             f"Unknown column UDP '{name}' in column layout (partitionUdp)."
                              + (f" Did you mean '{sug}'?" if sug else ""),
                              token=name, suggestion=sug)
                     elif {"udpId": d["id"], "level": "column"} not in udp_refs:

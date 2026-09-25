@@ -45,33 +45,88 @@ def _case(s: str, mode: str) -> str:
 
 
 def cased(s: str, options: dict | None = None) -> str:
-    """Identificador con el casing del export (`identifierCase`) SIN backticks
-    — para las proyecciones de las vistas generadas (doc 76 D8)."""
+    """Identificador con el casing del export (`identifierCase`) SIN comillas."""
     return _case(str(s), (options or {}).get("identifierCase") or "as-is")
 
 
+# Doc 93 D2: sin backticks salvo que el nombre los NECESITE. ESPEJO EXACTO de
+# `RESERVED_WORDS` del front (web-data-model-hub/src/features/ddl/generators.ts).
+RESERVED_WORDS = frozenset("""
+all alter and anti any as authorization between both by case cast check collate column
+constraint create cross current_date current_time current_timestamp current_user delete
+describe distinct drop else end escape except exists external false fetch filter for foreign
+from full function global grant group having in inner insert intersect interval into is join
+lateral leading left like local minus natural no not null of on only or order out outer
+overlaps position primary range references revoke right rollback rollup row rows select semi
+session_user set some start table tablesample then time to trailing true truncate union
+unique unknown update user using values when where window with
+""".split())
+
+_SAFE_IDENT_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def needs_quote(name: str) -> bool:
+    """True si el identificador no compila sin backticks en Databricks (o no lo
+    leería el parser del motor): caracteres fuera de [A-Za-z0-9_], empieza con
+    dígito, o es palabra reservada."""
+    s = str(name)
+    return not _SAFE_IDENT_RX.match(s) or s.lower() in RESERVED_WORDS
+
+
+def _quote(s: str) -> str:
+    return "`" + s.replace("`", "``") + "`"
+
+
 def ident(s: str, options: dict | None = None) -> str:
-    """Identificador backtickeado con el casing de las opciones del export
-    (`identifierCase`: as-is | lower | upper)."""
-    return f"`{cased(s, options)}`"
+    """Identificador con el casing del export y comillas según `quoteIdentifiers`
+    (`when-needed` por default · `always` = estilo anterior al doc 93)."""
+    c = cased(s, options)
+    if (options or {}).get("quoteIdentifiers") == "always" or needs_quote(c):
+        return _quote(c)
+    return c
+
+
+def proj_ident(s: str, options: dict | None = None) -> str:
+    """Identificador de una PROYECCIÓN de vista (`col AS col`): casing del export
+    y comillas SOLO si el nombre las necesita (doc 76 D8 · doc 93 D2)."""
+    c = cased(s, options)
+    return _quote(c) if needs_quote(c) else c
 
 
 def full_name(schema: str | None, name: str, options: dict | None = None) -> str:
-    """``schema``.``name`` con backticks (o solo el nombre) y el casing del export."""
+    """`schema.name` (o solo el nombre) con el casing y las comillas del export."""
     return f"{ident(schema, options)}.{ident(name, options)}" if schema else ident(name, options)
+
+
+def type_text(t: str, options: dict | None = None) -> str:
+    """Tipo de dato con el casing del export (`typeCase`: lower | upper; default
+    lower, doc 93 D3). Los tipos complejos (`<…>`) salen tal cual."""
+    s = str(t or "").strip() or "STRING"
+    if "<" in s:
+        return s
+    return s.upper() if (options or {}).get("typeCase") == "upper" else s.lower()
+
+
+def create_table_sql(options: dict | None = None) -> str:
+    """Encabezado del CREATE TABLE (doc 93 D5): `or-replace` (default) →
+    `CREATE OR REPLACE TABLE` (con LOCATION ya es externa; Databricks no admite
+    `CREATE OR REPLACE EXTERNAL`); `if-not-exists` → la forma anterior."""
+    o = options or {}
+    if o.get("createTable") == "if-not-exists":
+        return "CREATE EXTERNAL TABLE IF NOT EXISTS" if o.get("external") else "CREATE TABLE IF NOT EXISTS"
+    return "CREATE OR REPLACE TABLE"
 
 
 def location_folder(name: str, options: dict | None = None) -> str:
     """Carpeta del `LOCATION` (doc 76 D9): el nombre del objeto con el casing de
-    carpeta del export (`locationFolderCase`, default MAYÚSCULA — convención
-    ADLS de la macro). Es un literal de path: no lleva backticks."""
+    carpeta del export (`locationFolderCase`, default MAYÚSCULA). Literal de path."""
     return _case(str(name), (options or {}).get("locationFolderCase") or "upper")
 
 
 def artifact_ctx(schema: str | None, name: str, kind: str, options: dict | None = None) -> dict:
-    """Contexto `artefacto.*` (doc 76 D6): el objeto que se está emitiendo —
-    `ref` calificado con backticks + casing (para `-- DROP TABLE IF EXISTS
-    {artefacto.ref};`), `esquema`/`nombre` crudos, `tipo` table|view."""
+    """Contexto `artefacto.*` (doc 76 D6): `ref` calificado con el casing y las
+    comillas del export (para `-- DROP TABLE IF EXISTS {artefacto.ref};`),
+    `esquema`/`nombre` crudos, `tipo` table|view."""
     return {"esquema": schema, "nombre": name, "tipo": kind,
             "ref": full_name(schema, name, options)}
 
@@ -214,7 +269,8 @@ def decorate_select(select: exp.Select, artifact: str, rules: list[dict],
             expanded = expand_template(alias_tpl, ctx, lookups, functions)
             if expanded and expanded.lower() not in {str(alias).lower(), str(match_name).lower()}:
                 alias = expanded
-        new_exprs.append(exp.alias_(acc, alias, quoted=False))
+        # Doc 93 D2: el alias se cita solo si el nombre lo necesita.
+        new_exprs.append(exp.alias_(acc, alias, quoted=needs_quote(str(alias))))
         changed = True
     if changed:
         select.set("expressions", new_exprs)
@@ -257,9 +313,11 @@ def _eval_rule_condition(rule: dict, ctx: dict, parsed: dict) -> bool:
     return cond.eval_condition(ast_cond, ctx, rule.get("condition") or "")
 
 
-def _alter_kw(object_kind: str | None) -> str:
-    """`ALTER VIEW` para artefactos vista, `ALTER TABLE` para el resto (doc 76 D5)."""
-    return "VIEW" if object_kind == "view" else "TABLE"
+def _alter_kw(object_kind: str | None, options: dict | None = None) -> str:
+    """Doc 93 D6: `ALTER TABLE` para todo objeto (como la macro BCP; la sintaxis
+    documentada de ALTER VIEW no trae ALTER COLUMN … SET TAGS). `ALTER VIEW` solo
+    para vistas cuando las Output settings dicen `viewTagsAs = 'view'`."""
+    return "VIEW" if object_kind == "view" and (options or {}).get("viewTagsAs") == "view" else "TABLE"
 
 
 def column_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
@@ -271,13 +329,14 @@ def column_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
     `cols_ctx_by_name` debe venir en orden de columna (dict ordenado) y, en
     vistas, contener SOLO las columnas proyectadas con su nombre de salida.
     `table_full` ya viene calificado (`full_name`); la columna se emite con el
-    mismo `ident()` (doc 71 H2). `object_kind='view'` ⇒ `ALTER VIEW`."""
+    mismo `ident()` (doc 71 H2). `object_kind='view'` + `viewTagsAs='view'` ⇒
+    `ALTER VIEW`; si no, `ALTER TABLE` (doc 93 D6)."""
     log: list[dict] = []
     stmts: list[str] = []
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     parsed: dict[str, object] = {}
-    kw = _alter_kw(object_kind)
+    kw = _alter_kw(object_kind, options)
     ordered = run_order([r for r in rules
                          if r.get("kind") == "rule" and r.get("target") == "column"
                          and (r.get("action") or {}).get("tags")
@@ -309,16 +368,18 @@ def column_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
 
 def table_tag_statements(rules: list[dict], artifact: str, base_ctx: dict,
                          config: dict, table_full: str,
-                         object_kind: str = "table") -> tuple[list[str], list[dict]]:
+                         object_kind: str = "table",
+                         options: dict | None = None) -> tuple[list[str], list[dict]]:
     """Tags a nivel de OBJETO (spec §8.3 · doc 76 D4): UNA sentencia por REGLA
     que aplique (orden de prioridad), pares ordenados dentro de cada una; una
     key ya emitida por una regla de mayor prioridad no se repite. Límite
-    Databricks: 50 tags por objeto. `object_kind='view'` ⇒ `ALTER VIEW`."""
+    Databricks: 50 tags por objeto. `object_kind='view'` + `viewTagsAs='view'`
+    ⇒ `ALTER VIEW`; si no, `ALTER TABLE` (doc 93 D6)."""
     log: list[dict] = []
     lookups = config.get("lookups") or {}
     functions = config.get("functions") or []
     parsed: dict[str, object] = {}
-    kw = _alter_kw(object_kind)
+    kw = _alter_kw(object_kind, options)
     stmts: list[str] = []
     seen: dict[str, str] = {}
     for r in run_order([r for r in rules
@@ -564,6 +625,16 @@ def view_projections(sql: str) -> list[tuple[str | None, str | None]]:
     return [(src, out) for src, out, _ in (_projection_parts(p) for p in select.expressions)]
 
 
+def readable_select(sql: str) -> bool:
+    """True si el SQL parsea y tiene un SELECT del que se pueden leer TODAS las
+    proyecciones (doc 93 D8: sin eso, las columnas de la vista se desconocen).
+    Un `*` o `t.*` no dice qué columnas expone la vista: también cuenta como
+    ilegible, así las reglas con ANY_COLUMN se saltan en vez de inventar un
+    `isDAC` (final review #2)."""
+    select = _parse_view(sql)[1]
+    return select is not None and not any(p.is_star for p in select.expressions)
+
+
 def projected_cols_ctx(sql: str, cols_ctx_by_name: dict[str, dict]) -> dict[str, dict]:
     """Contexto `columna.*` de las columnas que una VISTA realmente proyecta
     (doc 76 D5): {nombre_de_salida: contexto de la columna fuente con
@@ -762,6 +833,11 @@ def map_type_text(text: str, maps: list[tuple[str, dict[str, str]]]) -> tuple[st
     return _splice(text, repl), applied
 
 
+# Doc 93 D13: sin comillas, una columna llamada `char`/`array` se tokeniza como
+# PALABRA CLAVE; igual es la cabeza de su definición (salvo las de constraint).
+_CONSTRAINT_HEADS = {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "KEY", "INDEX"}
+
+
 def _column_regions(toks: list) -> list[tuple[str, int, int]]:
     """[(nombre, i0, i1)] de las definiciones de columna del PRIMER grupo
     `( … )` de los tokens (la lista de columnas del CREATE): toks[i0:i1] son
@@ -799,7 +875,8 @@ def _column_regions(toks: list) -> list[tuple[str, int, int]]:
         if b - a < 2:                    # nombre sin tipo (o entrada vacía)
             continue
         head = toks[a]
-        if head.token_type in (TokenType.IDENTIFIER, TokenType.VAR):
+        if head.token_type in (TokenType.IDENTIFIER, TokenType.VAR) or (
+                _TYPE_WORD_RX.match(head.text or "") and head.text.upper() not in _CONSTRAINT_HEADS):
             out.append((head.text, a + 1, b))
     return out
 

@@ -11,7 +11,7 @@ _SCHEMAS = [{"id": "s1", "name": "ddv", "kind": "tables"}]
 EXISTING = [{"id": "t1", "projectId": "p1", "physicalName": "CLIENTE", "logicalName": "Cliente", "schema": "ddv",
              "description": None, "udpValues": {}}]
 COL = {"id": "c1", "projectId": "p1", "tableId": "t1", "physicalName": "X", "logicalName": "X", "parentDomainId": None,
-       "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None, "pkPosition": None, "isForeignKey": None,
+       "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None, "isForeignKey": None,
        "isNullable": True, "isPartition": False, "description": None, "ordinal": 0, "udpValues": {}}
 
 
@@ -54,7 +54,7 @@ def test_default_de_campo_solo_para_entidad_nueva():
     col = parsed(tables=[trow(3, "Cliente", schema="ddv")],
                  columns=[crow(3, "Cliente", "A", defaults={"data_type": "BIGINT", "pk": "X"})])
     (c,) = [x["payload"] for x in by_coll(build_plan(col, ctx(schemas=_SCHEMAS)))["canonical_columns"]]
-    assert (c["dataType"], c["isPrimaryKey"], c["pkPosition"]) == ("BIGINT", True, 0)
+    assert (c["dataType"], c["isPrimaryKey"]) == ("BIGINT", True) and "pkPosition" not in c
 
 
 def test_column_de_incidencia_usa_cabecera_del_perfil():

@@ -1,7 +1,9 @@
 """Plantillas del picker "New rule" (pantalla 16d) + el RULESET BASE que
-reproduce los DDL de la macro BCP (doc 76 §5) + la homologación de tipos
-CHAR(n) → VARCHAR(n) (doc 90): 10 reglas + 5 generadores —
-TODAS con UDPs reales del catálogo fijo (doc 68/69). Las semillas también son
+reproduce los DDL de la macro BCP (doc 76 §5 · doc 93) + la homologación de
+tipos CHAR(n) → VARCHAR(n) (doc 90): 12 reglas + 5 generadores —
+TODAS con UDPs reales del catálogo fijo (doc 68/69). Doc 93: tag
+`updateFrequency`; `isDAC` de las vistas de negocio según las columnas que
+PROYECTAN (`ANY_COLUMN`); particiones desde el UDP «Particion». Las semillas también son
 los fixtures de los golden tests y el contenido del CTA "Restore the base rule
 set" del catálogo vacío (doc 30 D4): el front las manda por
 `POST /api/projects/{pid}/standards/apply` — acá no se siembra nada solo. En
@@ -21,13 +23,20 @@ Los 7 artefactos de la macro (doc 76 §1):
 """
 from __future__ import annotations
 
+import copy
+
+from .output import OUTPUT_DEFAULTS
+
 TABLE_ARTIFACTS = ["ddl.tabla_fisica", "ddl.tabla_rej"]
 NODAC_VIEWS = ["ddl.vista_tecnica", "ddl.vista_rej"]
-DAC_VIEWS = ["ddl.vista_tecnica_dac", "ddl.vista_rej_dac", "ddl.vista_negocio"]
+DAC_GENERATED_VIEWS = ["ddl.vista_tecnica_dac", "ddl.vista_rej_dac"]
+DAC_VIEWS = DAC_GENERATED_VIEWS + ["ddl.vista_negocio"]
 ALL_ARTIFACTS = TABLE_ARTIFACTS + NODAC_VIEWS + DAC_VIEWS
 
 _COL_IS_DAC = 'columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\''
 _TABLE_IS_DAC = 'tabla.udp["Clasificacion del Dato"] = \'DAC\''
+# Doc 93 D9: la vista de negocio es DAC si PROYECTA alguna columna DAC-*.
+_ANY_DAC_COLUMN = f"ANY_COLUMN({_COL_IS_DAC})"
 
 SEED_RULES: list[dict] = [
     # ── Reglas de COLUMNA (decoran los SELECT / tags por columna) ──────────
@@ -73,27 +82,42 @@ SEED_RULES: list[dict] = [
         "action": {"statements": {"before": ["-- DROP TABLE IF EXISTS {artefacto.ref};"]}},
         "appliesTo": list(TABLE_ARTIFACTS), "priority": 90, "enabled": True,
     },
-    {   # todos · updateFrecuency = prefijo de Frecuencia Vacuum (CUSTOM_90 days → CUSTOM).
+    {   # todos · updateFrequency = prefijo de Frecuencia Vacuum (CUSTOM_90 days → CUSTOM).
         # Condición ABIERTA: sin valor cae al default del lookup (enfoque B, doc 30 §11).
         "name": "tags_update_frequency", "kind": "rule", "target": "table",
-        "description": "SET TAGS ('updateFrecuency' = …) según Frecuencia Vacuum (lookup update_frequency_map)",
+        "description": "SET TAGS ('updateFrequency' = …) según Frecuencia Vacuum (lookup update_frequency_map)",
         "condition": "",
-        "action": {"tags": {"updateFrecuency": "{lookup:update_frequency_map}"}},
+        "action": {"tags": {"updateFrequency": "{lookup:update_frequency_map}"}},
         "appliesTo": list(ALL_ARTIFACTS), "priority": 60, "enabled": True,
     },
-    {   # 1/2/4/6/7 · isDAC = True|False según el UDP de TABLA (No Definido/sin valor → False)
+    {   # 1/2/4/6 · física, _rej y vistas técnicas DAC · isDAC según el UDP de
+        # TABLA (No Definido/sin valor → False)
         "name": "tags_isdac", "kind": "rule", "target": "table",
-        "description": "SET TAGS ('isDAC' = 'True'|'False') según Clasificacion del Dato de la tabla (lookup dac_flag_map)",
+        "description": "SET TAGS ('isDAC' = 'True'|'False') según Clasificacion del Dato de la tabla (física, _rej y vistas técnicas DAC)",
         "condition": "",
         "action": {"tags": {"isDAC": "{lookup:dac_flag_map}"}},
-        "appliesTo": TABLE_ARTIFACTS + DAC_VIEWS, "priority": 55, "enabled": True,
+        "appliesTo": TABLE_ARTIFACTS + DAC_GENERATED_VIEWS, "priority": 55, "enabled": True,
     },
     {   # 3/5 · las vistas NoDAC nunca exponen columnas DAC → False constante
         "name": "tags_isdac_sin_dac", "kind": "rule", "target": "table",
-        "description": "SET TAGS ('isDAC' = 'False') en las vistas NoDAC",
+        "description": "SET TAGS ('isDAC' = 'False') en las vistas técnicas y de rechazos NoDAC",
         "condition": "",
         "action": {"tags": {"isDAC": "False"}},
         "appliesTo": list(NODAC_VIEWS), "priority": 55, "enabled": True,
+    },
+    {   # 7 · vista de negocio (_vu) que proyecta alguna columna DAC-* (doc 93 D9)
+        "name": "tags_isdac_vista_negocio", "kind": "rule", "target": "table",
+        "description": "SET TAGS ('isDAC' = 'True') en las vistas de negocio que proyectan alguna columna DAC-*",
+        "condition": _ANY_DAC_COLUMN,
+        "action": {"tags": {"isDAC": "True"}},
+        "appliesTo": ["ddl.vista_negocio"], "priority": 55, "enabled": True,
+    },
+    {   # 7 · vista de negocio (_vu) sin columnas DAC-* (doc 93 D9)
+        "name": "tags_isdac_vista_negocio_sin_dac", "kind": "rule", "target": "table",
+        "description": "SET TAGS ('isDAC' = 'False') en las vistas de negocio que no proyectan columnas DAC-*",
+        "condition": f"NOT {_ANY_DAC_COLUMN}",
+        "action": {"tags": {"isDAC": "False"}},
+        "appliesTo": ["ddl.vista_negocio"], "priority": 55, "enabled": True,
     },
     {   # 1/2 · retención delta según Frecuencia Vacuum (vía lookup). Condición
         # ABIERTA: en el DDV real NINGUNA tabla asigna "Frecuencia Vacuum"
@@ -107,13 +131,15 @@ SEED_RULES: list[dict] = [
                                      "delta.deletedFileRetentionDuration": "{lookup:vacuum_map}"}},
         "appliesTo": list(TABLE_ARTIFACTS), "priority": 40, "enabled": True,
     },
-    {   # doc 73/76 · layout de columnas: las PARTICIONES se emiten al FINAL del
-        # CREATE, ordenadas por el correlativo del UDP «Particion» (PART_01,
-        # PART_02…). El orden físico del modelo no cambia. Sin condición.
+    {   # doc 73/76/93 · layout: las columnas de partición SON las que tienen
+        # PART_nn en el UDP «Particion» (el flag de partición no se usa); se
+        # emiten al FINAL del CREATE en orden PART_01, PART_02… y el
+        # PARTITIONED BY lleva solo los nombres. El orden físico del modelo no
+        # cambia. Sin condición.
         "name": "particiones_al_final", "kind": "rule", "target": "table",
-        "description": "Emite las columnas de partición al final del CREATE TABLE, en el orden del UDP Particion (PART_01, PART_02…)",
+        "description": "Particiones = columnas con PART_nn en el UDP Particion; al final del CREATE TABLE en orden PART_01, PART_02… (PARTITIONED BY solo con nombres)",
         "condition": "",
-        "action": {"layout": {"partitionColumns": "last", "partitionOrderUdp": "Particion"}},
+        "action": {"layout": {"partitionColumns": "last", "partitionUdp": "Particion"}},
         "appliesTo": ["ddl.tabla_fisica"], "priority": 30, "enabled": True,
     },
     # ── Generadores (cascada) ──────────────────────────────────────────────
@@ -184,7 +210,7 @@ SEED_LOOKUPS: dict = {
         "values": {v: f"{v.split('_', 1)[1]}" for v in _VACUUM_VALUES},
         "default": "90 days",
     },
-    # Frecuencia Vacuum → prefijo para el tag updateFrecuency ('DAILY_15 days' → 'DAILY').
+    # Frecuencia Vacuum → prefijo para el tag updateFrequency ('DAILY_15 days' → 'DAILY').
     "update_frequency_map": {
         "fromUdpName": "Frecuencia Vacuum", "fromLevel": "table",
         "values": {v: v.split("_", 1)[0] for v in _VACUUM_VALUES},
@@ -235,19 +261,25 @@ TEMPLATES: list[dict] = [
      "summary": "esquema → esquema_v · col AS col in physical order",
      "rule": _SEED_BY_NAME["vista_tecnica"]},
     {"id": "governance-tags", "title": "Apply governance tags",
-     "summary": "Frecuencia Vacuum → SET TAGS ('updateFrecuency' = 'MONTHLY')",
+     "summary": "Frecuencia Vacuum → SET TAGS ('updateFrequency' = 'MONTHLY')",
      "rule": _SEED_BY_NAME["tags_update_frequency"]},
     {"id": "free-statements", "title": "Free statements",
      "summary": "-- DROP TABLE IF EXISTS … before the CREATE (any SQL text with placeholders)",
      "rule": _SEED_BY_NAME["drop_comentado"]},
     {"id": "partitions-last", "title": "Partition columns last",
-     "summary": "PARTITIONED BY columns at the end of the CREATE, ordered by the UDP 'Particion'",
+     "summary": "Partition columns from the UDP 'Particion' (PART_nn), at the end of the CREATE",
      "rule": _SEED_BY_NAME["particiones_al_final"]},
     {"id": "map-types", "title": "Map data types",
      "summary": "CHAR(10) → VARCHAR(10): rename a base type on export, keeping each column's length",
      "rule": _SEED_BY_NAME["char_a_varchar"]},
+    {"id": "tag-by-columns", "title": "Tag by the columns an object exposes",
+     "summary": "ANY_COLUMN(columna.udp[\"Clasificacion del Dato\"] LIKE 'DAC-%') → SET TAGS ('isDAC' = 'True')",
+     "rule": _SEED_BY_NAME["tags_isdac_vista_negocio"]},
     {"id": "blank", "title": "Blank rule",
      "summary": "Start from scratch and configure every field yourself.",
      "rule": {"name": "", "kind": "rule", "target": "column", "condition": "",
               "action": {}, "appliesTo": [], "priority": 100, "enabled": True}},
 ]
+
+# Doc 93 D1: Output settings de la semilla = convenciones de la macro BCP.
+SEED_OUTPUT: dict = copy.deepcopy(OUTPUT_DEFAULTS)

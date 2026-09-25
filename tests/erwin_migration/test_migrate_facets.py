@@ -166,7 +166,8 @@ def test_orden_unico_llaves_primero_en_el_orden_de_la_llave_doc74():
     Migrator(db, m, "Proyecto K", None).run()
     cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
     assert [cols[n]["ordinal"] for n in ("CODCLAVE", "CODMES", "FLG", "NOTA")] == [0, 1, 2, 3]
-    assert (cols["CODCLAVE"]["pkPosition"], cols["CODMES"]["pkPosition"], cols["FLG"]["pkPosition"]) == (0, 1, None)
+    # Doc 94 D1: la llave sigue el ordinal (PK primero, en el orden de la llave de Erwin) — sin pkPosition.
+    assert all("pkPosition" not in cols[n] for n in ("CODCLAVE", "CODMES", "FLG", "NOTA"))
 
 
 def test_dominio_estandar_hereda_nombre_y_definicion_doc79():

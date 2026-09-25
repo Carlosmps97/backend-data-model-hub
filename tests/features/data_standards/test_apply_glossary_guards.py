@@ -155,7 +155,7 @@ def test_apply_mismo_termino_en_scopes_distintos_no_choca(monkeypatch):
 
 
 def test_apply_edit_sin_cambio_de_texto_no_valida(monkeypatch):
-    # Editar SOLO abbrev/wordType (mismo texto) NO dispara ensure_term_valid.
+    # Editar SOLO abbrev (mismo texto) NO dispara ensure_term_valid.
     ensure = AsyncMock()
     _mock(monkeypatch, before_terms=[{**LOCKED, "locked": False}], ensure=ensure)
     body = ApplyBody(termsUpsert=[TermEdit(id="t1", term="codigo", abbrev="CD9",

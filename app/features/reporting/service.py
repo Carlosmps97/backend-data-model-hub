@@ -163,8 +163,7 @@ def column_rows(columns: list[dict], parent_domains: list[dict],
                 "description": c.get("description"),
                 "physicalDescription": c.get("physicalDescription"),   # doc 85
                 "ordinal": c.get("ordinal", 0),
-                # Doc 70 §4.2 — metadata COMPLETA de la columna (docs 19/68/69).
-                "pkPosition": c.get("pkPosition"),
+                # Doc 70 §4.2 — metadata COMPLETA de la columna (docs 68/69).
                 "typeOverridden": bool(c.get("typeOverridden")),
                 "logicalTypeOverridden": bool(c.get("logicalTypeOverridden")),
                 "physicalNameOverridden": bool(c.get("physicalNameOverridden")),

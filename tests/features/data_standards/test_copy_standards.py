@@ -29,12 +29,13 @@ def _mock(monkeypatch):
                                                  "udpValues": {"u-src": "No DAC", "u-gone": "x"}}]))
     monkeypatch.setattr(service.dict_repo, "list_entries",
                         AsyncMock(return_value=[{"id": "t-src", "term": "codigo", "abbrev": "COD", "scope": "column",
-                                                 "wordType": None, "locked": True, "lockedBy": "admin", "lockedAt": "x"}]))
+                                                 "locked": True, "lockedBy": "admin", "lockedAt": "x"}]))
     monkeypatch.setattr(service.udp_repo, "list_udp", AsyncMock(return_value=SRC_UDP))
     monkeypatch.setattr(service.rules_repo, "list_rules", AsyncMock(return_value=SRC_RULES))
     monkeypatch.setattr(service.rules_repo, "get_config",
                         AsyncMock(return_value={"id": "src", "projectId": "src", "functions": [],
-                                                "lookups": {"m": {"fromUdpId": "u-src", "fromLevel": "column", "values": {}, "default": None}}}))
+                                                "lookups": {"m": {"fromUdpId": "u-src", "fromLevel": "column", "values": {}, "default": None}},
+                                                "output": {"typeCase": "upper"}}))
     monkeypatch.setattr(service.set_svc, "get_naming",
                         AsyncMock(return_value={"column": {"separator": "_", "case": "lower", "maxLength": 90},
                                                 "table": {"separator": "", "case": "upper", "maxLength": 150}}))
@@ -64,6 +65,7 @@ def test_copia_total_remapea_udp_en_reglas_y_lookups_y_quita_locks(monkeypatch):
     rule = created["rules"][0][1]
     assert rule["udpRefs"] == [{"udpId": "u-new", "level": "column"}] and rule["validationState"] == "valid"
     assert created["config"][0][1]["lookups"]["m"]["fromUdpId"] == "u-new"
+    assert created["config"][0][1]["output"] == {"typeCase": "upper"}          # doc 93 D1
     assert created["naming"] == [("dst", "column", {"separator": "_", "case": "lower", "maxLength": 90}),
                                  ("dst", "table", {"separator": "", "case": "upper", "maxLength": 150})]
 

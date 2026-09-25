@@ -112,7 +112,7 @@ def column_payload(table_id: str, physical: str, logical: str, ordinal: int, *, 
     p = {"tableId": table_id, "physicalName": physical, "logicalName": logical, "dataType": data_type,
          "ordinal": ordinal, "isNullable": not pk, **extra}
     if pk:
-        p.update({"isPrimaryKey": True, "pkPosition": 0})
+        p.update({"isPrimaryKey": True})
     return p
 
 

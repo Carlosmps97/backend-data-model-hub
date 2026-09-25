@@ -45,7 +45,7 @@ def test_default_del_mapeo_solo_en_entidad_nueva():
                column_udp={"UDP Campo Cross": [CP]})
     assert _cols(build_plan(p, ctx(schemas=_SCHEMAS)))[0]["udpValues"] == {"c-p": "Si"}
     existing = {"id": "c1", "projectId": "p1", "tableId": "t1", "physicalName": "A", "logicalName": "A", "parentDomainId": None,
-                "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None, "pkPosition": None,
+                "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None,
                 "isForeignKey": None, "isNullable": True, "isPartition": False, "description": None, "ordinal": 0,
                 "udpValues": {}}
     table = {"id": "t1", "projectId": "p1", "physicalName": "CLIENTE", "logicalName": "Cliente", "schema": "ddv",
@@ -67,7 +67,7 @@ def test_columna_nueva_hereda_tipo_logico_del_dominio():
 
 def test_columna_existente_conserva_campos_de_faceta():
     existing = {"id": "c1", "projectId": "p1", "tableId": "t1", "physicalName": "COD", "logicalName": "Codigo", "parentDomainId": None,
-                "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None, "pkPosition": None,
+                "dataType": "STRING", "typeOverridden": False, "isPrimaryKey": None,
                 "isForeignKey": None, "isNullable": True, "isPartition": False, "description": None, "ordinal": 0,
                 "udpValues": {}, "logicalDataType": "VARCHAR(20)", "logicalTypeOverridden": True,
                 "logicalOnly": True}

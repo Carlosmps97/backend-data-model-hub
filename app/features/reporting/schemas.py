@@ -52,8 +52,7 @@ class ReportColumnRow(BaseModel):
     description: str | None = None
     physicalDescription: str | None = None   # doc 85: comment físico (Erwin Comment)
     ordinal: int = 0
-    # Doc 70 §4.2 — metadata completa (docs 19/68/69).
-    pkPosition: int | None = None
+    # Doc 70 §4.2 — metadata completa (docs 68/69; doc 94 retiró pkPosition).
     typeOverridden: bool = False
     logicalTypeOverridden: bool = False
     physicalNameOverridden: bool = False

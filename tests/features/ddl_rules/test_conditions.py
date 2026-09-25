@@ -136,3 +136,47 @@ def test_udp_names_used_y_literal_comparisons():
     comps = c.literal_comparisons(ast, text)
     assert ("columna", "Clasificacion del Dato", "=", ["DAC"]) in comps
     assert ("tabla", "Tipo de Vista", "IN", ["Regular", "Personalizada"]) in comps
+
+
+# ── Doc 93 D8 · ANY_COLUMN(...) ───────────────────────────────────────────
+
+COLS_OBJ = [
+    {"nombre": "a", "pk": True, "udp": {"Clasificacion del Dato": "No DAC"}},
+    {"nombre": "b", "pk": False, "udp": {"Clasificacion del Dato": "DAC-CUENTA"}},
+]
+DAC_ANY = 'ANY_COLUMN(columna.udp["Clasificacion del Dato"] LIKE \'DAC-%\')'
+
+
+def test_any_column_evalua_sobre_las_columnas_del_objeto():
+    ctx = {**CTX, "columnas": COLS_OBJ}
+    assert ev(DAC_ANY, ctx)
+    assert not ev(f"NOT {DAC_ANY}", ctx)
+    assert ev('ANY_COLUMN(columna.pk = true) AND tabla.udp["Clasificacion del Dato"] = \'DAC\'', ctx)
+    assert not ev(DAC_ANY, {**CTX, "columnas": COLS_OBJ[:1]})
+    assert not ev(DAC_ANY, {**CTX, "columnas": []})                  # sin columnas: ninguna cumple
+    assert ev("any_column(columna.nombre = 'b')", ctx)               # sin distinguir mayúsculas
+
+
+def test_any_column_sin_columnas_conocidas_es_error_explicito():
+    with pytest.raises(c.CondError) as e:
+        ev(DAC_ANY, {**CTX, "columnas": None})
+    assert "needs the columns" in e.value.message
+
+
+def test_any_column_aridad_anidado_y_otras_funciones():
+    with pytest.raises(c.CondError) as e1:
+        c.parse_condition("ANY_COLUMN(columna.pk = true, columna.pk = false)")
+    assert "exactly one" in e1.value.message
+    with pytest.raises(c.CondError) as e2:
+        c.parse_condition("ANY_COLUMN(ANY_COLUMN(columna.pk = true))")
+    assert "nested" in e2.value.message
+    with pytest.raises(c.CondError) as e3:                            # otras funciones siguen prohibidas
+        c.parse_condition("ALL_COLUMNS(columna.pk = true)")
+    assert "not supported" in e3.value.message and "ANY_COLUMN(...)" in e3.value.message
+
+
+def test_refs_outside_any_column():
+    text = f'tabla.udp["Clasificacion del Dato"] = \'DAC\' AND {DAC_ANY}'
+    ast = c.parse_condition(text)
+    assert c.refs_outside_any_column(ast, text) == [("tabla", "udp", "Clasificacion del Dato")]
+    assert ("columna", "udp", "Clasificacion del Dato") in c.extract_refs(ast, text)

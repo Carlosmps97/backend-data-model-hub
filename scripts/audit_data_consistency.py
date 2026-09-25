@@ -27,6 +27,8 @@ Chequeos (C1–C9) y su fix:
      keys; valores fuera de allowedValues (defs tipo list) → REPORTE.
   C9 subject_areas: tableIds muertos → pull; layout con nodos que no son ni
      tabla activa ni vista activa → poda de entradas.
+  C11 campos retirados (doc 94): `glossary_terms.wordType` (D12) y
+      `canonical_columns.pkPosition` (D1) → unset.
 
 Uso:
     .venv/bin/python -m scripts.audit_data_consistency            # reporte
@@ -68,6 +70,25 @@ def bulk(coll: str, ops: list):
 
 def norm(s) -> str:
     return str(s or "").strip().lower()
+
+
+# Campos retirados del modelo (doc 94): quedan en docs viejos hasta el saneo.
+RETIRED_FIELDS = (("glossary_terms", "wordType"), ("canonical_columns", "pkPosition"))
+
+
+def unset_retired_fields(database, fix: bool) -> dict[str, int]:
+    """C11 · docs (activos o no) que aún traen un campo retirado (doc 94:
+    `glossary_terms.wordType`, `canonical_columns.pkPosition`). Cuenta por
+    `coleccion.campo` y, con `fix`, los quita con un `$unset`. Idempotente:
+    tras el fix las cuentas quedan en 0."""
+    out: dict[str, int] = {}
+    for coll, field in RETIRED_FIELDS:
+        flt = {field: {"$exists": True}}
+        n = database[coll].count_documents(flt)
+        if fix and n:
+            database[coll].update_many(flt, {"$unset": {field: ""}})
+        out[f"{coll}.{field}"] = n
+    return out
 
 
 def main():
@@ -304,6 +325,10 @@ def main():
     report("C9a canvases con tableIds muertos", n_tids)
     report("C9b canvases con layout de nodos inexistentes", n_layout)
     bulk("subject_areas", ops)
+
+    # ── C11 · campos retirados del modelo (doc 94) ──────────────────────────
+    for key, n in unset_retired_fields(db, FIX).items():
+        report(f"C11 {key} (campo retirado, doc 94)", n)
 
     bad = sum(n for code, n in ISSUES.items() if "INFORME" not in code)
     info = sum(n for code, n in ISSUES.items() if "INFORME" in code)

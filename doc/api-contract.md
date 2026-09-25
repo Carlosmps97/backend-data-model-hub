@@ -696,7 +696,7 @@ Es el pool canónico **del proyecto** (doc 75): tablas (`canonical_tables`) y co
 
 Forma de una tabla canónica en respuesta (`CanonicalTableDoc`, serializado con alias): `{ id, projectId, physicalName, logicalName, schema, description, udpValues, … }`. El campo `schema` es el alias de `sql_schema`; `description` es la definición funcional de la tabla (declarada en el modelo desde el doc 11 — antes se descartaba por `extra="ignore"`).
 
-Forma de una columna canónica en respuesta (`CanonicalColumnDoc`): `{ id, projectId, tableId, physicalName, logicalName, parentDomainId, dataType, typeOverridden, isPrimaryKey, pkPosition, isForeignKey, isNullable, isPartition, description, ordinal, udpValues, … }`. `pkPosition` (doc 19 §12b) es la posición 0-based dentro de la LLAVE primaria — independiente del `ordinal` físico (Erwin ordena el bloque PK y el `PRIMARY KEY(...)` del DDL por el orden de la llave); `null` si no es PK o si la PK se marcó sin orden.
+Forma de una columna canónica en respuesta (`CanonicalColumnDoc`): `{ id, projectId, tableId, physicalName, logicalName, parentDomainId, dataType, typeOverridden, isPrimaryKey, isForeignKey, isNullable, isPartition, description, ordinal, udpValues, … }`. Doc 94: no hay orden de llave aparte — las PK van primero en el `ordinal` y entre ellas manda el `ordinal` (`pkPosition` se retiró).
 
 ### 6.1 GET /api/projects/{project_id}/catalog/tables
 
@@ -896,7 +896,7 @@ Respuesta 200:
 
 Prefijo del router: `/api/projects/{project_id}/glossary` (con `alive_project`). Diccionario de abreviaturas DEL proyecto (términos que cascadean nombres físicos de ese proyecto) más conversión lógico→físico. Editar términos es editar estándares, así que las mutaciones requieren `standards.edit`; el endpoint de cómputo (`physicalize`) y el `GET` quedan abiertos (los usa el modelador para previsualizar sin mutar); `validate` exige sesión; `lock`/`unlock` requieren `admin.manage`. (`logicalize` se retiró en el doc 75 D14.)
 
-Forma de un término (`AbbreviationDoc`): `{ id, projectId, term, abbrev, scope, wordType, locked, lockedBy, lockedAt }`. `scope` es `column | table`; `wordType` es `prime | class | modifier` o `null`. Una entrada con `locked=true` es intocable para TODOS (editar/eliminar devuelve 409, tanto por CRUD directo como por `standards/apply`) hasta que un admin la desbloquee.
+Forma de un término (`AbbreviationDoc`): `{ id, projectId, term, abbrev, scope, locked, lockedBy, lockedAt }`. `scope` es `column | table` (doc 94: el antiguo `wordType` se retiró; un body que lo mande lo pierde). Una entrada con `locked=true` es intocable para TODOS (editar/eliminar devuelve 409, tanto por CRUD directo como por `standards/apply`) hasta que un admin la desbloquee.
 
 ### 7.1 GET /api/projects/{project_id}/glossary
 
@@ -920,8 +920,8 @@ Respuesta 200:
 {
   "success": true,
   "data": [
-    { "id": "g-01", "term": "Identificador", "abbrev": "ID", "scope": "column", "wordType": "class" },
-    { "id": "g-02", "term": "Cliente", "abbrev": "CLI", "scope": "column", "wordType": "prime" }
+    { "id": "g-01", "term": "Identificador", "abbrev": "ID", "scope": "column" },
+    { "id": "g-02", "term": "Cliente", "abbrev": "CLI", "scope": "column" }
   ]
 }
 ```
@@ -937,7 +937,6 @@ Body (`AbbreviationBody`):
 | `term` | string | sí | |
 | `abbrev` | string | sí | |
 | `scope` | string | no | `column` |
-| `wordType` | string | no | null |
 
 curl:
 
@@ -945,13 +944,13 @@ curl:
 curl -s -X POST https://api.ejemplo.com/api/projects/p-001/glossary \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"term":"Producto","abbrev":"PROD","scope":"column","wordType":"prime"}'
+  -d '{"term":"Producto","abbrev":"PROD","scope":"column"}'
 ```
 
 Respuesta 201:
 
 ```json
-{ "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PROD", "scope": "column", "wordType": "prime" } }
+{ "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PROD", "scope": "column" } }
 ```
 
 ### 7.3 PUT /api/projects/{project_id}/glossary/{entry_id}
@@ -966,13 +965,13 @@ curl:
 curl -s -X PUT https://api.ejemplo.com/api/projects/p-001/glossary/g-03 \
   -H "Authorization: Bearer $STD_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"term":"Producto","abbrev":"PRD","scope":"column","wordType":"prime"}'
+  -d '{"term":"Producto","abbrev":"PRD","scope":"column"}'
 ```
 
 Respuesta 200:
 
 ```json
-{ "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PRD", "scope": "column", "wordType": "prime" } }
+{ "success": true, "data": { "id": "g-03", "term": "Producto", "abbrev": "PRD", "scope": "column" } }
 ```
 
 ### 7.4 DELETE /api/projects/{project_id}/glossary/{entry_id}
@@ -1047,7 +1046,7 @@ Respuesta 200:
 
 ### 7.7 POST /api/projects/{project_id}/glossary/validate
 
-Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados (muestra con cap de 50 filas + total). No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
+Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados **de su scope** (doc 94 D9: un término de columna solo mira columnas; uno de tabla, solo tablas — los físicos de tabla solo usan términos de tabla; muestra con cap de 50 filas + total). El 409 del write dice, en inglés: `The term 'X' can't be added: it already exists in the glossary or appears as a full phrase in logical column names (N conflicts). Adding it would rename those columns.` No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
 
 Body (`ValidateTermBody`):
 
@@ -1073,13 +1072,40 @@ Respuesta 200 (`total` = conflictos de corpus + 1 si hay duplicado en el glosari
   "data": {
     "ok": false,
     "conflicts": {
-      "glossaryDuplicate": { "id": "g-03", "term": "Producto", "abbrev": "PROD", "scope": "column", "wordType": "prime" },
+      "glossaryDuplicate": { "id": "g-03", "term": "Producto", "abbrev": "PROD", "scope": "column" },
       "corpus": [ { "entity": "column", "tableName": "DIM_PRODUCTO", "columnName": "PROD_COD", "logicalName": "Producto Codigo" } ],
       "total": 2
     }
   }
 }
 ```
+
+### 7.7b POST /api/projects/{project_id}/glossary/impact
+
+Propósito (doc 94 D7): **dry-run** del re-derivado que haría aplicar el borrador del glosario de un scope — cuántos nombres físicos cambiarían, en cuántas tablas y una muestra. Corre el mismo cálculo que el apply (`compute_rephysicalize`) sobre AMBOS scopes, como el apply: el editado con los términos y el naming simulados, el otro con lo vigente (un desfase previo también se repararía). Los físicos con override manual no cuentan. No muta. Exige SESIÓN (como `/validate`), no `standards.edit`. El front lo usa para avisar SOLO cuando algo cambia.
+
+Body (`ImpactBody`):
+
+| Campo | Tipo | Requerido | Default |
+|---|---|---|---|
+| `scope` | string | no | `column` |
+| `termsUpsert` | `[{ id?, term, abbrev }]` | no | `[]` (sin `id` = término nuevo) |
+| `termsDelete` | string[] (ids) | no | `[]` |
+| `namingConfig` | `{ separator?, case? }` \| null | no | null (= el guardado del scope) |
+
+Respuesta 200:
+
+```json
+{
+  "success": true,
+  "data": {
+    "columns": 2, "columnTables": 1, "tables": 0,
+    "sample": [ { "entity": "column", "table": "MAESTROCLIENTES", "from": "CODCLI", "to": "CODCLTE" } ]
+  }
+}
+```
+
+`sample` tiene cap 20; para `entity: "table"`, `table` = `from` = el físico actual de la tabla.
 
 ### 7.8 POST /api/projects/{project_id}/glossary/{entry_id}/lock
 
@@ -1324,7 +1350,7 @@ Respuesta 200:
   "success": true,
   "data": {
     "domains": [ { "id": "dom-id", "name": "Identificador", "defaultDataType": "BIGINT", "namingTerm": "ID", "description": null } ],
-    "dict": [ { "id": "g-01", "term": "Identificador", "abbrev": "ID", "scope": "column", "wordType": "class", "locked": false, "lockedBy": null, "lockedAt": null } ],
+    "dict": [ { "id": "g-01", "term": "Identificador", "abbrev": "ID", "scope": "column", "locked": false, "lockedBy": null, "lockedAt": null } ],
     "namingConfig": { "column": { "separator": "", "case": "upper", "maxLength": 150 }, "table": { "separator": "", "case": "upper", "maxLength": 150 } },
     "udp": [ { "id": "udp-clasif", "name": "Clasificación del Dato", "level": "column", "dataType": "list", "defaultValue": "NO DAC", "allowedValues": ["DAC", "NO DAC"], "description": null } ],
     "ddlRules": [ { "id": "r-01", "name": "enmascarar_dac", "description": "Hashea columnas de alta criticidad en la vista técnica", "kind": "rule", "target": "column", "sourceArtifact": null, "condition": "columna.udp[\"Clasificacion del Dato\"] LIKE 'DAC-%'", "udpRefs": [{ "udpId": "udp-clasif", "level": "column" }], "action": { "expression": "sha2({col}, 512)", "alias": "{columna.nombre}" }, "appliesTo": ["ddl.vista_tecnica"], "priority": 100, "enabled": true, "validationState": "valid" } ],
@@ -1383,16 +1409,16 @@ Body (`ApplyBody`):
 | `udpDelete` | string[] (ids) | `[]` | |
 | `rulesUpsert` | `DdlRuleEdit[]` | `[]` | reglas de DDL Export a crear/editar (doc 30) |
 | `rulesDelete` | string[] (ids) | `[]` | ids de reglas a borrar |
-| `ddlConfigPatch` | `DdlConfigPatch` | null | lookups/functions del ruleset |
+| `ddlConfigPatch` | `DdlConfigPatch` | null | lookups/functions/Output settings del ruleset |
 
 Sub-esquemas:
 
-- `TermEdit`: `{ id?: string, term: string, abbrev: string, scope: string, wordType?: string }` (id `null` = nuevo).
+- `TermEdit`: `{ id?: string, term: string, abbrev: string, scope: string }` (id `null` = nuevo).
 - `DomainEdit`: `{ id?: string, name: string, defaultDataType: string, namingTerm?: string, description?: string }`.
 - `NamingEdit`: `{ separator: string, case: string, maxLength?: int (def 150) }` — `maxLength` = límite de caracteres del nombre físico (tabla/columna), versionado acá (doc 24).
 - `UdpEdit`: `{ id?: string, name: string, level?: string (def "column", acepta "table" | "column" | "canvas"), dataType?: string (def "string"), defaultValue?: string, allowedValues?: string[], description?: string }`.
 - `DdlRuleEdit`: `{ id?: string, name: string, description?: string, kind?: "rule" | "generator" (def "rule"), target?: "column" | "table" (def "column"; solo kind=rule), sourceArtifact?: string (solo kind=generator), condition?: string (DSL), udpRefs?: [{udpId, level}], action?: dict (expression | tags | tblproperties | emit), appliesTo?: string[], priority?: int (def 100), enabled?: bool (def true), validationState?: string, validationReport?: dict }`.
-- `DdlConfigPatch`: `{ lookups?: dict, functions?: list }` — cada bloque no-nulo REEMPLAZA el set completo (sin deltas).
+- `DdlConfigPatch`: `{ lookups?: dict, functions?: list, output?: dict }` — cada bloque no-nulo REEMPLAZA el set completo (sin deltas). `output` = *Output settings* del Export DDL (doc 93, ver §12.2): se normaliza (claves desconocidas se descartan) y un valor inválido responde **422** con el motivo (`{ "detail": "Output setting 'typeCase' must be one of: lower, upper." }`).
 
 Guards propios del batch DDL (el estado se evalúa POST-batch: si el mismo batch borra la regla que referenciaba al UDP, pasa):
 
@@ -1576,7 +1602,7 @@ Respuesta 200: lista de `DdlRuleDoc` (misma forma que en `ddlRules` del snapshot
 
 ### 12.2 GET /api/projects/{project_id}/ddl-rules/config
 
-Propósito: config del ruleset del proyecto — lookups (mapeos valor de UDP → texto SQL, con `default`) y funciones reusables.
+Propósito: config del ruleset del proyecto — lookups (mapeos valor de UDP → texto SQL, con `default`), funciones reusables y *Output settings* (doc 93: cómo se escribe el DDL y cómo se nombran los archivos del zip).
 
 ```bash
 curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules/config -H "Authorization: Bearer $TOKEN"
@@ -1589,10 +1615,14 @@ Respuesta 200:
   "success": true,
   "data": {
     "lookups": { "vacuum_map": { "fromUdpId": "udp-vacuum", "fromLevel": "table", "values": { "CUSTOM_90 days": "interval 90 days" }, "default": "interval 90 days" } },
-    "functions": [ { "name": "mask_suffix", "params": ["col"], "body": "sha2({col}, 512)" } ]
+    "functions": [ { "name": "mask_suffix", "params": ["col"], "body": "sha2({col}, 512)" } ],
+    "output": { "quoteIdentifiers": "when-needed", "typeCase": "lower", "createTable": "or-replace", "viewTagsAs": "table",
+                "fileNames": { "table": "TABLE", "modeledView": "VIEW_NEG", "generatedView": "VIEW_TEC", "separator": "-", "nameCase": "upper", "schema": "when-needed" } }
   }
 }
 ```
+
+`output` guarda SOLO lo que el proyecto fijó (puede venir `{}` en un proyecto sin semilla); lo efectivo = defaults (`seedOutput` de §12.4, las convenciones de la macro BCP) + lo guardado, clave a clave — un valor guardado inválido cae a su default sin descartar los demás. Claves: `identifierCase` (`as-is`/`lower`/`upper`), `quoteIdentifiers` (`when-needed`/`always`), `typeCase` (`lower`/`upper`), `createTable` (`or-replace`/`if-not-exists`), `viewTagsAs` (`table`/`view`), `tableFormat`, `external`, `location`, `locationFolderCase`, `unityCatalog`, `catalog`, `defaultSchema`, `includeViews`/`includeKeys`/`includeComments`/`includePartitions`/`includeIndexes`, `tblProperties` (`[{key, value}]`) y `fileNames` (`table`/`modeledView`/`generatedView` = prefijos, `separator`, `nameCase` `upper`/`lower`/`as-is`, `schema` `when-needed`/`always`; sin `\ / : * ? " < > |`).
 
 Semántica del lookup: un valor sin mapeo con `default: null` no emite nada; la condición VACÍA de una regla + `default` del lookup es cómo se declara el "sin valor → default" (enfoque B del doc 30 §11: el motor lee SOLO valores explícitos de UDP, jamás el `defaultValue` de la definición).
 
@@ -1629,7 +1659,7 @@ Propósito: plantillas del picker del editor + las reglas semilla del spec, con 
 curl -s https://api.ejemplo.com/api/projects/p-001/ddl-rules/templates -H "Authorization: Bearer $TOKEN"
 ```
 
-Respuesta 200: `{ "templates": [...], "seedRules": [...], "seedLookups": {...} }`.
+Respuesta 200: `{ "templates": [...], "seedRules": [...], "seedLookups": {...}, "seedOutput": {...} }` — `seedOutput` = las Output settings por defecto (convenciones de la macro BCP, doc 93), las que la semilla guarda y las que el editor ofrece restaurar.
 
 ### 12.5 POST /api/projects/{project_id}/ddl-rules/validate
 
@@ -1715,9 +1745,9 @@ Body (`RenderBody`):
 |---|---|---|---|
 | `ruleIds` | string[] | requerido | ids de las reglas SELECCIONADAS en el modal (checkboxes) |
 | `model` | dict \| null | null | `{name, udpValues}` del canvas |
-| `tables` | `RenderTableEntry[]` | `[]` | cada una: `{ table: {...doc canónico...}, columns: [...], baseSql: "CREATE TABLE ..." }` |
+| `tables` | `RenderTableEntry[]` | `[]` | cada una: `{ table: {...doc canónico...}, columns: [...], baseSql: "CREATE TABLE ..." }`; cada columna puede traer `ddlType` = el tipo tal como lo escribió el front en el CREATE (Databricks, con el `typeCase` del export) — los artefactos generados lo usan en vez de `dataType` |
 | `views` | `RenderViewEntry[]` | `[]` | cada una: `{ name, schema, sql, sourceTableIds[], businessView }` — `businessView=true` = vista "on canvas"; solo esas se decoran con `ddl.vista_negocio`, el resto pasa intacto |
-| `options` | dict | `{}` | opciones del modal (identifierCase/tableFormat/external/location/locationFolderCase/includePartitions/partitionsLast): los artefactos generados salen espejo del CREATE físico (doc 76: carpeta del LOCATION con `locationFolderCase`, default MAYÚSCULA) |
+| `options` | dict | `{}` | opciones del modal (identifierCase/quoteIdentifiers/typeCase/createTable/viewTagsAs/includeKeys/tableFormat/external/location/locationFolderCase/includePartitions/partitionsLast — doc 93: son las Output settings del proyecto, ajustables para un export puntual): los artefactos generados salen espejo del CREATE físico (doc 76: carpeta del LOCATION con `locationFolderCase`, default MAYÚSCULA). `quoteIdentifiers: when-needed` = sin comillas salvo palabra reservada o carácter fuera de `[a-z0-9_]`; `viewTagsAs: table` = tags de vistas con `ALTER TABLE` (como la macro); `NOT NULL` solo con `includeKeys` |
 
 ```bash
 curl -s -X POST https://api.ejemplo.com/api/projects/p-001/ddl-rules/render \
@@ -1790,7 +1820,8 @@ Forma de cada pieza:
 | PUT | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Actualizar término |
 | DELETE | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Eliminar término |
 | POST | `/api/projects/{pid}/glossary/physicalize` | abierto | Lógico a físico |
-| POST | `/api/projects/{pid}/glossary/validate` | sesión | Validar término nuevo (duplicado + corpus) |
+| POST | `/api/projects/{pid}/glossary/validate` | sesión | Validar término nuevo (duplicado + corpus del scope) |
+| POST | `/api/projects/{pid}/glossary/impact` | sesión | Dry-run: nombres físicos que cambiaría el borrador (doc 94) |
 | POST | `/api/projects/{pid}/glossary/rephysicalize` | `standards.edit` | Re-derivar físicos del proyecto |
 | POST | `/api/projects/{pid}/glossary/{entry_id}/lock` | `admin.manage` | Bloquear entrada |
 | POST | `/api/projects/{pid}/glossary/{entry_id}/unlock` | `admin.manage` | Desbloquear entrada |
@@ -2794,7 +2825,7 @@ Propósito (doc 55 · doc 78 · doc 87): crear o actualizar **carpetas, canvases
 
 Estados: `validating → validated | failed`; `validated → applying → applied | failed`. Fases de progreso: Reading workbook → Loading profile → Applying profile and rules → Loading columns of referenced tables → Validating rows → Building report. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns|views: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, views, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount, profile: {id, name}, sheets: [{role, name, found, headerRow, rows}]}` con `Issue = {severity, sheet, row, column, code, message}` — `sheet` es el nombre REAL de la hoja del perfil (o `Workbook` / `Profile`) y `column` la cabecera real del Excel (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
 
-Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa (`pkPosition` por orden de la hoja); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft. Doc 87: `target-folder-required` / `target-folder-invalid` (proyecto destino, error sin fila); `view-no-columns` / `view-no-schema` (warning: la tabla no tiene columnas o esquema, sus vistas no se crean); `view-schema-kind` (error: `<esquema>_vu` catalogado como esquema de tablas); `existing-canvas` cuenta también las vistas que entran al canvas.
+Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain; PK autoritativa para las columnas listadas (doc 94: sin orden de llave aparte; las columnas nuevas nacen PK primero); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft. Doc 87: `target-folder-required` / `target-folder-invalid` (proyecto destino, error sin fila); `view-no-columns` / `view-no-schema` (warning: la tabla no tiene columnas o esquema, sus vistas no se crean); `view-schema-kind` (error: `<esquema>_vu` catalogado como esquema de tablas); `existing-canvas` cuenta también las vistas que entran al canvas.
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/uploads \

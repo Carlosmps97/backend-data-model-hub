@@ -51,12 +51,13 @@ COLS = [
     {"physicalName": "fec_alta", "dataType": "DATE", "ordinal": 3, "isPartition": True,
      "udpValues": {"u-dac-col": "No DAC", "u-part": "PART_01"}},
 ]
-BASE_SQL = ("CREATE TABLE IF NOT EXISTS `core`.`tbl_cliente` (\n"
-            "  `cod_cliente` STRING NOT NULL,\n  `nom_cliente` STRING,\n"
-            "  `num_documento` STRING,\n  `fec_alta` DATE\n)\nUSING delta\nPARTITIONED BY (`fec_alta`);")
-VIEW_SQL = ("CREATE OR REPLACE VIEW `negocio`.`clientes` AS\n"
+# Base emitida por el FRONT (doc 93: sin comillas, tipos en minúscula, OR REPLACE).
+BASE_SQL = ("CREATE OR REPLACE TABLE core.tbl_cliente (\n"
+            "  cod_cliente string,\n  nom_cliente string,\n"
+            "  num_documento string,\n  fec_alta date\n)\nUSING DELTA\nPARTITIONED BY (fec_alta);")
+VIEW_SQL = ("CREATE OR REPLACE VIEW negocio.clientes AS\n"
             "SELECT\n  cod_cliente AS cod_cliente,\n  nom_cliente AS nom_cliente,\n"
-            "  fec_alta AS fec_alta\nFROM `core`.`tbl_cliente`;")
+            "  fec_alta AS fec_alta\nFROM core.tbl_cliente;")
 
 PAYLOAD = {
     "model": {"name": "DDV", "udpValues": {}},
@@ -95,10 +96,10 @@ def test_pipeline_produce_todos_los_artefactos_en_orden():
     # tags de tabla → tags de columna).
     fisica = _addenda(out, "ddl.tabla_fisica")
     assert [s.split(" SET TAGS ")[0] for s in fisica] == [
-        "ALTER TABLE `core`.`tbl_cliente`",                                # updateFrecuency (prio 60)
-        "ALTER TABLE `core`.`tbl_cliente`",                                # isDAC (prio 55)
-        "ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `nom_cliente`",     # DAC por columna
-        "ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `num_documento`",
+        "ALTER TABLE core.tbl_cliente",                                # updateFrequency (prio 60)
+        "ALTER TABLE core.tbl_cliente",                                # isDAC (prio 55)
+        "ALTER TABLE core.tbl_cliente ALTER COLUMN nom_cliente",       # DAC por columna
+        "ALTER TABLE core.tbl_cliente ALTER COLUMN num_documento",
     ]
 
 
@@ -106,38 +107,38 @@ def test_golden_fragmentos_clave():
     out = {s["artifact"]: s for s in _run()["statements"]}
     fisica = out["ddl.tabla_fisica"]["sql"]
     # preámbulo comentado (statements.before) + CREATE intacto + TBLPROPERTIES
-    assert fisica.startswith("-- DROP TABLE IF EXISTS `core`.`tbl_cliente`;\n" + BASE_SQL[:-1])
+    assert fisica.startswith("-- DROP TABLE IF EXISTS core.tbl_cliente;\n" + BASE_SQL[:-1])
     assert fisica.endswith("TBLPROPERTIES (\n  'delta.deletedFileRetentionDuration' = '90 days',\n"
                            "  'delta.logRetentionDuration' = '90 days'\n);")
     tags = _addenda(_run(), "ddl.tabla_fisica")
-    assert tags[0] == "ALTER TABLE `core`.`tbl_cliente` SET TAGS ('updateFrecuency' = 'MONTHLY');"
-    assert tags[1] == "ALTER TABLE `core`.`tbl_cliente` SET TAGS ('isDAC' = 'True');"
-    assert tags[2] == "ALTER TABLE `core`.`tbl_cliente` ALTER COLUMN `nom_cliente` SET TAGS ('DAC' = 'NOMBRE');"
+    assert tags[0] == "ALTER TABLE core.tbl_cliente SET TAGS ('updateFrequency' = 'MONTHLY');"
+    assert tags[1] == "ALTER TABLE core.tbl_cliente SET TAGS ('isDAC' = 'True');"
+    assert tags[2] == "ALTER TABLE core.tbl_cliente ALTER COLUMN nom_cliente SET TAGS ('DAC' = 'NOMBRE');"
     rej = out["ddl.tabla_rej"]["sql"]
-    assert "`core`.`tbl_cliente_rej`" in rej and rej.startswith("-- DROP TABLE IF EXISTS `core`.`tbl_cliente_rej`;")
-    assert "`fec_alta`       DATE" in rej                     # partición: conserva su tipo (keep_partition_type)
-    assert "`nom_cliente`    STRING" in rej and "NOT NULL" not in rej
-    assert rej.index("`tiporeject`") < rej.index("`fec_alta`")  # añadida antes de las particiones
+    assert "core.tbl_cliente_rej" in rej and rej.startswith("-- DROP TABLE IF EXISTS core.tbl_cliente_rej;")
+    assert "  fec_alta date" in rej                           # partición: conserva su tipo (keep_partition_type)
+    assert "  nom_cliente string," in rej and "NOT NULL" not in rej
+    assert rej.index("  tiporeject string") < rej.index("  fec_alta date")   # añadida antes de las particiones
     assert "'delta.logRetentionDuration' = '90 days'" in rej
     vista_rej = out["ddl.vista_rej"]["sql"]
-    assert "`core_v`.`tbl_cliente_rej`" in vista_rej and "decrypt_column_view" not in vista_rej   # §7.4
+    assert "core_v.tbl_cliente_rej" in vista_rej and "decrypt_column_view" not in vista_rej   # §7.4
     assert "nom_cliente" not in vista_rej                                       # DAC excluida (tabla DAC)
-    assert vista_rej.rstrip(";").endswith("tiporeject AS tiporeject\nFROM `core`.`tbl_cliente_rej`")
+    assert vista_rej.rstrip(";").endswith("tiporeject AS tiporeject\nFROM core.tbl_cliente_rej")
     tecnica = out["ddl.vista_tecnica"]["sql"]
-    assert tecnica == ("CREATE OR REPLACE VIEW `core_v`.`tbl_cliente` AS\nSELECT\n"
-                       "  cod_cliente AS cod_cliente,\n  fec_alta AS fec_alta\nFROM `core`.`tbl_cliente`;")
+    assert tecnica == ("CREATE OR REPLACE VIEW core_v.tbl_cliente AS\nSELECT\n"
+                       "  cod_cliente AS cod_cliente,\n  fec_alta AS fec_alta\nFROM core.tbl_cliente;")
     assert _addenda(_run(), "ddl.vista_tecnica") == [
-        "ALTER VIEW `core_v`.`tbl_cliente` SET TAGS ('updateFrecuency' = 'MONTHLY');",
-        "ALTER VIEW `core_v`.`tbl_cliente` SET TAGS ('isDAC' = 'False');",
+        "ALTER TABLE core_v.tbl_cliente SET TAGS ('updateFrequency' = 'MONTHLY');",
+        "ALTER TABLE core_v.tbl_cliente SET TAGS ('isDAC' = 'False');",
     ]
     tecnica_dac = out["ddl.vista_tecnica_dac"]["sql"]
-    assert "CREATE OR REPLACE VIEW `core_v`.`tbl_clientedac` AS" in tecnica_dac
+    assert "CREATE OR REPLACE VIEW core_v.tbl_clientedac AS" in tecnica_dac
     assert "bcp_encrypt_function.decrypt_column_view(nom_cliente, 'NOMBRE') AS nom_cliente" in tecnica_dac
     assert "decrypt_column_view(fec_alta" not in tecnica_dac                     # 'No DAC' no dispara
     assert _addenda(_run(), "ddl.vista_tecnica_dac")[1:] == [
-        "ALTER VIEW `core_v`.`tbl_clientedac` SET TAGS ('isDAC' = 'True');",
-        "ALTER VIEW `core_v`.`tbl_clientedac` ALTER COLUMN `nom_cliente` SET TAGS ('DAC' = 'NOMBRE');",
-        "ALTER VIEW `core_v`.`tbl_clientedac` ALTER COLUMN `num_documento` SET TAGS ('DAC' = 'DOCUMENTO');",
+        "ALTER TABLE core_v.tbl_clientedac SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE core_v.tbl_clientedac ALTER COLUMN nom_cliente SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE core_v.tbl_clientedac ALTER COLUMN num_documento SET TAGS ('DAC' = 'DOCUMENTO');",
     ]
     # Vista de NEGOCIO: la columna DAC sale con la función de desencriptación y
     # el sufijo del valor UDP (DAC-NOMBRE → 'NOMBRE'); tags de objeto y de columna.
@@ -145,9 +146,9 @@ def test_golden_fragmentos_clave():
     assert "bcp_encrypt_function.decrypt_column_view(nom_cliente, 'NOMBRE') AS nom_cliente" in negocio
     assert "num_documento" not in negocio                                      # la vista no la tenía
     assert _addenda(_run(), "ddl.vista_negocio") == [
-        "ALTER VIEW `negocio`.`clientes` SET TAGS ('updateFrecuency' = 'MONTHLY');",
-        "ALTER VIEW `negocio`.`clientes` SET TAGS ('isDAC' = 'True');",
-        "ALTER VIEW `negocio`.`clientes` ALTER COLUMN `nom_cliente` SET TAGS ('DAC' = 'NOMBRE');",
+        "ALTER TABLE negocio.clientes SET TAGS ('updateFrequency' = 'MONTHLY');",
+        "ALTER TABLE negocio.clientes SET TAGS ('isDAC' = 'True');",
+        "ALTER TABLE negocio.clientes ALTER COLUMN nom_cliente SET TAGS ('DAC' = 'NOMBRE');",
     ]
 
 
@@ -189,14 +190,14 @@ def test_service_test_rule_fragmentos(monkeypatch):
     frags = {f["column"]: f for f in out["fragments"]}
     assert frags["nom_cliente"]["sql"] == "bcp_encrypt_function.decrypt_column_view(nom_cliente, 'NOMBRE') AS nom_cliente"
     assert frags["nom_cliente"]["why"] == "Clasificacion del Dato = 'DAC-NOMBRE'"
-    # exclude → fragmento explícito; tags de objeto sobre artefacto VISTA → ALTER VIEW
+    # exclude → fragmento explícito; tags de objeto sobre artefacto VISTA → ALTER TABLE (doc 93 D6)
     out_ex = asyncio.run(svc.test_rule("p1", BY_NAME["excluir_dac_vista_sin_dac"], "t1"))
     assert {f["column"] for f in out_ex["fragments"]} == {"nom_cliente", "num_documento"}
     assert all(f["sql"] == "-- excluded from the SELECT" for f in out_ex["fragments"])
     out_tag = asyncio.run(svc.test_rule("p1", BY_NAME["tags_isdac_sin_dac"], "t1"))
-    assert out_tag["fragments"][0]["sql"] == "ALTER VIEW `core`.`tbl_cliente` SET TAGS ('isDAC' = 'False');"
+    assert out_tag["fragments"][0]["sql"] == "ALTER TABLE core.tbl_cliente SET TAGS ('isDAC' = 'False');"
     out_drop = asyncio.run(svc.test_rule("p1", BY_NAME["drop_comentado"], "t1"))
-    assert out_drop["fragments"][0]["sql"] == "-- DROP TABLE IF EXISTS `core`.`tbl_cliente`;"
+    assert out_drop["fragments"][0]["sql"] == "-- DROP TABLE IF EXISTS core.tbl_cliente;"
 
 
 def test_service_impact_cuenta_columnas_y_tablas(monkeypatch):
@@ -219,12 +220,13 @@ def test_templates_payload_resuelve_lookup(monkeypatch):
     from app.features.ddl_rules import service as svc
     monkeypatch.setattr(svc.udp_repo, "list_udp", AsyncMock(return_value=DEFS))
     out = asyncio.run(svc.templates_payload("p1"))
-    assert len(out["templates"]) == 9 and len(out["seedRules"]) == 15   # doc 76 + doc 90: 10 reglas + 5 generadores
+    assert len(out["templates"]) == 10 and len(out["seedRules"]) == 17   # doc 93: 12 reglas + 5 generadores
     assert out["seedLookups"]["vacuum_map"]["fromUdpId"] == "u-vac"
     assert out["seedLookups"]["update_frequency_map"]["fromUdpId"] == "u-vac"
     assert out["seedLookups"]["dac_flag_map"]["fromUdpId"] == "u-dac-tab"
     assert out["seedLookups"]["dac_map"]["fromUdpId"] == "u-dac-col"
     assert out["seedLookups"]["dac_map"]["values"]["DAC-TARJETA"] == "TARJETA"
+    assert out["seedOutput"]["fileNames"]["modeledView"] == "VIEW_NEG"        # doc 93 D1
     assert out["seedLookups"]["vacuum_map"]["values"]["DAILY_15 days"] == "15 days"
     assert out["seedLookups"]["update_frequency_map"]["values"]["DAILY_15 days"] == "DAILY"
     assert "fromUdpName" not in out["seedLookups"]["vacuum_map"]
@@ -267,7 +269,7 @@ def test_vista_no_negocio_pasa_intacta():
 
 
 def test_seed_rules_validan_contra_el_catalogo_real():
-    """Las 15 semillas deben salir VÁLIDAS con las defs reales + los lookups."""
+    """Las 17 semillas deben salir VÁLIDAS con las defs reales + los lookups."""
     importlib.import_module("app.features.ddl_rules.engine.validate")
     from app.features.ddl_rules.engine import validate as v
     from app.features.ddl_rules import service as svc

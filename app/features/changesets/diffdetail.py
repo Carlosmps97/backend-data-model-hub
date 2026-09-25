@@ -27,7 +27,8 @@ NOISE_BY_COLLECTION: dict[str, set[str]] = {
     # cambio de MODELO revisable campo a campo.
     "subject_areas": {"layout", "drawings"},
     # tableId: el árbol ya da el contexto; typeOverridden: flag interno del naming.
-    "canonical_columns": {"tableId", "typeOverridden"},
+    # pkPosition: retirado (doc 94 D1) — un doc viejo que aún lo trae no es revisable.
+    "canonical_columns": {"tableId", "typeOverridden", "pkPosition"},
     # tableId/sourceTableIds: compat — las filas por fuente (sources) los cubren;
     # sql: derivado del editor de vistas (sources es el canónico).
     # Doc 91: tags/filter/joinOverride/customColumns ya no existen en el modelo;
@@ -47,7 +48,7 @@ FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "canonical_columns": (
         ("physicalName", "Physical name"), ("logicalName", "Logical name"),
         ("dataType", "Data type"), ("isNullable", "Nullable"),
-        ("isPrimaryKey", "Primary key"), ("pkPosition", "Key position"),
+        ("isPrimaryKey", "Primary key"),
         ("isForeignKey", "Foreign key"), ("isPartition", "Partition"),
         ("ordinal", "Order"), ("parentDomainId", "Parent domain"),
         ("description", "Definition"),
@@ -83,7 +84,7 @@ def _clean(v):
 
 def _skippable(v) -> bool:
     """Valor sin señal para un created/deleted: None, '', False, [] o {}.
-    OJO: 0 NO es skippable (ordinal 0 / pkPosition 0 son valores reales)."""
+    OJO: 0 NO es skippable (ordinal 0 es un valor real)."""
     if v is None or v is False:
         return True
     if isinstance(v, str) and v == "":

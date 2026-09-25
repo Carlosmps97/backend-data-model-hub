@@ -106,6 +106,10 @@ async def restore_domains(project_id: str, domains: list[dict]) -> None:
         await db[DOMAINS].bulk_write(ops, ordered=False)
 
 
+# Claves de un término que el restore escribe (las del snapshot vigente).
+_TERM_RESTORE_KEYS = ("term", "abbrev", "scope", "locked", "lockedBy", "lockedAt")
+
+
 async def restore_dict(project_id: str, entries: list[dict], preserve_ids: set[str] | None = None) -> None:
     """Deja `glossary_terms` DEL PROYECTO exactamente como el snapshot, salvo
     `preserve_ids` (D4): entradas HOY bloqueadas con contenido idéntico al
@@ -118,10 +122,12 @@ async def restore_dict(project_id: str, entries: list[dict], preserve_ids: set[s
         scoped(project_id, {"flgactive": {"$ne": False}, "_id": {"$nin": list(keep)}}),
         {"$set": {"flgactive": False, "deletedAt": _now()}},
     )
-    # bulk_write: un solo round-trip en vez de N update_one secuenciales.
+    # bulk_write: un solo round-trip en vez de N update_one secuenciales. Solo
+    # se restauran las claves VIGENTES (doc 94 D11): un snapshot viejo no
+    # reinyecta campos retirados como `wordType`.
     ops = [UpdateOne(
         {"_id": e["id"]},
-        {"$set": {**{k: v for k, v in e.items() if k != "id"}, "projectId": project_id,
+        {"$set": {**{k: v for k, v in e.items() if k in _TERM_RESTORE_KEYS}, "projectId": project_id,
                   "flgactive": True, "updatedAt": _now()},
          "$setOnInsert": {"createdAt": _now()}}, upsert=True)
         for e in entries if e.get("id") and e["id"] not in preserve]
