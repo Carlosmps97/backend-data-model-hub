@@ -48,12 +48,25 @@ def test_impact_route_registrada_y_delegada(project_client, monkeypatch):
     from unittest.mock import AsyncMock
     from app.features.glossary import service
 
-    spy = AsyncMock(return_value={"columns": 0, "columnTables": 0, "tables": 0, "sample": []})
+    spy = AsyncMock(return_value={"renamed": [], "outOfSync": []})
     monkeypatch.setattr(service, "impact_preview", spy)
     body = {"scope": "column", "termsUpsert": [{"id": "t1", "term": "cliente", "abbrev": "CLTE"}],
             "termsDelete": ["t2"], "namingConfig": {"separator": "", "case": "upper"}}
     resp = project_client.post("/api/projects/p1/glossary/impact", json=body)
     assert resp.status_code == 200
-    assert resp.json()["data"] == {"columns": 0, "columnTables": 0, "tables": 0, "sample": []}
+    assert resp.json()["data"] == {"renamed": [], "outOfSync": []}
     spy.assert_awaited_once_with("p1", "column", [{"id": "t1", "term": "cliente", "abbrev": "CLTE"}],
                                  ["t2"], {"separator": "", "case": "upper"})
+
+
+def test_validate_route_pide_la_lista_completa(project_client, monkeypatch):
+    """Doc 95 D1: el popup de conflictos muestra TODAS las columnas."""
+    from unittest.mock import AsyncMock
+    from app.features.glossary import service
+
+    spy = AsyncMock(return_value={"ok": True,
+                                  "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
+    monkeypatch.setattr(service, "validate_term", spy)
+    resp = project_client.post("/api/projects/p1/glossary/validate", json={"term": "codigo", "scope": "column"})
+    assert resp.status_code == 200
+    spy.assert_awaited_once_with("p1", "codigo", "column", limit=None)

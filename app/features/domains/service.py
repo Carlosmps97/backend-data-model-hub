@@ -1,7 +1,10 @@
 """Lógica de negocio de `domains`. `cascade_filter` es puro (testeable)."""
 from __future__ import annotations
 
+from app.core.datatypes import canonicalize_default_type
+
 from . import repository
+from .cascade import classify_columns, summarize_columns
 from .schemas import ParentDomainBody
 
 
@@ -95,3 +98,64 @@ async def propagate(domain_id: str) -> dict:
     updated_logical = (await repository.propagate_field(logical_cascade_filter(domain_id), "logicalDataType", logical_type)
                        if logical_type else 0)
     return {"updated": updated, "updatedLogical": updated_logical}
+
+
+# ── Doc 95 D7: vista previa EXACTA por columna (misma regla que la cascada) ──
+
+
+def _targets(domain_types: dict[str, str | None], physical_to: str | None,
+             logical_to: str | None) -> dict[str, str]:
+    """Facetas cuyo tipo CAMBIA con el borrador, homologado como el apply
+    (`canonicalize_default_type`). Un tipo vacío nunca cascadea."""
+    out: dict[str, str] = {}
+    if physical_to is not None:
+        p = canonicalize_default_type(physical_to)
+        if p and p != domain_types["physical"]:
+            out["physical"] = p
+    if logical_to is not None:
+        lg = canonicalize_default_type(logical_to) or None
+        if lg is not None and lg != domain_types["logical"]:
+            out["logical"] = lg
+    return out
+
+
+async def _types(domain_id: str) -> dict[str, str | None]:
+    physical, logical = await repository.get_domain_types(domain_id)
+    return {"physical": physical, "logical": logical}
+
+
+async def column_impact(domain_id: str, physical_to: str | None = None, logical_to: str | None = None,
+                        q: str | None = None, status: str | None = None,
+                        offset: int = 0, limit: int = 500) -> dict:
+    """Doc 95 D7: vista previa EXACTA por columna de re-tipar el dominio a
+    `physical_to` / `logical_to` (la MISMA regla que aplica la cascada). Sin tipos
+    nuevos mide quién sigue hoy al dominio (panel). Con `limit=0` devuelve solo
+    los totales (no resuelve nombres). `totals.models` = modelos (canvases) de las
+    tablas que CAMBIAN; sin tipos nuevos, de todas las que usan el dominio. No muta."""
+    domain_types = await _types(domain_id)
+    targets = _targets(domain_types, physical_to, logical_to)
+    rows = classify_columns(await repository.domain_columns(domain_id), domain_types, targets)
+    need_names = limit > 0 or bool((q or "").strip())
+    names = (await repository.tables_by_ids(list({r["tableId"] for r in rows if r.get("tableId")}))
+             if need_names and rows else {})
+    out = summarize_columns(rows, names, q=q, status=status, offset=offset, limit=limit)
+    model_tables = {r["tableId"] for r in rows if r.get("tableId") and (r["status"] == "change" or not targets)}
+    out["totals"]["models"] = await repository.models_affected(list(model_tables))
+    return {"domain": domain_types, "targets": targets, **out}
+
+
+async def count_changes(domain_id: str, domain_types: dict[str, str | None],
+                        targets: dict[str, str | None]) -> int:
+    """Columnas que re-tipa pasar de `domain_types` a `targets` (cualquier
+    faceta) — la misma cuenta para el apply y la vista previa del rollback."""
+    if not targets:
+        return 0
+    rows = classify_columns(await repository.domain_columns(domain_id), domain_types, targets)
+    return sum(1 for r in rows if r["status"] == "change")
+
+
+async def count_retype(domain_id: str, physical_to: str | None, logical_to: str | None) -> int:
+    """Columnas que el apply re-tipará — el impacto REAL que registra la versión
+    (doc 95 D7: antes era un estimado que contaba también las divorciadas)."""
+    domain_types = await _types(domain_id)
+    return await count_changes(domain_id, domain_types, _targets(domain_types, physical_to, logical_to))

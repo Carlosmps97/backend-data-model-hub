@@ -66,7 +66,7 @@ def _mock_apply(monkeypatch, *, before_domains=None, before_terms=None, rephys=N
     monkeypatch.setattr(service.dom_repo, "list_domains", AsyncMock(return_value=before_domains or []))
     monkeypatch.setattr(service.dict_repo, "list_entries", AsyncMock(return_value=before_terms or []))
     monkeypatch.setattr(service.dict_svc, "ensure_term_valid", AsyncMock())
-    monkeypatch.setattr(service.dom_svc, "impact", AsyncMock(return_value={"willUpdate": impact_willupdate}))
+    monkeypatch.setattr(service.dom_svc, "count_retype", AsyncMock(return_value=impact_willupdate))
     monkeypatch.setattr(service.dict_repo, "delete_entry", AsyncMock())
     monkeypatch.setattr(service.dict_repo, "create_entry", AsyncMock())
     monkeypatch.setattr(service.dict_repo, "update_entry", AsyncMock())
@@ -124,6 +124,20 @@ def test_apply_sin_cambios_de_udp_no_rephysicaliza(monkeypatch):
     service.dom_repo.delete_domain.assert_awaited_once()
 
 
+def test_apply_cuenta_lo_que_re_tipa_tambien_el_cambio_logico(monkeypatch):
+    """Doc 95 D7: el impacto de la versión es lo que la cascada re-tipa de verdad
+    (física o lógica), no un estimado."""
+    inserted = _mock_apply(
+        monkeypatch,
+        before_domains=[{"id": "d1", "name": "Codigo", "defaultDataType": "INTEGER", "logicalDataType": "NUMBER"}],
+        impact_willupdate=9)
+    body = ApplyBody(domainsUpsert=[DomainEdit(id="d1", name="Codigo", defaultDataType="INTEGER",
+                                               logicalDataType="TEXT")])
+    asyncio.run(service.apply("ana", "p1", body))
+    service.dom_svc.count_retype.assert_awaited_once_with("d1", "INTEGER", "TEXT")
+    assert inserted["impact"]["columns"] == 9
+
+
 # ── rollback (mockeado) ───────────────────────────────────────────────────
 
 def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
@@ -141,7 +155,10 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
     monkeypatch.setattr(service.rules_repo, "restore_rules", AsyncMock())
     monkeypatch.setattr(service.rules_repo, "restore_config", AsyncMock())
     monkeypatch.setattr(service.dict_svc, "rephysicalize", AsyncMock(return_value={"updated": {"tables": 4, "columns": 12}}))
-    monkeypatch.setattr(service.dom_svc, "propagate", AsyncMock(return_value={"updated": 5}))
+    # Doc 95 D9: d1 hoy es DECIMAL(20,4) → el rollback lo re-tipa (5 columnas).
+    monkeypatch.setattr(service.dom_repo, "types_by_ids",
+                        AsyncMock(return_value={"d1": ("DECIMAL(20,4)", None)}))
+    monkeypatch.setattr(service.dom_repo, "retype", AsyncMock(return_value=5))
     monkeypatch.setattr(service, "current_snapshot", AsyncMock(return_value={}))
     inserted = {}
     async def _ins(pid, fields):  # el repo asigna seq/label; acá simulamos v19
@@ -152,7 +169,7 @@ def test_rollback_restaura_snapshot_y_registra_version_nueva(monkeypatch):
     v = asyncio.run(service.rollback("mr", "p1", 16))
     assert v["seq"] == 19 and v["kind"] == "rollback" and v["revertsSeq"] == 16
     rd.assert_awaited_once(); rdi.assert_awaited_once(); rn.assert_awaited_once()
-    # impacto = rephys.columns (12) + propagate (5 × 1 dominio) ; tables rephys.
+    # impacto = rephys.columns (12) + re-tipo del dominio (5) ; tables rephys.
     assert inserted["impact"] == {"tables": 4, "columns": 17}
 
 

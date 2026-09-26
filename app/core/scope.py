@@ -15,6 +15,7 @@ PROJECT_SCOPED: frozenset[str] = frozenset({
     "parent_domains", "glossary_terms", "udp_definitions", "naming_config",
     "ddl_rules", "ddl_ruleset_config",
     "upload_profiles",                     # doc 78: perfiles de carga por proyecto
+    "sheet_templates",                     # doc 95 D11: plantillas Excel por proyecto
     "changesets", "standards_versions", "saved_reports",
 })
 

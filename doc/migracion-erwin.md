@@ -26,7 +26,7 @@ dos proyectos tiene ids distintos; (3) la adopción por clave natural, la
 unicidad del nombre físico y el prefetch se acotan al proyecto; (4) los
 estándares de un proyecto con varios archivos son la **unión distinta**
 (el primero gana; discrepancias → `glossary_conflicts`/`domain_conflicts` del
-reporte); (5) `seed_ddl_export_rules`, `seed_upload_profiles` y `mark_base_version` corren
+reporte); (5) `seed_ddl_export_rules`, `seed_upload_profiles`, `seed_sheet_templates` y `mark_base_version` corren
 por proyecto. No hay backfill: la BD se reemplaza con el one-shot.
 
 Todos los scripts viven en `scripts/erwin_migration/` (más los auxiliares en
@@ -56,6 +56,7 @@ resolvió por estructura, no por nombres.
 | Crear el usuario `admin` (BD nueva, para poder entrar) | `create_admin` | Sí (upsert) |
 | Sembrar el ruleset base del DDL Export (8 reglas + lookups) | `seed_ddl_export_rules` | Sí (con `--apply`) |
 | Sembrar el perfil de carga «Plantilla BCP» (doc 78) | `seed_upload_profiles` | Sí (con `--apply`) |
+| Sembrar la plantilla de hoja Excel «QA_MODELO» del Reporting (doc 95) | `seed_sheet_templates` | Sí (con `--apply`) |
 | Marcar la versión base `v1` al cerrar la carga (sin él la web bloquea Model) | `mark_base_version` | Sí (con `--apply`) |
 | Re-aplicar las 3 correcciones de partición del owner (solo XML DDV actual) | `fix_particiones_ddv_20260717` | Sí (con `--apply`) |
 | Volver a la VERSIÓN BASE de un proyecto (deshace y borra toda versión posterior a su v1) | `reset_to_base_version` | Sí (con `--apply`) |
@@ -66,7 +67,7 @@ El one-shot por carpeta es DESTRUCTIVO (dropea el schema `dmh` completo) y
 encadena, en 4 ETAPAS: `quality` por proyecto (gate + glosario cruzado entre
 los archivos del proyecto) → reset + `create_admin` → `migrate` archivo por
 archivo → `audit_data_consistency` + `seed_ddl_export_rules --all-projects` +
-`seed_upload_profiles --all-projects` + `arrange_all` + `mark_base_version` (v1 de
+`seed_upload_profiles --all-projects` + `seed_sheet_templates --all-projects` + `arrange_all` + `mark_base_version` (v1 de
 cada proyecto):
 ```
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                  # plan (dry-run)
@@ -124,6 +125,7 @@ Al final, por CADA proyecto:
       audit_data_consistency                               # esperado: 0 fixables
       seed_ddl_export_rules --project "P" (o --all-projects) → --apply
       seed_upload_profiles --project "P" (o --all-projects) → --apply   # perfil «Plantilla BCP» (doc 78)
+      seed_sheet_templates --project "P" (o --all-projects) → --apply   # plantilla Excel «QA_MODELO» (doc 95)
       mark_base_version (dry-run) → --apply                # v1 de cada proyecto activo
 ```
 Como los ids son deterministas (`uuid5("<projectId>|<Long_Id>")`), re-correr
@@ -280,6 +282,16 @@ muestra el plan sin abrir conexión a la BD.
 - **PKs correctas:** los miembros del Key_Group PK se traducen vía
   `Key_Group_Member.Attribute_Ref` (fix 2026-07-16 — antes NINGUNA columna
   migrada quedaba `isPrimaryKey`).
+- **Nombres limpios (doc 95 D3):** el parser normaliza los nombres de
+  entidades, atributos, vistas y dominios (lógico y físico) con `clean_name`:
+  quita los caracteres de ancho cero y colapsa todo espacio —incluido el NBSP
+  (`\u00a0`) que traían 2 atributos del DDV— a un espacio simple. Sin esto el
+  nombre guardado no coincidía con la derivación del glosario y el popup de
+  «Save & apply» los listaba como renombres de CUALQUIER término.
+- **Glosario bloqueado (doc 95 D6):** los términos que CREA el one-shot nacen
+  con `locked = true`, `lockedBy = "one-shot"`; solo un admin los desbloquea
+  (auditado). Los reusados de la BD no se tocan; los que crean los
+  modeladores en la web nacen sin candado.
 - **Política de RE-RUN sobre el mismo XML:** los datos del MODELO (órdenes de
   columnas y de llave incluidos) los pisa el XML — re-correr = re-sincronizar
   desde Erwin; los LAYOUTS de canvas trabajados en la plataforma se PRESERVAN.
@@ -308,8 +320,8 @@ muestra el plan sin abrir conexión a la BD.
   (adopciones, conflictos resueltos por score, alias, fusiones).
 - **Después de `--apply`:** layout inicial en grilla → correr `arrange_all`
   (§5) y `audit_data_consistency` (§6). En una BD estrenada, cerrar con
-  `seed_ddl_export_rules` (§6b), `seed_upload_profiles` (perfil de carga) y
-  `mark_base_version` (§6c).
+  `seed_ddl_export_rules` (§6b), `seed_upload_profiles` (perfil de carga),
+  `seed_sheet_templates` (plantilla «QA_MODELO», §6d) y `mark_base_version` (§6c).
 
 ## 5. `arrange_all` — auto-arrange ELK de todos los canvases
 
@@ -389,6 +401,21 @@ proyecto primero, el marcador después (`--title` para el rótulo).
 .venv/bin/python -m scripts.mark_base_version           # dry-run
 .venv/bin/python -m scripts.mark_base_version --apply
 ```
+
+## 6d. `seed_sheet_templates` — plantilla de hoja Excel «QA_MODELO» (doc 95)
+
+Siembra por proyecto la plantilla built-in «QA_MODELO» del Reporting (hoja
+«QA_MODELO», 14 columnas: una fila por columna con los datos de su tabla y
+sus UDP) en la colección `sheet_templates`. Pasa por
+`sheet_templates.service.create_default` — la MISMA ruta que el botón «Create
+QA_MODELO template» de Reporting — y NO re-siembra: si el proyecto ya tiene la
+built-in (editada o no), lo salta. La plantilla queda editable: es dato.
+```bash
+.venv/bin/python -m scripts.seed_sheet_templates --all-projects            # dry-run
+.venv/bin/python -m scripts.seed_sheet_templates --all-projects --apply
+.venv/bin/python -m scripts.seed_sheet_templates --project "MODELO DDV" --apply
+```
+El one-shot (`run_migration`) la corre después de `seed_upload_profiles`.
 
 ## 7. `fix_particiones_ddv_20260717` — decisiones del owner (solo XML DDV actual)
 

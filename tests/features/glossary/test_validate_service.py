@@ -100,3 +100,23 @@ def test_corpus_de_un_termino_de_tabla_solo_mira_tablas(monkeypatch):
     columns.count_documents.assert_not_awaited()
     assert sample == [{"entity": "table", "tableName": "CODIGOS", "columnName": None,
                        "logicalName": "codigo maestro"}]
+
+
+def test_validate_term_pasa_el_limite_al_repositorio(monkeypatch):
+    """Doc 95 D1: el popup pide la lista COMPLETA (limit=None)."""
+    monkeypatch.setattr(service.repository, "list_entries", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.repository, "corpus_conflicts", AsyncMock(return_value=([HIT], 1)))
+    asyncio.run(service.validate_term("p1", "codigo", "column", limit=None))
+    assert service.repository.corpus_conflicts.await_args.kwargs == {"limit": None}
+
+
+def test_corpus_completo_sin_tope_cuenta_por_la_lista(monkeypatch):
+    repo, _tables, columns = _fake_db(monkeypatch)
+    columns.find.return_value.to_list = AsyncMock(return_value=[
+        {"physicalName": "CODCTA", "logicalName": "codigo cuenta", "tableId": "tb1"},
+        {"physicalName": "CODCTA2", "logicalName": "codigo cuenta 2", "tableId": "tb1"}])
+    rows, total = asyncio.run(repo.corpus_conflicts("p1", "x", "column", limit=None))
+    assert total == 2 and [r["columnName"] for r in rows] == ["CODCTA", "CODCTA2"]
+    assert {r["tableName"] for r in rows} == {"CUENTAS"}
+    columns.count_documents.assert_not_awaited()          # un solo scan: el largo ES el total
+    columns.find.return_value.limit.assert_not_called()

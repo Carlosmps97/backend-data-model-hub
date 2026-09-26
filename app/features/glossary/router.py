@@ -82,15 +82,17 @@ async def validate_term(project_id: str, body: ValidateTermBody,
     if not term:
         return ok({"ok": True,
                    "conflicts": {"glossaryDuplicate": None, "corpus": [], "total": 0}})
-    return ok(await service.validate_term(project_id, term, body.scope))
+    # Doc 95 D1: el popup muestra TODAS las columnas en conflicto (lista completa).
+    return ok(await service.validate_term(project_id, term, body.scope, limit=None))
 
 
 @router.post("/impact")
 async def impact(project_id: str, body: ImpactBody,
                  principal: Principal = Depends(current_principal)):
-    """Doc 94 D7: dry-run del re-derivado que haría aplicar el borrador del
-    glosario — `{columns, columnTables, tables, sample}`. No muta. Sesión, sin
-    standards.edit (igual que /validate): el front decide con esto si avisa."""
+    """Docs 94 D7 · 95 D3: dry-run del re-derivado que haría aplicar el borrador
+    del glosario — `{renamed, outOfSync}` con las listas completas. No muta.
+    Sesión, sin standards.edit (igual que /validate): el front decide con esto si
+    avisa."""
     return ok(await service.impact_preview(
         project_id, body.scope,
         [t.model_dump(exclude_none=True) for t in body.termsUpsert], body.termsDelete,

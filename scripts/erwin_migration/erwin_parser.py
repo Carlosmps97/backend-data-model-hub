@@ -259,6 +259,18 @@ def _phys_sorted(el: ET.Element, props_tag: str, attrs: list[ErwinAttribute]) ->
     return sorted(attrs, key=lambda a: (pos.get(a.id, 10**6), a.order))
 
 
+# Doc 95 D2: caracteres de ancho cero que Erwin/Excel dejan pegados a un nombre.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def clean_name(s: str | None) -> str:
+    """Doc 95 D2: nombre del XML sin espacios Unicode raros ni caracteres
+    invisibles — todo espacio (U+00A0, U+2007, U+202F, tab…) pasa a espacio
+    normal, se colapsan los repetidos y se recorta. Dos nombres de MODELO DDV
+    con U+00A0 al final aparecían «desfasados» en cada apply del glosario."""
+    return " ".join((s or "").translate(_ZERO_WIDTH).split())
+
+
 def _txt(p: ET.Element | None, name: str) -> str:
     return (p.findtext(f"./{{*}}{name}") or "") if p is not None else ""
 
@@ -305,10 +317,10 @@ def parse(xml_path: str) -> ErwinModel:
                     id=el.get("id") or "",
                     owner_id=owner.get("id") or "",
                     owner_kind=okind,
-                    name=el.get("name") or _txt(p, "Name"),
-                    physical=_txt(p, "User_Formatted_Physical_Name")
-                             or (raw if "%" not in raw else "")
-                             or (el.get("name") or ""),
+                    name=clean_name(el.get("name") or _txt(p, "Name")),
+                    physical=clean_name(_txt(p, "User_Formatted_Physical_Name")
+                                        or (raw if "%" not in raw else "")
+                                        or (el.get("name") or "")),
                     physical_raw=raw,
                     data_type=_txt(p, "Physical_Data_Type").strip(),
                     logical_type=_txt(p, "Logical_Data_Type").strip(),
@@ -371,8 +383,8 @@ def parse(xml_path: str) -> ErwinModel:
                 a.column_order = cpos.get(a.id, lpos.get(a.id, a.order))
             ent = ErwinEntity(
                 id=el.get("id") or "",
-                name=el.get("name") or _txt(p, "Name"),
-                physical=(ufpn if was_macro or not raw else raw) or raw,
+                name=clean_name(el.get("name") or _txt(p, "Name")),
+                physical=clean_name((ufpn if was_macro or not raw else raw) or raw),
                 physical_was_macro=was_macro,
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
@@ -389,7 +401,7 @@ def parse(xml_path: str) -> ErwinModel:
             p = _props(el, "ViewProps")
             v = ErwinView(
                 id=el.get("id") or "",
-                name=el.get("name") or _txt(p, "Name"),
+                name=clean_name(el.get("name") or _txt(p, "Name")),
                 definition=_txt(p, "Definition").strip(),
                 comment=_txt(p, "Comment").strip(),
                 sql=_txt(p, "SQL").strip(),
@@ -416,15 +428,15 @@ def parse(xml_path: str) -> ErwinModel:
             raw_phys = _txt(p, "Physical_Name")
             d = ErwinDomain(
                 id=el.get("id") or "",
-                name=el.get("name") or _txt(p, "Name"),
+                name=clean_name(el.get("name") or _txt(p, "Name")),
                 builtin=bool(_txt(p, "Built_In_Id")),
                 data_type=_txt(p, "Logical_Data_Type").strip(),
                 parent_ref=_txt(p, "Parent_Domain_Ref") or None,
                 definition=_txt(p, "Definition").strip(),
                 physical_type=_txt(p, "Physical_Data_Type").strip(),
                 attribute_definition=_txt(p, "Attribute_Definition").strip(),
-                physical_name=(_txt(p, "User_Formatted_Physical_Name")
-                               or (raw_phys if "%" not in raw_phys else "")).strip(),
+                physical_name=clean_name(_txt(p, "User_Formatted_Physical_Name")
+                                         or (raw_phys if "%" not in raw_phys else "")),
                 comment=_txt(p, "Comment").strip(),
             )
             m.domains[d.id] = d

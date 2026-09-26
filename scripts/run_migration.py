@@ -11,6 +11,7 @@ ONE-SHOT (destructivo) — deja la plataforma como un primer deployment:
   de caja + admin + whitelist SSO) → migrate archivo por archivo → audit →
   seed_ddl_export_rules ("data functions", en todos los proyectos) →
   seed_upload_profiles (perfil de carga «Plantilla BCP», doc 78) →
+  seed_sheet_templates (plantilla Excel «QA_MODELO», doc 95) →
   arrange_all → mark_base_version (v1 de cada proyecto, título parametrizable).
 
 APPEND (no destructivo) — suma UN archivo sobre la base viva:
@@ -245,6 +246,8 @@ def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
              "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]},
             {"name": "seed_upload_profiles (perfil «Plantilla BCP», por proyecto)", "klass": "core",
              "cmd": [_PY, "-m", "scripts.seed_upload_profiles", "--all-projects", "--apply"]},
+            {"name": "seed_sheet_templates (plantilla Excel «QA_MODELO», por proyecto)", "klass": "core",
+             "cmd": [_PY, "-m", "scripts.seed_sheet_templates", "--all-projects", "--apply"]},
             {"name": "arrange_all (layout ELK, todos los canvases)", "klass": "info",
              "cmd": [_PY, "scripts/arrange_all.py"]},
             {"name": "mark_base_version (v1 de cada proyecto)", "klass": "core",

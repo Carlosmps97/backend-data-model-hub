@@ -40,7 +40,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 
 ---
 
-## 1. Mapa de colecciones (21 propias)
+## 1. Mapa de colecciones (23 propias)
 
 | Colección | Modelo `*Doc` | `projectId` | Versionada (changeset) | Soft-delete | `_id` |
 |---|---|:--:|:--:|:--:|---|
@@ -62,6 +62,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 | `ddl_rules` | DdlRuleDoc | ✅ | — (Data Standards) | ✅ | `id` (uuid) |
 | `ddl_ruleset_config` | DdlRulesetConfigDoc | ✅ | — (Data Standards) | — | **`<projectId>`** (un doc por proyecto) |
 | `upload_profiles` | UploadProfileDoc | ✅ | — (config operativa, sin versionado) | ✅ | `id` (uuid) |
+| `sheet_templates` | SheetTemplateDoc (en `reporting/sheet_templates/models.py`) | ✅ | — (config operativa, sin versionado) | ✅ | `id` (uuid) |
 | `users` | UserDoc | — | — | via `status=disabled` | **`username`** |
 | `roles` | RoleDoc | — | — | — | **`key`** (slug del rol) |
 | `saved_reports` | SavedReportDoc (en `reporting/query/reports.py`, no en `models/`) | ✅ | — | ✅ | `id` (uuid) |
@@ -71,7 +72,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 >
 > **Entidades virtuales del reporting** (no son colecciones): `COLL_OF` en `reporting/query/executor.py` mapea `view_columns → views` y `models → subject_areas`.
 >
-> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) y `upload_profiles` (doc 78: perfiles de carga — nombre, hojas con fila de cabecera y mapeos cabecera → campo / UDP, reglas por columna, políticas; un `isDefault` por proyecto; `origin` `user` | `builtin:plantilla-bcp`) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
+> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) y `upload_profiles` (doc 78: perfiles de carga — nombre, hojas con fila de cabecera y mapeos cabecera → campo / UDP, reglas por columna, políticas; un `isDefault` por proyecto; `origin` `user` | `builtin:plantilla-bcp`) y `sheet_templates` (doc 95 D11: plantillas de hoja Excel del Reporting) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
 
 ---
 
@@ -305,7 +306,7 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | term | str | — | palabra lógica |
 | abbrev | str | — | abreviatura física |
 | scope | str | "column" | `column` \| `table` |
-| locked | bool | false | lock por admin (intocable para todos hasta desbloquear) |
+| locked | bool | false | lock por admin (intocable para todos hasta desbloquear). Doc 95 D6: los términos que CREA el one-shot nacen bloqueados (`lockedBy = "one-shot"`); los que crean los modeladores, no |
 | lockedBy | str? | null | |
 | lockedAt | str? | null | |
 
@@ -416,6 +417,23 @@ Doc 38: la colección funciona como **WHITELIST de acceso** — las entradas nor
 | owner | str | — | ref `users.id` (fijado server-side) |
 | createdAt / updatedAt | str? | null | |
 
+### `sheet_templates` — SheetTemplateDoc  *(en `reporting/sheet_templates/models.py`, doc 95 D11)*
+Formato Excel FIJO del Reporting guardado como dato (se exporta desde el front con las funciones puras del export tabular).
+
+| Campo | Tipo | Default | Notas |
+|---|---|---|---|
+| id | str | uuid4 | PK |
+| projectId | str | — | ref `projects.id` (alcance; índice `projectId`) |
+| name | str | — | 1–80; único (CI) entre las que ve quien escribe (las suyas + las compartidas) |
+| sheetName | str | — | nombre de la hoja: 1–31, sin `: \ / ? * [ ]` |
+| description | str? | null | |
+| columns | list[{header, source}] | — | 1–200; `header` único (CI); `source` = `table.<campo>` · `column.<campo>` · `table.udp:<nombre>` · `column.udp:<nombre>` |
+| shared | bool | false | compartida con el proyecto (spec D11: «dueño + compartida, como los saved reports»); la sembrada nace compartida |
+| owner | str? | null | dueño (lo fija el servidor): edita y borra; un admin, además, las compartidas. La del one-shot: `system` |
+| origin | str | "user" | `user` \| `builtin:qa-modelo` (la «QA_MODELO» sembrada por el one-shot o el botón) |
+| createdBy / updatedBy | str? | null | |
+| createdAt / updatedAt | str? | null | + `flgactive`/`deletedAt` (soft-delete) |
+
 ### `audit_log`  *(append-only, `_id` = ObjectId auto)*
 Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: str, targetType?: str, meta?: dict }`. Sin soft-delete.
 
@@ -469,7 +487,7 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 - **UDP** (`udp/models.py`): `UDP_TYPES = (string, number, boolean, date, list)`, `UDP_LEVELS = (table, column, canvas, view)`.
 - **Standards version kind** (`data_standards/models.py KINDS`): `glossary`, `udp`, `domain`, `naming`, `ddl`, `batch`, `baseline`, `rollback`, `copy`.
 - **Bloques copiables de estándares** (`data_standards/schemas.py CopyFromBody.blocks`): `glossary`, `domains`, `udp`, `naming`, `ddl`.
-- **Colecciones con alcance** (`core/scope.py PROJECT_SCOPED`): `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `ddl_rules`, `ddl_ruleset_config`, `changesets`, `standards_versions`, `saved_reports`.
+- **Colecciones con alcance** (`core/scope.py PROJECT_SCOPED`): `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `ddl_rules`, `ddl_ruleset_config`, `upload_profiles`, `sheet_templates`, `changesets`, `standards_versions`, `saved_reports`.
 - **Reglas DDL** (`ddl_rules/models.py`): `RULE_KINDS = (rule, generator)`, `RULE_TARGETS = (column, table)`, `VALIDATION_STATES = (valid, invalid, stale)`.
 - **Estado de changeset**: `draft`, `submitted`, `approved`, `rejected`.
 - **Estado de usuario**: `active`, `invited`, `disabled`.

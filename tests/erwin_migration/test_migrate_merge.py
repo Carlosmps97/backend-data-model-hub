@@ -527,6 +527,20 @@ def test_glosario_conflicto_vs_bd_se_reporta_y_la_bd_gana():
     assert mig.stats["glosario en conflicto (abbrev distinta)"] == 2
 
 
+def test_terminos_del_one_shot_nacen_bloqueados():
+    """Doc 95 D6: el término que crea el kit queda locked (lockedBy «one-shot»,
+    con fecha); el que ya estaba en la BD no se toca."""
+    db = FakeDb({"projects": {"proj-f": {"_id": "proj-f", "name": "Fam"}},
+                 "glossary_terms": {
+        "g1": {"_id": "g1", "term": "Monto", "abbrev": "MTO", "projectId": "proj-f", "locked": False}}})
+    m = ep.ErwinModel(name="M")
+    m.glossary = [("Monto", "MTO"), ("Codigo", "COD")]
+    Migrator(db, m, "Fam", None).run()
+    created = next(g for g in db.data["glossary_terms"].values() if g.get("term") == "Codigo")
+    assert created["locked"] is True and created["lockedBy"] == "one-shot" and created["lockedAt"]
+    assert db.data["glossary_terms"]["g1"]["locked"] is False
+
+
 # ── doc 53 · subcategorías (supertipo→subtipo) ────────────────────────────
 def _modelo_subtipos() -> ep.ErwinModel:
     """Party con dos subtipos (Individuo, Organizacion) agrupados por UN

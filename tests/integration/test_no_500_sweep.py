@@ -60,6 +60,7 @@ QUERY = {
     "/api/reporting/insights/relationships": "projectId={pid}",
     "/api/reporting/insights/udp-coverage": "projectId={pid}",
     "/api/admin/audit": "limit=20",
+    "/api/projects/{project_id}/standards/rollback-preview": "targetSeq=1",   # doc 95 D9
 }
 
 # POST de sólo lectura (o idempotentes) con body real.

@@ -4,6 +4,7 @@ override de CADA faceta por separado."""
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.features.domains import repository, service
@@ -63,6 +64,7 @@ class _Coll:
 
     async def update_many(self, flt, upd):
         self.updates.append((flt, upd["$set"]))
+        return SimpleNamespace(modified_count=1)
 
 
 def test_update_domain_cascadea_cada_faceta_por_separado(monkeypatch):

@@ -173,10 +173,51 @@ def _naming_key(snap: dict):
     return (terms, snap.get("namingConfig") or {})
 
 
-def _domains_key(snap: dict):
-    """Dominios del snapshot (ordenados). Si no cambian entre target y actual, un
-    rollback no necesita re-propagar tipos por dominio. Puro."""
-    return sorted((snap.get("domains") or []), key=lambda d: d.get("id") or "")
+# ── Doc 95 D8/D9: tipos de dominio del rollback + historial por dominio (puros) ──
+
+DOMAIN_STATE_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description",
+                     "inheritsName", "physicalName", "physicalDescription", "udpValues")
+
+
+def domain_type_changes(snap_domains: list[dict],
+                        current: dict[str, tuple[str | None, str | None]]) -> list[dict]:
+    """Dominios del snapshot cuyo tipo físico o lógico difiere del que tienen HOY
+    (`current`: id → (físico, lógico), borrados incluidos). Sin estado actual no
+    hay columnas que lo sigan: no re-tipa. Nunca se cascadea a vacío (igual que
+    la ida). Puro."""
+    out: list[dict] = []
+    for d in snap_domains:
+        did = d.get("id")
+        if not did or did not in current:
+            continue
+        cur_p, cur_l = current[did]
+        new_p, new_l = d.get("defaultDataType"), d.get("logicalDataType")
+        phys = (cur_p, new_p) if new_p is not None and new_p != cur_p else None
+        log = (cur_l, new_l) if new_l is not None and new_l != cur_l else None
+        if phys or log:
+            out.append({"id": did, "name": d.get("name") or "", "physical": phys, "logical": log})
+    return out
+
+
+def domain_history(versions: list[dict], domain_id: str) -> list[dict]:
+    """Versiones de Data Standards donde el estado de UN dominio cambia, más
+    reciente primero, con ese estado (`None` = no existía o estaba borrado) y los
+    campos que cambiaron respecto de la entrada anterior. Puro."""
+    entries: list[dict] = []
+    prev: dict | None = None
+    for v in sorted(versions, key=lambda v: v.get("seq") or 0):
+        d = next((x for x in (v.get("snapshot") or {}).get("domains") or [] if x.get("id") == domain_id), None)
+        state = {k: d.get(k) for k in DOMAIN_STATE_KEYS} if d else None
+        if state == prev:
+            continue
+        changed = ([k for k in DOMAIN_STATE_KEYS if prev.get(k) != state.get(k)]
+                   if prev is not None and state is not None else [])
+        entries.append({"seq": v.get("seq"), "label": v.get("label"), "title": v.get("title"),
+                        "author": v.get("author"), "createdAt": v.get("createdAt"),
+                        "kind": v.get("kind"), "state": state, "changed": changed})
+        prev = state
+    entries.reverse()
+    return entries
 
 
 # D4 protege el CONTENIDO de la entrada; los campos de lock (locked/lockedBy/
@@ -429,13 +470,13 @@ async def apply(actor: str, project_id: str, body) -> dict:
             # renombre de TEXTO de un término existente → valida excluyéndose.
             await dict_svc.ensure_term_valid(project_id, t.term, t.scope, exclude_id=t.id)
 
-    # Impacto de dominios (columnas re-tipadas): se cuenta ANTES de aplicar,
-    # sobre las columnas sin override cuyo tipo cambia.
+    # Impacto de dominios (doc 95 D7): las columnas que la cascada RE-TIPA de
+    # verdad (física o lógica, misma regla que `update_domain`), contadas ANTES
+    # de aplicar.
     domain_cols = 0
     for d in body.domainsUpsert:
-        if d.id and d.id in before_domains and before_domains[d.id].get("defaultDataType") != d.defaultDataType:
-            imp = await dom_svc.impact(d.id)
-            domain_cols += imp.get("willUpdate", 0)
+        if d.id and d.id in before_domains:
+            domain_cols += await dom_svc.count_retype(d.id, d.defaultDataType, d.logicalDataType)
 
     # 1) Aplicar términos.
     for tid in body.termsDelete:
@@ -561,9 +602,17 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
     preserve = locked_ids_preserved(snap.get("dict") or [], cur.get("dict") or [])
 
     naming_changed = (_naming_key(snap) != _naming_key(cur))
-    domains_changed = (_domains_key(snap) != _domains_key(cur))
+    # Doc 95 D9: solo re-tipan los dominios cuyo TIPO cambia, desde el tipo que
+    # tienen HOY (borrados incluidos: si el rollback los revive, re-tipan desde
+    # su último tipo) y con la MISMA regla de la cascada de ida — las columnas
+    # que siguen al dominio vuelven; las divorciadas no se tocan. Se lee ANTES
+    # de restaurar.
+    snap_domains = snap.get("domains") or []
+    type_changes = domain_type_changes(
+        snap_domains,
+        await dom_repo.types_by_ids([d["id"] for d in snap_domains if d.get("id")], include_deleted=True))
 
-    await repository.restore_domains(project_id, snap.get("domains") or [])
+    await repository.restore_domains(project_id, snap_domains)
     await repository.restore_dict(project_id, snap.get("dict") or [], preserve_ids=preserve)
     await repository.restore_naming(project_id, snap.get("namingConfig") or {})
     # Definiciones UDP: restaura las del snapshot (snapshots viejos sin 'udp' → []).
@@ -574,14 +623,14 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
     await rules_repo.restore_config(project_id, snap.get("ddlConfig") or {})
 
     # Re-derivar SOLO lo que cambió: nombres físicos si cambió glosario/naming;
-    # tipos por dominio si cambiaron los dominios. Un rollback de solo-UDP no toca
-    # ninguno de los dos → no barre las 400k columnas.
+    # tipos solo de los dominios que cambiaron de tipo. Un rollback de solo-UDP no
+    # toca ninguno de los dos → no barre las 400k columnas.
     rederived = (await dict_svc.rephysicalize(project_id))["updated"] if naming_changed else {"tables": 0, "columns": 0}
     domain_cols = 0
-    if domains_changed:
-        for d in (snap.get("domains") or []):
-            if d.get("id"):
-                domain_cols += (await dom_svc.propagate(d["id"])).get("updated", 0)
+    for ch in type_changes:
+        counts = [await dom_repo.retype(ch["id"], facet, *ch[facet])
+                  for facet in ("physical", "logical") if ch[facet]]
+        domain_cols += max(counts, default=0)   # una columna re-tipada en ambas facetas cuenta una vez
 
     impact = {"tables": rederived["tables"], "columns": rederived["columns"] + domain_cols}
     title = f"Rolled back to {target.get('label')}"
@@ -592,6 +641,37 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
                 meta={"newVersion": version["label"], "impact": impact, "projectId": project_id})
     log.info("standards rolled back", extra={"to": target_seq, "new": version["seq"]})
     return version
+
+
+async def rollback_preview(project_id: str, target_seq: int) -> dict | None:
+    """Doc 95 D9: qué haría el rollback a `target_seq` ANTES de confirmarlo —
+    dominios que cambian de tipo con cuántas columnas se re-tipan (misma regla
+    que el rollback) y si se re-derivan nombres (glosario/naming distintos). No
+    muta. None si la versión no existe."""
+    target = await repository.get_version(project_id, target_seq)
+    if target is None:
+        return None
+    snap = target.get("snapshot") or {}
+    snap_domains = snap.get("domains") or []
+    current = await dom_repo.types_by_ids([d["id"] for d in snap_domains if d.get("id")], include_deleted=True)
+    domains: list[dict] = []
+    for ch in domain_type_changes(snap_domains, current):
+        cur_p, cur_l = current[ch["id"]]
+        targets = {f: ch[f][1] for f in ("physical", "logical") if ch[f]}
+        domains.append({
+            "id": ch["id"], "name": ch["name"],
+            "physical": {"from": ch["physical"][0], "to": ch["physical"][1]} if ch["physical"] else None,
+            "logical": {"from": ch["logical"][0], "to": ch["logical"][1]} if ch["logical"] else None,
+            "columns": await dom_svc.count_changes(ch["id"], {"physical": cur_p, "logical": cur_l}, targets),
+        })
+    cur = await current_snapshot(project_id)
+    return {"target": {"seq": target.get("seq"), "label": target.get("label")},
+            "domains": domains, "namesRederived": _naming_key(snap) != _naming_key(cur)}
+
+
+async def domain_history_of(project_id: str, domain_id: str) -> list[dict]:
+    """Doc 95 D8: historial de UN dominio (versiones donde su estado cambia)."""
+    return domain_history(await repository.list_versions(project_id), domain_id)
 
 
 # ── Doc 75 D15: nacimiento de un proyecto (copia de bloques o baseline vacío) ──

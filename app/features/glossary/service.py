@@ -116,14 +116,17 @@ def find_glossary_duplicate(term: str, entries: list[dict],
     return None
 
 
-async def validate_term(project_id: str, term: str, scope: str, exclude_id: str | None = None) -> dict:
+async def validate_term(project_id: str, term: str, scope: str, exclude_id: str | None = None,
+                        limit: int | None = repository.CORPUS_SAMPLE_CAP) -> dict:
     """Contrato del POST /api/glossary/validate (F2 #1). Chequeo 1: duplicado
     exacto case-insensitive en el glosario del scope. Chequeo 2: frase completa
-    contigua en los nombres lógicos publicados (muestra cap 50 + total).
-    `total` = corpus + 1 si hay duplicado."""
+    contigua en los nombres lógicos publicados — muestra de `limit` o, con
+    `limit=None`, la lista COMPLETA (doc 95 D1) — + total. `total` = corpus + 1
+    si hay duplicado."""
     entries = await repository.list_entries(project_id, scope)
     dup = find_glossary_duplicate(term, entries, exclude_id)
-    corpus, corpus_total = await repository.corpus_conflicts(project_id, corpus_regex(term), scope)
+    corpus, corpus_total = await repository.corpus_conflicts(project_id, corpus_regex(term), scope,
+                                                             limit=limit)
     total = corpus_total + (1 if dup else 0)
     return {"ok": total == 0,
             "conflicts": {"glossaryDuplicate": dup, "corpus": corpus, "total": total}}
@@ -220,9 +223,7 @@ async def _rephysicalize_scope(project_id: str, scope: str) -> int:
     return await repository.update_physical_names(scope, updates)
 
 
-# ── Dry-run del re-derivado (doc 94 D7): el aviso del glosario solo con impacto real ──
-
-IMPACT_SAMPLE_CAP = 20
+# ── Dry-run del re-derivado (docs 94 D7 · 95 D3): qué renombra el borrador y qué ya estaba desfasado ──
 
 
 def simulate_terms(current: list[dict], upserts: list[dict], deletes: list[str]) -> list[dict]:
@@ -243,36 +244,75 @@ def simulate_terms(current: list[dict], upserts: list[dict], deletes: list[str])
     return [*by_id.values(), *added]
 
 
+def classify_rephysicalize(entities: list[dict], current: dict[str, str], draft: dict[str, str],
+                           naming: tuple[str, str], draft_naming: tuple[str, str],
+                           ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Doc 95 D3 (puro): separa lo que renombra el BORRADOR de lo que ya estaba
+    desfasado. `renamed` = el derivado con el borrador difiere del derivado con
+    lo vigente; `out_of_sync` = el borrador no lo cambia, pero el nombre guardado
+    ya no coincide con la regla (el apply lo repara igual). Mismo filtro que
+    `compute_rephysicalize`: sin lógico u override manual ⇒ fuera. La unión de
+    ambas listas es exactamente lo que el apply re-deriva."""
+    renamed: list[tuple[str, str]] = []
+    out_of_sync: list[tuple[str, str]] = []
+    for e in entities:
+        logical = e.get("logicalName")
+        if not logical or e.get("physicalNameOverridden"):
+            continue
+        new = physicalize(logical, draft, separator=draft_naming[0], case=draft_naming[1])
+        if new == e.get("physicalName"):
+            continue
+        base = physicalize(logical, current, separator=naming[0], case=naming[1])
+        (renamed if new != base else out_of_sync).append((str(e.get("_id", e.get("id"))), new))
+    return renamed, out_of_sync
+
+
+def _impact_row(scope: str, e: dict, new: str, names: dict[str, str]) -> dict:
+    """Fila del dry-run: una columna lleva el nombre físico de su tabla; una
+    tabla se nombra a sí misma."""
+    if scope == "column":
+        return {"entity": "column", "tableId": e.get("tableId"), "table": names.get(e.get("tableId"), ""),
+                "from": e.get("physicalName"), "to": new}
+    tid = str(e.get("_id", e.get("id")))
+    return {"entity": "table", "tableId": tid, "table": e.get("physicalName"),
+            "from": e.get("physicalName"), "to": new}
+
+
+def _row_order(r: dict) -> tuple:
+    return (r["entity"] != "column", (r["table"] or "").lower(), (r["from"] or "").lower())
+
+
 async def impact_preview(project_id: str, scope: str, terms_upsert: list[dict],
                          terms_delete: list[str], naming: dict | None = None) -> dict:
-    """Cuántos nombres físicos cambiaría el apply del glosario con estos cambios
-    del borrador en `scope` (doc 94 D7). NO escribe. Recorre AMBOS scopes, igual
-    que el apply (`rephysicalize` sin scope): el editado con los términos y el
-    naming simulados, el otro con lo vigente (un desfase previo también se
-    repararía). Devuelve `{columns, columnTables, tables, sample}`; muestra cap
-    20 (`{entity, table, from, to}`)."""
-    changed: dict[str, list[tuple[dict, str]]] = {}
+    """Qué nombres físicos cambiaría aplicar el borrador del glosario en `scope`
+    (doc 94 D7). NO escribe. Recorre AMBOS scopes, igual que el apply
+    (`rephysicalize` sin scope): el editado con los términos y el naming
+    simulados, el otro con lo vigente. Doc 95 D3/D4: devuelve las listas
+    COMPLETAS, separadas en `renamed` (lo que cambia por el borrador) y
+    `outOfSync` (lo ya desfasado que el apply repara de paso; en el otro scope
+    todo cae acá). Fila: `{entity, tableId, table, from, to}`."""
+    renamed: list[tuple[str, dict, str]] = []
+    out_of_sync: list[tuple[str, dict, str]] = []
     for sc in _REPHYS_SCOPES:
         cfg = await settings_service.get_naming_for(project_id, sc)
         current = await repository.list_entries(project_id, sc)
-        terms = simulate_terms(current, terms_upsert, terms_delete) if sc == scope else current
-        sep, case = cfg["separator"], cfg["case"]
-        if sc == scope and naming:
-            sep = naming.get("separator", sep) if naming.get("separator") is not None else sep
-            case = naming.get("case") or case
+        cur_naming = (cfg["separator"], cfg["case"])
+        draft_terms, draft_naming = current, cur_naming
+        if sc == scope:
+            draft_terms = simulate_terms(current, terms_upsert, terms_delete)
+            if naming:
+                draft_naming = (naming["separator"] if naming.get("separator") is not None else cur_naming[0],
+                                naming.get("case") or cur_naming[1])
         entities = await repository.entities_for_rephysicalize(project_id, sc)
         by_id = {str(e.get("_id", e.get("id"))): e for e in entities}
-        changed[sc] = [(by_id[i], new) for i, new in
-                       compute_rephysicalize(entities, to_mappings(terms), sep, case)]
-    cols, tabs = changed["column"], changed["table"]
-    sample_cols = cols[:IMPACT_SAMPLE_CAP]
-    names = await repository.table_physical_names([e.get("tableId") for e, _ in sample_cols]) if sample_cols else {}
-    sample = [{"entity": "column", "table": names.get(e.get("tableId"), ""),
-               "from": e.get("physicalName"), "to": new} for e, new in sample_cols]
-    sample += [{"entity": "table", "table": e.get("physicalName"), "from": e.get("physicalName"), "to": new}
-               for e, new in tabs[:max(0, IMPACT_SAMPLE_CAP - len(sample))]]
-    return {"columns": len(cols), "columnTables": len({e.get("tableId") for e, _ in cols if e.get("tableId")}),
-            "tables": len(tabs), "sample": sample}
+        ren, oos = classify_rephysicalize(entities, to_mappings(current), to_mappings(draft_terms),
+                                          cur_naming, draft_naming)
+        renamed += [(sc, by_id[i], new) for i, new in ren]
+        out_of_sync += [(sc, by_id[i], new) for i, new in oos]
+    col_tables = [e.get("tableId") for sc, e, _ in renamed + out_of_sync if sc == "column" and e.get("tableId")]
+    names = await repository.table_physical_names(col_tables) if col_tables else {}
+    return {"renamed": sorted((_impact_row(sc, e, new, names) for sc, e, new in renamed), key=_row_order),
+            "outOfSync": sorted((_impact_row(sc, e, new, names) for sc, e, new in out_of_sync), key=_row_order)}
 
 
 async def rephysicalize(project_id: str, scope: str | None = None) -> dict:

@@ -96,6 +96,10 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Doc 95 D6: autor del candado de los términos que siembra el one-shot.
+LOCKED_BY_ONESHOT = "one-shot"
+
+
 def _norm_type(t: str) -> str:
     return re.sub(r"\s+", "", (t or "").upper())
 
@@ -452,8 +456,11 @@ class Migrator:
                 continue
             self.ex_gloss[key] = abbrev
             self.gloss_scope["column"][term] = abbrev
+            # Doc 95 D6: lo que siembra el one-shot nace BLOQUEADO — solo un admin
+            # lo desbloquea (auditado); lo que crean los modeladores, no.
             self._upsert("glossary_terms", self.pid(f"gloss|{key}"), {
-                "term": term, "abbrev": abbrev, "scope": "column", "locked": False})
+                "term": term, "abbrev": abbrev, "scope": "column",
+                "locked": True, "lockedBy": LOCKED_BY_ONESHOT, "lockedAt": _now()})
             self.stats["glosario creado"] += 1
 
         # defs UDP — CATÁLOGO FIJO (doc 61 ronda 2, owner 2026-08-30): las

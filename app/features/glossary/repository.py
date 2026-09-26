@@ -90,39 +90,45 @@ async def get_entry(entry_id: str) -> dict | None:
     return AbbreviationDoc.model_validate(_to_doc(doc)).model_dump() if doc else None
 
 
-async def corpus_conflicts(project_id: str, pattern: str, scope: str = "column") -> tuple[list[dict], int]:
+async def corpus_conflicts(project_id: str, pattern: str, scope: str = "column",
+                           limit: int | None = CORPUS_SAMPLE_CAP) -> tuple[list[dict], int]:
     """Apariciones del patrón (frase completa) en `logicalName` de las entidades
     ACTIVAS DEL PROYECTO del `scope` del término (doc 94 D9): un término de
     columna solo deriva nombres de columnas, así que solo lo bloquean nombres
-    lógicos de columnas; uno de tabla, solo de tablas. Devuelve (muestra cap 50,
-    conteo total). El regex corre case-insensitive server-side; es un scan
-    aceptable como acción on-demand (botón Validar / save), no per-keystroke
-    (riesgo medido en el doc 10)."""
+    lógicos de columnas; uno de tabla, solo de tablas. Devuelve (filas, total):
+    con `limit`, una muestra (el enforcement de los writes solo necesita el
+    total); con `limit=None`, la lista COMPLETA (doc 95 D1: el popup muestra
+    todas las columnas en conflicto). El regex corre case-insensitive
+    server-side; es un scan aceptable como acción on-demand (botón Validar /
+    save), no per-keystroke (riesgo medido en el doc 10)."""
     db = await get_db()
     flt = scoped(project_id, {"logicalName": {"$regex": pattern, "$options": "i"},
                               "flgactive": {"$ne": False}})
     if scope == "table":
-        total = await db[TABLES_COLL].count_documents(flt)
-        t_docs = await db[TABLES_COLL].find(
-            flt, {"_id": 1, "physicalName": 1, "logicalName": 1},
-        ).limit(CORPUS_SAMPLE_CAP).to_list(None)
+        t_docs, total = await _matches(db[TABLES_COLL], flt,
+                                       {"_id": 1, "physicalName": 1, "logicalName": 1}, limit)
         return [{"entity": "table", "tableName": t.get("physicalName") or "",
                  "columnName": None, "logicalName": t.get("logicalName") or ""} for t in t_docs], total
 
-    total = await db[COLUMNS_COLL].count_documents(flt)
-    sample: list[dict] = []
-    if total > 0:
-        c_docs = await db[COLUMNS_COLL].find(
-            flt, {"physicalName": 1, "logicalName": 1, "tableId": 1},
-        ).limit(CORPUS_SAMPLE_CAP).to_list(None)
-        # Nombres de tabla en batch (NO $lookup, joins en Python a propósito).
-        names = await table_physical_names([c.get("tableId") for c in c_docs if c.get("tableId")])
-        for c in c_docs:
-            sample.append({"entity": "column",
-                           "tableName": names.get(c.get("tableId"), ""),
-                           "columnName": c.get("physicalName"),
-                           "logicalName": c.get("logicalName") or ""})
-    return sample, total
+    c_docs, total = await _matches(db[COLUMNS_COLL], flt,
+                                   {"physicalName": 1, "logicalName": 1, "tableId": 1}, limit)
+    # Nombres de tabla en batch (NO $lookup, joins en Python a propósito).
+    names = (await table_physical_names([c.get("tableId") for c in c_docs if c.get("tableId")])
+             if c_docs else {})
+    return [{"entity": "column", "tableName": names.get(c.get("tableId"), ""),
+             "columnName": c.get("physicalName"), "logicalName": c.get("logicalName") or ""}
+            for c in c_docs], total
+
+
+async def _matches(coll, flt: dict, projection: dict, limit: int | None) -> tuple[list[dict], int]:
+    """(docs, total) de un filtro: con `limit`, conteo + muestra; sin límite, la
+    lista completa (su largo ES el total — un solo scan)."""
+    if limit is None:
+        docs = await coll.find(flt, projection).to_list(None)
+        return docs, len(docs)
+    total = await coll.count_documents(flt)
+    docs = await coll.find(flt, projection).limit(limit).to_list(None) if total else []
+    return docs, total
 
 
 async def table_physical_names(table_ids: list[str]) -> dict[str, str]:

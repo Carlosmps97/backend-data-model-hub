@@ -9,6 +9,7 @@ from pymongo import ReturnDocument
 from app.core.db.client import get_db
 from app.core.scope import scoped
 
+from .cascade import FACETS, retype_filter
 from .models import ParentDomainDoc
 
 COLL = "parent_domains"
@@ -55,7 +56,6 @@ async def update_domain(domain_id: str, data: dict, cascade: bool = True) -> dic
     old = await db[COLL].find_one({"_id": domain_id, "flgactive": {"$ne": False}})
     if not old:
         return None
-    old_type = old.get("defaultDataType")
     res = await db[COLL].find_one_and_update(
         {"_id": domain_id, "flgactive": {"$ne": False}},
         {"$set": {**data, "updatedAt": _now()}},
@@ -63,26 +63,13 @@ async def update_domain(domain_id: str, data: dict, cascade: bool = True) -> dic
     )
     if not res:
         return None
-    new_type = data.get("defaultDataType")
-    # Cascada RESPETANDO EL OVERRIDE MANUAL: solo re-tipa columnas que MANTIENEN
-    # el tipo viejo del dominio (`dataType == old_type`) y no fueron editadas a
-    # mano (`typeOverridden != True`). Una columna cuyo tipo se cambió
-    # manualmente (rompió la conexión) queda excluida — aunque su flag venga mal.
-    if cascade and new_type is not None and new_type != old_type:
-        await db[COLUMNS].update_many(
-            {"parentDomainId": domain_id, "typeOverridden": {"$ne": True},
-             "dataType": old_type, "flgactive": {"$ne": False}},
-            {"$set": {"dataType": new_type, "updatedAt": _now()}},
-        )
-    # Doc 69: cascada de la faceta LÓGICA con su propio override.
-    old_logical = old.get("logicalDataType")
-    new_logical = data.get("logicalDataType")
-    if cascade and new_logical is not None and new_logical != old_logical:
-        await db[COLUMNS].update_many(
-            {"parentDomainId": domain_id, "logicalTypeOverridden": {"$ne": True},
-             "logicalDataType": old_logical, "flgactive": {"$ne": False}},
-            {"$set": {"logicalDataType": new_logical, "updatedAt": _now()}},
-        )
+    # Cascada RESPETANDO EL OVERRIDE MANUAL, por faceta (doc 69) y con LA regla
+    # de `cascade` (doc 95): solo re-tipa las columnas que SIGUEN al dominio —
+    # sin override y con el tipo viejo. Una columna editada a mano (o que ya
+    # tenía otro tipo) rompió la conexión y queda excluida.
+    if cascade:
+        await retype(domain_id, "physical", old.get("defaultDataType"), data.get("defaultDataType"))
+        await retype(domain_id, "logical", old.get("logicalDataType"), data.get("logicalDataType"))
     return ParentDomainDoc.model_validate(_to_doc(res)).model_dump()
 
 
@@ -183,3 +170,43 @@ async def models_affected(table_ids: list[str]) -> int:
     db = await get_db()
     return await db[SUBJECT_AREAS].count_documents(
         {"tableIds": {"$in": table_ids}, "flgactive": {"$ne": False}})
+
+
+# ── Doc 95: re-tipo con LA regla + columnas del dominio para la vista previa ──
+
+
+async def retype(domain_id: str, facet: str, from_type: str | None, to_type: str | None) -> int:
+    """Re-tipa en `facet` las columnas que SIGUEN al dominio (tipo `from_type`,
+    sin override) a `to_type`. Sin tipo nuevo o sin cambio no toca nada (nunca
+    se cascadea a vacío). Update directo; devuelve cuántas cambió."""
+    if to_type is None or to_type == from_type:
+        return 0
+    db = await get_db()
+    res = await db[COLUMNS].update_many(retype_filter(domain_id, facet, from_type),
+                                        {"$set": {FACETS[facet][0]: to_type, "updatedAt": _now()}})
+    return res.modified_count
+
+
+async def domain_columns(domain_id: str) -> list[dict]:
+    """Columnas ACTIVAS del dominio con lo justo para clasificarlas (doc 95 D7)."""
+    db = await get_db()
+    return await db[COLUMNS].find(
+        {"parentDomainId": domain_id, "flgactive": {"$ne": False}},
+        {"_id": 1, "tableId": 1, "physicalName": 1, "logicalName": 1, "dataType": 1,
+         "logicalDataType": 1, "typeOverridden": 1, "logicalTypeOverridden": 1},
+    ).to_list(None)
+
+
+async def types_by_ids(domain_ids: list[str], include_deleted: bool = False
+                       ) -> dict[str, tuple[str | None, str | None]]:
+    """Doc 95: (físico, lógico) ACTUALES de los dominios pedidos, en una lectura.
+    `include_deleted`: el rollback que revive un dominio borrado re-tipa desde
+    su último tipo (el doc borrado lo conserva)."""
+    if not domain_ids:
+        return {}
+    db = await get_db()
+    flt: dict = {"_id": {"$in": list(domain_ids)}}
+    if not include_deleted:
+        flt["flgactive"] = {"$ne": False}
+    docs = await db[COLL].find(flt, {"defaultDataType": 1, "logicalDataType": 1}).to_list(None)
+    return {str(d["_id"]): (d.get("defaultDataType"), d.get("logicalDataType")) for d in docs}

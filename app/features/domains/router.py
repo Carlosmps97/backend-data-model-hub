@@ -47,6 +47,23 @@ async def domain_impact(
     return ok(await service.impact(domain_id, q=q, offset=offset, limit=limit))
 
 
+@router.get("/{domain_id}/impact/columns")
+async def domain_column_impact(
+    domain_id: str,
+    physicalTo: str | None = Query(default=None),
+    logicalTo: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None, pattern="^(change|override|differs)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=0, le=2000),
+):
+    """Doc 95 D7: impacto EXACTO por columna (misma regla que la cascada):
+    totales por estado + filas con búsqueda (`q`) y filtro (`status`)
+    server-side, paginadas. `limit=0` = solo totales (panel del dominio)."""
+    return ok(await service.column_impact(domain_id, physicalTo, logicalTo, q=q, status=status,
+                                          offset=offset, limit=limit))
+
+
 @router.post("/{domain_id}/propagate")
 async def domain_propagate(domain_id: str):
     """Aplica el `defaultDataType` actual del dominio a sus columnas sin

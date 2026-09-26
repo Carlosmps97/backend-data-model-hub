@@ -17,6 +17,8 @@ from app.core.naming.logical import sanitize_logical_name
 from app.core.naming import apply_case
 from app.core.scope import PROJECT_SCOPED, ProjectDeletedError, scoped
 from app.core.versioning import overlay, summarize_diff
+from app.features.domains import repository as dom_repo
+from app.features.domains.cascade import align_restored_column
 from app.features.glossary import service as dict_svc
 from app.features.projects import repository as projects_repo
 from app.features.relationships.models import RelationshipDoc
@@ -1630,6 +1632,24 @@ def rollback_plan(changes: dict) -> tuple[list[dict], list[str]]:
     return inverse, missing
 
 
+async def _align_domain_types(inverse: list[dict]) -> list[dict]:
+    """Doc 95 D10: las columnas que el restore reescribe y que HOY siguen a su
+    dominio conservan el tipo vigente del dominio (Data Standards manda sobre el
+    tipo; tiene su propio rollback). Lo demás del inverso pasa intacto."""
+    ids = [ch["entityId"] for ch in inverse
+           if ch["collection"] == "canonical_columns" and ch["op"] == "upsert"
+           and (ch.get("payload") or {}).get("parentDomainId")]
+    if not ids:
+        return inverse
+    current = {d["id"]: d for d in await repository.published("canonical_columns", {"_id": {"$in": ids}})}
+    domain_ids = sorted({d.get("parentDomainId") for d in current.values() if d.get("parentDomainId")})
+    types = await dom_repo.types_by_ids(domain_ids) if domain_ids else {}
+    wanted = set(ids)
+    return [{**ch, "payload": align_restored_column(ch["payload"], current.get(ch["entityId"]), types)}
+            if ch["entityId"] in wanted and ch["collection"] == "canonical_columns" else ch
+            for ch in inverse]
+
+
 async def rollback(cs_id: str, actor: str) -> dict | str | None:
     """Crea un DRAFT que RESTAURA el modelo al estado de la versión `cs_id`
     (cualquier versión publicada, no sólo la última): deshace TODAS las versiones
@@ -1669,6 +1689,7 @@ async def rollback(cs_id: str, actor: str) -> dict | str | None:
     if missing:
         return "no-before"
     inverse = list(inverse_by_key.values())
+    inverse = await _align_domain_types(inverse)
     if not inverse:
         return "empty"
     label = cs.get("versionLabel") or cs.get("title") or cs_id[:8]

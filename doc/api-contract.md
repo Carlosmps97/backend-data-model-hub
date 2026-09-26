@@ -1046,7 +1046,7 @@ Respuesta 200:
 
 ### 7.7 POST /api/projects/{project_id}/glossary/validate
 
-Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados **de su scope** (doc 94 D9: un término de columna solo mira columnas; uno de tabla, solo tablas — los físicos de tabla solo usan términos de tabla; muestra con cap de 50 filas + total). El 409 del write dice, en inglés: `The term 'X' can't be added: it already exists in the glossary or appears as a full phrase in logical column names (N conflicts). Adding it would rename those columns.` No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
+Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados **de su scope** (doc 94 D9: un término de columna solo mira columnas; uno de tabla, solo tablas — los físicos de tabla solo usan términos de tabla; doc 95 D1: el endpoint devuelve la lista **completa** de coincidencias, para que el popup muestre todas las columnas en conflicto; el enforcement de los writes solo necesita el total). El 409 del write dice, en inglés: `The term 'X' can't be added: it already exists in the glossary or appears as a full phrase in logical column names (N conflicts). Adding it would rename those columns.` No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
 
 Body (`ValidateTermBody`):
 
@@ -1082,7 +1082,12 @@ Respuesta 200 (`total` = conflictos de corpus + 1 si hay duplicado en el glosari
 
 ### 7.7b POST /api/projects/{project_id}/glossary/impact
 
-Propósito (doc 94 D7): **dry-run** del re-derivado que haría aplicar el borrador del glosario de un scope — cuántos nombres físicos cambiarían, en cuántas tablas y una muestra. Corre el mismo cálculo que el apply (`compute_rephysicalize`) sobre AMBOS scopes, como el apply: el editado con los términos y el naming simulados, el otro con lo vigente (un desfase previo también se repararía). Los físicos con override manual no cuentan. No muta. Exige SESIÓN (como `/validate`), no `standards.edit`. El front lo usa para avisar SOLO cuando algo cambia.
+Propósito (docs 94 D7 · 95 D3/D4): **dry-run** del re-derivado que haría aplicar el borrador del glosario de un scope. Corre el mismo cálculo que el apply sobre AMBOS scopes, como el apply: el editado con los términos y el naming simulados, el otro con lo vigente. Devuelve las listas **completas**, separadas en:
+
+- `renamed`: los nombres que cambian **por el borrador** (el derivado con el borrador difiere del derivado con lo vigente);
+- `outOfSync`: los nombres que **ya estaban desfasados** de la regla vigente y el apply repara de paso (p. ej. un U+00A0 venido del XML de Erwin). En el otro scope todo cae acá.
+
+`renamed` ∪ `outOfSync` es exactamente lo que el apply re-deriva. Los físicos con override manual no cuentan. No muta. Exige SESIÓN (como `/validate`), no `standards.edit`. El front muestra el popup SOLO si alguna lista trae filas.
 
 Body (`ImpactBody`):
 
@@ -1093,19 +1098,17 @@ Body (`ImpactBody`):
 | `termsDelete` | string[] (ids) | no | `[]` |
 | `namingConfig` | `{ separator?, case? }` \| null | no | null (= el guardado del scope) |
 
-Respuesta 200:
+Respuesta 200 (fila = `{entity: "column"|"table", tableId, table, from, to}`; orden: columnas antes que tablas, luego tabla y nombre; para `entity: "table"`, `table` = `from` = el físico actual de la tabla):
 
 ```json
 {
   "success": true,
   "data": {
-    "columns": 2, "columnTables": 1, "tables": 0,
-    "sample": [ { "entity": "column", "table": "MAESTROCLIENTES", "from": "CODCLI", "to": "CODCLTE" } ]
+    "renamed": [ { "entity": "column", "tableId": "tb1", "table": "MAESTROCLIENTES", "from": "CODCLI", "to": "CODCLTE" } ],
+    "outOfSync": [ { "entity": "table", "tableId": "tb9", "table": "HM_JERARQUIAFUNCIONALCRE\u00a0", "from": "HM_JERARQUIAFUNCIONALCRE\u00a0", "to": "HM_JERARQUIAFUNCIONALCRE" } ]
   }
 }
 ```
-
-`sample` tiene cap 20; para `entity: "table"`, `table` = `from` = el físico actual de la tabla.
 
 ### 7.8 POST /api/projects/{project_id}/glossary/{entry_id}/lock
 
@@ -1251,6 +1254,38 @@ Respuesta 200:
       { "id": "c-01", "physicalName": "CLIENTE_ID", "tableId": "t-001", "overridden": false },
       { "id": "c-77", "physicalName": "PEDIDO_ID", "tableId": "t-050", "overridden": true }
     ]
+  }
+}
+```
+
+### 8.5b GET /api/projects/{project_id}/domains/{domain_id}/impact/columns
+
+Propósito (doc 95 D7): vista previa **exacta por columna** de re-tipar el dominio, con la MISMA regla que aplica la cascada (`app/features/domains/cascade.py`): una columna se re-tipa si es activa, apunta al dominio, no tiene override de esa faceta y conserva el tipo actual del dominio. Sin `physicalTo`/`logicalTo` mide quién sigue hoy al dominio (panel del editor). No muta. Lectura (sesión).
+
+Query:
+
+| Parámetro | Tipo | Default | Notas |
+|---|---|---|---|
+| `physicalTo` | string | — | tipo físico nuevo (se homologa como el apply) |
+| `logicalTo` | string | — | tipo lógico nuevo; vacío = no cascadea |
+| `q` | string | — | busca en tabla o columna (físico o lógico), sin mayúsculas |
+| `status` | `change` \| `override` \| `differs` | — | filtra filas; sin valor = todas |
+| `offset` | int ≥ 0 | 0 | |
+| `limit` | int 0–2000 | 500 | `0` = solo totales (no resuelve nombres) |
+
+Respuesta 200 (totales globales, no dependen de `q`/`status`; `tables` = todas las tablas del dominio, `changeTables` = las que cambian; `models` = modelos (canvases) de las tablas que cambian y, sin tipos nuevos —el panel—, de todas las tablas del dominio, como el panel de antes):
+
+```json
+{
+  "success": true,
+  "data": {
+    "domain": { "physical": "INTEGER", "logical": "NUMBER" },
+    "targets": { "physical": "UUID" },
+    "totals": { "columns": 180, "tables": 120, "change": 177, "changeTables": 118, "override": 2, "differs": 1, "models": 37 },
+    "matched": 177,
+    "rows": [ { "columnId": "c1", "tableId": "t1", "schema": "core", "table": "CLIENTE", "tableLogical": "cliente",
+                "column": "CODCLI", "attribute": "codigo cliente", "physicalType": "INTEGER", "logicalType": "NUMBER",
+                "physical": "change", "logical": null, "status": "change" } ]
   }
 }
 ```
@@ -1465,6 +1500,8 @@ Respuesta 200 (la versión creada):
 
 Propósito: restaurar el estado de estándares al snapshot de una versión objetivo (dominios, términos, naming, UDP y también reglas/config DDL), re-derivar solo lo necesario, y registrar una versión NUEVA (`kind = rollback`). Requiere el permiso `rollback` (dejó de ser `standards.edit` en el doc 27, cuando el rollback pasó a ser un permiso propio de la matriz). 404 si la versión objetivo no existe.
 
+Doc 95 D9: solo re-tipa los dominios cuyo tipo cambia, desde el tipo actual (borrados incluidos) y con la regla de la cascada de ida (`app/features/domains/cascade.py`: columna activa, mismo `parentDomainId`, sin override en esa faceta y con el tipo actual del dominio); no reescribe filas sin cambio. Las columnas «divorciadas» (override o tipo ya distinto) no se tocan. `impact.columns` = columnas re-tipadas (máximo entre facetas por dominio). Lo que hará se ve antes con §10.4b.
+
 Body (`RollbackBody`):
 
 | Campo | Tipo | Requerido | Notas |
@@ -1499,6 +1536,42 @@ Respuesta 200 (nueva versión de rollback):
 ```
 
 Error 404: `{ "detail": "That standards version doesn't exist." }`.
+
+### 10.4b GET /api/projects/{project_id}/standards/rollback-preview?targetSeq=N
+
+Propósito (doc 95 D9): lo que haría el rollback a `targetSeq` ANTES de confirmarlo — los dominios cuyo tipo cambia (físico y/o lógico, desde el tipo que tienen HOY) con cuántas columnas se re-tipan, con la misma regla que §10.4, y si se re-derivan nombres (glosario o naming distintos). No muta. Abierto (como `snapshot`/`versions`). `targetSeq` ≥ 1; 404 si la versión no existe.
+
+```bash
+curl -s "https://api.ejemplo.com/api/projects/p-001/standards/rollback-preview?targetSeq=12"
+```
+
+Respuesta 200:
+
+```json
+{
+  "success": true,
+  "data": {
+    "target": { "seq": 12, "label": "v12" },
+    "domains": [
+      { "id": "d-7", "name": "Importe", "physical": { "from": "DECIMAL(18,2)", "to": "DECIMAL(18,4)" },
+        "logical": null, "columns": 214 }
+    ],
+    "namesRederived": false
+  }
+}
+```
+
+`physical`/`logical` = `null` si esa faceta no cambia. Un dominio del snapshot que hoy no existe ni borrado no aparece (no hay columnas que lo sigan).
+
+### 10.4c GET /api/projects/{project_id}/standards/domains/{domain_id}/history
+
+Propósito (doc 95 D8): el historial de UN parent domain — las versiones de Data Standards donde su estado cambia, más reciente primero. Abierto. Lista vacía si el dominio nunca aparece en un snapshot.
+
+Cada entrada: `{seq, label, title, author, createdAt, kind, state, changed}`. `state` = los campos del dominio en esa versión (`name`, `defaultDataType`, `logicalDataType`, `namingTerm`, `description`, `inheritsName`, `physicalName`, `physicalDescription`, `udpValues`) o `null` si en esa versión no existía o estaba borrado; `changed` = los campos que cambiaron respecto de la entrada anterior (vacío en la creación, el borrado o la restauración). El front ofrece «Revert to vN»: carga `state` en el editor y se aplica con el popup de cascada (misma regla, versión nueva, auditada).
+
+```bash
+curl -s https://api.ejemplo.com/api/projects/p-001/standards/domains/d-7/history
+```
 
 ### 10.5 GET /api/projects/{project_id}/standards/summary
 
@@ -1830,6 +1903,7 @@ Forma de cada pieza:
 | PUT | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Actualizar dominio (cascada) |
 | DELETE | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Eliminar dominio |
 | GET | `/api/projects/{pid}/domains/{domain_id}/impact` | sesión | Impacto de propagar |
+| GET | `/api/projects/{pid}/domains/{domain_id}/impact/columns` | sesión | Lista exacta de columnas que re-tipa la cascada, paginada (doc 95, §8.5b) |
 | POST | `/api/projects/{pid}/domains/{domain_id}/propagate` | `standards.edit` | Propagar tipo |
 | GET | `/api/projects/{pid}/udp` | abierto | Listar definiciones UDP del proyecto |
 | GET | `/api/projects/{pid}/standards/snapshot` | abierto | Estado actual de estándares del proyecto (+ `ddlRules`/`ddlConfig`) |
@@ -1837,6 +1911,8 @@ Forma de cada pieza:
 | GET | `/api/projects/{pid}/standards/summary` | abierto | Conteos por bloque (New project · copyFrom) |
 | POST | `/api/projects/{pid}/standards/apply` | `standards.edit` | Aplicar batch + versionar (incluye reglas DDL) |
 | POST | `/api/projects/{pid}/standards/rollback` | `rollback` | Restaurar versión + versionar |
+| GET | `/api/projects/{pid}/standards/rollback-preview?targetSeq=N` | abierto | Qué re-tipa y qué re-deriva el rollback, sin mutar (doc 95, §10.4b) |
+| GET | `/api/projects/{pid}/standards/domains/{domain_id}/history` | abierto | Historial de UN parent domain (doc 95, §10.4c) |
 | GET | `/api/projects/{pid}/ddl-rules` | sesión | Reglas DDL activas del proyecto |
 | GET | `/api/projects/{pid}/ddl-rules/config` | sesión | Lookups + functions del ruleset |
 | GET | `/api/projects/{pid}/ddl-rules/artifacts` | sesión | Catálogo de artefactos |
@@ -2860,6 +2936,32 @@ curl -X POST http://localhost:8000/api/projects/<pid>/upload-profiles/suggest \
   -H "Content-Type: application/json" -d '{"sheet":"tables","headers":["TABLA_LOGICO","UDP_Universal","LOGICO"]}'
 ```
 
+### 8.20 Plantillas de hoja Excel (`/api/projects/{project_id}/sheet-templates`)
+
+Propósito (doc 95 D11): un formato Excel FIJO que se guarda como dato — nombre de hoja + columnas (encabezado → dato del modelo) —, por proyecto, colección `sheet_templates` (sin versionado; soft-delete; alcance por proyecto en toda lectura/escritura). El backend solo valida la FORMA y guarda; el front arma las filas con las mismas funciones puras del export tabular del Reporting (una fila por columna del alcance), así sumar un dato nuevo no toca el backend. Proyecto vivo (`alive_project`, 404).
+
+Permisos (spec D11: «dueño + compartida, como los saved reports»): cualquiera en sesión ve las suyas + las compartidas del proyecto y crea las suyas (el servidor fija `owner`); edita y borra el dueño; un admin (`admin.manage`) también las compartidas —así la «QA_MODELO» sembrada por el one-shot (dueño `system`) sigue siendo editable— y, al editar una compartida ajena, la plantilla sigue compartida. Una ajena que no se puede editar responde 404 (no existe o no es tuya), como los saved reports.
+
+Una plantilla = `{id, projectId, name, sheetName, description, columns: [{header, source}], shared, owner, origin ('user' | 'builtin:qa-modelo'), createdBy, updatedBy, createdAt, updatedAt}`. Reglas de forma (**422** si fallan): `name` 1–80 caracteres; `sheetName` 1–31 caracteres sin `: \ / ? * [ ]` (regla de Excel); 1–200 columnas; `header` no vacío (≤ 120) y único sin distinguir mayúsculas; `source` = `table.<campo>` · `column.<campo>` · `table.udp:<nombre>` · `column.udp:<nombre>` (el catálogo de campos vive en el front). Nombre único (CI) entre las que ve quien escribe —las suyas + las compartidas— (**409**).
+
+| Método y ruta | Cuerpo / respuesta |
+|---|---|
+| `GET …/sheet-templates` | Las suyas + las compartidas del proyecto, activas, por nombre |
+| `POST …/sheet-templates` | `SheetTemplateBody` `{name, sheetName, description?, columns, shared?}` → **201** doc (dueño = quien la crea); **422** forma; **409** nombre repetido |
+| `POST …/sheet-templates/default` | Siembra la built-in «QA_MODELO» (hoja «QA_MODELO», 14 columnas) COMPARTIDA → **201** doc; **409** si el proyecto ya la tiene (editada o no, la vea o no quien pide) |
+| `PUT …/sheet-templates/{template_id}` | Reemplaza nombre, hoja, descripción, columnas y `shared` (conserva `origin`/`owner`/`createdBy`) → doc; 404 (no existe o no es tuya) · 409 · 422 |
+| `DELETE …/sheet-templates/{template_id}` | Soft-delete → `{deleted: true}`; 404 (no existe o no es tuya) |
+
+La built-in «QA_MODELO» (`app/features/reporting/sheet_templates/builtin.py`) también la siembra el one-shot (`scripts/seed_sheet_templates.py`, paso de `run_migration.py`, dueño `system`) y queda compartida y editable por un admin: es dato, no código. Sus UDP van por nombre legible; `UDP_CLASIFICACION_DEL_DATO` lee la clasificación de la TABLA (la de la columna es `CLASIF_DATO`) — supuesto aprobado del doc 95 §7.
+
+```bash
+curl -X POST http://localhost:8000/api/projects/<pid>/sheet-templates/default      # 201 doc «QA_MODELO»
+curl http://localhost:8000/api/projects/<pid>/sheet-templates                       # lista
+curl -X POST http://localhost:8000/api/projects/<pid>/sheet-templates \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Solo PK","sheetName":"PK","columns":[{"header":"TABLA","source":"table.physicalName"},{"header":"CAMPO","source":"column.physicalName"}]}'
+```
+
 ## 9. Requests (Home / Review)
 
 Router hermano en el mismo archivo — `requests_router`, prefijo `/api/requests`.
@@ -3423,7 +3525,7 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 
 ## 14. Índice rápido de endpoints (Parte 2)
 
-Las 89 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el total del backend es 141 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28; las 9 de perfiles de carga, 8.19, el 2026-09-09).
+Las 102 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el total del backend es 163, contado sobre `app.routes` el 2026-09-25 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28; las de perfiles de carga, 8.19, el 2026-09-09; las 5 de plantillas de hoja, 8.20, y las 3 de la Parte 1 del doc 95 —impacto por columna, preview del rollback e historial de dominio—, el 2026-09-25).
 
 | Método | Ruta | Sección |
 |---|---|---|
@@ -3466,6 +3568,9 @@ Las 89 rutas de esta parte (las otras 52 están en el resumen de la Parte 1; el 
 | POST | `/api/projects/{project_id}/upload-profiles/validate` `/suggest` `/default` | 8.19 |
 | GET/PUT/DELETE | `/api/projects/{project_id}/upload-profiles/{id}` | 8.19 |
 | POST | `/api/projects/{project_id}/upload-profiles/{id}/default` | 8.19 |
+| GET/POST | `/api/projects/{project_id}/sheet-templates` | 8.20 |
+| POST | `/api/projects/{project_id}/sheet-templates/default` | 8.20 |
+| PUT/DELETE | `/api/projects/{project_id}/sheet-templates/{template_id}` | 8.20 |
 | GET | `/api/requests` | 9.1 |
 | GET | `/api/versions?projectId=` | 10.1 |
 | GET | `/api/projects/{project_id}/versions` · `/published` | 10.2 |
