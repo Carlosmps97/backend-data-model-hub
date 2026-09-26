@@ -75,8 +75,8 @@ async def rows_of_project(project_id: str) -> list[dict]:
     db = await get_db()
     pipeline = [
         {"$match": {"projectId": project_id, "flgactive": {"$ne": False}}},
-        # Doc 91 D7: en ambos modos las columnas de salida son `sources`
-        # (User-Defined SQL ⇒ todas las columnas de las fuentes, persistidas).
+        # Doc 96 D6: las columnas de salida son siempre `sources` (la
+        # User-Defined SQL es solo informativa).
         {"$project": {"name": 1, "schema": 1, "sourceTableIds": 1, "tableId": 1, "customSql": 1,
                       "nSources": {"$size": {"$ifNull": ["$sources", []]}}}},
     ]

@@ -297,6 +297,15 @@ muestra el plan sin abrir conexión a la BD.
   desde Erwin; los LAYOUTS de canvas trabajados en la plataforma se PRESERVAN.
   El `views.sql` (CREATE VIEW original) es referencia congelada: el Export DDL
   de la plataforma siempre genera desde la estructura (`sources`).
+- **Tipos complejos iguales en las dos facetas (doc 96 D8):** Erwin guarda el
+  `Logical_Data_Type` de una columna ARRAY/STRUCT/MAP sin estructura (`Array`
+  a secas, que se homologa a `ARRAY<>`) o con su `CHAR(18)` por defecto; la
+  estructura solo viene en el `Physical_Data_Type`. Si el físico es un complejo
+  con estructura y el lógico no lo es, el kit guarda en el lógico el MISMO texto
+  del físico (`app/core/datatypes.mirror_complex`, que también usan la carga
+  Excel y, en espejo, el front al crear y editar). Un lógico que ya es un
+  complejo completo se respeta. Evidencia 2026-09-25: MODELO DDV 43 `ARRAY<>`
+  + 2 `CHAR(18)`; UDV 4 `CHAR(18)` + 6 `VARCHAR(256)`.
 - **UN solo orden (doc 74 · doc 94):** `ordinal`, el mismo en el modelo
   lógico y el físico: las llaves primarias primero, en el orden de la llave de
   Erwin (miembros del Key_Group PK), y después el resto en el Column order

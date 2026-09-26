@@ -30,3 +30,38 @@ def test_fold_type_whitespace():
     assert fold_type_whitespace("Array \n<\n\tstruct < a : int >\n>") == "Array<struct<a:int>>"
     assert fold_type_whitespace("  DECIMAL ( 10 , 2 ) ") == "DECIMAL(10,2)"
     assert fold_type_whitespace(None) == ""
+
+
+# ── Doc 96 D8: un tipo complejo es el mismo en las dos facetas ──
+
+from app.core.datatypes import has_complex_content, mirror_complex  # noqa: E402
+
+
+def test_complejo_con_contenido_vs_generico_doc96():
+    assert has_complex_content("ARRAY<STRING>") and has_complex_content("Array\n< struct <\n\ta:int>>")
+    assert has_complex_content("Struct<@param1:String>")
+    assert not has_complex_content("ARRAY<>") and not has_complex_content("Array")
+    assert not has_complex_content("CHAR(18)") and not has_complex_content(None)
+
+
+def test_mirror_complex_el_complejo_manda_doc96():
+    full = "ARRAY<STRUCT<a:VARCHAR(30)>>"
+    assert mirror_complex(full, "ARRAY<>") == full          # Erwin: lógico `Array` sin estructura
+    assert mirror_complex(full, "CHAR(18)") == full         # default de Erwin
+    assert mirror_complex(full, "VARCHAR(256)") == full     # decisión del owner: complejo = igual en ambas
+    assert mirror_complex(full, None) == full
+    assert mirror_complex(full, "ARRAY<STRING>") == "ARRAY<STRING>"   # el otro ya es un complejo completo
+    assert mirror_complex("VARCHAR(20)", "CHAR(18)") == "CHAR(18)"    # simples: independientes
+
+
+from app.core.datatypes import synced_other_facet  # noqa: E402
+
+
+def test_synced_other_facet_espejo_del_front_final_review():
+    full = "ARRAY<STRUCT<a:STRING>>"
+    assert synced_other_facet("ARRAY<STRING>", full, full) == "ARRAY<STRING>"   # complejo nuevo: la otra igual
+    assert synced_other_facet("STRING", full, full) == "STRING"                 # salen juntas del complejo
+    assert synced_other_facet("STRING", "S", "S") == "STRING"                   # estado intermedio: siguen enlazadas
+    assert synced_other_facet("BIGINT", "INT", "INT") == "INT"                  # simples (con alias): independientes
+    assert synced_other_facet("STRING", full, "CHAR(18)") == "CHAR(18)"         # no estaban enlazadas
+    assert synced_other_facet("STRING", "", "") == ""                           # vacías: no se arrastra

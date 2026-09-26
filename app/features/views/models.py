@@ -26,9 +26,9 @@ def normalize_source_tables(data: dict) -> dict:
 
 
 def normalize_custom_sql(data: dict) -> dict:
-    """Doc 91 D6: el User-Defined SQL se guarda VERBATIM (sin parse ni
-    validación); única normalización = `strip()`, y vacío ⇒ None (modo
-    Regular). Pura."""
+    """Doc 91 D6 → doc 96 D6: el User-Defined SQL (texto informativo) se guarda
+    VERBATIM, sin parse ni validación; única normalización = `strip()`, y
+    vacío ⇒ None (sin texto). Pura."""
     sql = (data.get("customSql") or "").strip()
     return {**data, "customSql": sql or None}
 
@@ -42,7 +42,7 @@ class ViewDoc(BaseModel):
     name: str
     # Referencia CONGELADA (no autoritativa): el preview del editor al guardar
     # o el `ViewProps.SQL` original de Erwin (doc 19 §12). El DDL se genera
-    # desde `sources` (Regular) o es `customSql` (User-Defined SQL).
+    # SIEMPRE desde `sources` (doc 96 D6).
     sql: str = ""
     description: str | None = None
     # Aditivos del editor de vista (07b-2). Todos opcionales con default
@@ -62,8 +62,8 @@ class ViewDoc(BaseModel):
     # `description` = definición funcional propia de la columna en la vista (F5,
     # override del origen físico). `sources` es list[dict] → las claves nuevas
     # PERSISTEN sin tocar el modelo (no hay sub-schema estricto).
-    # Doc 91 D7: en modo User-Defined SQL `sources` lista TODAS las columnas
-    # de TODAS las fuentes (lo que pinta el canvas); el DDL no las usa.
+    # Doc 96 D6: las columnas de salida son siempre `sources` (la proyección
+    # del editor): de acá sale el DDL y lo que pinta el canvas.
     sources: list[dict] = []
     outputAlias: str | None = None
     expression: str | None = None
@@ -74,12 +74,10 @@ class ViewDoc(BaseModel):
     # D3: flag GLOBAL por vista — aparece en todo canvas con ≥1 fuente.
     # NO afecta el export DDL.
     showOnCanvas: bool = False
-    # ── Doc 61 → doc 91: «User-Defined SQL» (modo Personalizada) ──
-    # NO vacío = la vista es Personalizada: el export emite este texto TAL
-    # CUAL (sentencia `CREATE VIEW …` completa, como el `User_Defined_SQL` de
-    # Erwin; un cuerpo suelto legacy se envuelve en el front). Sin parse ni
-    # validación (doc 91 D6): se guarda lo que el modelador escribió. None =
-    # Regular (DDL generado de `sources`). No confundir con `sql`.
+    # ── Doc 61 → 91 → doc 96 D6: «User-Defined SQL», texto INFORMATIVO ──
+    # Se guarda tal cual, sin parse ni validación (p. ej. el `User_Defined_SQL`
+    # de Erwin o el JOIN/WHERE que el modelador anota) y NO se exporta: el DDL
+    # se genera de `sources`. None = sin texto. No confundir con `sql`.
     customSql: str | None = None
     # Valores UDP de la vista ({defId: value}) — mismo contrato que tablas/
     # columnas/canvas (doc 06); aplican las keys con level='view'.

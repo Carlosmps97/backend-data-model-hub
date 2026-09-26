@@ -407,8 +407,8 @@ def view_row(v: dict) -> dict:
     if "columnCount" in v:
         return v
     from app.features.views.membership import view_sources
-    # Doc 91 D7: en ambos modos las columnas de salida son `sources` (en
-    # User-Defined SQL = todas las columnas de las fuentes).
+    # Doc 96 D6: las columnas de salida son siempre `sources` (la User-Defined
+    # SQL es solo informativa).
     custom = bool((v.get("customSql") or "").strip())
     cols = v.get("sources")
     return {

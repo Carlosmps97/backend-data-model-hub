@@ -284,3 +284,29 @@ def test_builtins_con_nombre_se_siembran_y_los_placeholders_no():
     assert cols["EDAD"]["parentDomainId"] == num["_id"] and cols["EDAD"]["typeOverridden"] is False
     assert cols["MONTO"]["parentDomainId"] == num["_id"] and cols["MONTO"]["typeOverridden"] is True
     assert cols["NOTA"]["parentDomainId"] is None
+
+
+# ── Doc 96 D8: un tipo complejo es el mismo en las dos facetas ──
+
+def _modelo_complejos():
+    m = ep.ErwinModel(name="Modelo Complejos")
+    arr = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30)\n\t>\n>"
+    e = ep.ErwinEntity(id="E9", name="solicitud", physical="SOLICITUD", physical_was_macro=False, definition="",
+                       comment="", attributes=[
+                           _attr("B1", "E9", "coleccion", "COLSOL", 1, ptype=arr, ltype="Array"),
+                           _attr("B2", "E9", "flujo", "COLFLUJO", 2, ptype=arr, ltype="CHAR(18)"),
+                           _attr("B3", "E9", "codigo", "COD", 3, ptype="VARCHAR(30)", ltype="CHAR(18)"),
+                       ], pk_attr_ids=set(), pk_attr_order=[], physical_only=False)
+    m.entities = {"E9": e}
+    m.hive_dbs = {"S1": ["E9"]}
+    return m
+
+
+def test_complejo_es_el_mismo_en_ambas_facetas_doc96():
+    db = FakeDb()
+    Migrator(db, _modelo_complejos(), "Proyecto C", None).run()
+    cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
+    full = "ARRAY<STRUCT<codcampania:VARCHAR(30)>>"
+    assert cols["COLSOL"]["dataType"] == cols["COLSOL"]["logicalDataType"] == full      # `Array` → el físico
+    assert cols["COLFLUJO"]["dataType"] == cols["COLFLUJO"]["logicalDataType"] == full  # CHAR(18) de Erwin → el físico
+    assert cols["COD"]["logicalDataType"] == "CHAR(18)"                                   # simple: sin cambio

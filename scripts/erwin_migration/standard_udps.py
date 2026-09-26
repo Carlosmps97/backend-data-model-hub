@@ -101,7 +101,7 @@ FIXED_UDPS: list[dict] = [
     # ── View (doc 61: Tipo de Vista; doc 69: + Filtro Despliegue 2021) ─────
     {"name": "Tipo de Vista", "level": "view", "view": "physical", "dataType": "list",
      "defaultValue": "Regular", "allowedValues": ["Regular", "Personalizada"],
-     "description": "Regular = generada desde sources; Personalizada = User-Defined SQL (verbatim)."},
+     "description": "Regular = sin User-Defined SQL; Personalizada = con User-Defined SQL (texto informativo: el DDL se genera siempre de las columnas)."},
     {"name": "Filtro Despliegue 2021", "level": "view", "view": "physical", "dataType": "list",
      "defaultValue": "NO", "allowedValues": ["NO", "SI"]},
     # ── Model (canvas) ─────────────────────────────────────────────────────

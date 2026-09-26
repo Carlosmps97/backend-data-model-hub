@@ -251,3 +251,29 @@ def test_update_conserva_physical_description_y_create_la_deja_vacia_doc85():
     payloads = {ch["payload"]["logicalName"]: ch["payload"] for ch in _cols(plan)}
     assert payloads["Codigo"]["physicalDescription"] == "Comentario fisico"
     assert payloads["Nombre"]["physicalDescription"] is None
+
+
+def test_complejo_con_contenido_es_el_mismo_en_ambas_facetas_doc96():
+    doms = [*_DOMAINS, {"id": "d4", "name": "ColArray", "defaultDataType": "ARRAY<>", "logicalDataType": "ARRAY<>"}]
+    p = parsed(tables=[trow(3, "Cliente", schema="ddv")],
+               columns=[crow(3, "Cliente", "Coleccion", domain="ColArray", data_type="array<struct<a:string>>"),
+                        crow(4, "Cliente", "Codigo", domain="Codigo")])
+    plan = build_plan(p, ctx(schemas=_SCHEMAS, domains=doms))
+    assert plan.has_errors is False
+    col, simple = (c["payload"] for c in _cols(plan))
+    assert col["dataType"] == col["logicalDataType"] == "ARRAY<STRUCT<a:STRING>>"
+    assert col["logicalTypeOverridden"] is True          # ≠ el `ARRAY<>` genérico del dominio
+    assert simple["logicalDataType"] is None             # simple: hereda el lógico del dominio (ninguno)
+
+
+def test_actualizar_una_columna_compleja_arrastra_el_logico_final_review():
+    """Final review #2 (doc 96 D8): si la columna tenía el MISMO complejo en las dos
+    facetas, el tipo nuevo de la plantilla (físico) también es el lógico."""
+    full = "ARRAY<STRUCT<a:STRING>>"
+    for excel, esperado in [("array<struct<a:string,b:string>>", "ARRAY<STRUCT<a:STRING,b:STRING>>"),
+                            ("array<string>", "ARRAY<STRING>"), ("string", "STRING")]:
+        existing = _col("c1", "COLECCION", "Coleccion", 0, dataType=full, logicalDataType=full)
+        c = ctx(schemas=_SCHEMAS, domains=_DOMAINS, tables=[_table()], columns_by_table={"t1": [existing]})
+        plan = build_plan(parsed(columns=[crow(3, "Cliente", "Coleccion", physical="COLECCION", data_type=excel)]), c)
+        (col,) = _cols(plan)
+        assert (excel, col["payload"]["dataType"], col["payload"]["logicalDataType"]) == (excel, esperado, esperado)

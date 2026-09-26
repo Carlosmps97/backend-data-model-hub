@@ -214,7 +214,7 @@ Un doc por relación Erwin con **todos** sus pares de columnas (FK compuesta = v
 | expression | str? | null | |
 | sourceTableIds | list[str] | [] | refs `canonical_tables.id`; el **orden** define los alias `t1, t2…` |
 | showOnCanvas | bool | false | flag GLOBAL: la vista aparece en todo canvas con ≥1 fuente presente |
-| customSql | str? | null | doc 61 → doc 91: **User-Defined SQL** (modo Personalizada) — NO vacío ⇒ el Export DDL emite este texto **verbatim** (sentencia `CREATE VIEW …` completa, como el `User_Defined_SQL` de Erwin; un cuerpo suelto legacy se envuelve en el front). **Sin validación** (se guarda lo que el modelador escribió; el motor de reglas deja intacto lo que no parsea). null ⇒ **Regular** (DDL desde `sources`). En modo User-Defined `sources` = todas las columnas de las fuentes |
+| customSql | str? | null | doc 61 → 91 → **doc 96 D6**: **User-Defined SQL** como texto **informativo** — se guarda tal cual, **sin validación** (p. ej. el `User_Defined_SQL` de Erwin o el JOIN/WHERE que el modelador anota) y **no se exporta**: el DDL de la vista sale siempre de `sources` (con 2+ fuentes `FROM t1, t2` sin JOIN). null ⇒ sin texto |
 | udpValues | dict | {} | doc 61: `{udpDefId: value}` — keys de `udp_definitions` con `level='view'` (mismo contrato que tablas/columnas/canvas) |
 
 > Doc 91 (2026-09-17): `tags`, `filter`, `joinOverride` y `customColumns` se retiraron (`extra="ignore"` descarta los valores legacy al leer; desaparecen al próximo write). Con 2+ fuentes el DDL lista `FROM t1, t2` sin JOIN (como Erwin).

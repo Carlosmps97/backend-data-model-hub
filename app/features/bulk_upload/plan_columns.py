@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from app.core.datatypes import mirror_complex, synced_other_facet
 from app.features.catalog.models import CanonicalColumnDoc
 
 from .normalize import clean_logical, clean_text, is_pk_mark, norm_ci, norm_key, norm_name, norm_type, partition_correlative
@@ -245,6 +246,15 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     else:
         logical_type = std.domain_logical(domain_id)
         logical_overridden = False
+    # Doc 96 D8: un complejo con estructura es el mismo en las dos facetas; el tipo
+    # de la plantilla (físico) manda. En una actualización, si las dos facetas eran
+    # el mismo complejo, el lógico sigue al físico nuevo (final review #2).
+    prev_phys = str(existing.get("dataType") or "") if existing is not None else ""
+    aligned = mirror_complex(data_type, synced_other_facet(data_type, prev_phys, logical_type))
+    if aligned != logical_type:
+        dom_logical = std.domain_logical(domain_id)
+        logical_type = aligned
+        logical_overridden = bool(domain_id and dom_logical and logical_type != dom_logical)
 
     description = clean_text(r.description) or None
     if existing is not None and description is None:

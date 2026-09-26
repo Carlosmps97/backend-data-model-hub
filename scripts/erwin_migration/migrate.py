@@ -76,7 +76,7 @@ from pymongo import UpdateOne
 # Motor de naming REAL del backend (app.core.naming es PURO, sin config/BD):
 # el estampado del override (doc 68) debe derivar EXACTAMENTE igual que el
 # rephysicalize retroactivo — un espejo local driftearía.
-from app.core.datatypes import canonicalize_default_type
+from app.core.datatypes import canonicalize_default_type, mirror_complex
 from app.core.facets import normalize_udp_view
 from app.core.naming import physicalize
 from app.core.scope import PROJECT_SCOPED, naming_id
@@ -755,7 +755,10 @@ class Migrator:
                 dom_phys = canonicalize_default_type(dom.physical_type or dom.data_type) if dom else ""
                 dom_log = canonicalize_default_type(dom.data_type) if dom else ""
                 col_phys = canonicalize_default_type(a.data_type)
-                col_log = canonicalize_default_type(a.logical_type) or None
+                # Doc 96 D8: un complejo es el mismo en las dos facetas — Erwin deja el
+                # lógico en `Array` (sin estructura) o en su `CHAR(18)` por defecto.
+                stored_phys = _col_type(a.data_type)
+                col_log = mirror_complex(stored_phys, canonicalize_default_type(a.logical_type) or None)
                 overridden = bool(dom_pid and dom and dom_phys and col_phys != dom_phys)
                 log_overridden = bool(dom_pid and dom and dom_log and col_log and col_log != dom_log)
                 if col_log and col_log != col_phys:
@@ -767,7 +770,7 @@ class Migrator:
                     "tableId": pid, "physicalName": a.physical,
                     "physicalNameOverridden": c_override,
                     "logicalName": a.name, "parentDomainId": dom_pid,
-                    "dataType": _col_type(a.data_type),
+                    "dataType": stored_phys,
                     "typeOverridden": overridden,
                     "logicalDataType": col_log,
                     "logicalTypeOverridden": log_overridden,
@@ -989,10 +992,10 @@ class Migrator:
                     src["description"] = vdef
                     self.stats["columnas de vista con definición propia"] += 1
                 sources.append(src)
-            # Doc 91 D8: `User_Defined_SQL` de Erwin → `customSql` VERBATIM (la
-            # vista es Personalizada: el export la emite tal cual) y el UDP fijo
-            # «Tipo de Vista» = Personalizada (mismo contrato que el front). Las
-            # columnas siguen siendo las que Erwin declara en la vista (S5).
+            # Doc 91 D8 → doc 96 D6: `User_Defined_SQL` de Erwin → `customSql`
+            # VERBATIM como texto informativo (el DDL de la plataforma sale de las
+            # columnas) y el UDP fijo «Tipo de Vista» = Personalizada (dato de
+            # Erwin). Las columnas son las que Erwin declara en la vista (S5).
             udp_values = self._udp_values_for(v.id, "view")
             custom_sql = (v.user_defined_sql or "").strip() or None
             if custom_sql:

@@ -60,6 +60,11 @@ _COMPLEX_RE = re.compile(r"^(STRUCT|ARRAY|MAP)\s*<(.*)>$", re.IGNORECASE | re.DO
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Complejo "recién iniciado": la base sola o con <> vacío (`Array`, `MAP <>`).
 _BARE_COMPLEX_RE = re.compile(r"^(STRUCT|ARRAY|MAP)\s*(?:<\s*>)?$", re.IGNORECASE)
+# Doc 96 D8: complejo CON estructura (`ARRAY<STRING>`, `STRUCT<a:INT>`…), no el
+# genérico vacío (`ARRAY<>` / `Array`, como un VARCHAR sin tamaño).
+_COMPLEX_CONTENT_RE = re.compile(r"^\s*(STRUCT|ARRAY|MAP)\s*<\s*[^\s>]", re.IGNORECASE)
+# Arranca como complejo (`ARRAY<`…) — espejo de `isComplexTypeStart` del front.
+_COMPLEX_START_RE = re.compile(r"^\s*(STRUCT|ARRAY|MAP)\s*<", re.IGNORECASE)
 
 
 def clean_text(value) -> str:
@@ -208,3 +213,42 @@ def canonicalize_default_type(text) -> str:
     # Doc 92 D6: un complejo que no parsea (p.ej. campos `@param1`) sale
     # verbatim pero en UNA línea compacta — jamás partido por saltos de línea.
     return fold_type_whitespace(t) if "<" in t else t
+
+
+def has_complex_content(value) -> bool:
+    """¿STRUCT/ARRAY/MAP con estructura adentro? `ARRAY<>` y `Array` no. Puro."""
+    return bool(_COMPLEX_CONTENT_RE.match(value or ""))
+
+
+def mirror_complex(source, target):
+    """Doc 96 D8: un tipo complejo es el MISMO en las dos facetas (su estructura
+    es propia de cada columna). Si `source` es un complejo con estructura y
+    `target` no lo es (vacío, `ARRAY<>`, el `CHAR(18)` por defecto de Erwin u
+    otro simple), `target` toma `source`; si no, queda como está. Direccional:
+    la faceta que manda es `source`. Puro (espejo de `mirrorComplex` del front)."""
+    if has_complex_content(source) and not has_complex_content(target):
+        return source
+    return target
+
+
+def is_complete_simple_type(value) -> bool:
+    """¿Un tipo SIMPLE completo (`STRING`, `VARCHAR(20)`, alias como `INT`)? Los
+    complejos, el genérico `Array` y los textos a medio tipear (`S`) no. Puro."""
+    t = clean_text(value)
+    if not t or "<" in t or _BARE_COMPLEX_RE.match(t):
+        return False
+    return canonical_type(t, aliases=True) is not None
+
+
+def synced_other_facet(next_type, prev_this, prev_other):
+    """Doc 96 D8 (espejo de `syncedOtherFacet` del front): al poner `next_type` en
+    una faceta, qué toma la otra — `next_type` si es complejo, o si las dos eran
+    el MISMO tipo y ese tipo no era un simple completo (un complejo o un estado
+    intermedio: siguen enlazadas hasta salir juntas); si no, queda como estaba.
+    Los simples siguen independientes (doc 69). Puro."""
+    if _COMPLEX_START_RE.match(next_type or ""):
+        return next_type
+    this = clean_text(prev_this)
+    if this and clean_text(prev_other) == this and not is_complete_simple_type(this):
+        return next_type
+    return prev_other
