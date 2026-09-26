@@ -11,6 +11,11 @@
 # `databricks bundle deploy --target <target>`.
 bundle:
   name: bknd-data-model-hub
+  # Motor "direct": el CLI aplica el bundle llamando a la API de Databricks,
+  # sin Terraform. Es el motor por defecto del CLI (los deploys hechos con
+  # Terraform se migraron solos desde la 1.14.0); queda explícito para que
+  # ningún workspace vuelva al motor Terraform, ya deprecado.
+  engine: direct
 
 variables:
   secret_scope:

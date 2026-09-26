@@ -74,7 +74,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 |---|---|
 | `e2e/` | Suite E2E contra el backend **en vivo** (`E2E_BASE`, default `localhost:8000`): login real por rol → flujos completos vía HTTP. Auto-limpia lo que crea (los escenarios de rollback dejan registros de versión — limpiar con §4) |
 | `reapply_changeset` | Recuperación: re-aplica un publish interrumpido (changeset `approved` sin `appliedAt`). Idempotente |
-| `ci/tf-provider-mirror.sh` | Solo CI (GitHub Actions): mirror del provider terraform para el deploy del bundle |
+| `databricks/apps_prender_apagar_notebook.py` | Notebook para un Job de Databricks: prende/apaga las apps según el horario, espera el resultado y muestra el motivo si Databricks rechaza la operación (despliegue.md §2.7) |
 
 ```bash
 # E2E (backend corriendo)

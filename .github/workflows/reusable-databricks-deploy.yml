@@ -18,7 +18,9 @@
 #   · Variable DATABRICKS_HOST  — URL del workspace (ej. https://adb-123.4.azuredatabricks.net).
 #   · Variable BUNDLE_TARGET    — target del bundle (ej. prod).
 #   · Una GitHub Variable por cada variable del bundle y por cada env de app.yaml.
-#   · scripts/ci/tf-provider-mirror.sh — workaround del provider Terraform (ver script).
+#
+# El bundle se aplica con el motor "direct" del CLI (llama directo a la API de
+# Databricks, sin Terraform): no hace falta instalar Terraform ni OpenTofu.
 
 name: Deploy Databricks App (reusable)
 
@@ -50,7 +52,9 @@ permissions:
 jobs:
   deploy:
     name: Despliegue (${{ inputs.environment }})
-    runs-on: ubuntu-latest
+    # Imagen fija del runner: `ubuntu-latest` cambia de versión sola (pasa a
+    # Ubuntu 26 desde el 2026-10-19) y con ella las versiones de yq/jq.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Un deploy a la vez por repositorio y environment; los demás quedan en cola.
     concurrency:
@@ -64,12 +68,15 @@ jobs:
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
       BUNDLE_TARGET: ${{ vars.BUNDLE_TARGET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # Instala la última versión del CLI; si un cambio del CLI rompe el deploy,
-      # fijar acá una versión con `with: version:`.
+      # Versión FIJA del CLI (el tag de la acción instala esa misma versión).
+      # Instalar siempre la última cambió el deploy sin aviso: la 1.14.0 migró
+      # el bundle al motor "direct", que actualiza la app con el «App update»
+      # de Databricks. Para subir de versión: cambiar el tag a propósito y
+      # probar primero en dev.
       - name: Instalar Databricks CLI
-        uses: databricks/setup-cli@main
+        uses: databricks/setup-cli@v1.18.0
 
       - name: Verificar configuración mínima y credenciales
         run: |
@@ -141,18 +148,6 @@ jobs:
              | .env += [{"name": "BUILD_SHA", "value": strenv(SHA)}, {"name": "BUILD_TIME", "value": strenv(NOW)}]' app.yaml
           echo "build: ${{ github.sha }} @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # El CLI aplica el bundle con un OpenTofu embebido y la verificación de
-      # firma del provider databricks falla en el runner; se instala desde un
-      # mirror local pre-armado. Este OpenTofu solo arma el mirror (ver script).
-      - name: Instalar OpenTofu (solo para el mirror del provider)
-        uses: opentofu/setup-opentofu@v1
-        with:
-          tofu_version: "1.12.3"
-          tofu_wrapper: false
-
-      - name: Preparar mirror local del provider databricks
-        run: bash scripts/ci/tf-provider-mirror.sh
-
       - name: Validar bundle
         run: databricks bundle validate --target "$BUNDLE_TARGET"
 
@@ -187,6 +182,26 @@ jobs:
               || echo "Aviso: el bind no aplicó (si el recurso ya estaba en el estado, el deploy continúa igual)."
           else
             echo "La app '$APP_NAME' no existe todavía: el deploy la creará."
+          fi
+
+      # Qué va a cambiar el deploy, campo por campo, ANTES de aplicarlo. Si la
+      # app aparece con cambios que no son su código (descripción, recursos,
+      # tamaño de cómputo), el deploy dispara un «App update» de Databricks: la
+      # operación que puede fallar con "failed to update app's compute size".
+      # El listado dice qué campo la provoca.
+      - name: Plan del bundle (qué va a cambiar)
+        run: |
+          databricks bundle plan --target "$BUNDLE_TARGET" --output json > "$RUNNER_TEMP/bundle-plan.json"
+          CAMBIOS=$(jq -r '
+            (.plan // {}) | to_entries[] | select(.value.action != "skip")
+            | "\(.value.action) \(.key | ltrimstr("resources."))",
+              ((.value.changes // {}) | to_entries[] | select(.value.action != "skip")
+               | "    · \(.key)" + (if .value.reason then " (\(.value.reason))" else "" end))
+          ' "$RUNNER_TEMP/bundle-plan.json")
+          if [ -z "$CAMBIOS" ]; then
+            echo "Sin cambios en la app ni en sus permisos: el deploy solo sube el código."
+          else
+            echo "$CAMBIOS"
           fi
 
       # Sube el código (source_code_path) y crea/actualiza la app, sus permisos

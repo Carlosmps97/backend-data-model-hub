@@ -80,7 +80,10 @@ Consideraciones específicas de App Service:
 Es el destino que ya está configurado en el repo. El deploy vive en
 `databricks.yml` (bundle: `variables:` + recurso secreto + permisos) y en el
 `app.yaml` de la raíz del repo (comando + env de runtime, que Databricks lee en
-cada arranque; el workflow instala el CLI con `setup-cli@main`). Desde 2026-07-27 el
+cada arranque). El workflow instala el CLI con versión FIJA (`databricks/setup-cli@v1.18.0`)
+y aplica el bundle con el motor **`direct`** (API de Databricks, sin Terraform;
+`bundle.engine: direct`); antes del deploy imprime un `bundle plan` con lo que va a
+cambiar (doc 97). Desde 2026-07-27 el
 manifiesto está pensado para desplegar en **cualquier workspace sin editar
 el repo**: cada variable puede venir de una GitHub Variable (§2.3) y el
 workspace destino sale de `DATABRICKS_HOST`.
@@ -185,7 +188,7 @@ Dos notas operativas:
 
 ### 2.4 Apps pre-creadas (cupo) y `bundle deployment bind`
 
-En workspaces corporativos hay **cupo de Databricks Apps** (el límite se llena y ya no deja crear más), así que las apps `bknd-data-model-hub` y `frnt-data-model-hub` se crean **a mano en la UI** para reservar el slot antes del primer deploy. El estado Terraform del bundle no las conoce → `bundle deploy` planifica un create → la API responde **`409 ALREADY_EXISTS`**.
+En workspaces corporativos hay **cupo de Databricks Apps** (el límite se llena y ya no deja crear más), así que las apps `bknd-data-model-hub` y `frnt-data-model-hub` se crean **a mano en la UI** para reservar el slot antes del primer deploy. El estado del bundle no las conoce → `bundle deploy` planifica un create → la API responde **`409 ALREADY_EXISTS`**.
 
 La solución vive en los dos workflows como paso **"Bind app pre-existente"**, entre `bundle validate` y `bundle deploy`:
 
@@ -197,7 +200,7 @@ databricks bundle deployment bind <resource-key> <app-name> --target prod --auto
 
 `bind` importa la app al estado del bundle y desde ahí el deploy la ACTUALIZA en su sitio. El paso es **idempotente**: si la app no existe, no hace nada (el deploy la creará); si ya estaba bindeada, avisa y sigue. Condiciones:
 
-- El nombre creado a mano debe ser **IDÉNTICO** al del bundle (si difiere, Terraform destruiría y recrearía).
+- El nombre creado a mano debe ser **IDÉNTICO** al del bundle (si difiere, el bundle no la reconoce y trataría de crear otra app).
 - La identidad del `DATABRICKS_TOKEN` necesita **CAN_MANAGE** sobre esa app (si la creó otra persona, otorgarlo en la app → Permissions; un `403 PERMISSION_DENIED` en el bind significa exactamente eso).
 - Ojo: `bundle destroy` sobre un recurso bindeado **SÍ borra la app** del workspace (por eso no se usa).
 
@@ -236,6 +239,26 @@ Lo ÚNICO que se prepara a mano, una vez, en cada workspace nuevo (convención d
 4. **Rol PG del service principal del BACKEND**: la opción usada es `databricks_superuser`; la alternativa granular son GRANTs sobre el schema `dmh` (doc 28 §11.3). **El SP del FRONT no necesita rol**: ni la SPA ni el proxy tocan jamás la base.
 
 Todo lo demás (variables, permisos de apps, grant del proxy) lo re-aplica el CI en cada deploy.
+
+### 2.7 Operación diaria: prender y apagar las apps
+
+`scripts/databricks/apps_prender_apagar_notebook.py` (notebook para un Job
+programado) prende las apps dentro del horario y las apaga fuera de él, en orden
+(backend primero al prender, último al apagar). Solo llama a la API cuando hace
+falta, espera el resultado y, si algo falla, imprime el **motivo que devuelve
+Databricks** y el estado del último «App update», y deja el Job en rojo. Actúa
+con la identidad del Job (necesita `CAN_MANAGE` sobre las apps) o con el token
+de un secreto (widgets `secret_scope`/`secret_key`).
+
+- **Prender o apagar no sube archivos ni crea deployments**: al prender,
+  Databricks vuelve a levantar el último deployment (reinstala paquetes y, en el
+  front, corre el build). El código solo cambia con el deploy de GitHub Actions.
+- El aviso **«Update failed … failed to update app's compute size»** del
+  Overview de una app NO es un deploy de código ni un arranque: es un «App
+  update» (cambio de configuración de la app: descripción, recursos, tamaño) que
+  falló del lado de Databricks. Lo dispara `bundle deploy` cuando el plan trae
+  cambios en la app; el paso *Plan del bundle* del workflow dice qué campo lo
+  provoca (doc 97).
 
 ---
 
