@@ -16,7 +16,7 @@ from app.core.db.client import get_db
 from app.core.identity import Principal, current_principal
 from app.core.scope import scoped
 
-from .. import views
+from .. import versions, views
 from . import executor as ex
 from . import parser
 from . import reports
@@ -144,9 +144,13 @@ async def insights_glossary_usage(projectId: str = Query(min_length=1)):
 
 @router.get("/insights/relationships")
 async def insights_relationships(projectId: str = Query(min_length=1),
-                                 limit: int = Query(default=2000, ge=1, le=5000)):
-    """Relaciones con ambos extremos resueltos (schema.tabla.columna), cardinalidad."""
-    return ok(await views.relationships_report(projectId, limit=limit))
+                                 limit: int = Query(default=2000, ge=1, le=5000),
+                                 changesetId: str | None = Query(default=None),
+                                 principal: Principal = Depends(current_principal)):
+    """Relaciones con ambos extremos resueltos (schema.tabla.columna), cardinalidad.
+    Doc 102: con `changesetId`, las de una versión PROPIA sin publicar."""
+    changes = await versions.version_changes(projectId, changesetId, principal, versions.RELATIONSHIP_INPUTS)
+    return ok(await views.relationships_report(projectId, limit=limit, changes=changes))
 
 
 @router.get("/reports")

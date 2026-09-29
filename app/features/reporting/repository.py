@@ -70,7 +70,9 @@ async def _relationships(project_id: str, ids: list[str] | None = None) -> list[
         query["$or"] = [{"parentTableId": {"$in": ids}}, {"childTableId": {"$in": ids}},
                         {"sourceTableId": {"$in": ids}}, {"targetTableId": {"$in": ids}}]
     docs = await db["relationships"].find(query, _REL_LITE).to_list(None)
-    return [{"parentTableId": d.get("parentTableId") or d.get("targetTableId"),
+    # Doc 102: con el id, la versión propia puede superponerse (overlay).
+    return [{"id": str(d["_id"]),
+             "parentTableId": d.get("parentTableId") or d.get("targetTableId"),
              "childTableId": d.get("childTableId") or d.get("sourceTableId")}
             for d in docs]
 
@@ -150,6 +152,23 @@ async def count_tables(project_id: str) -> int:
     una página)."""
     db = await get_db()
     return int(await db["canonical_tables"].count_documents(scoped(project_id, ACTIVE)))
+
+
+async def table_ids(project_id: str) -> list[str]:
+    """Doc 102: ids de las tablas ACTIVAS del proyecto (conteo de una versión
+    propia). Proyecta un campo REAL: `{"_id": 1}` el adaptador lo lee como
+    «sin exclusiones» y traería documentos completos (doc 100)."""
+    return [d["id"] for d in await _find_active("canonical_tables", project_id, {"physicalName": 1})]
+
+
+async def table_schemas(project_id: str) -> list[dict]:
+    """Doc 102: {id, schema} de las tablas activas (filtros de una versión propia)."""
+    return await _find_active("canonical_tables", project_id, {"schema": 1})
+
+
+async def canvas_folders(project_id: str) -> list[dict]:
+    """Doc 102: {id, folderId} de los canvases activos (filtros de una versión propia)."""
+    return await _find_active("subject_areas", project_id, {"folderId": 1})
 
 
 async def columns(project_id: str, table_id: str | None = None,

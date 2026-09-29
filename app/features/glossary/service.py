@@ -29,11 +29,33 @@ def to_mappings(entries: list[dict]) -> dict[str, str]:
     return {e["term"]: e["abbrev"] for e in entries}
 
 
+def blank_term_error(term: str | None, abbrev: str | None) -> str | None:
+    """Doc 102: todo término del glosario lleva término Y abreviatura (antes el
+    front descartaba en silencio la fila incompleta). Mensaje en inglés (llega
+    a la pantalla) o None si está completo. Puro."""
+    no_term = not (term or "").strip()
+    no_abbrev = not (abbrev or "").strip()
+    if no_term and no_abbrev:
+        return "Every glossary entry needs a term and an abbreviation."
+    if no_term:
+        return "Every glossary entry needs a term."
+    if no_abbrev:
+        return f"The term '{(term or '').strip()}' needs an abbreviation."
+    return None
+
+
+def _ensure_complete(term: str | None, abbrev: str | None) -> None:
+    err = blank_term_error(term, abbrev)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+
+
 async def list_entries(project_id: str, scope: str | None = None) -> list[dict]:
     return await repository.list_entries(project_id, scope)
 
 
 async def create_entry(project_id: str, body: AbbreviationBody) -> dict:
+    _ensure_complete(body.term, body.abbrev)   # doc 102
     # Enforcement F2 #1: el término nuevo no puede duplicar el glosario del
     # scope ni aparecer como frase completa en los nombres lógicos publicados
     # (del proyecto, doc 75 D3).
@@ -45,6 +67,7 @@ async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody) -
     existing = await repository.get_entry(entry_id)
     if existing is None:
         return None
+    _ensure_complete(body.term, body.abbrev)   # doc 102
     if existing.get("locked"):
         raise HTTPException(
             status_code=409,

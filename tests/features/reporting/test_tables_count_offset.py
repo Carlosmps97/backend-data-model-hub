@@ -27,6 +27,6 @@ def test_list_table_rows_pasa_el_offset_al_fast_path(monkeypatch):
 
 def test_count_tables_endpoint(monkeypatch):
     monkeypatch.setattr(service.repository, "count_tables", AsyncMock(return_value=1932))
-    out = asyncio.run(report_tables_count(projectId="p1"))
+    out = asyncio.run(report_tables_count(projectId="p1", changesetId=None, principal=None))
     assert out["data"] == {"total": 1932}
     service.repository.count_tables.assert_awaited_once_with("p1")

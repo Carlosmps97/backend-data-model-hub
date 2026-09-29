@@ -188,3 +188,52 @@ def test_tabla_sin_esquema_avisa_y_no_crea_vista():
     c = ctx(tables=[_table(schema=None)], columns_by_table={"t1": [_col("c1", "COD", 0)]})
     plan = build_plan(parsed(tables=[trow(3, "Cliente")]), c)
     assert codes(plan, "warning") == ["view-no-schema"] and _views(plan) == []
+
+
+# ── Doc 102 (D3): tabla DAC — la vista normal va SIN las columnas DAC-* ──────
+COL_P = {"id": "ccl-p", "name": "Clasificacion del Dato", "level": "column", "view": "physical", "dataType": "list",
+         "defaultValue": "No Definido",
+         "allowedValues": ["No Definido", "No DAC", "DAC-DOCUMENTO", "DAC-NOMBRE"]}
+COL_L = {**COL_P, "id": "ccl-l", "view": "logical"}
+COL_MAP = {"UDP_Clasificacion_del_Dato": [COL_P, COL_L]}
+DEFS = [CLASS_P, CLASS_L, COL_P, COL_L]
+
+
+def _dac_plan(table_class="DAC", cols=None):
+    cols = cols or [crow(3, "Cliente", "Codigo", data_type="STRING", pk=True, udp={"UDP_Clasificacion_del_Dato": "No DAC"}),
+                    crow(4, "Cliente", "Documento", data_type="STRING", udp={"UDP_Clasificacion_del_Dato": "dac-documento"}),
+                    crow(5, "Cliente", "Nombre", data_type="STRING", udp={"UDP_Clasificacion_del_Dato": "DAC-NOMBRE"})]
+    p = parsed(tables=[trow(3, "Cliente", schema="ddv", udp={"Clasificacion_del_Dato": table_class})],
+               columns=cols, table_udp=UDP_MAP, column_udp=COL_MAP)
+    return build_plan(p, ctx(schemas=SCHEMAS, udp_defs=DEFS), new_id=seq_ids())
+
+
+def test_tabla_dac_vista_normal_sin_columnas_dac_y_la_dac_con_todas_doc102():
+    plan = _dac_plan()
+    normal, dac = _views(plan)
+    assert (normal["name"], dac["name"]) == ("CLIENTE", "CLIENTEDAC")
+    assert [s["column"] for s in normal["sources"]] == ["CODIGO"]
+    assert [s["column"] for s in dac["sources"]] == ["CODIGO", "DOCUMENTO", "NOMBRE"]
+    assert codes(plan, "warning") == ["no-canvas"]
+
+
+def test_tabla_no_dac_conserva_todas_las_columnas_aunque_tenga_dac_doc102():
+    (normal,) = _views(_dac_plan(table_class="No DAC"))
+    assert [s["column"] for s in normal["sources"]] == ["CODIGO", "DOCUMENTO", "NOMBRE"]
+
+
+def test_tabla_dac_solo_con_columnas_dac_avisa_y_no_crea_la_normal_doc102():
+    plan = _dac_plan(cols=[crow(3, "Cliente", "Documento", data_type="STRING",
+                                udp={"UDP_Clasificacion_del_Dato": "DAC-DOCUMENTO"})])
+    assert [v["name"] for v in _views(plan)] == ["CLIENTEDAC"]
+    assert "view-only-dac-columns" in codes(plan, "warning")
+
+
+def test_columna_dac_por_faceta_logica_de_respaldo_doc102():
+    cols = {"t1": [dict(_col("c1", "COD", 0, pk=True), udpValues={"ccl-p": "No DAC"}),
+                   dict(_col("c2", "DOC", 1), udpValues={"ccl-l": "DAC-DOCUMENTO"}),          # solo lógica
+                   dict(_col("c3", "NOM", 2), udpValues={"ccl-p": "No DAC", "ccl-l": "DAC-NOMBRE"})]}   # física manda
+    c = ctx(schemas=SCHEMAS, udp_defs=DEFS, columns_by_table=cols, tables=[_table(udp={"cl-p": "DAC"})])
+    normal, dac = _views(build_plan(parsed(tables=[trow(3, "Cliente")]), c, new_id=seq_ids()))
+    assert [s["column"] for s in normal["sources"]] == ["COD", "NOM"]
+    assert [s["column"] for s in dac["sources"]] == ["COD", "DOC", "NOM"]

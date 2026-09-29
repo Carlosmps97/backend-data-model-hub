@@ -434,6 +434,12 @@ async def apply(actor: str, project_id: str, body) -> dict:
     # glosario + corpus de nombres lógicos (misma regla que el CRUD directo:
     # altas y renombres de texto validan (renombres con exclude_id); edits de
     # abbrev no. El botón Validar del front es cortesía).
+    # Doc 102: término Y abreviatura obligatorios (antes el front descartaba la
+    # fila incompleta y el lote vacío igual registraba una versión «Saved»).
+    for t in body.termsUpsert:
+        err = dict_svc.blank_term_error(t.term, t.abbrev)
+        if err:
+            raise HTTPException(status_code=422, detail=err)
     for tid in body.termsDelete:
         prev = before_terms.get(tid)
         if prev and prev.get("locked"):

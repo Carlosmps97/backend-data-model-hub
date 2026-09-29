@@ -102,3 +102,37 @@ def test_delete_desbloqueado_pasa(monkeypatch):
     monkeypatch.setattr(service.repository, "get_entry", AsyncMock(return_value=UNLOCKED))
     monkeypatch.setattr(service.repository, "delete_entry", AsyncMock(return_value=True))
     assert asyncio.run(service.delete_entry("t1")) is True
+
+
+# ── Doc 102: término Y abreviatura obligatorios ─────────────────────────────
+@pytest.mark.parametrize("term, abbrev, msg", [
+    ("analisis", "  ", "The term 'analisis' needs an abbreviation."),
+    ("  ", "ANL", "Every glossary entry needs a term."),
+    ("", "", "Every glossary entry needs a term and an abbreviation."),
+])
+def test_blank_term_error_doc102(term, abbrev, msg):
+    assert service.blank_term_error(term, abbrev) == msg
+
+
+def test_blank_term_error_completo_es_none():
+    assert service.blank_term_error("analisis", "ANL") is None
+
+
+def test_create_sin_abreviatura_422_y_no_crea(monkeypatch):
+    _ok_validation(monkeypatch)
+    created = AsyncMock()
+    monkeypatch.setattr(service.repository, "create_entry", created)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.create_entry("p1", AbbreviationBody(term="analisis", abbrev=" ")))
+    assert exc.value.status_code == 422 and "abbreviation" in exc.value.detail
+    created.assert_not_awaited()
+
+
+def test_update_que_borra_la_abreviatura_422(monkeypatch):
+    monkeypatch.setattr(service.repository, "get_entry", AsyncMock(return_value=UNLOCKED))
+    updated = AsyncMock()
+    monkeypatch.setattr(service.repository, "update_entry", updated)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="codigo", abbrev="")))
+    assert exc.value.status_code == 422
+    updated.assert_not_awaited()

@@ -75,4 +75,4 @@ def test_reporting_tabular_exige_project_id(client, monkeypatch):
     assert client.get("/api/reporting/filters").status_code == 422
     resp = client.get("/api/reporting/filters", params={"projectId": "p1"})
     assert resp.status_code == 200
-    service.filter_options.assert_awaited_once_with("p1")
+    service.filter_options.assert_awaited_once_with("p1", None)   # doc 102: sin versión = producción

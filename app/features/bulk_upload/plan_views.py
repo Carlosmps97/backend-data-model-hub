@@ -1,8 +1,10 @@
 """Planner — vistas `_vu` automáticas (doc 87 §3.1). Por cada fila de la hoja
 de tablas (create / update / unchanged): la vista NORMAL (mismo nombre que la
 tabla) siempre, y la vista DAC (`<TABLA>DAC`) solo si el UDP de tabla
-«Clasificacion del Dato» vale DAC; ambas en `<esquema>_vu`, con TODAS las
-columnas efectivas de la tabla en el orden de display del doc 81. Una vista que
+«Clasificacion del Dato» vale DAC; ambas en `<esquema>_vu`, con las columnas
+efectivas de la tabla en el orden de display del doc 81. Doc 102 (D3): en una
+tabla DAC la vista normal va SIN las columnas DAC (`DAC-…`, misma regla del
+Export DDL `excluir_dac_vista_sin_dac`) y la DAC las lleva todas. Una vista que
 ya existe (mismo esquema y nombre, CI) no se toca (D3); las nuevas entran al
 canvas de la tabla (D4). Puro.
 """
@@ -24,6 +26,9 @@ from .report import SHEET_TABLES, ReportBuilder
 # la misma función para no depender de su grafía interna.
 CLASSIFICATION_KEY = norm_key("Clasificacion del Dato")
 DAC_VALUE = "DAC"
+# Doc 102 (D3): una COLUMNA es DAC si su «Clasificacion del Dato» empieza con
+# `DAC-` (DAC-DOCUMENTO, DAC-NOMBRE…) — la regla del Export DDL (`LIKE 'DAC-%'`).
+DAC_COLUMN_PREFIX = "DAC-"
 _VIEW_ACTIONS = ("create", "update", "unchanged")
 
 
@@ -53,25 +58,36 @@ class ViewIndex:
         self._ids[(norm_ci(schema), norm_ci(name))] = view_id
 
 
-def classification_defs(udp_defs: list[dict]) -> dict[str, str]:
-    """{faceta: id} de las defs de TABLA «Clasificacion del Dato» (doc 69: una
-    por faceta). Sin def ⇒ ninguna tabla es DAC."""
+def classification_defs(udp_defs: list[dict], level: str = "table") -> dict[str, str]:
+    """{faceta: id} de las defs «Clasificacion del Dato» del nivel pedido
+    (doc 69: una por faceta). Sin def ⇒ nada de ese nivel es DAC."""
     out: dict[str, str] = {}
     for d in udp_defs:
-        if (d.get("level") or "column") != "table" or norm_key(d.get("name")) != CLASSIFICATION_KEY or not d.get("id"):
+        if (d.get("level") or "column") != level or norm_key(d.get("name")) != CLASSIFICATION_KEY or not d.get("id"):
             continue
         out.setdefault(udp_view(d), str(d["id"]))
     return out
 
 
-def is_dac(udp_values: dict | None, defs: dict[str, str]) -> bool:
-    """Decide la faceta FÍSICA si tiene valor; si no, la lógica."""
+def _classification(udp_values: dict | None, defs: dict[str, str]) -> str:
+    """Clasificación normalizada: decide la faceta FÍSICA si tiene valor; si no,
+    la lógica. '' sin valor. Puro."""
     values = udp_values or {}
     for facet in (PHYSICAL, LOGICAL):
         val = clean_text(values.get(defs.get(facet, "")))
         if val:
-            return norm_enum(val) == DAC_VALUE
-    return False
+            return norm_enum(val)
+    return ""
+
+
+def is_dac(udp_values: dict | None, defs: dict[str, str]) -> bool:
+    """Tabla DAC: clasificación = DAC."""
+    return _classification(udp_values, defs) == DAC_VALUE
+
+
+def is_dac_column(udp_values: dict | None, defs: dict[str, str]) -> bool:
+    """Doc 102: columna DAC — clasificación que empieza con `DAC-`."""
+    return _classification(udp_values, defs).startswith(DAC_COLUMN_PREFIX)
 
 
 def dac_suffix(naming_case: str | None) -> str:
@@ -110,6 +126,7 @@ def plan_views(table_plans: list[TablePlan], column_plans: list[ColumnPlan], ctx
                rb: ReportBuilder, new_id: Callable[[], str], h: Callable[[str, str], str]) -> list[ViewPlan]:
     index = ViewIndex(ctx.views)
     defs = classification_defs(ctx.udp_defs)
+    col_defs = classification_defs(ctx.udp_defs, level="column")
     suffix = dac_suffix((ctx.naming.get("table") or {}).get("case"))
     by_table: dict[str, list[ColumnPlan]] = {}
     for cp in column_plans:
@@ -134,17 +151,26 @@ def plan_views(table_plans: list[TablePlan], column_plans: list[ColumnPlan], ctx
         if schema is None:
             continue                                   # `view-schema-kind` ya reportado
         table = tp.doc or tp.existing or {}
-        wanted = [(tp.physical, "normal")]
-        if is_dac(table.get("udpValues"), defs):
-            wanted.append((tp.physical + suffix, "dac"))
-        for name, kind in wanted:
+        dac_table = is_dac(table.get("udpValues"), defs)
+        # Doc 102 (D3): en una tabla DAC la vista normal va SIN las columnas
+        # DAC-* (misma regla del Export DDL); la DAC las lleva todas.
+        plain = [c for c in cols if not is_dac_column(c.get("udpValues"), col_defs)] if dac_table else cols
+        wanted = [(tp.physical, "normal", plain)]
+        if dac_table:
+            wanted.append((tp.physical + suffix, "dac", cols))
+        for name, kind, view_cols in wanted:
             existing_id = index.get(schema, name)
             if existing_id is not None:
                 out.append(ViewPlan(tp, existing_id, name, schema, kind, "unchanged"))
                 continue
+            if not view_cols:
+                rb.warning(SHEET_TABLES, "view-only-dac-columns",
+                           f"Table '{tp.physical}' only has DAC columns — its non-DAC view '{name}' was not created.",
+                           row=tp.row, column=h("logicalName", "TABLA_LOGICO"))
+                continue
             vid = new_id()
             index.add(schema, name, vid)
             out.append(ViewPlan(tp, vid, name, schema, kind, "create",
-                                view_doc(vid, ctx.project_id, name, schema, tp, cols)))
+                                view_doc(vid, ctx.project_id, name, schema, tp, view_cols)))
             structure.place_view(tp, vid)
     return out

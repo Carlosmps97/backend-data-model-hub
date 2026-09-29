@@ -33,6 +33,8 @@ for _s in (sys.stdout, sys.stderr):
 def plan_lines(template: dict) -> list[str]:
     """Descripción legible de la plantilla (dry-run y apply). Puro."""
     out = [f"   hoja «{template['sheetName']}» · {len(template['columns'])} columnas"]
+    if template.get("fileName"):
+        out.append(f"   archivo «{template['fileName']}.xlsx» (marcadores con la hora local de quien exporta)")
     out += [f"      {c['header']:<28} ← {c['source']}" for c in template["columns"]]
     return out
 

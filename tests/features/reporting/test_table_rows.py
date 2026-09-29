@@ -89,6 +89,7 @@ def test_table_with_no_references_has_empty_lists():
     tables = [{"id": "t9", "physicalName": "ORPHAN", "logicalName": "Orphan"}]
     rows = table_rows(tables, {}, [], [], [])
     assert rows[0]["subjectAreas"] == [] and rows[0]["diagrams"] == []
+    assert rows[0]["spaces"] == []
     assert rows[0]["projects"] == []
     assert rows[0]["columnCount"] == 0
     assert rows[0]["relationshipCount"] == 0
@@ -189,3 +190,22 @@ def test_list_table_rows_fast_path_sin_filtros(monkeypatch):
     rows = asyncio.run(service.list_table_rows("p1", {}, 50))
     assert calls == {"page": ("p1", 50)}
     assert rows[0]["projects"] == ["Core Banking"]
+
+
+def test_spaces_son_las_carpetas_raiz_de_los_canvases_doc102():
+    rows = {r["id"]: r for r in table_rows(*_fixture(), folders=FOLDERS)}
+    assert rows["t1"]["spaces"] == ["CPYBCA"] and rows["t2"]["spaces"] == ["CPYBCA"]
+    assert rows["t3"]["spaces"] == ["CPYBCA"]           # sa3 en la raíz del proyecto no aporta
+
+
+def test_spaces_canvas_en_la_raiz_padre_desconocido_y_ciclo():
+    tables = [{"id": "t1", "physicalName": "A"}]
+    sas = [{"id": "s1", "name": "D1", "tableIds": ["t1"], "folderId": "otros"},      # canvas directo en una raíz
+           {"id": "s2", "name": "D2", "tableIds": ["t1"], "folderId": "suelta"},     # su padre ya no existe
+           {"id": "s3", "name": "D3", "tableIds": ["t1"], "folderId": "c1"}]         # ciclo c1 ↔ c2
+    folders = [{"id": "otros", "name": "Otros", "parentFolderId": None},
+               {"id": "suelta", "name": "Suelta", "parentFolderId": "borrada"},
+               {"id": "c1", "name": "C1", "parentFolderId": "c2"},
+               {"id": "c2", "name": "C2", "parentFolderId": "c1"}]
+    (row,) = table_rows(tables, {}, [], sas, [], folders=folders)
+    assert row["spaces"] == ["Otros", "Suelta"]

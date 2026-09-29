@@ -14,6 +14,7 @@ class ReportTableRow(BaseModel):
     subjectAreas: list[str] = Field(default_factory=list)
     # Doc 88 §7: subjectAreas = carpetas de los canvases; diagrams = los canvases.
     diagrams: list[str] = Field(default_factory=list)
+    spaces: list[str] = Field(default_factory=list)   # doc 102: carpeta raíz (sub-proyecto)
     columnCount: int = 0
     relationshipCount: int = 0
     projects: list[str] = Field(default_factory=list)
@@ -58,3 +59,17 @@ class ReportColumnRow(BaseModel):
     physicalNameOverridden: bool = False
     logicalOnly: bool = False
     physicalOnly: bool = False
+
+
+# Doc 102 (431): tope de ids por pedido en el CUERPO (el front manda lotes de
+# 300 tablas para columnas y 2 000 para vistas).
+MAX_BATCH_IDS = 5000
+
+
+class ReportBatchBody(BaseModel):
+    """Doc 102: un lote de tablas con los ids en el CUERPO — en la URL, cientos
+    de ids pasaban el tope de 16 KB de cabeceras del servidor del front (431)."""
+
+    projectId: str = Field(min_length=1)
+    tableIds: list[str] = Field(min_length=1, max_length=MAX_BATCH_IDS)
+    changesetId: str | None = None

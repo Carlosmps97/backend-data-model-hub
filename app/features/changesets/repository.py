@@ -251,6 +251,20 @@ async def asof_changes_map(version_id: str, collections: list[str] | None = None
     return composed
 
 
+def _ledger_entry(d: dict) -> tuple[str, str, dict]:
+    """(colección, entityId, cambio) de un doc del ledger, con la forma que
+    devuelve `changes_map`."""
+    ch = ChangeDoc.model_validate({**d, "id": str(d.get("_id"))}).model_dump()
+    entry: dict = {"op": ch["op"], "at": ch["at"]}
+    if ch["op"] != "delete":
+        entry["payload"] = ch["payload"] or {}
+    if ch.get("beforeAt"):
+        # Imagen previa capturada en el publish → habilita el rollback.
+        entry["beforeAt"] = ch["beforeAt"]
+        entry["before"] = ch.get("before")
+    return ch["collection"], ch["entityId"], entry
+
+
 async def _ledger_map(cs_id: str, collections: list[str] | None = None) -> dict[str, dict[str, dict]]:
     """Lector CRUDO del ledger de un changeset real (ver `changes_map`)."""
     db = await get_db()
@@ -260,16 +274,27 @@ async def _ledger_map(cs_id: str, collections: list[str] | None = None) -> dict[
     docs = await db[CHANGES_COLL].find(flt).to_list(None)
     out: dict[str, dict[str, dict]] = {}
     for d in docs:
-        ch = ChangeDoc.model_validate({**d, "id": str(d.get("_id"))}).model_dump()
-        entry: dict = {"op": ch["op"], "at": ch["at"]}
-        if ch["op"] != "delete":
-            entry["payload"] = ch["payload"] or {}
-        if ch.get("beforeAt"):
-            # Imagen previa capturada en el publish → habilita el rollback.
-            entry["beforeAt"] = ch["beforeAt"]
-            entry["before"] = ch.get("before")
-        out.setdefault(ch["collection"], {})[ch["entityId"]] = entry
+        collection, entity_id, entry = _ledger_entry(d)
+        out.setdefault(collection, {})[entity_id] = entry
     return out
+
+
+async def column_changes_for_tables(cs_id: str, column_ids: list[str],
+                                    table_ids: list[str]) -> dict[str, dict]:
+    """Doc 102: cambios de `canonical_columns` de un changeset REAL (no `asof:`)
+    que tocan un LOTE de tablas, sin leer su ledger entero: los de columnas ya
+    leídas (`column_ids`, por `_id` — ediciones, bajas y mudanzas fuera del
+    lote) y los upserts cuyo `payload.tableId` cae en el lote (altas, revividas,
+    mudanzas hacia el lote). Forma de `changes_map(...)["canonical_columns"]`."""
+    db = await get_db()
+    docs: list[dict] = []
+    if column_ids:
+        keys = [change_key(cs_id, "canonical_columns", c) for c in column_ids]
+        docs += await db[CHANGES_COLL].find({"_id": {"$in": keys}}).to_list(None)
+    if table_ids:
+        docs += await db[CHANGES_COLL].find({"csId": cs_id, "collection": "canonical_columns",
+                                             "payload.tableId": {"$in": table_ids}}).to_list(None)
+    return {entity_id: entry for _, entity_id, entry in map(_ledger_entry, docs)}
 
 
 async def set_approval(cs_id: str, actor: str, entry: dict) -> dict | None:

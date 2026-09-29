@@ -10,6 +10,8 @@ Semántica de una fila de tabla (`GET /api/reporting/tables`):
     los canvases (`subject_areas`) cuyo `tableIds` incluye la tabla (DDV: las
     hijas de CPYBCA/Otros; UDV: «1. Party»…). Un canvas en la raíz del
     proyecto no aporta. Ordenados, sin duplicados.
+  - spaces             : doc 102 — carpetas RAÍZ (sub-proyecto) de esos
+    canvases: en MODELO DDV «CPYBCA» / «Otros». Ordenadas, sin duplicados.
   - diagrams           : nombres de esos canvases (lo que ANTES se llamaba
     subject area). Ordenados, sin duplicados.
   - projects           : doc 75: el reporte es de UN proyecto y toda tabla le
@@ -24,10 +26,14 @@ predicado puro `_matches` es `schema` (igualdad exacta).
 from __future__ import annotations
 
 from app.core.facets import udp_display_names
+from app.features.catalog import repository as catalog_repo
+from app.features.catalog.service import adjust_column_counts
+from app.features.changesets import repository as cs_repo
 from app.features.projects import repository as projects_repo
 from app.features.views.membership import view_on_canvas
 
 from . import repository
+from .draft import changes_of, overlay_columns, overlay_named, overlay_project, overlay_views
 
 
 def _index_tables_to_canvases(
@@ -54,6 +60,31 @@ def _folder_names(table_id: str, tables_to_canvases: dict[str, list[dict]],
     tabla (sin carpeta ⇒ nada). Puro."""
     canvases = tables_to_canvases.get(table_id, [])
     names = {folder_name.get(str(c.get("folderId"))) for c in canvases if c.get("folderId")}
+    return sorted(n for n in names if n)
+
+
+def _root_name(folder_id: str, parent_of: dict[str, str | None],
+               folder_name: dict[str, str]) -> str | None:
+    """Doc 102: SPACE (sub-proyecto) = la carpeta RAÍZ sobre `folder_id` — en
+    MODELO DDV, «CPYBCA» / «Otros». Un padre desconocido corta ahí (esa carpeta
+    hace de raíz); un ciclo no devuelve nada. Puro."""
+    seen: set[str] = set()
+    cur: str | None = folder_id
+    while cur and cur not in seen:
+        seen.add(cur)
+        parent = parent_of.get(cur)
+        if not parent or parent not in folder_name:
+            return folder_name.get(cur) or None
+        cur = parent
+    return None
+
+
+def _space_names(table_id: str, tables_to_canvases: dict[str, list[dict]],
+                 parent_of: dict[str, str | None], folder_name: dict[str, str]) -> list[str]:
+    """Doc 102: spaces = carpetas RAÍZ de los canvases de la tabla (un canvas
+    en la raíz del proyecto no aporta). Ordenados, sin duplicados. Puro."""
+    names = {_root_name(str(c["folderId"]), parent_of, folder_name)
+             for c in tables_to_canvases.get(table_id, []) if c.get("folderId")}
     return sorted(n for n in names if n)
 
 
@@ -91,6 +122,8 @@ def table_rows(
     filters = filters or {}
     tables_to_canvases = _index_tables_to_canvases(subject_areas)
     folder_name = {str(f.get("id")): str(f.get("name") or "") for f in (folders or [])}
+    parent_of = {str(f.get("id")): (str(f["parentFolderId"]) if f.get("parentFolderId") else None)
+                 for f in (folders or [])}
     proj_names = sorted({p.get("name") for p in projects if p.get("name")})
     udp_name_by_id = udp_display_names(udp_defs or [])   # doc 69: «X (Logical)» para la faceta lógica
 
@@ -112,6 +145,7 @@ def table_rows(
             "logicalName": t.get("logicalName"),
             "schema": t.get("schema"),
             "subjectAreas": _folder_names(tid, tables_to_canvases, folder_name),
+            "spaces": _space_names(tid, tables_to_canvases, parent_of, folder_name),   # doc 102
             "diagrams": _canvas_names(tid, tables_to_canvases),
             "columnCount": col_count.get(tid, 0),
             "relationshipCount": rel_count.get(tid, 0),
@@ -184,11 +218,23 @@ def filter_option_lists(schemas: list, subject_areas: list) -> dict:
     return {"schemas": _clean(schemas), "subjectAreas": _clean(subject_areas)}
 
 
-async def filter_options(project_id: str) -> dict:
+async def filter_options(project_id: str, changes: dict | None = None) -> dict:
     """Universo COMPLETO de Schema / Subject area del proyecto para los combos
-    del reporte tabular (antes salían de las 50 filas de la carga inicial)."""
-    raw = await repository.filter_options(project_id)
-    return filter_option_lists(raw["schemas"], raw["subjectAreas"])
+    del reporte tabular (antes salían de las 50 filas de la carga inicial).
+    Doc 102: con una versión propia, el de esa versión (tablas, canvases y
+    carpetas con sus cambios)."""
+    if not changes:
+        raw = await repository.filter_options(project_id)
+        return filter_option_lists(raw["schemas"], raw["subjectAreas"])
+    tables = overlay_project(await repository.table_schemas(project_id),
+                             changes_of(changes, "canonical_tables"), project_id)
+    canvases = overlay_project(await repository.canvas_folders(project_id),
+                               changes_of(changes, "subject_areas"), project_id)
+    folders = overlay_project(await repository._folders(project_id),
+                              changes_of(changes, "folders"), project_id)
+    name = {str(f["id"]): f.get("name") for f in folders}
+    return filter_option_lists([t.get("schema") for t in tables],
+                               [name.get(str(c.get("folderId"))) for c in canvases if c.get("folderId")])
 
 
 async def _project_list(project_id: str) -> list[dict]:
@@ -198,14 +244,23 @@ async def _project_list(project_id: str) -> list[dict]:
 
 
 async def list_table_rows(project_id: str, filters: dict | None = None,
-                          limit: int | None = None, offset: int = 0) -> list[dict]:
+                          limit: int | None = None, offset: int = 0,
+                          changes: dict | None = None) -> list[dict]:
     """Filas del reporte por tabla del proyecto (filtradas en Python).
 
     Fast-path de la carga inicial: con `limit` y SIN filtros se trae sólo una
     PÁGINA de tablas (orden físico; `offset` = doc 92 D3) + sus conteos, en vez
-    de barrer las 10k/400k (`report_inputs_page`)."""
+    de barrer las 10k/400k (`report_inputs_page`). Doc 102: con una versión
+    propia (`changes`) se arma el proyecto COMPLETO con sus cambios y la página
+    sale de ese orden."""
     udp_defs = await repository.udp_definitions(project_id)
     projects = await _project_list(project_id)
+    if changes:
+        data = await _effective_inputs(project_id, changes)
+        rows = table_rows(data["tables"], data["columnCounts"], data["relationships"],
+                          data["subjectAreas"], projects, filters, None, udp_defs, data["folders"])
+        stop = offset + limit if limit is not None and limit >= 0 else None
+        return rows[offset:stop]
     if limit is not None and limit >= 0 and not (filters or {}):
         data = await repository.report_inputs_page(project_id, limit, offset)
     else:
@@ -216,9 +271,35 @@ async def list_table_rows(project_id: str, filters: dict | None = None,
     )
 
 
-async def count_tables(project_id: str) -> int:
-    """Doc 92 D4: total de tablas activas del proyecto."""
-    return await repository.count_tables(project_id)
+async def _effective_inputs(project_id: str, changes: dict) -> dict:
+    """Doc 102: `report_inputs` con la versión propia aplicada — tablas,
+    relaciones, canvases y carpetas por overlay; conteos de columnas con la
+    MISMA regla del Explorer (`adjust_column_counts`: alta +1, baja −1,
+    mudanza −1/+1; una columna revivida suma)."""
+    data = await repository.report_inputs(project_id)
+    tables = overlay_project(data["tables"], changes_of(changes, "canonical_tables"), project_id)
+    counts = data["columnCounts"]
+    col_changes = changes_of(changes, "canonical_columns")
+    if col_changes:
+        published_table_of = await catalog_repo.column_tables_by_ids(list(col_changes))
+        counts = adjust_column_counts(counts, col_changes, published_table_of, {t["id"] for t in tables})
+    return {
+        "tables": tables,
+        "columnCounts": counts,
+        "relationships": overlay_project(data["relationships"], changes_of(changes, "relationships"), project_id),
+        "subjectAreas": overlay_project(data["subjectAreas"], changes_of(changes, "subject_areas"), project_id),
+        "folders": overlay_project(data["folders"], changes_of(changes, "folders"), project_id),
+    }
+
+
+async def count_tables(project_id: str, changes: dict | None = None) -> int:
+    """Doc 92 D4: total de tablas activas del proyecto. Doc 102: con una
+    versión propia, las de esa versión (altas entran, bajas salen)."""
+    table_changes = changes_of(changes, "canonical_tables")
+    if not table_changes:
+        return await repository.count_tables(project_id)
+    ids = await repository.table_ids(project_id)
+    return len(overlay_project([{"id": i} for i in ids], table_changes, project_id))
 
 
 def view_rows(views: list[dict], table_name_by_id: dict[str, str],
@@ -277,28 +358,49 @@ UNFILTERED_VIEWS_CAP = 10000
 
 async def list_column_rows(project_id: str, table_id: str | None = None,
                            table_ids: list[str] | None = None,
-                           limit: int | None = None) -> list[dict]:
+                           limit: int | None = None, changeset_id: str | None = None) -> list[dict]:
     """Detalle a nivel columna del proyecto; todas, las de una tabla o de un
     lote de tablas. Sin filtro de tabla se aplica un tope (`limit` o
-    `UNFILTERED_COLUMNS_CAP`)."""
+    `UNFILTERED_COLUMNS_CAP`). Doc 102: con una versión propia (`changeset_id`
+    ya validado por `versions.open_version`), las columnas de ESA versión para
+    el lote (altas entran, bajas salen, revividas vuelven)."""
     if not table_id and not table_ids:
         limit = limit or UNFILTERED_COLUMNS_CAP
     columns = await repository.columns(project_id, table_id, table_ids, limit)
+    if changeset_id:
+        lot = set(table_ids or ([table_id] if table_id else []))
+        col_changes = await _column_changes(changeset_id, columns, lot)
+        if col_changes:
+            columns = overlay_columns(columns, col_changes, project_id, lot)
     parent_domains = await repository.parent_domains(project_id)
     udp_defs = await repository.udp_definitions(project_id)
     return column_rows(columns, parent_domains, udp_defs)
 
 
+async def _column_changes(changeset_id: str, columns: list[dict], lot: set[str]) -> dict:
+    """Cambios de columnas de la versión para el lote: SOLO los que lo tocan
+    (el export manda decenas de lotes y un draft de carga Excel puede traer
+    cientos de miles de columnas — releer el ledger entero por lote no escala).
+    Sin lote (todo el proyecto, con tope), el ledger de columnas completo."""
+    if not lot:
+        return changes_of(await cs_repo.changes_map(changeset_id, ["canonical_columns"]), "canonical_columns")
+    return await cs_repo.column_changes_for_tables(changeset_id, [c["id"] for c in columns], sorted(lot))
+
+
 async def list_view_rows(project_id: str, table_ids: list[str] | None = None,
-                         schema: str | None = None) -> list[dict]:
+                         schema: str | None = None, changes: dict | None = None) -> list[dict]:
     """Vistas del proyecto para el export por niveles; con `table_ids`, las
     derivadas de esas tablas; con `schema`, las de ese esquema (Database
-    Explorer, doc 18). Resuelve los nombres `schema.tabla` de TODAS las fuentes."""
+    Explorer, doc 18). Resuelve los nombres `schema.tabla` de TODAS las fuentes.
+    Doc 102: con una versión propia, sus vistas, sus nombres de tablas fuente y
+    sus canvases."""
     limit = None if (table_ids or schema) else UNFILTERED_VIEWS_CAP
     views = await repository.views_for_tables(project_id, table_ids, limit, schema=schema)
+    views = overlay_views(views, changes_of(changes, "views"), project_id, set(table_ids or []), schema)
     src_ids = sorted({t for v in views for t in (v.get("sourceTableIds") or [])}
                      | {v["tableId"] for v in views if v.get("tableId")})
-    names = await repository.table_names(src_ids)
+    names = overlay_named(await repository.table_names(src_ids),
+                          changes_of(changes, "canonical_tables"), src_ids)
     name_by_id = {
         tid: (f"{d.get('schema')}.{d.get('physicalName')}" if d.get("schema")
               else (d.get("physicalName") or tid))
@@ -307,4 +409,5 @@ async def list_view_rows(project_id: str, table_ids: list[str] | None = None,
     # Doc 70: canvases que contienen alguna fuente = candidatos a membresía
     # (una vista miembro siempre conserva ≥1 fuente en su canvas).
     sas = await repository._subject_areas(project_id, src_ids) if src_ids else []
+    sas = overlay_project(sas, changes_of(changes, "subject_areas"), project_id)
     return view_rows(views, name_by_id, sas)

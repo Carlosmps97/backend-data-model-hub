@@ -11,6 +11,8 @@ QA_MODELO: dict = {
     "name": "QA_MODELO",
     "sheetName": "QA_MODELO",
     "description": "Fixed QA format requested by the modelers: one row per column with its table data and UDPs.",
+    # Doc 102: `QA_REPORTE_2026-09-28 153045.xlsx` (hora local de quien exporta).
+    "fileName": "QA_REPORTE_{yyyy}-{MM}-{dd} {HH}{mm}{ss}",
     "columns": [
         {"header": "DATABASE", "source": "table.schema"},
         {"header": "TABLA_FISICA", "source": "table.physicalName"},

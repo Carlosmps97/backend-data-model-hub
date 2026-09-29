@@ -18,6 +18,8 @@ from app.core.db.client import get_db
 from app.core.facets import udp_view
 from app.core.scope import scoped
 
+from .draft import changes_of, overlay_named, overlay_project
+
 ACTIVE = {"flgactive": {"$ne": False}}
 _MAXMS = 30000
 
@@ -186,23 +188,30 @@ _CARD_LABEL = {"one": "1", "zero-one": "0..1", "one-many": "1..N",
                "zero-many": "0..N", "many": "N"}
 
 
-async def relationships_report(project_id: str, limit: int = 2000) -> list[dict]:
+async def relationships_report(project_id: str, limit: int = 2000,
+                               changes: dict | None = None) -> list[dict]:
     """Relaciones del proyecto resueltas, UNA FILA POR PAR de columnas (v2,
     doc 19): una FK compuesta de 3 columnas emite 3 filas con el mismo `id` y
     `pairIndex` incremental — conserva el espíritu "1 fila por columna FK" del
-    export."""
+    export. Doc 102: con una versión propia (`changes`), sus relaciones y los
+    nombres de tablas y columnas de esa versión."""
     from app.features.relationships.models import RelationshipDoc
 
     db = await get_db()
     raw = await db["relationships"].find(scoped(project_id, ACTIVE)).limit(limit).to_list(limit)
-    rels = [RelationshipDoc.model_validate(
-        {**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])}).model_dump()
-        for r in raw]
+    docs = [{**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])} for r in raw]
+    docs = overlay_project(docs, changes_of(changes, "relationships"), project_id)
+    rels = [RelationshipDoc.model_validate(d).model_dump() for d in docs]
     tids = {t for r in rels for t in (r["parentTableId"], r["childTableId"]) if t}
     cids = {c for r in rels for p in r["pairs"]
             for c in (p.get("parentColumnId"), p.get("childColumnId")) if c}
     tmap = {str(t["_id"]): t async for t in db["canonical_tables"].find({"_id": {"$in": list(tids)}}, {"physicalName": 1, "schema": 1})}
     cmap = {str(c["_id"]): c.get("physicalName") async for c in db["canonical_columns"].find({"_id": {"$in": list(cids)}}, {"physicalName": 1})}
+    if changes:
+        tmap = overlay_named(tmap, changes_of(changes, "canonical_tables"), tids)
+        named = overlay_named({k: {"physicalName": v} for k, v in cmap.items()},
+                              changes_of(changes, "canonical_columns"), cids)
+        cmap = {k: d.get("physicalName") for k, d in named.items()}
     rows = []
     for r in rels:
         pt, ct = tmap.get(r["parentTableId"], {}), tmap.get(r["childTableId"], {})

@@ -8,3 +8,5 @@ def test_reporting_routes_registered(client):
     assert "/api/reporting/columns" in paths
     assert "/api/reporting/filters" in paths      # doc 70 §4.1
     assert "/api/reporting/tables/count" in paths  # doc 92 D4
+    assert "/api/reporting/columns/query" in paths   # doc 102: lotes por POST
+    assert "/api/reporting/views/query" in paths

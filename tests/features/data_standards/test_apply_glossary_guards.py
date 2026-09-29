@@ -171,3 +171,14 @@ def test_apply_edit_sin_cambio_de_texto_no_valida(monkeypatch):
     asyncio.run(service.apply("ana", "p1", body))
     ensure.assert_not_awaited()
     service.dict_repo.update_entry.assert_awaited_once()
+
+
+@pytest.mark.parametrize("term, abbrev", [("codigo", "   "), ("  ", "COD"), ("", "")])
+def test_apply_termino_incompleto_422_sin_mutar_doc102(monkeypatch, term, abbrev):
+    _mock(monkeypatch)
+    body = ApplyBody(termsUpsert=[TermEdit(term=term, abbrev=abbrev, scope="column")])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.apply("ana", "p1", body))
+    assert exc.value.status_code == 422
+    service.dict_repo.create_entry.assert_not_awaited()
+    service.dict_svc.ensure_term_valid.assert_not_awaited()
