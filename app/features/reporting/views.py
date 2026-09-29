@@ -223,6 +223,9 @@ async def relationships_report(project_id: str, limit: int = 2000) -> list[dict]
                 "parent": f"{pt_name}.{pc}", "parentSchema": pt.get("schema"),
                 "child": f"{ct_name}.{cc}", "childSchema": ct.get("schema"),
                 "roleName": p.get("roleName"),
+                # Doc 98: frases de la RELACIÓN (se repiten en cada fila de par).
+                "parentToChildPhrase": r.get("parentToChildPhrase"),
+                "childToParentPhrase": r.get("childToParentPhrase"),
                 "cardinality": card, "identifying": bool(r.get("identifying")),
                 "subcategory": bool(r.get("subcategory")),
                 "isSelfReferencing": r["parentTableId"] == r["childTableId"],

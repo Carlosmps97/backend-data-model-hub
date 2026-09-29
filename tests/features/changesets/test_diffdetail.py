@@ -122,6 +122,34 @@ def test_relacion_eliminada_muestra_extremos_por_nombre():
     assert by["pairs"]["before"] == "CODCLAVECTA → CODCLAVE_R"
 
 
+def test_relacion_frase_editada_muestra_antes_y_despues():
+    """Doc 98: el revisor ve la frase con su etiqueta; la dirección que no
+    cambió (ausente en el publicado, None en el payload) no ensucia el diff."""
+    before = {"parentTableId": "t1", "childTableId": "t2", "parentCardinality": "one",
+              "childCardinality": "zero-many", "identifying": False,
+              "pairs": [{"parentColumnId": "c1", "childColumnId": "c2"}]}
+    change = {"op": "upsert", "payload": {
+        **before, "parentToChildPhrase": "Cliente tiene", "childToParentPhrase": None}}
+    d = entity_detail("relationships", "r1", change, before, RES)
+    by = _fields_by_key(d)
+    assert set(by) == {"parentToChildPhrase"}
+    assert by["parentToChildPhrase"]["label"] == "Parent-to-child phrase"
+    assert by["parentToChildPhrase"]["before"] is None
+    assert by["parentToChildPhrase"]["after"] == "Cliente tiene"
+
+
+def test_relacion_frase_hijo_a_padre_borrada():
+    before = {"parentTableId": "t1", "childTableId": "t2",
+              "pairs": [{"parentColumnId": "c1", "childColumnId": "c2"}],
+              "childToParentPhrase": "pertenece a un Cliente"}
+    change = {"op": "upsert", "payload": {**before, "childToParentPhrase": None}}
+    d = entity_detail("relationships", "r1", change, before, RES)
+    by = _fields_by_key(d)
+    assert by["childToParentPhrase"]["label"] == "Child-to-parent phrase"
+    assert by["childToParentPhrase"]["before"] == "pertenece a un Cliente"
+    assert by["childToParentPhrase"]["after"] is None
+
+
 # ── vistas ─────────────────────────────────────────────────────────────────
 
 
@@ -213,3 +241,23 @@ def test_pk_position_retirado_no_es_revisable():
                                           "ordinal": 1}}
     d = entity_detail("canonical_columns", "c9", change, before, RES)
     assert set(_fields_by_key(d)) == {"ordinal"}
+
+
+def test_canvas_solo_trazos_no_tiene_campos_visibles():
+    """Doc 99: los trazos manuales de wires son dibujo, igual que `layout` y
+    `drawings` — al revisor no se le muestra un JSON de coordenadas."""
+    before = {"name": "Pricing", "projectId": "p1", "folderId": "f1",
+              "tableIds": ["t1"], "layout": {"t1": {"x": 1, "y": 2}}, "routes": {}}
+    change = {"op": "upsert", "payload": {
+        **before, "routes": {"rel-1": [{"x": 420, "y": 180}, {"x": 420, "y": 96}]}}}
+    d = entity_detail("subject_areas", "sa1", change, before, RES)
+    assert d["action"] == "modified" and d["fields"] == []
+
+
+def test_canvas_nuevo_o_borrado_con_trazos_no_los_lista():
+    doc = {"name": "Pricing", "projectId": "p1", "tableIds": ["t1"],
+           "routes": {"rel-1": [{"x": 1, "y": 2}]}}
+    created = entity_detail("subject_areas", "sa1", {"op": "upsert", "payload": doc}, None, RES)
+    deleted = entity_detail("subject_areas", "sa1", {"op": "delete"}, doc, RES)
+    assert "routes" not in _fields_by_key(created)
+    assert "routes" not in _fields_by_key(deleted)

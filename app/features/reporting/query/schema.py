@@ -91,6 +91,9 @@ _RELATIONSHIPS = [
     _s("childCardinality", "Child cardinality", type="enum", enumValues=_CARDINALITY_ENUM),
     _s("identifying", "Identifying", type="boolean"),
     _s("subcategory", "Subcategory", type="boolean"),
+    # Doc 98: frases de relación (texto libre — sin índice, no agrupables).
+    _s("parentToChildPhrase", "Parent-to-child phrase", groupable=False),
+    _s("childToParentPhrase", "Child-to-parent phrase", groupable=False),
 ]
 _VIEWS = [
     _s("name", "Name", sortable=False),

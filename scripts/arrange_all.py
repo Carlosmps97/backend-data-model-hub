@@ -12,6 +12,10 @@ Pipeline: Python (datos) → arrange_all.cjs (elkjs) → Python (persistir).
 `--project` (doc 32b): limita el arrange a los canvases de ESE proyecto —
 imprescindible en cargas incrementales para no pisar los layouts ya
 trabajados de los proyectos/archivos anteriores.
+
+Doc 99: cada canvas que se arregla pierde sus trazos manuales de wires
+(`routes`) — con las posiciones nuevas ya no calzan; los wires vuelven al
+camino automático. En el one-shot los canvases son nuevos: no hay trazos.
 """
 from __future__ import annotations
 
@@ -68,6 +72,16 @@ def view_size(v: dict) -> tuple[int, int]:
 def view_src_ids(v: dict) -> list[str]:
     s = v.get("sourceTableIds") or []
     return s if s else ([v["tableId"]] if v.get("tableId") else [])
+
+
+def layout_updates(positions: dict[str, dict]) -> list[UpdateOne]:
+    """Escrituras del arrange, una por canvas. Doc 99: el arrange cambia TODAS
+    las posiciones del canvas, así que sus trazos manuales de wires (`routes`)
+    dejan de calzar con los bloques — se reinician en la misma escritura (como
+    el botón Autoarrange de la web). Los canvases que el arrange no tocó no
+    aparecen en `positions`: conservan posiciones y trazos. Puro."""
+    return [UpdateOne({"_id": sa_id}, {"$set": {"layout": layout, "routes": {}}})
+            for sa_id, layout in positions.items()]
 
 
 async def main(project: str | None = None) -> None:
@@ -152,7 +166,7 @@ async def main(project: str | None = None) -> None:
     positions = json.loads(Path(gout).read_text(encoding="utf-8"))
 
     print("[5/6] persistiendo layouts (bulk)…")
-    ops = [UpdateOne({"_id": sa_id}, {"$set": {"layout": layout}}) for sa_id, layout in positions.items()]
+    ops = layout_updates(positions)
     for i in range(0, len(ops), 200):
         await db["subject_areas"].bulk_write(ops[i:i + 200])
     print(f"[6/6] OK · {len(ops)} canvases re-organizados con ELK (tablas+vistas)")

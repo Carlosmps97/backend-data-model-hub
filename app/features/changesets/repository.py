@@ -483,14 +483,53 @@ async def published(collection: str, flt: dict | None = None, limit: int | None 
     return out
 
 
+async def deleted_at(collection: str, ids: list[str]) -> dict[str, str | None]:
+    """Doc 100 (P3): `{id: deletedAt}` de las entidades de `ids` que están
+    BORRADAS (soft-delete) en producción. La revisión las necesita: el diff
+    sólo mira lo activo y una entidad que otra versión borró se veía como
+    «added», sin aviso de conflicto."""
+    if not ids:
+        return {}
+    flt = {"_id": {"$in": ids}}
+    assert_scoped_filter(collection, flt)
+    db = await get_db()
+    docs = await db[collection].find({**flt, "flgactive": False}, {"deletedAt": 1}).to_list(None)
+    return {str(d["_id"]): d.get("deletedAt") for d in docs}
+
+
+# Marcas que deja un borrado (`deletedIn`: cascada del borrado de proyecto,
+# doc 75). Las maneja la base, nunca un payload.
+_DELETION_MARKS = ("deletedAt", "deletedIn")
+
+
 async def apply_changes(plan: list[tuple]) -> dict[str, int]:
     """Aplica el plan a las colecciones publicadas con UN `bulk_write` por
     colección (upsert / soft-delete por entidad). El loop viejo de un
     `update_one` awaiteado por entidad tardaba minutos con miles de cambios y
     dejaba una ventana enorme de aplicación parcial. Devuelve counts por
-    colección para loguear el publish."""
+    colección para loguear el publish.
+
+    Doc 100 (P3): un upsert sobre una entidad BORRADA la reactiva (gana el
+    draft que publica: rollback, restore, o un draft que la tocó antes de que
+    otro la borrara — la revisión lo avisa) y le quita las marcas de borrado:
+    antes quedaba activa con su `deletedAt` viejo. Las reactivadas van en el
+    MISMO lote que el resto y las marcas salen después con UNA sentencia por
+    colección: un `$unset` dentro de cada op sacaba al lote del camino rápido
+    del adaptador (una sentencia por fila) y un rollback puede reactivar miles."""
     db = await get_db()
     now = _now()
+    upsert_ids: dict[str, list[str]] = {}
+    for collection, entity_id, op, _payload in plan:
+        if op != "delete":
+            upsert_ids.setdefault(collection, []).append(entity_id)
+    revived: dict[str, list[str]] = {}
+    for collection, ids in upsert_ids.items():
+        # Proyección de un campo REAL: `{"_id": 1}` el adaptador la lee como
+        # «sin exclusiones» y trae los documentos completos.
+        docs = await db[collection].find({"_id": {"$in": ids}, "flgactive": False},
+                                         {"flgactive": 1}).to_list(None)
+        if docs:
+            revived[collection] = [str(d["_id"]) for d in docs]
     ops_by_coll: dict[str, list[UpdateOne]] = {}
     for collection, entity_id, op, payload in plan:
         ops = ops_by_coll.setdefault(collection, [])
@@ -499,8 +538,8 @@ async def apply_changes(plan: list[tuple]) -> dict[str, int]:
                 {"_id": entity_id},
                 {"$set": {"flgactive": False, "deletedAt": now, "updatedAt": now}},
             ))
-        else:  # upsert
-            body = {k: v for k, v in (payload or {}).items() if k != "id"}
+        else:  # upsert — las marcas de borrado las maneja la base, nunca un payload
+            body = {k: v for k, v in (payload or {}).items() if k != "id" and k not in _DELETION_MARKS}
             ops.append(UpdateOne(
                 {"_id": entity_id},
                 {"$set": {**body, "flgactive": True, "updatedAt": now},
@@ -508,7 +547,13 @@ async def apply_changes(plan: list[tuple]) -> dict[str, int]:
                 upsert=True,
             ))
     counts: dict[str, int] = {}
-    for collection, ops in ops_by_coll.items():
+    for collection, ops in ops_by_coll.items():      # orden del plan (dependencias)
         await db[collection].bulk_write(ops, ordered=False)
+        if revived.get(collection):
+            # Sólo las que quedaron ACTIVAS: si otra publicación la volvió a
+            # borrar en el medio, conserva las marcas de ese borrado.
+            await db[collection].update_many(
+                {"_id": {"$in": revived[collection]}, "flgactive": True},
+                {"$unset": dict.fromkeys(_DELETION_MARKS, "")})
         counts[collection] = len(ops)
     return counts

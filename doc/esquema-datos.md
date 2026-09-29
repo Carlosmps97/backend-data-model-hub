@@ -30,7 +30,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
   - `extra="ignore"` ⇒ al **leer**, cualquier campo del doc persistido que NO esté declarado en el `*Doc` se **descarta silenciosamente** (no llega a la app). Implicación de migración: para no perder datos hay que mirar el **doc real en la BD**, no solo el modelo — puede haber campos legacy o aditivos (p. ej. `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`) que persisten en el doc pero el modelo ignora.
   - `populate_by_name=True` ⇒ los campos con `alias` aceptan el nombre del atributo o el alias en la entrada.
 - **`_id` vs `id`**: el repositorio guarda el `id` (o la clave natural) del modelo como `_id` del doc al insertar, y lo revierte a `id` al leer. Donde el `_id` es especial se anota en cada colección.
-- **Soft-delete**: la mayoría **no borra**; marca `flgactive: false` + `deletedAt` (ISO) y las lecturas filtran `flgactive != false`. Excepciones: `audit_log` es append-only; `changesets` / `changeset_changes` / `standards_versions` no usan `flgactive` (se gobiernan por estado/seq).
+- **Soft-delete**: la mayoría **no borra**; marca `flgactive: false` + `deletedAt` (ISO) y las lecturas filtran `flgactive != false`. Doc 100: un upsert publicado sobre una entidad borrada la **reactiva** y le quita `deletedAt`/`deletedIn` (antes quedaba activa con su marca de borrado vieja); un payload nunca fija esas marcas. Excepciones: `audit_log` es append-only; `changesets` / `changeset_changes` / `standards_versions` no usan `flgactive` (se gobiernan por estado/seq).
 - **Alcance por proyecto (doc 75 D1)**: todo documento que describe el modelo o sus estándares pertenece a exactamente UN proyecto y lleva `projectId` (ref `projects.id`), estampado SIEMPRE server-side (nunca lo elige el cliente). `app/core/scope.py` es la única forma de armar un filtro de alcance (`scoped(pid, flt)`); `PROJECT_SCOPED` enumera las 16 colecciones con `projectId` y `published()` del ledger rechaza (`MissingProjectError` → 500, bug de programación) una lectura de esas colecciones sin `projectId`/`_id`/`tableId` en el filtro. Sólo `projects` (la raíz del alcance), `users`, `roles`, `changeset_changes` y `audit_log` no lo llevan.
 - **Sin integridad referencial**: todas las referencias entre colecciones son **strings** (un `id`, o a veces un **nombre**). El almacén no las valida (el `doc` jsonb es opaco para Postgres) — la consistencia la garantiza la app. Ver §Referencias (final).
 - **Timestamps**: strings ISO-8601 (`datetime.now(timezone.utc).isoformat()`), nunca tipos fecha nativos del almacén (`timestamptz`).
@@ -127,6 +127,7 @@ Un doc = **un diagrama ER** (canvas).
 | layout | dict[str, NodePosDoc] | {} | posición por nodo: `{tableId | viewId: {x, y}}` |
 | drawings | list[dict] | [] | capa DRAWING (shapes/texto con estilo); dicts free-form (sin sub-schema) |
 | udpValues | dict[str,str] | {} | UDP nivel canvas: `{udpDefId: value}` |
+| routes | dict[str, list[NodePosDoc]] | {} | **trazos manuales de wires** (doc 99): puntos de quiebre por wire, en coordenadas del canvas y en orden padre → hijo. La llave es el id del wire en el canvas: el de la relación (wire crow's-foot y rama de subcategoría) o `subsym-{símbolo}` (tronco). Un wire sin entrada usa el camino automático. Topes: 32 puntos por wire, 5 000 wires por canvas, coordenadas dentro de ±1 000 000, id de wire de hasta 200 caracteres. **Lectura tolerante** (un trazo corrupto se descarta y el canvas abre igual), **escritura estricta** en la entrada del cliente (422) |
 
 **Embebido `NodePosDoc`**: `{ x: float, y: float }`.
 
@@ -194,6 +195,10 @@ Un doc por relación Erwin con **todos** sus pares de columnas (FK compuesta = v
 | parentCardinality | str | "one" | enum CARDINALITIES (ver §12) |
 | childCardinality | str | "zero-many" | enum CARDINALITIES |
 | identifying | bool | false | relación **sólida**: la FK es parte de la PK del hijo |
+| parentToChildPhrase | str? | null | frase padre→hijo (Erwin *Parent-to-Child Phrase*); se guarda recortada, vacío = null |
+| childToParentPhrase | str? | null | frase hijo→padre (Erwin *Child-To-Parent Phrase*); ídem |
+
+Las dos frases son la **etiqueta del wire** en el canvas y en el export (`padre→hijo / hijo→padre`, o la única que exista). No tienen validación dura de largo: el tope (120) vive en la caja de texto del front.
 
 **Embebido `RelationshipPairDoc`**: `{ parentColumnId: str (ref canonical_columns.id), childColumnId: str (ref canonical_columns.id), roleName: str? }`. (`roleName` = rolename estilo Erwin; el nombre real de la columna vive en el hijo.)
 
@@ -499,7 +504,7 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 
 Solo **descripción del estado actual** (no recomendaciones de destino):
 
-1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas/views), `layout` (map → `{x,y}`) y `drawings` (list) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`, `udpRefs`/`action` en `ddl_rules`, `lookups`/`functions` en `ddl_ruleset_config`.
+1. **Estructuras embebidas / denormalizadas** (viven dentro de un doc, sin sub-colección): `udpValues` (map en tables/columns/subject_areas/views), `layout` (map → `{x,y}`), `drawings` (list) y `routes` (map → lista de `{x,y}`, doc 99) en `subject_areas`, `pairs` en `relationships`, `sources` en `views`, `approvals`/`comments` en `changesets`, `snapshot`/`diff`/`impact` en `standards_versions`, `permissions` en `roles`, `spec` (QuerySpec) en `saved_reports`, `udpRefs`/`action` en `ddl_rules`, `lookups`/`functions` en `ddl_ruleset_config`.
 2. **Referencias sin integridad referencial**: todo apunta por string (id o **nombre** — `schema` y `sources[].column` son por nombre). Nada lo valida el almacén.
 3. **Soft-delete** por `flgactive:false` + `deletedAt` en casi todo; `audit_log` es append-only; `changesets`/`changeset_changes`/`standards_versions` no usan `flgactive`.
 4. **`_id` especiales**: `changeset_changes._id` es DETERMINISTA (`{csId}::{collection}::{entityId}`); `naming_config._id = "<projectId>:<scope>"`; `users._id = username`; `roles._id = key`; `ddl_ruleset_config._id = projectId`; `audit_log._id` = ObjectId auto. El resto = `id` uuid4 (los migrados desde Erwin: `uuid5("<projectId>|<Long_Id>")`, doc 75 D11 — el mismo objeto Erwin cargado en dos proyectos tiene ids distintos).

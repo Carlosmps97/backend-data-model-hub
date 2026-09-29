@@ -229,3 +229,28 @@ def test_sin_capa_un_destino_enviado_es_error_y_todo_sigue_en_la_raiz():
     plan = build_plan(parsed(tables=[trow(3, "Cliente", subject="SA", diagram="D", schema="ddv")]), ctx(), target_folder_id="f1")
     assert codes(plan, "error") == ["target-folder-invalid"]
     assert by_coll(plan)["folders"][0]["payload"]["parentFolderId"] is None
+
+
+def test_canvas_existente_que_gana_tablas_conserva_sus_trazos():
+    """Doc 99: el planner re-arma el canvas con `SubjectAreaDoc`; los trazos
+    manuales de wires (`routes`) viajan en el payload — sin declararlos en el
+    modelo, la carga los borraría en silencio. (El arrange posterior de los
+    canvases afectados los reinicia a propósito: eso lo decide el front.)"""
+    routes = {"rel-1": [{"x": 200, "y": 40}, {"x": 200, "y": 160}]}
+    c = ctx(canvases=[{"id": "sa1", "projectId": "p1", "folderId": None, "name": "D", "tableIds": ["t0"],
+                       "layout": {"t0": {"x": 40, "y": 1000}}, "drawings": [], "udpValues": {},
+                       "routes": routes}],
+            tables=[{"id": "t0", "physicalName": "VIEJA", "logicalName": "Vieja", "schema": "ddv"}])
+    p = parsed(tables=[trow(3, "Nueva", diagram="D", schema="ddv")],
+               columns=[crow(3, "Nueva", "Codigo", data_type="STRING", pk=True)])
+    plan = build_plan(p, c, new_id=seq_ids())
+    canvas, = by_coll(plan)["subject_areas"]
+    assert canvas["payload"]["routes"] == routes
+    assert len(canvas["payload"]["tableIds"]) == 2
+
+
+def test_canvas_nuevo_nace_sin_trazos():
+    p = parsed(tables=[trow(3, "Cliente", diagram="D", schema="ddv")],
+               columns=[crow(3, "Cliente", "Codigo", data_type="STRING", pk=True)])
+    canvas, = by_coll(build_plan(p, ctx(), new_id=seq_ids()))["subject_areas"]
+    assert canvas["payload"]["routes"] == {}

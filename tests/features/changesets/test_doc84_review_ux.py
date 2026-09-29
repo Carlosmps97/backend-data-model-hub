@@ -282,6 +282,7 @@ def test_diff_expone_last_change_at(monkeypatch):
     monkeypatch.setattr(service.repository, "get", AsyncMock(return_value=cs))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes))
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service.repository, "deleted_at", AsyncMock(return_value={}))   # doc 100
     out = asyncio.run(service.diff("cs1"))
     assert out["lastChangeAt"] == "2026-09-10T06:05:59+00:00"
 

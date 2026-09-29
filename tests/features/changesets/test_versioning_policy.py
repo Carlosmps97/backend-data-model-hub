@@ -456,3 +456,37 @@ def test_review_exige_revisor_asignado_en_ambas_decisiones(monkeypatch):
                                                 "owner": "ana", "reviewers": ["beto"]}))
     assert asyncio.run(service.review("c1", "qa", "approve", None)) == "forbidden"
     assert asyncio.run(service.review("c1", "qa", "reject", None)) == "forbidden"
+
+
+# ── Doc 100 (P3): lo que producción BORRÓ después de abrir la versión ───────
+
+
+def test_structured_diff_marca_lo_que_produccion_borro_despues_de_abrir_la_version():
+    """El diff sólo mira lo ACTIVO de producción: una entidad que otra versión
+    borró aparece como «added», sin aviso — y al aprobar vuelve a la vida. Si
+    el borrado es POSTERIOR a la apertura de esta versión, es un conflicto
+    (aprobar la restaura). Un borrado ANTERIOR (rollback, restore) es una
+    restauración deliberada: sin aviso."""
+    opened = "2026-09-28T09:00:00+00:00"
+    changes = {"subject_areas": {
+        "sa-borrado-despues": {"op": "upsert", "payload": {"name": "Ventas"}, "at": "2026-09-28T10:00:00+00:00"},
+        "sa-borrado-antes": {"op": "upsert", "payload": {"name": "Viejo"}, "at": "2026-09-28T10:00:00+00:00"},
+        "sa-nuevo": {"op": "upsert", "payload": {"name": "Nuevo"}, "at": "2026-09-28T10:00:00+00:00"},
+    }}
+    deleted = {"subject_areas": {"sa-borrado-despues": "2026-09-28T11:00:00+00:00",
+                                 "sa-borrado-antes": "2026-09-27T11:00:00+00:00"}}
+    out = service.structured_diff(changes, {"subject_areas": []}, baseline=opened, deleted=deleted)
+    added = {x["id"]: x for x in out["collections"]["subject_areas"]["added"]}
+    assert set(added) == {"sa-borrado-despues", "sa-borrado-antes", "sa-nuevo"}
+    assert added["sa-borrado-despues"]["conflict"] is True and added["sa-borrado-despues"]["restores"] is True
+    assert added["sa-borrado-despues"]["name"] == "Ventas"
+    for eid in ("sa-borrado-antes", "sa-nuevo"):
+        assert added[eid]["conflict"] is False and "restores" not in added[eid]
+
+
+def test_structured_diff_sin_fecha_de_apertura_no_marca_la_restauracion():
+    changes = {"subject_areas": {"sa1": {"op": "upsert", "payload": {"name": "C"}}}}
+    out = service.structured_diff(changes, {"subject_areas": []},
+                                  deleted={"subject_areas": {"sa1": "2026-09-28T11:00:00+00:00"}})
+    item = out["collections"]["subject_areas"]["added"][0]
+    assert item["conflict"] is False and "restores" not in item

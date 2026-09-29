@@ -31,12 +31,24 @@ def _published_fake(data: dict[str, list[dict]], seen: list[tuple[str, dict | No
     return _published
 
 
+def _deleted_at_fake(seen: list[tuple[str, dict | None]]):
+    """`repository.deleted_at` de mentira (doc 100: entidades del draft borradas
+    en producción) con el MISMO guard; no hay borradas."""
+    async def _deleted_at(collection, ids):
+        flt = {"_id": {"$in": list(ids)}}
+        seen.append((collection, flt))
+        assert_scoped_filter(collection, flt)
+        return {}
+    return _deleted_at
+
+
 def _wire(monkeypatch, changes: dict, published: dict) -> list[tuple[str, dict | None]]:
     cs = {"id": "cs1", "projectId": "P1", "status": "submitted", "owner": "ana", "createdAt": "t0"}
     seen: list[tuple[str, dict | None]] = []
     monkeypatch.setattr(service.repository, "get", AsyncMock(return_value=cs))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes))
     monkeypatch.setattr(service.repository, "published", _published_fake(published, seen))
+    monkeypatch.setattr(service.repository, "deleted_at", _deleted_at_fake(seen))
     return seen
 
 

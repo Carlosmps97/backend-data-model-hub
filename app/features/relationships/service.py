@@ -169,6 +169,7 @@ async def table_links(table_id: str, changeset_id: str | None = None) -> dict:
 
     Contrato: {"links": [{id, parentTableId, parentTableName, childTableId,
     childTableName, parentCardinality, childCardinality, identifying,
+    parentToChildPhrase, childToParentPhrase,
     pairs: [{parentColumnId, parentColumnName, childColumnId,
     childColumnName, roleName}], canvases: [{id, name}]}], "total": int}."""
     pub = await repository.list_for_tables([table_id])
@@ -230,6 +231,9 @@ async def table_links(table_id: str, changeset_id: str | None = None) -> dict:
             "parentCardinality": r.get("parentCardinality"),
             "childCardinality": r.get("childCardinality"),
             "identifying": bool(r.get("identifying")),
+            # Doc 98: frases de relación (la etiqueta del wire).
+            "parentToChildPhrase": r.get("parentToChildPhrase"),
+            "childToParentPhrase": r.get("childToParentPhrase"),
             "pairs": [{
                 "parentColumnId": p.get("parentColumnId"),
                 "parentColumnName": column_names.get(p.get("parentColumnId"), p.get("parentColumnId")),

@@ -337,8 +337,12 @@ class Migrator:
         # uso en BD (score del lado existente) + material del dedup de relaciones
         self.db_rel_count: Counter = Counter()
         self.db_rels_raw: list[dict] = []
+        # Doc 100 (7.1 del doc 98): `subcategory` entra a la clave natural de
+        # R4 — sin él en la proyección, Lakebase no lo devuelve y una
+        # subcategoría ya migrada nunca se reconocía (se re-escribía o entraba
+        # repetida desde otro archivo de la familia).
         for r in db.relationships.find(active, {"parentTableId": 1, "childTableId": 1,
-                                                "pairs": 1, "identifying": 1}):
+                                                "pairs": 1, "identifying": 1, "subcategory": 1}):
             self.db_rel_count[r.get("parentTableId")] += 1
             self.db_rel_count[r.get("childTableId")] += 1
             self.db_rels_raw.append(r)
@@ -903,9 +907,15 @@ class Migrator:
                          "parentCardinality": pol.map_parent_cardinality(r.null_option),
                          "childCardinality": pol.map_cardinality(r.cardinality),
                          "identifying": r.rel_type == ep.REL_IDENTIFYING}
+            # Doc 98: frases de la relación. Sólo viajan las que el XML TRAE:
+            # el upsert es un $set, y un XML sin frase no debe llevarse la que
+            # un modelador escribió en la plataforma.
+            phrases = {k: v for k, v in (
+                ("parentToChildPhrase", r.parent_to_child_phrase),
+                ("childToParentPhrase", r.child_to_parent_phrase)) if v}
             self._upsert("relationships", self.pid(r.id), {
                 "parentTableId": parent_t, "childTableId": child_t,
-                "pairs": rel_pairs, **extra, "erwinLongId": r.id})
+                "pairs": rel_pairs, **extra, **phrases, "erwinLongId": r.id})
             self.stats["relaciones"] += 1
             if len(rel_pairs) > 1:
                 self.stats["relaciones compuestas (2+ pares)"] += 1

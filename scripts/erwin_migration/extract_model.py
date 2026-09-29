@@ -33,7 +33,8 @@ Salida (en --out, default `model_out/<nombre-del-xml>/`):
   views.json          [{schema, name, definition, sql, columns:[{outputAlias,
                         dataType, sourceTable, sourceColumn}]}]
   relationships.json  [{name, type, parentTable, childTable,
-                        columnPairs:[{parentColumn, childColumn}]}]
+                        columnPairs:[{parentColumn, childColumn}],
+                        parentToChildPhrase, childToParentPhrase}]
   canvases.json       [{name, subjectArea, tables:[...], views:[...]}]
   subject_areas.json  [{name, definition, canvases:[...]}]
   summary.json        conteos + duplicados descartados
@@ -145,6 +146,9 @@ def extract(model: ep.ErwinModel) -> tuple[dict[str, list[dict]], int]:
             "columnPairs": [
                 {"parentColumn": attr_idx[p].physical, "childColumn": attr_idx[c].physical}
                 for (p, c) in pairs.get(r.id, []) if p in attr_idx and c in attr_idx],
+            # Doc 98: frases de la relación (Parent-to-Child / Child-To-Parent)
+            "parentToChildPhrase": r.parent_to_child_phrase or None,
+            "childToParentPhrase": r.child_to_parent_phrase or None,
         }
         if r.rel_type == ep.REL_SUBTYPE:
             sym = model.subtype_symbols.get(sym_of.get(r.id, ""))
@@ -202,7 +206,9 @@ def _flat_csvs(out: Path, data: dict[str, list[dict]]) -> None:
         for v in data["views"] for c in v["columns"]])
     _write_csv(out / "relationships.csv", [
         {"type": r["type"], "parentTable": r["parentTable"],
-         "childTable": r["childTable"], **p}
+         "childTable": r["childTable"], **p,
+         "parentToChildPhrase": r.get("parentToChildPhrase"),
+         "childToParentPhrase": r.get("childToParentPhrase")}
         for r in data["relationships"]
         for p in (r["columnPairs"] or [{"parentColumn": None, "childColumn": None}])])
 

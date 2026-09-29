@@ -464,6 +464,7 @@ flowchart LR
   - prefijos de archivo `TABLE-` / `VIEW_NEG-` / `VIEW_TEC-` (nombre en MAYÚSCULA; esquema solo si dos objetos chocan).
 
   El modal Export DDL arranca desde ellas. El motor suma la condición genérica `ANY_COLUMN(<condición de columna>)`, que evalúa sobre las columnas que el objeto realmente tiene; se usa para el `isDAC` de las vistas de negocio. Con la regla de layout, las particiones salen del UDP «Particion» (`PART_nn`) y no del flag de la plataforma.
+- **Doc 101 (2026-09-28) — Export DDL en Oracle.** Las Output settings suman `dialect` (con qué dialecto abre el modal; default Databricks) y `oracle` (la configuración propia de Oracle: vistas, PK/FK, comentarios, casing, comillas, esquema por default y el mapeo de los tipos que Oracle no tiene). El backend solo la valida y versiona (`app/features/ddl_rules/output.py`); el DDL Oracle lo arma el front y **no pasa por el motor de reglas** (las reglas son de Databricks). La semilla deja a los proyectos declarados en `ORACLE_PROJECTS` de `scripts/seed_ddl_export_rules.py` (hoy «MODELO RDV DataEntry») **sin reglas** y con Oracle como dialecto por default.
 
 ### 6.5 Review con detalle de cambios (`diff/details`)
 
@@ -472,7 +473,7 @@ Complemento read-only del review (§6.1): el panel del request muestra un resume
 - **`POST /api/changesets/{cs_id}/diff/details`** — read-only; body `{items: [{collection, entityId}]}` con cap de 200 ítems por llamada (el front trocea). Mismo guard de lectura que `GET /diff`; no modifica la mecánica de versionado.
 - Respuesta por ítem: `{collection, entityId, action, name, fields: [{key, label, before, after}]}` con SOLO los campos que realmente cambian. `before` = documento publicado (o la imagen estampada si el changeset ya fue aplicado, para que el historial no derive); `after` = `payload` del cambio (`op=delete` → after nulo).
 - **Resolución a nombres** (implementación pura en `changesets/diffdetail.py`): `udpValues` → una fila por UDP con su nombre; `parentDomainId` → nombre del Parent Domain; relaciones → nombres de tabla y pares `PADRE.col → HIJO.col`; vistas → resumen de columnas `+a, +b, −c`; `subject_areas.tableIds` → conteos `+N added · −N removed`.
-- Ruido excluido (`id/_id/csId/updatedAt/createdAt/flgactive` y el `layout` de subject_areas); un modificado solo-ruido devuelve `fields: []` y la UI muestra "No visible field changes".
+- Ruido excluido (`id/_id/csId/updatedAt/createdAt/flgactive` y `layout`/`drawings`/`routes` de subject_areas); un modificado solo-ruido devuelve `fields: []` y la UI muestra "No visible field changes".
 
 ---
 
@@ -501,7 +502,7 @@ La persistencia productiva es Databricks Lakebase Postgres y el modelo de datos 
 | `roles` | Roles + matriz de permisos data-driven | auth/admin |
 | `projects` | Proyectos: la raíz del alcance (sin `projectId`; `name` único global; borrado = soft-delete con `deletedIn`) | projects |
 | `folders` | Carpetas del Model Explorer (jerarquía) — `projectId` | folders |
-| `subject_areas` | Canvases: `tableIds[]` + `viewIds[]` + `layout` + `drawings` — `projectId` | projects |
+| `subject_areas` | Canvases: `tableIds[]` + `viewIds[]` + `layout` + `drawings` + `routes` (trazos manuales de wires, doc 99) — `projectId` | projects |
 | `schemas` | Esquema físico de BD como entidad DEL proyecto (`name` único por proyecto; tablas/vistas lo referencian por string, sin FK) | schemas |
 | `canonical_tables` | Tablas canónicas (pool del proyecto, físico único por proyecto, `udpValues` embebido) | catalog |
 | `canonical_columns` | Columnas canónicas (`projectId`, `tableId`, `parentDomainId`, `udpValues`) | catalog |
@@ -559,6 +560,7 @@ erDiagram
         dict layout
         list drawings
         dict udpValues
+        dict routes
     }
     SCHEMAS {
         string id PK
@@ -600,6 +602,8 @@ erDiagram
         string parentCardinality
         string childCardinality
         bool identifying
+        string parentToChildPhrase "etiqueta del wire"
+        string childToParentPhrase "etiqueta del wire"
     }
     VIEWS {
         string id PK

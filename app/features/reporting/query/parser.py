@@ -31,14 +31,14 @@ def _field_key(col: exp.Column, catalog: dict[str, FieldDef]) -> str:
         for fd in catalog.values():
             if fd.udpDefId and fd.label == name:
                 return fd.key
-        raise SqlError(f"UDP desconocido: {name!r}")
+        raise SqlError(f"Unknown UDP: {name!r}")
     if name in catalog:
         return name
     # permitir 'udp.<defId>' escrito como identificador plano
     dotted = f"{table}.{name}" if table else name
     if dotted in catalog:
         return dotted
-    raise SqlError(f"Campo desconocido: {name!r}")
+    raise SqlError(f"Unknown field: {name!r}")
 
 
 def _literal(e) -> object:
@@ -50,7 +50,7 @@ def _literal(e) -> object:
         return e.name if e.is_string else (float(e.name) if "." in e.name else int(e.name))
     if isinstance(e, exp.Neg):
         return -_literal(e.this)
-    raise SqlError(f"Valor no soportado: {e.sql()}")
+    raise SqlError(f"Unsupported value: {e.sql()}")
 
 
 def _like_to_op(pattern: str) -> tuple[str, str]:
@@ -86,7 +86,7 @@ def _condition(e, catalog: dict[str, FieldDef]):
     for cls, op in OPS.items():
         if isinstance(e, cls):
             return Condition(field=_field_key(e.this, catalog), op=op, value=_literal(e.expression))
-    raise SqlError(f"Expresión no soportada en WHERE: {e.sql()}")
+    raise SqlError(f"Unsupported expression in WHERE: {e.sql()}")
 
 
 def parse_from(text: str) -> str:
@@ -94,20 +94,20 @@ def parse_from(text: str) -> str:
     try:
         stmts = sqlglot.parse(text)
     except Exception as ex:  # noqa: BLE001
-        raise SqlError(f"SQL inválido: {ex}")
+        raise SqlError(f"Invalid SQL: {ex}")
     stmts = [s for s in stmts if s is not None]
     if len(stmts) != 1:
-        raise SqlError("Enviá un solo SELECT.")
+        raise SqlError("Send a single SELECT.")
     stmt = stmts[0]
     if not isinstance(stmt, exp.Select):
-        raise SqlError("Sólo se permite SELECT.")
+        raise SqlError("Only SELECT is allowed.")
     if list(stmt.find_all(exp.Join)):
-        raise SqlError("JOIN no soportado.")
+        raise SqlError("JOIN isn't supported.")
     if list(stmt.find_all(exp.Subquery)):
-        raise SqlError("Subqueries no soportadas.")
+        raise SqlError("Subqueries aren't supported.")
     tbl = stmt.find(exp.Table)
     if tbl is None:
-        raise SqlError("Falta FROM <vista>.")
+        raise SqlError("Missing FROM <view>.")
     return tbl.name
 
 
@@ -128,7 +128,7 @@ def to_spec(text: str, catalog: dict[str, FieldDef], from_: str, project_id: str
         elif isinstance(inner, exp.Column):
             select.append(_field_key(inner, catalog))
         else:
-            raise SqlError(f"SELECT no soportado: {proj.sql()}")
+            raise SqlError(f"Unsupported SELECT item: {proj.sql()}")
     where = None
     if stmt.args.get("where"):
         where = _condition(stmt.args["where"].this, catalog)

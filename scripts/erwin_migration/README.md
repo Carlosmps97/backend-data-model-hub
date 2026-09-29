@@ -84,7 +84,9 @@ Parent_Domain_Ref, typeOverridden si difiere del default del dominio,
 `isNullable`, `isPartition` del UDP Particion) · Relationship 2/7→
 `relationships` (**v2, doc 19: UN doc por relación con TODOS sus pares** en
 `pairs[]`, no uno por par; identifying=tipo 2; cardinalidad del padre desde
-`Null_Option_Type`) · View→`views` (fuente por relación tipo 16, columnas
+`Null_Option_Type`; **frases de relación** `Parent_To_Child_Verb_Phrase` /
+`Child_To_Parent_Verb_Phrase` → `parentToChildPhrase` / `childToParentPhrase`,
+doc 98 — solo viajan las que el XML trae) · View→`views` (fuente por relación tipo 16, columnas
 passthrough con castType si el tipo difiere; **+ `description` de vista y de
 columna-de-vista (F5)** cuando difiere del origen físico) · Domain custom→
 `parent_domains` · Glossary→`glossary_terms` · Property_Type→

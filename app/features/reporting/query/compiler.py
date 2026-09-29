@@ -35,7 +35,7 @@ class Compiled:
 def _field(catalog: dict[str, FieldDef], key: str) -> FieldDef:
     fd = catalog.get(key)
     if fd is None:
-        raise QueryError(f"Campo desconocido: {key!r}", code=400)
+        raise QueryError(f"Unknown field: {key!r}", code=400)
     return fd
 
 
@@ -49,7 +49,7 @@ def _coerce(fd: FieldDef, value):
             f = float(value)
             return int(f) if f.is_integer() else f
         except (TypeError, ValueError):
-            raise QueryError(f"Valor numérico inválido para {fd.key}: {value!r}", code=400)
+            raise QueryError(f"Invalid number for {fd.key}: {value!r}", code=400)
     if fd.type == "boolean":
         return value in (True, "true", "True", 1, "1")
     return str(value)
@@ -58,9 +58,9 @@ def _coerce(fd: FieldDef, value):
 def _predicate(fd: FieldDef, op: str, value) -> dict:
     p = fd.path
     if fd.hydrate == "derived":
-        raise QueryError(f"El campo {fd.key} es calculado y no admite filtros", code=422)
+        raise QueryError(f"Field {fd.key} is calculated and can't be filtered", code=422)
     if op not in fd.ops:
-        raise QueryError(f"Op {op!r} no permitida para {fd.key} ({fd.type})", code=422)
+        raise QueryError(f"Operator {op!r} isn't allowed for {fd.key} ({fd.type})", code=422)
     if op == "eq":
         return {p: _coerce(fd, value)}
     if op == "ne":
@@ -76,13 +76,13 @@ def _predicate(fd: FieldDef, op: str, value) -> dict:
         return {p: {"$" + op: _coerce(fd, value)}}
     if op == "between":
         if not isinstance(value, (list, tuple)) or len(value) != 2:
-            raise QueryError(f"between requiere [min, max] en {fd.key}", code=400)
+            raise QueryError(f"between needs [min, max] on {fd.key}", code=400)
         return {p: {"$gte": _coerce(fd, value[0]), "$lte": _coerce(fd, value[1])}}
     if op == "exists":
         return {p: {"$exists": bool(value) if value is not None else True}}
     if op == "isnull":
         return {"$or": [{p: {"$exists": False}}, {p: {"$in": [None, ""]}}]}
-    raise QueryError(f"Op no soportada: {op}", code=422)  # pragma: no cover
+    raise QueryError(f"Unsupported operator: {op}", code=422)  # pragma: no cover
 
 
 def build_match(node, catalog: dict[str, FieldDef]) -> dict:
@@ -112,7 +112,7 @@ def _accumulator(a: Aggregation, catalog: dict[str, FieldDef]) -> dict:
     if a.fn == "countDistinct":
         return {"$addToSet": "$" + _field(catalog, a.field).path} if a.field else {"$addToSet": "$_id"}
     if a.field is None:
-        raise QueryError(f"La agregación {a.fn} requiere un campo", code=400)
+        raise QueryError(f"Aggregation {a.fn} needs a field", code=400)
     return {_AGG[a.fn]: "$" + _field(catalog, a.field).path}
 
 
@@ -126,7 +126,7 @@ def compile_spec(spec: QuerySpec, catalog: dict[str, FieldDef]) -> Compiled:
         for k in [*spec.groupBy, *[a.field for a in spec.aggregations if a.field]]:
             if _field(catalog, k).hydrate == "derived":
                 raise QueryError(
-                    f"El campo {k!r} es calculado y no admite groupBy/agregación", code=422)
+                    f"Field {k!r} is calculated and can't be grouped or aggregated", code=422)
         # _id = dimensiones del groupBy (con $ifNull → "(sin valor)" para nulos).
         gid = {gb: {"$ifNull": ["$" + _field(catalog, gb).path, None]} for gb in spec.groupBy} or None
         accs, project = {}, {"_id": 0}
@@ -158,9 +158,14 @@ def compile_spec(spec: QuerySpec, catalog: dict[str, FieldDef]) -> Compiled:
     for o in spec.orderBy:
         fd = _field(catalog, o.field)
         if not fd.sortable:
+            # Doc 100: se nombran los campos ordenables de ESTA entidad (las
+            # relaciones y las vistas no tienen ninguno).
+            sortable = [k for k, f in catalog.items() if f.sortable]
             raise QueryError(
-                f"No se puede ordenar por {o.field!r} (sin índice) a esta escala. "
-                f"Ordená por un campo indexado (p.ej. physicalName).", code=422)
+                f"Can't sort by {o.field!r}: it has no index. "
+                + (f"Sort by an indexed field: {', '.join(sortable)}." if sortable
+                   else "This entity has no sortable field: rows come in their default order."),
+                code=422)
         sort.append((fd.path, 1 if o.dir == "asc" else -1))
     return Compiled(match=match, group=None, project=project, sort=sort,
                     select=select, grouped=False, warnings=warnings)

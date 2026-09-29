@@ -9,7 +9,8 @@ ONE-SHOT (destructivo) — deja la plataforma como un primer deployment:
   quality POR PROYECTO (gate + glosario cruzado sólo entre los archivos que
   se unen en un mismo proyecto) → reset DESTRUCTIVO → create_admin (4 roles
   de caja + admin + whitelist SSO) → migrate archivo por archivo → audit →
-  seed_ddl_export_rules ("data functions", en todos los proyectos) →
+  seed_ddl_export_rules ("data functions", en todos los proyectos; los de
+  `ORACLE_PROJECTS` quedan sin reglas y con Oracle por default — doc 101) →
   seed_upload_profiles (perfil de carga «Plantilla BCP», doc 78) →
   seed_sheet_templates (plantilla Excel «QA_MODELO», doc 95) →
   arrange_all → mark_base_version (v1 de cada proyecto, título parametrizable).

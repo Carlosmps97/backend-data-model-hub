@@ -5,8 +5,8 @@ PUBLICADO vivo durante la revisión; `after` = payload del cambio, que por regla
 de la casa es SIEMPRE el doc completo) y acá solo se compara y se vuelve legible.
 
 Filosofía: honesto pero legible. Se comparan los documentos completos
-excluyendo SOLO ruido interno (timestamps, flgactive, `layout`/`drawings` del
-canvas — posiciones ensuciarían todo diff de modelo). Las referencias se
+excluyendo SOLO ruido interno (timestamps, flgactive, `layout`/`drawings`/
+`routes` del canvas — posiciones y trazos ensuciarían todo diff de modelo). Las referencias se
 resuelven a NOMBRE (UDP por defId, Parent Domain, tablas/columnas de relaciones
 y vistas) y un campo sin label conocido sale con la key prettificada — un campo
 nuevo del modelo nunca queda invisible para el revisor.
@@ -24,8 +24,9 @@ NOISE = {"id", "_id", "csId", "at", "createdAt", "updatedAt", "flgactive",
          "projectId", "physicalNameOverridden", "logicalTypeOverridden"}
 NOISE_BY_COLLECTION: dict[str, set[str]] = {
     # layout/drawings = posiciones y shapes del canvas: mover cajitas no es un
-    # cambio de MODELO revisable campo a campo.
-    "subject_areas": {"layout", "drawings"},
+    # cambio de MODELO revisable campo a campo. Doc 99: `routes` = trazos
+    # manuales de los wires — dibujo, igual que las posiciones.
+    "subject_areas": {"layout", "drawings", "routes"},
     # tableId: el árbol ya da el contexto; typeOverridden: flag interno del naming.
     # pkPosition: retirado (doc 94 D1) — un doc viejo que aún lo trae no es revisable.
     "canonical_columns": {"tableId", "typeOverridden", "pkPosition"},
@@ -62,6 +63,9 @@ FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
         ("parentCardinality", "Parent cardinality"),
         ("childCardinality", "Child cardinality"), ("identifying", "Identifying"),
         ("subcategory", "Subcategory"),
+        # Doc 98: frases de relación (la etiqueta del wire).
+        ("parentToChildPhrase", "Parent-to-child phrase"),
+        ("childToParentPhrase", "Child-to-parent phrase"),
     ),
     "schemas": (("name", "Name"), ("description", "Definition")),
     "projects": (("name", "Name"), ("description", "Definition")),

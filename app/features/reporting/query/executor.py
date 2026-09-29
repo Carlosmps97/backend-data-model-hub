@@ -25,7 +25,11 @@ COLL_OF = {"columns": "canonical_columns", "tables": "canonical_tables",
            "view_columns": "views", "models": "subject_areas"}
 # Campo de orden por defecto del row-query (keyset). `subject_areas` no tiene
 # physicalName: la entidad `models` ordena por `name` (indexado en indexes.py).
-DEFAULT_SORT_FIELD = {"models": "name"}
+# Doc 100 (7.2): relaciones y vistas tampoco — ordenar por un campo que no
+# existe dejaba `null` en cada cursor y la página 2 no se podía pedir. Van por
+# `_id` (la PK): el mismo orden que ya mostraba la página 1 (todos empataban
+# en null y desempataba el `_id`).
+DEFAULT_SORT_FIELD = {"models": "name", "relationships": "_id", "views": "_id"}
 ACTIVE = {"flgactive": {"$ne": False}}
 MAX_TIME_MS = 15000
 
@@ -48,14 +52,33 @@ def _decode_cursor(cur: str):
     try:
         v = json.loads(base64.urlsafe_b64decode(cur.encode()).decode())
     except Exception:
-        raise QueryError("Cursor inválido", code=400)
+        raise QueryError("Invalid cursor", code=400)
     # El cursor va DIRECTO al $match; si sort_val fuese dict/list un atacante
     # inyectaría operadores Mongo ({"$ne":null} bypassea el keyset, {"$regex":…}
     # ReDoS). Solo se aceptan escalares para el valor y string para el _id.
     if (not isinstance(v, list) or len(v) != 2
             or isinstance(v[0], (dict, list)) or not isinstance(v[1], str)):
-        raise QueryError("Cursor inválido", code=400)
+        raise QueryError("Invalid cursor", code=400)
     return v
+
+
+def _after(path: str, direction: int, cv, cid: str) -> dict:
+    """Filas DESPUÉS del cursor `(cv, cid)` en el orden `(path, direction),
+    (_id, 1)`. Un registro sin el campo (`null`/ausente) va PRIMERO en orden
+    ascendente y ÚLTIMO en descendente — como Mongo y como el ORDER BY del
+    adaptador (NULLS FIRST / NULLS LAST) —, y comparar contra `null` no existe
+    en Lakebase (el traductor lo rechaza): el tramo de nulos va aparte.
+    Doc 100 (7.2). Puro."""
+    if path == "_id":
+        return {"_id": {"$gt": cid}}
+    ties = {path: cv, "_id": {"$gt": cid}}
+    if cv is None:
+        # Dentro del tramo de nulos: en ascendente siguen todos los que SÍ
+        # tienen valor; en descendente el tramo es el final.
+        return {"$or": [ties, {path: {"$ne": None}}]} if direction == 1 else ties
+    beyond = {path: {"$gt" if direction == 1 else "$lt": cv}}
+    # En descendente los nulos vienen DESPUÉS de todos los valores.
+    return {"$or": [beyond, ties] + ([] if direction == 1 else [{path: None}])}
 
 
 async def _rewrite_cross_entity(node, catalog: dict[str, FieldDef], project_id: str):
@@ -73,7 +96,7 @@ async def _rewrite_cross_entity(node, catalog: dict[str, FieldDef], project_id: 
                 ids = [str(t["_id"]) async for t in db["canonical_tables"].find(
                     scoped(project_id, {**ACTIVE, "schema": {"$in": vals}}), {"_id": 1})]
                 return Condition(field="tableId", op="in", value=ids or ["__none__"])
-            raise QueryError("Filtro por schema en columns sólo soporta = / in", code=422)
+            raise QueryError("The schema filter on columns only supports = and in", code=422)
         return node
     subs = [await _rewrite_cross_entity(c, catalog, project_id) for c in node.conditions]
     return WhereGroup(op=node.op, conditions=[s for s in subs if s is not None])
@@ -140,13 +163,10 @@ async def run_query(spec: QuerySpec, cursor: str | None = None) -> dict:
     # ── Filas: keyset sobre el primer campo de orden (+ _id de desempate) ──
     sort = list(compiled.sort) or [(DEFAULT_SORT_FIELD.get(spec.from_, "physicalName"), 1)]
     sort_path, sort_dir = sort[0]
-    full_sort = [(sort_path, sort_dir), ("_id", 1)]
+    full_sort = [(sort_path, sort_dir)] + ([] if sort_path == "_id" else [("_id", 1)])
     if cursor:
         cv, cid = _decode_cursor(cursor)
-        gt = "$gt" if sort_dir == 1 else "$lt"
-        base_match = {"$and": [base_match, {"$or": [
-            {sort_path: {gt: cv}},
-            {sort_path: cv, "_id": {"$gt": cid}}]}]}
+        base_match = {"$and": [base_match, _after(sort_path, sort_dir, cv, cid)]}
     maps = await _hydration_maps(compiled.select, spec.from_, spec.projectId)
     proj = {**compiled.project, sort_path: 1}
     # Proyectar las FUENTES de hidratación cross-entity (schema en columns viene
@@ -189,7 +209,7 @@ async def _run_view_columns(spec: QuerySpec, catalog: dict[str, FieldDef],
     derivadas del $unwind). La `description` cae a la de la columna FÍSICA origen
     cuando la vista no la override (mismo fallback que el editor)."""
     if spec.is_grouped:
-        raise QueryError("El agrupado no está soportado para view_columns.", code=422)
+        raise QueryError("Grouping isn't supported for view_columns.", code=422)
     db = await get_db()
     coll = db["views"]
     match = build_match(spec.where, catalog)
@@ -206,9 +226,9 @@ async def _run_view_columns(spec: QuerySpec, catalog: dict[str, FieldDef],
         try:
             offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
         except Exception:
-            raise QueryError("Cursor inválido", code=400)
+            raise QueryError("Invalid cursor", code=400)
         if offset < 0:
-            raise QueryError("Cursor inválido", code=400)
+            raise QueryError("Invalid cursor", code=400)
     pipe: list[dict] = [{"$match": scoped(spec.projectId, ACTIVE)}, {"$unwind": "$sources"}]
     if match:
         pipe.append({"$match": match})

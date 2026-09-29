@@ -120,6 +120,9 @@ class ErwinRelationship:
     parent_ref: str            # entidad padre (lado PK)
     child_ref: str             # entidad o vista hija (lado FK / derivada)
     null_option: str = ""      # Null_Option_Type: "100" nulls allowed | "101" no nulls
+    # Doc 98: frases de la relación (Relationship Editor · General). "" = sin frase.
+    parent_to_child_phrase: str = ""   # Parent_To_Child_Verb_Phrase
+    child_to_parent_phrase: str = ""   # Child_To_Parent_Verb_Phrase
 
 
 @dataclass
@@ -420,6 +423,8 @@ def parse(xml_path: str) -> ErwinModel:
                 parent_ref=_txt(p, "Parent_Entity_Ref"),
                 child_ref=_txt(p, "Child_Entity_Ref"),
                 null_option=_txt(p, "Null_Option_Type").strip(),
+                parent_to_child_phrase=_txt(p, "Parent_To_Child_Verb_Phrase").strip(),
+                child_to_parent_phrase=_txt(p, "Child_To_Parent_Verb_Phrase").strip(),
             )
             m.relationships[r.id] = r
 

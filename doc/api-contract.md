@@ -1697,6 +1697,8 @@ Respuesta 200:
 
 `output` guarda SOLO lo que el proyecto fijó (puede venir `{}` en un proyecto sin semilla); lo efectivo = defaults (`seedOutput` de §12.4, las convenciones de la macro BCP) + lo guardado, clave a clave — un valor guardado inválido cae a su default sin descartar los demás. Claves: `identifierCase` (`as-is`/`lower`/`upper`), `quoteIdentifiers` (`when-needed`/`always`), `typeCase` (`lower`/`upper`), `createTable` (`or-replace`/`if-not-exists`), `viewTagsAs` (`table`/`view`), `tableFormat`, `external`, `location`, `locationFolderCase`, `unityCatalog`, `catalog`, `defaultSchema`, `includeViews`/`includeKeys`/`includeComments`/`includePartitions`/`includeIndexes`, `tblProperties` (`[{key, value}]`) y `fileNames` (`table`/`modeledView`/`generatedView` = prefijos, `separator`, `nameCase` `upper`/`lower`/`as-is`, `schema` `when-needed`/`always`; sin `\ / : * ? " < > |`).
 
+Doc 101 — dialecto por default y configuración propia de Oracle. `dialect` (`databricks`/`oracle`, default `databricks`) = con qué dialecto abre el modal Export DDL. Las claves planas de arriba son las de **Databricks**; `oracle` es un objeto aparte con SOLO lo que existe en Oracle: `includeViews`/`includeKeys`/`includeComments`, `identifierCase`, `quoteIdentifiers`, `typeCase`, `maxStringSize` (`standard`/`extended` = el MAX_STRING_SIZE de la base: con `standard` un VARCHAR2 de más de 4 000 — NVARCHAR2 2 000, RAW 2 000 — sale CLOB/NCLOB/BLOB), `defaultSchema` (vacío = nombre sin calificar) y `typeMap` (`[{from, to}]`: los tipos del modelo que Oracle no tiene → su equivalente; un origen con paréntesis compara el tipo completo, sin paréntesis el tipo base; filas vacías se descartan; una fila a medias, un texto que no es un tipo o un origen repetido — sin distinguir mayúsculas ni espacios — responde 422 con el número de fila, p. ej. `Oracle type mapping, row 3: the Oracle type is missing.`). `fileNames` es de los dos dialectos. Defaults de Oracle: comentarios OFF, PK/FK ON, identificadores y tipos en MAYÚSCULA, `maxStringSize: standard`, 29 filas de mapeo (`DATETIME → DATE`, `STRING → VARCHAR2(4000)`, `VARCHAR(MAX) → CLOB`, `NVARCHAR → NVARCHAR2(2000)`…; el largo del destino es el de las columnas sin largo — una columna con largo conserva el suyo si el destino lo admite). El backend solo guarda y valida `oracle`: el DDL Oracle lo genera el front y no pasa por `/render` (las reglas son de Databricks).
+
 Semántica del lookup: un valor sin mapeo con `default: null` no emite nada; la condición VACÍA de una regla + `default` del lookup es cómo se declara el "sin valor → default" (enfoque B del doc 30 §11: el motor lee SOLO valores explícitos de UDP, jamás el `defaultValue` de la definición).
 
 ### 12.3 GET /api/projects/{project_id}/ddl-rules/artifacts
@@ -2015,6 +2017,7 @@ class SubjectAreaDoc:
     layout: dict[str, {x,y}]   # posición por tabla
     drawings: list[dict]       # capa DRAWING (formas/texto con estilo)
     udpValues: dict[str, str]  # UDP de nivel canvas (F5, doc 06)
+    routes: dict[str, list[{x,y}]]  # trazos manuales de wires (doc 99): puntos de quiebre por wire
 ```
 
 ### 2.1 GET /api/projects
@@ -2178,7 +2181,14 @@ curl -X DELETE http://localhost:8000/api/folders/f-02
 
 Router: `app/features/projects/router.py` (mismo router que projects). Guard `write_guard("model.edit")`.
 
-Un canvas = un diagrama ER. `tableIds`, `viewIds`, `layout`, `drawings` y `udpValues` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip). Existe también `PUT /api/subject-areas/{sa_id}/views` (doc 70; body `{ viewIds: [] }`, la membresía COMPLETA de vistas del canvas), hermano de `/tables`. Los UDP de canvas (`udpValues`) se editan SOLO por el draft (el `PUT …/udp` directo se retiró en el doc 75 D14). Un canvas sólo puede referenciar tablas/vistas de SU proyecto (guard I2, 409).
+Un canvas = un diagrama ER. `tableIds`, `viewIds`, `layout`, `drawings`, `udpValues` y `routes` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip). Existe también `PUT /api/subject-areas/{sa_id}/views` (doc 70; body `{ viewIds: [] }`, la membresía COMPLETA de vistas del canvas), hermano de `/tables`. Los UDP de canvas (`udpValues`) se editan SOLO por el draft (el `PUT …/udp` directo se retiró en el doc 75 D14). Un canvas sólo puede referenciar tablas/vistas de SU proyecto (guard I2, 409).
+
+> **Trazos manuales de wires — `routes` (doc 99).** El canvas guarda, por wire, los puntos de quiebre que el modelador puso a mano: `routes: { "<id del wire>": [{"x": 420, "y": 180}, …] }`, en coordenadas del canvas y en orden padre → hijo. El id del wire es el de la relación (wire crow's-foot y rama de subcategoría) o `subsym-{símbolo}` (tronco supertipo → símbolo). Un wire sin entrada se dibuja con el camino automático.
+> - **No hay endpoint propio**: el trazo viaja en el documento COMPLETO del canvas por el changeset (`PUT /api/changesets/{cs_id}/changes`, colección `subject_areas`), igual que las posiciones en una sesión de edición. Se versiona con el documento: dos drafts sobre el mismo canvas ⇒ gana el último que publica, con su canvas completo (posiciones y trazos juntos).
+> - **Escritura estricta** (solo lo que manda el cliente, en `/changes` y `/changes/bulk`): `routes` debe ser un objeto de listas de `{x, y}` con números finitos, `|coordenada| ≤ 1 000 000`, a lo más **32 puntos por wire** y **5 000 wires por canvas**; el id del wire no puede estar vacío, pasar de 200 caracteres ni llevar caracteres de control → si no, `422` (`subject_areas/<id>: routes.<wire>[<i>] x must be a finite number`). También se rechaza una llave de primer nivel `routes.<algo>` (el trazo se manda como el objeto `routes` completo). Ausente, `null` y lista vacía valen (sin trazo).
+> - **Lectura tolerante**: un trazo corrupto en la BD se descarta entero al leer (el wire vuelve al camino automático) — nunca deja un canvas ni el árbol del proyecto sin abrir. `GET …/diagram`, `GET /subject-areas/{id}`, la lista de canvases y `GET /changesets/{cs_id}/effective/subject_areas` devuelven `routes` ya saneado.
+> - **Publish**: el canvas se publica SIEMPRE con la llave `routes` (saneada; `{}` si el payload no la trae). El apply es un `` (merge): sin la llave explícita, un draft de un cliente viejo publicaría sus posiciones con los trazos de otro, y un rollback no quitaría un trazo agregado después.
+> - **Revisión**: `routes` es ruido del diff, como `layout` y `drawings`.
 
 ### 4.1 POST /api/subject-areas
 
@@ -2305,7 +2315,11 @@ class RelationshipDoc:
     parentCardinality: str = "one"        # one | many | one-only | zero-one | one-many | zero-many
     childCardinality: str = "zero-many"
     identifying: bool = False        # sólida; la FK es parte de la PK del hijo
+    parentToChildPhrase: str | None = None   # frase padre→hijo (etiqueta del wire)
+    childToParentPhrase: str | None = None   # frase hijo→padre
 ```
+
+Las frases se normalizan al validar (se recortan los extremos; vacío → `null`).
 
 Compat: los payloads legacy (`sourceTableId/targetTableId` + 1 par) se
 normalizan automáticamente en el validator (orientación por cardinalidad;
@@ -2332,6 +2346,8 @@ Propósito: crea una relación. Body `RelationshipBody`:
 | `parentCardinality` | string | `"one"` |
 | `childCardinality` | string | `"zero-many"` |
 | `identifying` | bool | `false` |
+| `parentToChildPhrase` | string \| null | `null` |
+| `childToParentPhrase` | string \| null | `null` |
 
 ```bash
 curl -X POST http://localhost:8000/api/relationships \
@@ -2399,6 +2415,7 @@ Respuesta (`data`):
     { "id": "r-1", "parentTableId": "t-1", "parentTableName": "DIM_CLIENTE",
       "childTableId": "t-2", "childTableName": "FACT_VENTA",
       "parentCardinality": "one", "childCardinality": "zero-many", "identifying": true,
+      "parentToChildPhrase": "Cliente realiza", "childToParentPhrase": "es de un Cliente",
       "pairs": [ { "parentColumnId": "c-1", "parentColumnName": "CLIENTE_ID",
                    "childColumnId": "c-5", "childColumnName": "CLIENTE_ID", "roleName": null } ],
       "canvases": [ { "id": "sa-1", "name": "Ventas core" } ] }
@@ -2642,7 +2659,7 @@ Respuestas de error específicas:
 
 | Código | Motivo |
 |---|---|
-| 422 | Colección no versionada, o payload que no valida contra el modelo (`add_change` valida ANTES de escribir). |
+| 422 | Colección no versionada, o payload que no valida contra el modelo (`add_change` valida ANTES de escribir). Doc 100: también una llave de PRIMER nivel reservada — con `.` (el `$set` del publish la leería como camino: `layout.x` escribía DENTRO del layout y rompía la lectura del canvas), que empieza con `$` (operador) o `_id` (identidad del registro): `canonical_tables/t-1: 'udpValues.x' is not a valid field name — …`. Vale también en 8.5b. Ningún campo de los modelos se llama así; la lectura del draft (`/effective`, `diagram`) no las devuelve y el publish no las escribe (cubre lo grabado antes). |
 | 403 | El actor no es el owner (la working copy es personal). |
 | 409 | El changeset ya no está en `draft` (fue enviado o cerrado): hay que abrir una versión nueva. También 409 por unicidad de nombres EN EL PROYECTO (crear/renombrar chocaría con una entidad existente — el Save queda bloqueado acá y el publish re-chequea); por referencia a una entidad de OTRO proyecto (doc 75 I2); por tocar en `projects` una entidad distinta de `cs.projectId`; o porque el proyecto del changeset fue borrado (`This project was deleted.`). |
 | 400 | Nombre físico sobre el `maxLength` del naming config del proyecto (`NameTooLongError`, doc 24; los nombres heredados quedan grandfathered). |
@@ -2693,7 +2710,7 @@ curl "http://localhost:8000/api/changesets/cs-9/effective/canonical_tables?schem
 
 ### 8.7 GET /api/changesets/{cs_id}/diff
 
-Propósito: **diff estructurado** por colección (`added` / `edited` / `deleted` con nombres, más flag de conflicto) e impacto. Cada item: `{id, name, collection, conflict}`. `conflict=true` cuando la entidad fue modificada en producción **después** de que este changeset la editó (al publicar, el delta la pisaría).
+Propósito: **diff estructurado** por colección (`added` / `edited` / `deleted` con nombres, más flag de conflicto) e impacto. Cada item: `{id, name, collection, conflict}`. `conflict=true` cuando la entidad fue modificada en producción **después** de que este changeset la editó (al publicar, el delta la pisaría). Doc 100: una entidad que el changeset trae y que producción **borró después de abrirse** esta versión sale en `added` con `conflict=true` y `restores=true` (al publicar vuelve a la vida — gana el draft que publica; la revisión lo avisa con esas palabras). Un borrado anterior a la apertura (rollback, restore) es una restauración deliberada: sin flag.
 
 ```bash
 curl http://localhost:8000/api/changesets/cs-9/diff
@@ -2848,7 +2865,7 @@ Respuesta (`data`) — un item por entidad, con SOLO los campos que cambian de v
 }
 ```
 
-`action` es `created | modified | deleted` (created → panel solo-después; deleted → solo-antes). El ruido interno se excluye (`id`/`csId`/timestamps/`flgactive`, más `layout`/`drawings` de canvases, `tableId`/`typeOverridden` de columnas, `sql` derivado de vistas); un modificado solo-ruido sale con `fields: []`. Las referencias se resuelven a NOMBRE: `udpValues` → una fila por UDP con su nombre; `parentDomainId` → nombre del Parent Domain; relaciones → nombres de tabla y `pairs` como `PADRE.col → HIJO.col` (incluso si la entidad referida también es nueva en este mismo changeset); vistas → filas de columnas ±/cambiadas por fuente; `subject_areas.tableIds` → "+N added · −N removed".
+`action` es `created | modified | deleted` (created → panel solo-después; deleted → solo-antes). El ruido interno se excluye (`id`/`csId`/timestamps/`flgactive`, más `layout`/`drawings`/`routes` de canvases, `tableId`/`typeOverridden` de columnas, `sql` derivado de vistas); un modificado solo-ruido sale con `fields: []`. Las referencias se resuelven a NOMBRE: `udpValues` → una fila por UDP con su nombre; `parentDomainId` → nombre del Parent Domain; relaciones → nombres de tabla y `pairs` como `PADRE.col → HIJO.col` (incluso si la entidad referida también es nueva en este mismo changeset); vistas → filas de columnas ±/cambiadas por fuente; `subject_areas.tableIds` → "+N added · −N removed".
 
 ### 8.16 POST /api/changesets/{cs_id}/rollback
 
@@ -3154,7 +3171,7 @@ Notas de diseño relevantes para el consumidor:
 - **`op` es un enum cerrado** → cero inyección; el `value` se castea al tipo del campo. `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
 - **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — invariante de escala mantenido como contrato (a escala, un orden sin índice sería full-scan). El orden debe ir por un campo indexado (p. ej. `physicalName`).
 - **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`).
-- **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`.
+- **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`. Orden por defecto: `physicalName` (tablas, columnas), `name` (`models`) y `_id` (relaciones y vistas, que no tienen `physicalName` — doc 100: ordenar por un campo inexistente dejaba `null` en cada cursor y la página 2 fallaba en Lakebase). Un registro sin el campo de orden va primero en ascendente y último en descendente, y no corta la paginación.
 - **UDP dinámicos**: cada UDP def del proyecto agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
 - **Alcance**: el executor antepone `{projectId, flgactive}` a todo `$match`; el `projectId` del spec no es un filtro opcional sino el universo de la consulta.
 
@@ -3190,7 +3207,7 @@ Campos estáticos por vista:
 |---|---|
 | `columns` | physicalName, logicalName, tableId, schema*, dataType, parentDomainId, typeOverridden, isPrimaryKey, isForeignKey, isNullable, isPartition, ordinal, description |
 | `tables` | physicalName, logicalName, schema, description |
-| `relationships` | parentTableId, childTableId, parentCardinality, childCardinality, identifying |
+| `relationships` | parentTableId, childTableId, parentCardinality, childCardinality, identifying, subcategory, parentToChildPhrase, childToParentPhrase |
 | `views` | name, schema, tableId, description |
 | `view_columns` | viewName, schema, outputName, sourceColumn, sourceTableId, castType, expression, description — entidad VIRTUAL (doc 22 F5): 1 fila por columna de cada vista (unwind de `views.sources`), por un camino dedicado del executor; no admite groupBy |
 | `models` | name, folderId, tableCount — entidad `models` (canvases/`subject_areas` del proyecto); `tableCount` es derivado post-fetch (no filtra/agrupa) |
@@ -3407,7 +3424,7 @@ Respuesta (`data`):
 
 **GET /api/reporting/insights/glossary-usage** — uso de cada término del glosario (`columnUsage` = columnas cuyo `physicalName` contiene la abreviatura; heurística acotada por RU).
 
-**GET /api/reporting/insights/relationships** — relaciones con ambos extremos resueltos (`schema.tabla.columna`), cardinalidad (`1:N`), flags `identifying`/`isSelfReferencing`/`crossSchema`, y un `label` legible. Query `limit` (default 2000, 1–5000).
+**GET /api/reporting/insights/relationships** — relaciones con ambos extremos resueltos (`schema.tabla.columna`), cardinalidad (`1:N`), flags `identifying`/`isSelfReferencing`/`crossSchema`, y un `label` legible. Query `limit` (default 2000, 1–5000). Cada fila lleva además las frases de la relación, `parentToChildPhrase` y `childToParentPhrase` (`null` si no tiene); al ser datos de la RELACIÓN, se repiten en cada fila de par.
 
 ```bash
 curl "http://localhost:8000/api/reporting/insights/relationships?projectId=p-001&limit=500"

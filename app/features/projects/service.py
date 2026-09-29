@@ -8,6 +8,7 @@ from app.features.changesets import service as cs_service
 from app.features.data_standards import service as std_service
 
 from . import repository
+from .models import clean_routes
 from .schemas import SubjectAreaBody
 
 
@@ -111,7 +112,7 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
     Con `changeset_id` aplica el overlay del working copy SERVER-SIDE (acotado
     al slice del canvas), de modo que el frontend arma el canvas con UNA sola
     request tanto en modo publicado como en modo edición/visor."""
-    from app.core.versioning import overlay
+    from app.core.versioning import overlay, plain
     from app.features.catalog import repository as catalog_repo
     from app.features.changesets import repository as cs_repo
     from app.features.relationships import repository as rel_repo
@@ -195,6 +196,11 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
     # Doc 70: el canvas sale con `viewIds` MATERIALIZADO — un canvas legacy
     # (None) devuelve la lista que hoy se ve, así el front siempre parte de una
     # lista explícita para sus mutaciones de membresía (import, add, remove).
-    sa_out = {**sa, "viewIds": list(explicit) if explicit is not None else [v["id"] for v in views]}
+    # Doc 99: `routes` SANEADO — con changeset el canvas es el payload crudo del
+    # draft (no pasó por el modelo); publicado ya viene limpio de `SubjectAreaDoc`.
+    # Doc 100: sin llaves reservadas (el canvas del draft es el payload crudo;
+    # el cliente arma su próximo guardado sobre este documento).
+    sa_out = {**plain(sa), "viewIds": list(explicit) if explicit is not None else [v["id"] for v in views],
+              "routes": clean_routes(sa.get("routes"))}
     return {"subjectArea": sa_out, "tables": tables, "columns": columns,
             "relationships": visible, "views": views}

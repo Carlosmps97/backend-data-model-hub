@@ -17,7 +17,7 @@ def test_facets_de_campo_derived_422(client, monkeypatch):
     monkeypatch.setattr(ex, "_udp_defs", AsyncMock(return_value=[]))
     resp = client.get("/api/reporting/facets", params={"field": "tableCount", "from": "models", "projectId": "p1"})
     assert resp.status_code == 422
-    assert "calculado" in resp.json()["detail"]
+    assert "calculated" in resp.json()["detail"]
 
 
 def test_facets_de_campo_enum_sigue_funcionando(client, monkeypatch):

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.models import DOC_CONFIG
 
@@ -22,6 +22,18 @@ _MANYISH = {"many", "one-many", "zero-many"}
 _ONEISH = {"one", "zero-one", "one-only"}
 _LEGACY_FIELDS = ("sourceTableId", "sourceColumnId", "targetTableId",
                   "targetColumnId", "sourceCardinality", "targetCardinality")
+# Frases de relación (doc 98, Erwin: Parent-to-Child / Child-To-Parent Phrase).
+PHRASE_FIELDS = ("parentToChildPhrase", "childToParentPhrase")
+
+
+def clean_phrase(v: object) -> object:
+    """Frase normalizada: extremos recortados; vacío ≡ sin frase (None). Un
+    valor que NO es texto pasa intacto para que Pydantic lo rechace como a
+    cualquier otro campo de texto (no se convierte basura en una etiqueta).
+    Compartido por `RelationshipDoc` y el DTO `RelationshipBody`. Puro."""
+    if isinstance(v, str):
+        return v.strip() or None
+    return v
 
 
 def _child_cardinality(child_raw: str, parent_raw: str) -> str:
@@ -88,6 +100,14 @@ class RelationshipDoc(BaseModel):
     # mismo grupo comparten `subtypeSymbolId` y el canvas deriva el círculo.
     subcategory: bool = False
     subtypeSymbolId: str | None = None
+    # Frases de relación (doc 98): la etiqueta que el canvas dibuja sobre el
+    # wire. Opcionales y SIN validación dura de largo — una frase migrada larga
+    # jamás debe tumbar la lectura de la relación (el tope vive en la caja de
+    # texto del front).
+    parentToChildPhrase: str | None = None
+    childToParentPhrase: str | None = None
+
+    _clean_phrases = field_validator(*PHRASE_FIELDS, mode="before")(clean_phrase)
 
     @model_validator(mode="before")
     @classmethod

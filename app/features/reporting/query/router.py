@@ -35,7 +35,7 @@ class SqlBody(BaseModel):
 async def _spec_from_sql(text: str, project_id: str) -> QuerySpec:
     from_ = parser.parse_from(text)
     if from_ not in ex.COLL_OF:
-        raise parser.SqlError(f"Vista desconocida en FROM: {from_}")
+        raise parser.SqlError(f"Unknown view in FROM: {from_}")
     cat = build_catalog(from_, await ex._udp_defs(project_id))
     return parser.to_spec(text, cat, from_, project_id)
 
@@ -47,7 +47,7 @@ async def catalog(projectId: str = Query(min_length=1),
     dinámicos (los del proyecto), con ops por tipo, enumValues,
     sortable/indexed. Alimenta el query-builder y el SQL."""
     if from_ not in ex.COLL_OF:
-        raise HTTPException(400, f"Vista desconocida: {from_}")
+        raise HTTPException(400, f"Unknown view: {from_}")
     cat = build_catalog(from_, await ex._udp_defs(projectId))
     return ok({"from": from_, "fields": [fd.to_public() for fd in cat.values()]})
 
@@ -167,7 +167,7 @@ def _stamped_body(body: reports.SavedReportBody) -> reports.SavedReportBody:
     try:
         QuerySpec.model_validate(spec)
     except ValidationError as e:
-        raise HTTPException(422, "El spec del reporte no es una consulta válida.") from e
+        raise HTTPException(422, "The report spec isn't a valid query.") from e
     return body.model_copy(update={"spec": spec})
 
 
@@ -180,14 +180,14 @@ async def create_report(body: reports.SavedReportBody, principal: Principal = De
 async def update_report(rid: str, body: reports.SavedReportBody, principal: Principal = Depends(current_principal)):
     r = await reports.update_report(principal.username, rid, _stamped_body(body))
     if r is None:
-        raise HTTPException(404, "Reporte no encontrado (o no es tuyo).")
+        raise HTTPException(404, "Report not found (or it isn't yours).")
     return ok(r)
 
 
 @router.delete("/reports/{rid}")
 async def delete_report(rid: str, principal: Principal = Depends(current_principal)):
     if not await reports.delete_report(principal.username, rid):
-        raise HTTPException(404, "Reporte no encontrado (o no es tuyo).")
+        raise HTTPException(404, "Report not found (or it isn't yours).")
     return ok({"id": rid})
 
 
@@ -201,14 +201,14 @@ async def facets(field: str, projectId: str = Query(min_length=1),
     cat = build_catalog(from_, await ex._udp_defs(projectId))
     fd = cat.get(field)
     if fd is None:
-        raise HTTPException(400, f"Campo desconocido: {field}")
+        raise HTTPException(400, f"Unknown field: {field}")
     if fd.hydrate == "derived":
         # Defensa en profundidad (mismo criterio que el compiler en where/
         # groupBy/agregaciones): los campos calculados post-fetch no existen en
         # Mongo — facetarlos agruparía por su path fuente (p.ej. el array
         # tableIds) y devolvería basura. El builder ya no los ofrece (ops=[]);
         # esto cubre clientes no-browser.
-        raise HTTPException(422, f"El campo {fd.key} es calculado y no admite facetas")
+        raise HTTPException(422, f"Field {fd.key} is calculated and has no facets")
     db = await get_db()
     if fd.enumValues:
         vals = [v for v in fd.enumValues if not q or q.lower() in v.lower()][:limit]

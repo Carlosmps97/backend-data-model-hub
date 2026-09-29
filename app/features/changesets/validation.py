@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
+from app.core.versioning import reserved_key
 from app.features.catalog.models import CanonicalColumnDoc, CanonicalTableDoc
 from app.features.folders.models import FolderDoc
-from app.features.projects.models import ProjectDoc, SubjectAreaDoc
+from app.features.projects.models import ProjectDoc, SubjectAreaDoc, routes_error
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas.models import SchemaDoc
 from app.features.views.models import ViewDoc
@@ -142,6 +143,44 @@ def payload_error(collection: str, entity_id: str, op: str | None, payload: dict
             for e in exc.errors()[:5]
         )
         return f"{collection}/{entity_id}: {detail}"
+
+
+def client_routes_error(collection: str, entity_id: str, op: str | None, payload: dict | None) -> str | None:
+    """Doc 99 — chequeo ESTRICTO de los trazos (`routes`) de un canvas que manda
+    un CLIENTE. El modelo los LEE tolerante (un trazo corrupto se descarta y el
+    canvas abre igual), así que `payload_error` nunca falla por ellos: sin este
+    chequeo un cliente con bug grabaría basura sin enterarse. Sólo va en la
+    ENTRADA (`add_change` / lote): lo que arma el backend (cascadas, rollback) y
+    el gate del publish no pasan por acá — se sanean al aplicar (`apply_plan`),
+    para que un dato viejo corrupto jamás bloquee una publicación. Puro."""
+    if collection != "subject_areas" or op == "delete":
+        return None
+    # El publish mete TODAS las llaves del payload en el `$set`: una llave de
+    # primer nivel `routes.<algo>` escribiría DENTRO de `routes` sin pasar por
+    # el chequeo de abajo.
+    dotted = sorted(k for k in (payload or {}) if isinstance(k, str) and k.startswith("routes."))
+    if dotted:
+        return (f"{collection}/{entity_id}: routes: '{dotted[0]}' is not a field — "
+                "send the whole routes object")
+    err = routes_error((payload or {}).get("routes"))
+    return f"{collection}/{entity_id}: {err}" if err else None
+
+
+def client_keys_error(collection: str, entity_id: str, op: str | None, payload: dict | None) -> str | None:
+    """Doc 100 (P1/P2) — llaves de PRIMER nivel que el `$set` del publish lee
+    como otra cosa (`a.b` = camino, `$x` = operador, `_id` = identidad; ver
+    `reserved_key`). El modelo las IGNORA (`extra="ignore"`), así que
+    `payload_error` nunca falla por ellas: sin este chequeo `layout.evil`
+    escribía DENTRO del layout y rompía la lectura del canvas. Sólo va en la
+    ENTRADA (`add_change` / lote); el publish además las descarta
+    (`apply_plan`) por si quedó alguna grabada de antes. Puro."""
+    if op == "delete":
+        return None
+    bad = sorted(k for k in (payload or {}) if reserved_key(k))
+    if not bad:
+        return None
+    return (f"{collection}/{entity_id}: '{bad[0]}' is not a valid field name — "
+            "a field name can't contain '.' or start with '$', and '_id' is reserved")
 
 
 def validate_changes(changes: dict) -> list[str]:

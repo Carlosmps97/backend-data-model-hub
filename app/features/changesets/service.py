@@ -16,12 +16,13 @@ from app.core.logging import get_logger
 from app.core.naming.logical import sanitize_logical_name
 from app.core.naming import apply_case
 from app.core.scope import PROJECT_SCOPED, ProjectDeletedError, scoped
-from app.core.versioning import overlay, summarize_diff
+from app.core.versioning import overlay, plain, summarize_diff
 from app.features.domains import repository as dom_repo
 from app.features.domains.cascade import align_restored_column
 from app.features.glossary import service as dict_svc
 from app.features.projects import repository as projects_repo
-from app.features.relationships.models import RelationshipDoc
+from app.features.projects.models import clean_routes
+from app.features.relationships.models import PHRASE_FIELDS, RelationshipDoc
 from app.features.schemas import service as schemas_service
 from app.features.settings import service as settings_service
 from app.features.views.models import normalize_custom_sql, normalize_source_tables
@@ -55,6 +56,12 @@ def apply_plan(changes: dict) -> list[tuple]:
     for collection in ordered:
         for eid, ch in changes[collection].items():
             payload = ch.get("payload") if ch.get("op") != "delete" else None
+            if payload is not None:
+                # Doc 100 (P1/P2): el `$set` leería `a.b` como camino, `$x`
+                # como operador y `_id` como la identidad del registro. La
+                # entrada ya las rechaza; esto cubre lo grabado antes del
+                # arreglo y lo que arma el backend desde documentos viejos.
+                payload = plain(payload)
             if collection == "views" and payload:
                 # F3a: una vista publicada VÍA changeset debe quedar normalizada
                 # igual que POST/PUT (tableId↔sourceTableIds) — el payload crudo
@@ -66,6 +73,21 @@ def apply_plan(changes: dict) -> list[tuple]:
                 # Doc 91 D6: el User-Defined SQL se publica VERBATIM (solo
                 # strip; vacío ⇒ Regular). Sin parse ni columnas derivadas.
                 payload = normalize_custom_sql(payload)
+            if collection == "relationships" and payload:
+                # Doc 98: el apply es un $set (merge) — una llave AUSENTE del
+                # payload no borra la publicada. Las imágenes previas de las
+                # relaciones anteriores al doc 98 no traen las frases: sin este
+                # default explícito, un rollback no podría quitar una frase
+                # agregada después. Una frase que SÍ viene en el payload gana.
+                payload = {**dict.fromkeys(PHRASE_FIELDS), **payload}
+            if collection == "subject_areas" and payload:
+                # Doc 99: mismo motivo — un canvas que NO trae `routes` (draft
+                # de un cliente viejo, imagen previa anterior al doc 99)
+                # publicaría SUS posiciones con los trazos de otro, y un
+                # rollback no quitaría un trazo agregado después: la llave va
+                # SIEMPRE. Y va saneada: lo que arma el backend (cascada de
+                # membresía, rollback) parte del documento tal cual está.
+                payload = {**payload, "routes": clean_routes(payload.get("routes"))}
             plan.append((collection, eid, ch.get("op"), payload))
     return plan
 
@@ -188,6 +210,7 @@ def structured_diff(
     published: dict[str, list[dict]],
     relationships: list[dict] | None = None,
     baseline: str | None = None,
+    deleted: dict[str, dict[str, str | None]] | None = None,
 ) -> dict:
     """Diff por colección con nombres + impacto + conflictos. Puro.
 
@@ -202,6 +225,12 @@ def structured_diff(
     (publicado.updatedAt > at del cambio) — al publicar, este delta la pisaría.
     El impacto cuenta tablas/columnas tocadas y las OTRAS tablas afectadas vía
     relationships con las tocadas.
+
+    Doc 100 (P3): `deleted` = `{col: {id: deletedAt}}` de las entidades del
+    changeset BORRADAS en producción (el diff sólo ve lo activo: salen como
+    «added»). Si el borrado es posterior a la apertura de esta versión
+    (`baseline`), aprobar la RESTAURA: `conflict=True` + `restores=True`. Un
+    borrado anterior (rollback, restore) es una restauración deliberada.
     """
     out_cols: dict[str, dict] = {}
     tables_touched: set[str] = set()
@@ -222,9 +251,13 @@ def structured_diff(
                 edited_at = ch.get("at") or baseline
                 pub_updated = (meta.get(eid) or {}).get("updatedAt")
                 conflict = bool(edited_at and pub_updated and str(pub_updated) > str(edited_at))
-                buckets[bucket_of[kind]].append(
-                    {"id": eid, "name": _entity_name(meta, eid, payload), "collection": col, "conflict": conflict}
-                )
+                gone_at = ((deleted or {}).get(col) or {}).get(eid) if kind == "added" else None
+                restores = bool(gone_at and baseline and str(gone_at) > str(baseline))
+                item = {"id": eid, "name": _entity_name(meta, eid, payload), "collection": col,
+                        "conflict": conflict or restores}
+                if restores:
+                    item["restores"] = True
+                buckets[bucket_of[kind]].append(item)
         out_cols[col] = buckets
 
         # Impacto: qué tablas/columnas toca este changeset.
@@ -742,7 +775,9 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
         return "forbidden"
     await ensure_project_alive(cs)
     payload = _stamp_project(cs, collection, op, payload)          # doc 75 I1
-    err = validation.payload_error(collection, entity_id, op, payload)
+    err = (validation.payload_error(collection, entity_id, op, payload)
+           or validation.client_routes_error(collection, entity_id, op, payload)    # doc 99
+           or validation.client_keys_error(collection, entity_id, op, payload))     # doc 100
     if err:
         raise InvalidPayloadError(err)
     if collection == "relationships" and op == "upsert" and payload:
@@ -890,6 +925,15 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
         return cs
     # Doc 88 §4: los deletes de tablas/vistas del lote cascadean su membresía a
     # los canvases que NO vienen en el lote (los del lote se podan en el gate).
+    # Doc 99: los trazos (`routes`) se validan ESTRICTO sólo en lo que manda el
+    # cliente — los canvases que agrega la cascada de abajo salen del documento
+    # publicado tal cual y se sanean al aplicar.
+    # Doc 100: y las llaves reservadas (`a.b`, `$x`, `_id`), igual que add_change.
+    client_errors = [e for it in ordered
+                     if (e := validation.client_routes_error(it["collection"], it["entityId"], it["op"], it.get("payload"))
+                         or validation.client_keys_error(it["collection"], it["entityId"], it["op"], it.get("payload")))]
+    if client_errors:
+        raise InvalidPayloadError(" | ".join(client_errors[:5]))
     gone = [it for it in ordered if it["op"] == "delete" and it["collection"] in _MEMBERSHIP_COLLS]
     if gone:
         pending_sas = (await repository.changes_map(cs_id, ["subject_areas"])).get("subject_areas", {})
@@ -1036,6 +1080,24 @@ async def effective(cs_id: str, collection: str,
                     table_id: str | None = None, ids: list[str] | None = None,
                     q: str | None = None, limit: int | None = None,
                     schema: str | None = None) -> list[dict] | None:
+    """Estado efectivo de una colección (ver `_effective_docs`). Doc 99: los
+    canvases salen SIEMPRE con sus trazos (`routes`) y SANEADOS — `{}` si el
+    documento no trae la llave, igual que `diagram` y `GET /subject-areas/{id}`.
+    El cliente arma cada guardado del canvas sobre este documento, así que un
+    trazo corrupto en la BD no puede volver como payload (lo rechazaría el
+    chequeo estricto de entrada y nadie podría ni mover una tabla de ese
+    canvas)."""
+    docs = await _effective_docs(cs_id, collection, table_id=table_id, ids=ids,
+                                 q=q, limit=limit, schema=schema)
+    if docs is None or collection != "subject_areas":
+        return docs
+    return [{**d, "routes": clean_routes(d.get("routes"))} for d in docs]
+
+
+async def _effective_docs(cs_id: str, collection: str,
+                          table_id: str | None = None, ids: list[str] | None = None,
+                          q: str | None = None, limit: int | None = None,
+                          schema: str | None = None) -> list[dict] | None:
     """Estado efectivo (publicado + overlay del changeset) de una colección.
 
     `table_id`/`ids` acotan la lectura a un SLICE: sin filtro, un GET de
@@ -1349,14 +1411,10 @@ def _overlay_by_schema(published: list[dict], coll_changes: dict | None, name: s
     """Estado efectivo del slice `schema == name`: publicado + upserts del
     changeset (docs completos, PISAN al publicado homónimo), sin los deletes
     pendientes. Incluye entidades que el changeset MUDA hacia el esquema y
-    excluye las que muda fuera. Puro."""
-    docs = {d["id"]: d for d in published}
-    for eid, ch in (coll_changes or {}).items():
-        if ch.get("op") == "delete":
-            docs.pop(eid, None)
-        else:
-            docs[eid] = {**(ch.get("payload") or {}), "id": eid}
-    return [d for d in docs.values() if (d.get("schema") or "") == name]
+    excluye las que muda fuera. Doc 100: es el `overlay` de siempre (sin llaves
+    reservadas) — el rename graba estos docs con `add_change`, cuya entrada las
+    rechaza. Puro."""
+    return [d for d in overlay(published, coll_changes or {}) if (d.get("schema") or "") == name]
 
 
 async def _schema_usage(project_id: str, name: str, changes: dict) -> int:
@@ -1986,6 +2044,15 @@ async def diff(cs_id: str) -> dict | None:
     for col in VERSIONED:
         eids = list((changes.get(col) or {}).keys())
         published[col] = await repository.published(col, {"_id": {"$in": eids}}) if eids else []
+    # Doc 100 (P3): upserts de entidades que NO están activas — nuevas, o
+    # borradas en producción (aprobar las restauraría: ver structured_diff).
+    deleted: dict[str, dict[str, str | None]] = {}
+    for col in VERSIONED:
+        active = {d["id"] for d in published[col]}
+        gone = [eid for eid, ch in (changes.get(col) or {}).items()
+                if ch.get("op") != "delete" and eid not in active]
+        if gone:
+            deleted[col] = await repository.deleted_at(col, gone)
 
     # Tablas tocadas: cambios directos de tabla + tableId de columnas cambiadas
     # (del payload, o del documento publicado para deletes sin payload).
@@ -2027,7 +2094,7 @@ async def diff(cs_id: str) -> dict | None:
         published["canonical_tables"] = published["canonical_tables"] + await repository.published(
             "canonical_tables", {"_id": {"$in": need}})
 
-    result = structured_diff(changes, published, relationships, baseline=cs.get("createdAt"))
+    result = structured_diff(changes, published, relationships, baseline=cs.get("createdAt"), deleted=deleted)
     # Doc 84 A3: último cambio grabado en el request (el autor es el owner).
     result["lastChangeAt"] = max(
         (str(ch.get("at")) for per in changes.values() for ch in (per or {}).values() if ch.get("at")),

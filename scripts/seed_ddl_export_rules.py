@@ -36,6 +36,14 @@ y registra la versión "Base — DDL export rules" en el historial del proyecto
 (rollback disponible). NO re-siembra: si el proyecto ya tiene reglas activas,
 lo salta (bórralas o edítalas en la web → «Restore the base rule set»).
 
+Proyectos ORACLE (doc 101, `ORACLE_PROJECTS`): exportan a Oracle y NO llevan
+ruleset — las reglas de la macro son de Databricks (SET TAGS, TBLPROPERTIES,
+tablas _rej…). A esos se les registra solo una versión con las Output settings
+de la semilla y Oracle como dialecto por default del Export DDL (sin reglas ni
+lookups). Se saltan si ya tienen reglas o si ya eligieron un dialecto. En los
+demás proyectos, el dialecto ya elegido y la configuración de Oracle se conservan
+al sembrar el ruleset (como «Restore the base rule set» de la web).
+
 Dry-run por default; `--apply` para escribir.
   .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects            # dry-run
   .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects --apply
@@ -45,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import re
 import sys
 import uuid
@@ -52,6 +61,42 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# Doc 101: proyectos cuyo DDL se exporta a ORACLE, SIN ruleset. El nombre es el
+# del proyecto que crea el one-shot (doc 77: la subcarpeta o el .xml suelto de
+# folder_data, sin la extensión), sin distinguir mayúsculas. Al sumar otro
+# modelo Oracle, se agrega su nombre acá.
+ORACLE_PROJECTS: tuple[str, ...] = ("MODELO RDV DataEntry",)
+
+
+def is_oracle_project(name: str | None, oracle_projects: tuple[str, ...] = ORACLE_PROJECTS) -> bool:
+    """¿El proyecto exporta a Oracle sin reglas? Case-insensitive, sin bordes. Puro."""
+    key = (name or "").strip().lower()
+    return bool(key) and key in {p.strip().lower() for p in oracle_projects}
+
+
+def oracle_output(seed_output: dict) -> dict:
+    """Output settings de un proyecto Oracle: las de la semilla (copia) con Oracle
+    como dialecto por default del Export DDL. Puro."""
+    return {**copy.deepcopy(seed_output), "dialect": "oracle"}
+
+
+def seed_output_keeping_dialect(seed_output: dict, current: dict | None) -> dict:
+    """Output settings de la semilla (copia) conservando lo que el proyecto ya
+    eligió para el dialecto: `dialect` y la configuración `oracle` (el ruleset
+    base es de Databricks — igual que «Restore the base rule set» de la web). Puro."""
+    keep = {k: copy.deepcopy(current[k]) for k in ("dialect", "oracle")
+            if (current or {}).get(k) is not None}
+    return {**copy.deepcopy(seed_output), **keep}
+
+
+def unmatched_oracle_projects(projects: list[dict],
+                              oracle_projects: tuple[str, ...] = ORACLE_PROJECTS) -> list[str]:
+    """Nombres de `ORACLE_PROJECTS` que no son ningún proyecto (rename o typo: ese
+    modelo recibiría el ruleset de Databricks sin avisar). Puro."""
+    names = {(p.get("name") or "").strip().lower() for p in projects}
+    return [n for n in oracle_projects if n.strip().lower() not in names]
+
 
 # Defs UDP que el ruleset base necesita y que una carga vieja del kit podría
 # OMITIR por tener usedBy=0 en el DDV real (A4). Catálogo canónico:
@@ -134,8 +179,14 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
     existing = await rules_repo.list_rules(project_id)
     if existing:
         print(f"SALTADO: ya hay {len(existing)} regla(s) activas — no re-siembro.")
+        if is_oracle_project(project_name):
+            print("   OJO: es un proyecto Oracle (doc 101) pero ya tiene reglas de exportación: "
+                  "queda como está (el dialecto por default se cambia en Data Standards).")
         for r in existing:
             print(f"   - {r['name']} [{r['kind']}]")
+        return
+    if is_oracle_project(project_name):
+        await seed_oracle_one(project_id, project_name, apply)
         return
 
     payload = await rules_svc.templates_payload(project_id)   # lookups con udpId REAL del proyecto
@@ -189,7 +240,11 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
               f"{len(lk.get('values') or {})} valores · default={lk.get('default')!r} · {state}")
     for s in seeds:
         print(f"   regla {s['name']} [{s['kind']}]")
-    print(f"   output settings: {len(SEED_OUTPUT)} claves (convenciones de la macro BCP, doc 93)")
+    # Doc 101: el dialecto ya elegido (y la config de Oracle) no se pisa.
+    output = seed_output_keeping_dialect(
+        SEED_OUTPUT, (await rules_repo.get_config(project_id)).get("output"))
+    print(f"   output settings: {len(output)} claves (convenciones de la macro BCP, doc 93)"
+          f" · dialecto por default «{output.get('dialect')}»")
 
     if not apply:
         print("── DRY-RUN — nada escrito. Con --apply se crea la versión "
@@ -206,7 +261,7 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
                      "NoDAC/DAC, vistas de rechazos y decoración de las vistas de negocio."),
         udpUpsert=udp_upsert,
         rulesUpsert=[DdlRuleEdit(**s) for s in seeds],
-        ddlConfigPatch=DdlConfigPatch(lookups=lookups, output=SEED_OUTPUT),
+        ddlConfigPatch=DdlConfigPatch(lookups=lookups, output=output),
     )
     try:
         version = await std_service.apply("system", project_id, body)
@@ -223,14 +278,59 @@ async def seed_one(project_id: str, project_name: str, apply: bool) -> None:
         print(f"   - {r['name']} [{r['kind']}] · prio {r['priority']} · {r['validationState']}")
 
 
+async def seed_oracle_one(project_id: str, project_name: str, apply: bool) -> None:
+    """Doc 101: proyecto Oracle — SIN reglas ni lookups; una versión con las Output
+    settings de la semilla y Oracle como dialecto por default del Export DDL. Si
+    el proyecto ya eligió un dialecto (re-corrida sobre la BD viva), lo salta."""
+    from fastapi import HTTPException
+
+    from app.features.data_standards import service as std_service
+    from app.features.data_standards.schemas import ApplyBody, DdlConfigPatch
+    from app.features.ddl_rules import repository as rules_repo
+    from app.features.ddl_rules.templates import SEED_OUTPUT
+
+    current = ((await rules_repo.get_config(project_id)).get("output") or {}).get("dialect")
+    if current:
+        print(f"SALTADO: proyecto Oracle (doc 101) con dialecto por default «{current}» ya "
+              "elegido — no lo piso.")
+        return
+    output = oracle_output(SEED_OUTPUT)
+    print("PROYECTO ORACLE (doc 101): sin reglas ni lookups — solo las Output settings con "
+          f"dialecto por default «{output['dialect']}» (configuración Oracle por default: "
+          f"comentarios {'ON' if output['oracle']['includeComments'] else 'OFF'}, "
+          f"PK/FK {'ON' if output['oracle']['includeKeys'] else 'OFF'}, "
+          f"tipos {output['oracle']['typeCase'].upper()}).")
+    title = "Base — DDL output settings (Oracle, no export rules)"
+    if not apply:
+        print(f"── DRY-RUN — nada escrito. Con --apply se registra la versión '{title}'.")
+        return
+    body = ApplyBody(
+        kind="ddl", title=title,
+        description=("Proyecto Oracle (doc 101): sin ruleset de exportación; el Export DDL abre "
+                     "en Oracle con su configuración por default."),
+        ddlConfigPatch=DdlConfigPatch(output=output),
+    )
+    try:
+        version = await std_service.apply("system", project_id, body)
+    except HTTPException as exc:            # validación server-side: limpio, sin traceback
+        print(f"\nERROR de validación del apply: {exc.detail}")
+        raise SystemExit(1) from exc
+    print(f"\nOK · versión {version['label']} '{version['title']}' registrada en «{project_name}».")
+
+
 async def main(apply: bool, project: str | None = None, all_projects: bool = False) -> None:
     from app.core.db.client import connect, disconnect
     from app.features.projects import repository as projects_repo
 
     await connect()
     try:
-        targets = select_projects(await projects_repo.list_projects(), project, all_projects)
+        projects = await projects_repo.list_projects()
+        targets = select_projects(projects, project, all_projects)
         print(f"Proyectos destino: {len(targets)} → " + ", ".join(f"«{p['name']}»" for p in targets))
+        if all_projects:
+            for name in unmatched_oracle_projects(projects):
+                print(f"AVISO: «{name}» está en ORACLE_PROJECTS pero no es ningún proyecto "
+                      "(¿renombrado?) — revisa la lista (doc 101).")
         for p in targets:
             await seed_one(p["id"], p["name"], apply)
     finally:

@@ -10,7 +10,9 @@ en ~15 archivos → el kit hace **MERGE incremental**: la identidad
 cross-archivo es la clave natural (`schema.nombre`); lo repetido se ADOPTA
 (y el uso nuevo se suma), los conflictos de versión los decide el **score de
 uso** (2×relaciones + canvases + vistas), la misma FK en dos archivos no se
-duplica, y folders/canvases homónimos del mismo proyecto se fusionan. Todos
+duplica (tampoco una subcategoría: doc 100 — antes la lectura de las relaciones
+existentes no traía `subcategory` y en Lakebase nunca se reconocían), y
+folders/canvases homónimos del mismo proyecto se fusionan. Todos
 los archivos de una familia cargan al MISMO proyecto (`--project` explícito,
 obligatorio si ya existe). Cada carga deja un reporte JSON de decisiones en
 `migration-reports/`.
@@ -375,6 +377,14 @@ lookups `vacuum_map` / `update_frequency_map` / `dac_flag_map` / `dac_map`**
 DDL y cómo se nombran los archivos del zip — doc 93). Doc 75: el ruleset
 es POR PROYECTO — `--project "P"` o `--all-projects` (obligatorio uno); en un
 proyecto que ya tiene reglas se salta con aviso.
+
+**Proyectos Oracle (doc 101).** Los proyectos de `ORACLE_PROJECTS` (hoy
+«MODELO RDV DataEntry», el `.xml` suelto `folder_data/MODELO RDV DataEntry.xml`)
+exportan a Oracle y **no llevan ruleset**: la semilla les registra solo una
+versión «Base — DDL output settings (Oracle, no export rules)» con las Output
+settings y Oracle como dialecto por default (sin reglas ni lookups). Se salta
+si el proyecto ya tiene reglas o ya eligió un dialecto. Para sumar otro modelo
+Oracle, se agrega el nombre de su proyecto a esa lista.
 
 ```bash
 .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects           # dry-run
