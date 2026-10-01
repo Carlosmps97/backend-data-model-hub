@@ -7,11 +7,18 @@ Devuelve dicts crudos normalizados (`_id` -> `id`, sin campos internos del
 store) con EXACTAMENTE los campos que la agregación pura de `service` consume — incluido `schema`, que en
 la BD se guarda con esa clave (el modelo de `catalog` lo aliasa a `sql_schema`,
 pero aquí lo dejamos como `schema` para la salida del reporte).
+
+Doc 105: también lee TAJADAS del ledger (`changeset_changes`) de una versión
+propia — por `_id` determinista o por el extremo de una relación —, para que un
+lote del export no relea el ledger entero (ver `relationship_changes_touching`).
 """
 from __future__ import annotations
 
 from app.core.db.client import get_db
 from app.core.scope import scoped
+from app.features.changesets import repository as cs_repo
+
+from .draft import REL_ENDS
 
 ACTIVE = {"flgactive": {"$ne": False}}
 
@@ -156,9 +163,8 @@ async def count_tables(project_id: str) -> int:
 
 async def table_ids(project_id: str) -> list[str]:
     """Doc 102: ids de las tablas ACTIVAS del proyecto (conteo de una versión
-    propia). Proyecta un campo REAL: `{"_id": 1}` el adaptador lo lee como
-    «sin exclusiones» y traería documentos completos (doc 100)."""
-    return [d["id"] for d in await _find_active("canonical_tables", project_id, {"physicalName": 1})]
+    propia)."""
+    return [d["id"] for d in await _find_active("canonical_tables", project_id, {"_id": 1})]
 
 
 async def table_schemas(project_id: str) -> list[dict]:
@@ -233,3 +239,45 @@ async def table_names(ids: list[str]) -> dict[str, dict]:
     docs = await db["canonical_tables"].find(
         {"_id": {"$in": ids}}, {"physicalName": 1, "schema": 1}).to_list(None)
     return {str(d["_id"]): d for d in docs}
+
+
+# ── Tajadas del ledger de una versión PROPIA (changeset real, no `asof:`) ────
+# Doc 105 (revisión, hallazgo 1): un lote del export lee SÓLO los cambios que
+# lo tocan, con la misma forma que `changes_map(...)[colección]` (mismo
+# `_ledger_entry`). El `_id` de cada cambio es determinista (`change_key`).
+
+def _ledger_entries(docs: list[dict]) -> dict[str, dict]:
+    """{entityId: cambio} de docs del ledger; una edición que llega por dos
+    lecturas se valida una vez."""
+    unique = {d["_id"]: d for d in docs}.values()
+    return {entity_id: entry for _, entity_id, entry in map(cs_repo.ledger_entry, unique)}
+
+
+async def _ledger_by_keys(cs_id: str, collection: str, ids) -> list[dict]:
+    if not ids:
+        return []
+    db = await get_db()
+    keys = [cs_repo.change_key(cs_id, collection, i) for i in ids]
+    return await db[cs_repo.CHANGES_COLL].find({"_id": {"$in": keys}}).to_list(None)
+
+
+async def version_changes_by_ids(cs_id: str, collection: str, ids) -> dict[str, dict]:
+    """Cambios de `collection` de la versión para ESOS ids (por su `_id`), sin
+    leer el resto del ledger: los nombres de tablas de los pares de un lote."""
+    return _ledger_entries(await _ledger_by_keys(cs_id, collection, ids))
+
+
+async def relationship_changes_touching(cs_id: str, relationship_ids: list[str],
+                                        table_ids: list[str]) -> dict[str, dict]:
+    """Cambios de `relationships` de la versión que tocan un LOTE de tablas:
+    los de las relaciones ya leídas (`relationship_ids`, por `_id` — ediciones,
+    bajas y mudanzas fuera del lote) y los upserts con un extremo, v2 o legacy,
+    en el lote (`payload.<extremo>`: altas, revividas y mudanzas hacia el lote).
+    El overlay (`draft.overlay_relationships`) decide cuáles entran."""
+    docs = await _ledger_by_keys(cs_id, "relationships", relationship_ids)
+    if table_ids:
+        db = await get_db()
+        docs += await db[cs_repo.CHANGES_COLL].find({
+            "csId": cs_id, "collection": "relationships",
+            "$or": [{f"payload.{end}": {"$in": table_ids}} for end in REL_ENDS]}).to_list(None)
+    return _ledger_entries(docs)

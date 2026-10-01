@@ -17,8 +17,10 @@ import re
 from app.core.db.client import get_db
 from app.core.facets import udp_view
 from app.core.scope import scoped
+from app.features.changesets import repository as cs_repo
 
-from .draft import changes_of, overlay_named, overlay_project
+from . import repository
+from .draft import REL_ENDS, changes_of, overlay_named, overlay_project, overlay_relationships
 
 ACTIVE = {"flgactive": {"$ne": False}}
 _MAXMS = 30000
@@ -35,10 +37,21 @@ async def _one(coll: str, pipeline: list) -> dict:
 
 
 # ── Model Health Scorecard ───────────────────────────────────────────────────
+_COLUMN_METRICS = ("columns", "noDomain", "noDesc", "overridden", "withUdp", "pk", "fk")
+
+
+async def _active_table_ids(project_id: str) -> set[str]:
+    db = await get_db()
+    return {str(t["_id"]) async for t in db["canonical_tables"].find(scoped(project_id, ACTIVE), {"_id": 1})}
+
+
 async def scorecard(project_id: str) -> dict:
     NULLISH = [None, ""]
     active = scoped(project_id, ACTIVE)
-    col_stats_pipe = [{"$match": active}, {"$group": {"_id": None,
+    # Doc 105 (ronda 4): las métricas de columnas POR TABLA y se suman sólo las
+    # de tablas ACTIVAS — una columna activa de una tabla borrada contaba en
+    # `columns`, `pkColumns`, `fkColumns`… y como «tabla con PK» (ronda 3).
+    col_by_table_pipe = [{"$match": active}, {"$group": {"_id": "$tableId",
         "columns": {"$sum": 1},
         "noDomain": {"$sum": {"$cond": [{"$not": ["$parentDomainId"]}, 1, 0]}},
         "noDesc": {"$sum": {"$cond": [{"$in": [{"$ifNull": ["$description", ""]}, NULLISH]}, 1, 0]}},
@@ -46,38 +59,50 @@ async def scorecard(project_id: str) -> dict:
         "withUdp": {"$sum": {"$cond": [{"$gt": [{"$size": {"$ifNull": [{"$objectToArray": "$udpValues"}, []]}}, 0]}, 1, 0]}},
         "pk": {"$sum": {"$cond": ["$isPrimaryKey", 1, 0]}},
         "fk": {"$sum": {"$cond": ["$isForeignKey", 1, 0]}}}}]
-    tbl_pk_pipe = [{"$match": active}, {"$group": {"_id": "$tableId", "pk": {"$sum": {"$cond": ["$isPrimaryKey", 1, 0]}}}},
-                   {"$group": {"_id": None, "withCols": {"$sum": 1}, "withPk": {"$sum": {"$cond": [{"$gt": ["$pk", 0]}, 1, 0]}}}}]
     tbl_stats_pipe = [{"$match": active}, {"$group": {"_id": None, "tables": {"$sum": 1},
         "noDesc": {"$sum": {"$cond": [{"$in": [{"$ifNull": ["$description", ""]}, NULLISH]}, 1, 0]}},
         "withUdp": {"$sum": {"$cond": [{"$gt": [{"$size": {"$ifNull": [{"$objectToArray": "$udpValues"}, []]}}, 0]}, 1, 0]}}}}]
-    rel_pipe = [{"$match": active}, {"$project": {"t": ["$sourceTableId", "$targetTableId"]}}, {"$unwind": "$t"},
-                {"$group": {"_id": "$t"}}, {"$count": "involved"}]
+    # Doc 105 (revisión, hallazgo 7): extremos v2 (parent/child) con fallback a
+    # los legacy (target/source) — la regla del conteo por tabla del reporte
+    # (`repository._relationships`). Antes sólo source/target: con relaciones
+    # v2 las huérfanas salían de más. `$addToSet` (y no un `$project` a un
+    # array): mongomock no evalúa expresiones dentro de un array literal.
+    rel_pipe = [{"$match": active}, {"$group": {"_id": None,
+        "parents": {"$addToSet": {"$ifNull": ["$parentTableId", "$targetTableId"]}},
+        "children": {"$addToSet": {"$ifNull": ["$childTableId", "$sourceTableId"]}}}}]
 
-    cols, tpk, tstats, rel = await asyncio.gather(
-        _one("canonical_columns", col_stats_pipe), _one("canonical_columns", tbl_pk_pipe),
-        _one("canonical_tables", tbl_stats_pipe), _one("relationships", rel_pipe))
+    by_table, tstats, rel, table_ids = await asyncio.gather(
+        _agg("canonical_columns", col_by_table_pipe), _one("canonical_tables", tbl_stats_pipe),
+        _one("relationships", rel_pipe), _active_table_ids(project_id))
 
-    n_cols = cols.get("columns", 0) or 1
-    n_tbl = tstats.get("tables", 0) or 1
-    without_pk = n_tbl - tpk.get("withPk", 0)
-    orphans = n_tbl - (rel.get("involved", 0))
+    live = [g for g in by_table if g.get("_id") in table_ids]
+    cols = {k: sum(g.get(k) or 0 for g in live) for k in _COLUMN_METRICS}
+    tables = tstats.get("tables", 0)
+    n_cols = cols["columns"] or 1
+    n_tbl = tables or 1
+    # Conteo REAL (doc 105): el divisor `n_tbl` (≥ 1) no es un conteo — un
+    # proyecto vacío tenía «1 tabla sin PK» y su completitud salía 0.75.
+    without_pk = max(tables - sum(1 for g in live if (g.get("pk") or 0) > 0), 0)
+    # Huérfana = tabla ACTIVA sin ninguna relación (una relación hacia una tabla
+    # inactiva no cuenta), con el conteo real (un proyecto vacío no tiene 1).
+    involved = {t for t in (*(rel.get("parents") or []), *(rel.get("children") or [])) if t}
+    orphans = tables - len(involved & table_ids)
     # completeness = promedio ponderado de señales "0..1 = mejor"
     parts = [
-        1 - cols.get("noDomain", 0) / n_cols,
-        1 - cols.get("noDesc", 0) / n_cols,
+        1 - cols["noDomain"] / n_cols,
+        1 - cols["noDesc"] / n_cols,
         1 - without_pk / n_tbl,
         1 - tstats.get("noDesc", 0) / n_tbl,
     ]
     return {
-        "tables": tstats.get("tables", 0), "columns": cols.get("columns", 0),
+        "tables": tables, "columns": cols["columns"],
         "relationships": None,
         "tablesWithoutPk": without_pk, "tablesWithoutDescription": tstats.get("noDesc", 0),
         "orphanTables": max(orphans, 0),
-        "columnsWithoutDomain": cols.get("noDomain", 0), "columnsWithoutDescription": cols.get("noDesc", 0),
-        "columnsTypeOverridden": cols.get("overridden", 0),
-        "pkColumns": cols.get("pk", 0), "fkColumns": cols.get("fk", 0),
-        "udpFillRateColumn": round(cols.get("withUdp", 0) / n_cols, 4),
+        "columnsWithoutDomain": cols["noDomain"], "columnsWithoutDescription": cols["noDesc"],
+        "columnsTypeOverridden": cols["overridden"],
+        "pkColumns": cols["pk"], "fkColumns": cols["fk"],
+        "udpFillRateColumn": round(cols["withUdp"] / n_cols, 4),
         "udpFillRateTable": round(tstats.get("withUdp", 0) / n_tbl, 4),
         "completenessScore": round(sum(parts) / len(parts), 4),
     }
@@ -188,30 +213,112 @@ _CARD_LABEL = {"one": "1", "zero-one": "0..1", "one-many": "1..N",
                "zero-many": "0..N", "many": "N"}
 
 
+def _rel_docs(raw: list[dict]) -> list[dict]:
+    """`_id` → `id` (el overlay de la versión trabaja por id). Puro."""
+    return [{**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])} for r in raw]
+
+
+async def _first_relationships(db, project_id: str, limit: int, rel_changes: dict) -> list[dict]:
+    """Las primeras `limit` relaciones del proyecto (con la versión, si hay)."""
+    cur = db["relationships"].find(scoped(project_id, ACTIVE))
+    read = limit
+    if rel_changes:
+        # Doc 105 (A4): con la versión, el tope va DESPUÉS del overlay y sobre
+        # un orden estable (`_id`): se leen `limit` + una por cada baja (pueden
+        # caer dentro de la ventana) y se corta ya superpuesto. Antes salían
+        # más filas que el tope (altas) o faltaban las que sí entraban (bajas).
+        cur = cur.sort("_id", 1)
+        read = limit + sum(1 for ch in rel_changes.values() if ch.get("op") == "delete")
+    docs = _rel_docs(await cur.limit(read).to_list(read))
+    if rel_changes:
+        docs = sorted(overlay_project(docs, rel_changes, project_id), key=lambda d: d["id"])[:limit]
+    return docs
+
+
+async def _lot_relationships(db, project_id: str, table_ids: list[str],
+                             changeset_id: str | None) -> list[dict]:
+    """Doc 105 (A3-o1): TODAS las relaciones con el padre o el hijo en el lote
+    (sin tope global: el lote ya acota), con la versión si hay. Orden por id.
+    De la versión se leen SÓLO los cambios que tocan el lote (revisión del doc
+    105, hallazgo 1: cada lote releía el ledger entero del draft)."""
+    query = scoped(project_id, {**ACTIVE, "$or": [{k: {"$in": table_ids}} for k in REL_ENDS]})
+    docs = _rel_docs(await db["relationships"].find(query).to_list(None))
+    if changeset_id:
+        rel_changes = await repository.relationship_changes_touching(
+            changeset_id, [d["id"] for d in docs], table_ids)
+        if rel_changes:
+            docs = overlay_relationships(docs, rel_changes, project_id, set(table_ids))
+    return sorted(docs, key=lambda d: d["id"])
+
+
+def _validated(docs: list[dict]) -> tuple[list[dict], set[str], set[str]]:
+    """Relaciones validadas (una legacy sale en forma v2) + los ids de las
+    tablas y columnas de sus pares. Puro."""
+    from app.features.relationships.models import RelationshipDoc
+
+    rels = [RelationshipDoc.model_validate(d).model_dump() for d in docs]
+    tids = {t for r in rels for t in (r["parentTableId"], r["childTableId"]) if t}
+    cids = {c for r in rels for p in r["pairs"]
+            for c in (p.get("parentColumnId"), p.get("childColumnId")) if c}
+    return rels, tids, cids
+
+
+async def _published_names(db, tids: set[str], cids: set[str]) -> tuple[dict, dict]:
+    """{tableId: {physicalName, schema}} y {columnId: physicalName} publicados."""
+    tmap = {str(t["_id"]): t async for t in db["canonical_tables"].find({"_id": {"$in": list(tids)}}, {"physicalName": 1, "schema": 1})}
+    cmap = {str(c["_id"]): c.get("physicalName") async for c in db["canonical_columns"].find({"_id": {"$in": list(cids)}}, {"physicalName": 1})}
+    return tmap, cmap
+
+
+def _version_names(tmap: dict, cmap: dict, tids: set[str], cids: set[str],
+                   table_changes: dict, column_changes: dict) -> tuple[dict, dict]:
+    """Los nombres con los renombres, altas y bajas de la versión. Puro."""
+    tmap = overlay_named(tmap, table_changes, tids)
+    named = overlay_named({k: {"physicalName": v} for k, v in cmap.items()}, column_changes, cids)
+    return tmap, {k: d.get("physicalName") for k, d in named.items()}
+
+
 async def relationships_report(project_id: str, limit: int = 2000,
                                changes: dict | None = None) -> list[dict]:
     """Relaciones del proyecto resueltas, UNA FILA POR PAR de columnas (v2,
     doc 19): una FK compuesta de 3 columnas emite 3 filas con el mismo `id` y
     `pairIndex` incremental — conserva el espíritu "1 fila por columna FK" del
     export. Doc 102: con una versión propia (`changes`), sus relaciones y los
-    nombres de tablas y columnas de esa versión."""
-    from app.features.relationships.models import RelationshipDoc
-
+    nombres de tablas y columnas de esa versión. Las primeras `limit` (GET de
+    compatibilidad); el export pide LOTES (`relationships_lot_report`)."""
     db = await get_db()
-    raw = await db["relationships"].find(scoped(project_id, ACTIVE)).limit(limit).to_list(limit)
-    docs = [{**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])} for r in raw]
-    docs = overlay_project(docs, changes_of(changes, "relationships"), project_id)
-    rels = [RelationshipDoc.model_validate(d).model_dump() for d in docs]
-    tids = {t for r in rels for t in (r["parentTableId"], r["childTableId"]) if t}
-    cids = {c for r in rels for p in r["pairs"]
-            for c in (p.get("parentColumnId"), p.get("childColumnId")) if c}
-    tmap = {str(t["_id"]): t async for t in db["canonical_tables"].find({"_id": {"$in": list(tids)}}, {"physicalName": 1, "schema": 1})}
-    cmap = {str(c["_id"]): c.get("physicalName") async for c in db["canonical_columns"].find({"_id": {"$in": list(cids)}}, {"physicalName": 1})}
+    docs = await _first_relationships(db, project_id, limit, changes_of(changes, "relationships"))
+    rels, tids, cids = _validated(docs)
+    tmap, cmap = await _published_names(db, tids, cids)
     if changes:
-        tmap = overlay_named(tmap, changes_of(changes, "canonical_tables"), tids)
-        named = overlay_named({k: {"physicalName": v} for k, v in cmap.items()},
-                              changes_of(changes, "canonical_columns"), cids)
-        cmap = {k: d.get("physicalName") for k, d in named.items()}
+        tmap, cmap = _version_names(tmap, cmap, tids, cids, changes_of(changes, "canonical_tables"),
+                                    changes_of(changes, "canonical_columns"))
+    return _rows(rels, tmap, cmap)
+
+
+async def relationships_lot_report(project_id: str, table_ids: list[str],
+                                   changeset_id: str | None = None) -> list[dict]:
+    """Doc 105 (A3-o1): las MISMAS filas que `relationships_report`, pero sólo
+    de las relaciones que tocan el LOTE `table_ids` (padre o hijo en él) y sin
+    `limit`. Con `changeset_id` (versión propia ya validada por
+    `versions.open_version`), la versión — leyendo del ledger SÓLO lo que toca
+    el lote: sus relaciones y los nombres de las tablas y columnas de SUS pares
+    (revisión del doc 105, hallazgo 1: con un draft de carga Excel, releer el
+    ledger entero en cada uno de los ~50 lotes no escala)."""
+    db = await get_db()
+    docs = await _lot_relationships(db, project_id, table_ids, changeset_id)
+    rels, tids, cids = _validated(docs)
+    tmap, cmap = await _published_names(db, tids, cids)
+    if changeset_id:
+        tmap, cmap = _version_names(
+            tmap, cmap, tids, cids,
+            await repository.version_changes_by_ids(changeset_id, "canonical_tables", sorted(tids)),
+            await cs_repo.column_changes_for_tables(changeset_id, sorted(cids), []))
+    return _rows(rels, tmap, cmap)
+
+
+def _rows(rels: list[dict], tmap: dict, cmap: dict) -> list[dict]:
+    """Una fila por PAR de columnas, con los extremos resueltos. Puro."""
     rows = []
     for r in rels:
         pt, ct = tmap.get(r["parentTableId"], {}), tmap.get(r["childTableId"], {})

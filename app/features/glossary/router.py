@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
 from app.features.auth.deps import require_permission
+from app.features.data_standards.deps import standards_direct_write
 from app.features.projects.deps import alive_project
 
 from . import service
@@ -17,13 +18,14 @@ from .schemas import (
     ValidateTermBody,
 )
 
-# Editar términos del diccionario ES editar estándares → standards.edit. Los
-# endpoint de CÓMPUTO (physicalize) queda abierto (lo usa el
-# modelador para previsualizar nombres; no mutan).
+# Los términos se editan por Data Standards (`standards/apply`, versionado).
+# Doc 105 (D1b): el CRUD directo y `rephysicalize` siguen declarados pero
+# responden 409 (`standards_direct_write`). Quedan abiertos los CÓMPUTOS que no
+# mutan (physicalize, validate, impact) y el lock/unlock del admin.
 # Doc 75 D3/D4: glosario POR PROYECTO — prefijo `/api/projects/{project_id}/glossary`.
 router = APIRouter(prefix="/api/projects/{project_id}/glossary", tags=["glossary"],
                    dependencies=[Depends(alive_project)])
-_std = require_permission("standards.edit")
+_closed = [Depends(standards_direct_write)]
 # Lock/unlock del glosario: SOLO admin (D4) — no alcanza standards.edit.
 _admin = require_permission("admin.manage")
 
@@ -35,22 +37,31 @@ async def list_entries(project_id: str, scope: str | None = Query(default=None))
     return ok(await service.list_entries(project_id, scope))
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-async def create_entry(project_id: str, body: AbbreviationBody, user: dict = Depends(_std)):
+# ── Cerradas (doc 105 D1b): 409 antes de cualquier efecto ──────────────────
+@router.post("", status_code=status.HTTP_201_CREATED, dependencies=_closed)
+async def create_entry(project_id: str, body: AbbreviationBody):
     return ok(await service.create_entry(project_id, body))
 
 
-@router.put("/{entry_id}")
-async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody,
-                       user: dict = Depends(_std)):
+@router.put("/{entry_id}", dependencies=_closed)
+async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody):
     return ok(await service.update_entry(project_id, entry_id, body))
 
 
-@router.delete("/{entry_id}")
-async def delete_entry(entry_id: str, user: dict = Depends(_std)):
+@router.delete("/{entry_id}", dependencies=_closed)
+async def delete_entry(entry_id: str):
     return ok(await service.delete_entry(entry_id))
 
 
+@router.post("/rephysicalize", dependencies=_closed)
+async def rephysicalize(project_id: str, body: RephysicalizeBody):
+    """Re-physicalize retroactivo (R5) directo sobre las colecciones publicadas.
+    El apply de Data Standards re-deriva por su cuenta cuando cambia el
+    glosario o el naming (mismo service)."""
+    return ok(await service.rephysicalize(project_id, body.scope))
+
+
+# ── Cómputos y lock ─────────────────────────────────────────────────────────
 @router.post("/physicalize")
 async def physicalize_name(project_id: str, body: PhysicalizeBody):
     physical = await service.physicalize_name(
@@ -59,21 +70,13 @@ async def physicalize_name(project_id: str, body: PhysicalizeBody):
     return ok({"physical": physical})
 
 
-@router.post("/rephysicalize")
-async def rephysicalize(project_id: str, body: RephysicalizeBody, user: dict = Depends(_std)):
-    """Re-physicalize retroactivo (R5): recomputa el `physicalName` de TODAS las
-    entidades del scope DEL PROYECTO desde su `logicalName`. Sin scope ⇒ tablas y
-    columnas. Update directo (fuera de publish). Devuelve `{updated: {tables, columns}}`."""
-    return ok(await service.rephysicalize(project_id, body.scope))
-
-
 @router.post("/validate")
 async def validate_term(project_id: str, body: ValidateTermBody,
                         principal: Principal = Depends(current_principal)):
     """F2 #1: valida un término NUEVO contra el glosario del scope (duplicado
     exacto) y contra los nombres lógicos publicados (frase completa, muestra
-    cap 50 + total). No muta; el enforcement real vive en los writes
-    (POST/PUT de este router y standards/apply). Exige SESIÓN (lee el catálogo:
+    cap 50 + total). No muta; el enforcement real vive en el write
+    (standards/apply). Exige SESIÓN (lee el catálogo:
     en prod un anónimo no debe enumerar tablas/columnas) pero NO standards.edit
     — el botón Validar del front lo usan también usuarios sin ese permiso."""
     # Término vacío/whitespace: `corpus_regex('')` es laxo, así que cortamos acá

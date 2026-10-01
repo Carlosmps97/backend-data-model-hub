@@ -6,19 +6,32 @@ en el doc del changeset crecía sin techo con changesets
 grandes. El doc de `changesets` queda como cabecera (estado/decisiones)."""
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timezone
 
 from pymongo import DeleteOne, ReplaceOne, ReturnDocument, UpdateOne
 
 from app.core.db.client import get_db
+from app.core.logging import get_logger
 from app.core.scope import assert_scoped_filter, scoped
 
 from . import asof
 from .models import ChangeDoc, ChangesetDoc
 
+log = get_logger("app.changesets.repository")
+
 COLL = "changesets"
 CHANGES_COLL = "changeset_changes"
+# Doc 105 (revisión R1): lápidas de las eliminaciones de drafts — UNA POR
+# INTENTO {_id: "<csId>:<uuid>", csId, at: epoch} (ronda 3: con una sola por
+# versión, un intento negado —doble clic, dueño y admin a la vez— o la purga
+# retiraban la del intento que SÍ estaba en curso). Guían a
+# `purge_orphan_changes`; viven mientras dura su intento (o hasta la purga, si
+# se cortó en el medio). La gracia sólo protege a una versión VIVA (un intento
+# en el otro proceso que todavía no borró la cabecera).
+DELETED_COLL = "deleted_changesets"
+TOMBSTONE_GRACE_SECONDS = 10 * 60
 # Colecciones cuyo cambio pasa por el changeset/aprobación del canvas, en
 # ORDEN DE DEPENDENCIA para el apply (proyectos → folders → canvases → tablas
 # → columnas → relaciones → vistas).
@@ -96,7 +109,17 @@ def _with_origin(doc: dict, origin: dict | None, prev: dict | None) -> dict:
     """Adjunta la procedencia (doc 51) al doc del cambio. El upsert por `_id`
     REEMPLAZA el doc: sin este carry-forward, editar la entidad en el mismo
     draft borraría el origin del alta (paste/CTAS). Un delete lo corta (la
-    procedencia es del alta; un re-create posterior arranca limpio)."""
+    procedencia es del alta; un re-create posterior arranca limpio).
+
+    Doc 105 (H4): lo mismo con la imagen PREVIA que estampó un publish que
+    falló (`before`/`beforeAt`, también en deletes; `before=None` = «no
+    existía»): re-editar tras un publish a medias la perdía y el re-approve la
+    re-capturaba de la producción a medio escribir (rollback y `asof:`
+    contaminados). Si no hubo escritura, el re-approve la refresca igual
+    (`store_before_images(keep_existing=False)`)."""
+    if prev and prev.get("beforeAt"):
+        doc["beforeAt"] = prev["beforeAt"]
+        doc["before"] = prev.get("before")
     if doc.get("op") == "delete":
         return doc
     if origin:
@@ -107,7 +130,7 @@ def _with_origin(doc: dict, origin: dict | None, prev: dict | None) -> dict:
 
 
 async def set_change(cs_id: str, collection: str, entity_id: str, op: str, payload: dict | None,
-                     origin: dict | None = None) -> dict | None:
+                     origin: dict | None = None, owner: str | None = None) -> dict | None:
     """Graba UN cambio como documento propio en `changeset_changes`, sólo si el
     changeset sigue en `draft`.
 
@@ -126,12 +149,18 @@ async def set_change(cs_id: str, collection: str, entity_id: str, op: str, paylo
        posterior. Además, `_apply_and_finalize` filtra por `at <= submittedAt`
        (ver service): una escritura tardía que se cuele entre el claim y la
        lectura del apply queda fuera del publish aunque esta compensación
-       todavía no haya corrido."""
+       todavía no haya corrido.
+
+    Doc 104: con `owner`, el paso 1 exige además que el draft siga siendo de
+    ese usuario — la cabecera puede cambiar de dueño (transferencia) entre la
+    lectura del service y esta escritura; y si la versión se ELIMINÓ en el
+    medio, la compensación no restaura el cambio previo (quedaría huérfano):
+    sólo quita la escritura propia."""
     if not (collection and entity_id):
         return None
     db = await get_db()
     parent = await db[COLL].find_one_and_update(
-        {"_id": cs_id, "status": "draft"},
+        {"_id": cs_id, "status": "draft", **({"owner": owner} if owner else {})},
         {"$set": {"updatedAt": _now()}},
         return_document=ReturnDocument.AFTER,
     )
@@ -151,9 +180,12 @@ async def set_change(cs_id: str, collection: str, entity_id: str, op: str, paylo
     doc = _with_origin(doc, origin, prev)
     await db[CHANGES_COLL].replace_one({"_id": key}, doc, upsert=True)
 
-    still_draft = await db[COLL].find_one({"_id": cs_id, "status": "draft"}, {"_id": 1})
+    # Doc 104: el re-check también mira al dueño — una transferencia que cae
+    # entre el touch y la escritura compensa la escritura del dueño anterior.
+    still_draft = await db[COLL].find_one(
+        {"_id": cs_id, "status": "draft", **({"owner": owner} if owner else {})}, {"_id": 1})
     if still_draft is None:
-        if prev is not None:
+        if prev is not None and await _exists(db, cs_id):
             await db[CHANGES_COLL].replace_one({"_id": key, "wtoken": token}, prev)
         else:
             await db[CHANGES_COLL].delete_one({"_id": key, "wtoken": token})
@@ -161,12 +193,18 @@ async def set_change(cs_id: str, collection: str, entity_id: str, op: str, paylo
     return ChangesetDoc.model_validate(_to_doc(parent)).model_dump()
 
 
+async def _exists(db, cs_id: str) -> bool:
+    """¿La cabecera sigue existiendo? (doc 104: un draft eliminado no recibe
+    compensaciones que lo re-pueblen). Proyección chica (un campo)."""
+    return await db[COLL].find_one({"_id": cs_id}, {"status": 1}) is not None
+
+
 # Tamaño de tanda del lote (mismo criterio que la carga Erwin): el fast-path
 # del adaptador manda arrays por unnest — tandas acotadas, statements sanos.
 _BULK_BATCH = 1000
 
 
-async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
+async def set_changes_bulk(cs_id: str, items: list[dict], owner: str | None = None) -> dict | None:
     """Graba VARIOS cambios de una vez, con el MISMO protocolo de 3 pasos de
     `set_change` pagado UNA vez por lote: las cascadas (borrar tabla, crear
     tabla desde fuentes) iban cambio-por-cambio y a 4k columnas eran minutos.
@@ -177,7 +215,9 @@ async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
     unnest, 1-2 round-trips por tanda). Un solo `wtoken` identifica TODO el
     lote; si un submit gana la carrera entre el touch y el re-check, la
     compensación restaura los cambios previos legítimos y borra los nuevos,
-    filtrando por ese token para no pisar re-ediciones ajenas posteriores."""
+    filtrando por ese token para no pisar re-ediciones ajenas posteriores.
+    `owner` y la compensación ante una versión eliminada: como `set_change`
+    (doc 104)."""
     deduped: dict[str, dict] = {}
     for it in items:
         if it.get("collection") and it.get("entityId"):
@@ -186,7 +226,7 @@ async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
         return None
     db = await get_db()
     parent = await db[COLL].find_one_and_update(
-        {"_id": cs_id, "status": "draft"},
+        {"_id": cs_id, "status": "draft", **({"owner": owner} if owner else {})},
         {"$set": {"updatedAt": _now()}},
         return_document=ReturnDocument.AFTER,
     )
@@ -205,15 +245,35 @@ async def set_changes_bulk(cs_id: str, items: list[dict]) -> dict | None:
             doc["payload"] = it.get("payload") or {}
         doc = _with_origin(doc, it.get("origin"), prevs.get(key))
         ops.append(ReplaceOne({"_id": key}, doc, upsert=True))
-    for i in range(0, len(ops), _BULK_BATCH):
-        await db[CHANGES_COLL].bulk_write(ops[i:i + _BULK_BATCH])
 
-    still_draft = await db[COLL].find_one({"_id": cs_id, "status": "draft"}, {"_id": 1})
-    if still_draft is None:
-        comp = [ReplaceOne({"_id": k, "wtoken": token}, prevs[k]) if k in prevs
+    async def _compensate(alive: bool) -> None:
+        # Sólo lo que grabó ESTA llamada (filtro por `wtoken`): una re-edición
+        # ajena posterior no se pisa; las claves que no alcanzó a grabar, no
+        # matchean y quedan como estaban.
+        comp = [ReplaceOne({"_id": k, "wtoken": token}, prevs[k]) if alive and k in prevs
                 else DeleteOne({"_id": k, "wtoken": token}) for k in keys]
         for i in range(0, len(comp), _BULK_BATCH):
             await db[CHANGES_COLL].bulk_write(comp[i:i + _BULK_BATCH])
+
+    try:
+        for i in range(0, len(ops), _BULK_BATCH):
+            await db[CHANGES_COLL].bulk_write(ops[i:i + _BULK_BATCH])
+    except BaseException:
+        # Doc 105: una tanda que falla (timeout) no deja las anteriores a
+        # medias — un rename de esquema o un restore de más de 1000 entidades
+        # es todo o nada, salvo que la base tampoco deje compensar. También
+        # ante una cancelación (`CancelledError`: el proceso se apaga).
+        try:
+            await _compensate(await _exists(db, cs_id))   # doc 104: un draft eliminado no se re-puebla
+        except Exception:  # noqa: BLE001
+            log.warning("bulk change write failed and its compensation too", extra={"cs_id": cs_id},
+                        exc_info=True)
+        raise
+
+    still_draft = await db[COLL].find_one(
+        {"_id": cs_id, "status": "draft", **({"owner": owner} if owner else {})}, {"_id": 1})
+    if still_draft is None:
+        await _compensate(await _exists(db, cs_id))
         return None
     return ChangesetDoc.model_validate(_to_doc(parent)).model_dump()
 
@@ -265,6 +325,11 @@ def _ledger_entry(d: dict) -> tuple[str, str, dict]:
     return ch["collection"], ch["entityId"], entry
 
 
+# Público para otros módulos que leen el ledger por clave (doc 105: los lotes
+# del Reporting) — la misma forma que `changes_map`.
+ledger_entry = _ledger_entry
+
+
 async def _ledger_map(cs_id: str, collections: list[str] | None = None) -> dict[str, dict[str, dict]]:
     """Lector CRUDO del ledger de un changeset real (ver `changes_map`)."""
     db = await get_db()
@@ -294,7 +359,23 @@ async def column_changes_for_tables(cs_id: str, column_ids: list[str],
     if table_ids:
         docs += await db[CHANGES_COLL].find({"csId": cs_id, "collection": "canonical_columns",
                                              "payload.tableId": {"$in": table_ids}}).to_list(None)
-    return {entity_id: entry for _, entity_id, entry in map(_ledger_entry, docs)}
+    # Doc 105 (R2-A3): una edición EN SITIO llega por las dos lecturas: se valida una vez.
+    unique = {d["_id"]: d for d in docs}.values()
+    return {entity_id: entry for _, entity_id, entry in map(_ledger_entry, unique)}
+
+
+async def column_change_tables(cs_id: str) -> dict[str, dict]:
+    """Doc 105 (A7): cambios de `canonical_columns` de un changeset con lo JUSTO
+    para ajustar conteos por tabla (`adjust_column_counts`): `op` y
+    `payload.tableId`. Con un draft de carga Excel el ledger de columnas es la
+    lectura dominante del reporte de tablas: se trae proyectado, sin payloads
+    completos ni validación por documento. Forma de `changes_map(...)["canonical_columns"]`."""
+    db = await get_db()
+    docs = await db[CHANGES_COLL].find({"csId": cs_id, "collection": "canonical_columns"},
+                                       {"entityId": 1, "op": 1, "payload.tableId": 1}).to_list(None)
+    return {str(d.get("entityId")): ({"op": "delete"} if d.get("op") == "delete"
+                                     else {"op": d.get("op"), "payload": {"tableId": (d.get("payload") or {}).get("tableId")}})
+            for d in docs if d.get("entityId")}
 
 
 async def set_approval(cs_id: str, actor: str, entry: dict) -> dict | None:
@@ -356,6 +437,155 @@ async def transition(cs_id: str, from_status: str, fields: dict, expect: dict | 
     return ChangesetDoc.model_validate(_to_doc(res)).model_dump() if res else None
 
 
+async def transfer_owner(cs_id: str, expected_owner: str, new_owner: str, entry: dict) -> dict | None:
+    """Doc 104: pasa el draft a `new_owner` y ANEXA `entry` a `transfers`, en
+    UNA escritura condicionada al estado Y al dueño que el llamador leyó: si en
+    el medio lo enviaron a revisión, lo transfirieron o lo borraron, no toca
+    nada (None). `$push` atómico: dos transferencias jamás pisan su historia.
+    Doc 105: tampoco con una carga Excel escribiendo (lock de la cabecera,
+    que puede haber tomado el otro proceso de uvicorn)."""
+    db = await get_db()
+    res = await db[COLL].find_one_and_update(
+        {"_id": cs_id, "status": "draft", "owner": expected_owner, **upload_lock_free()},
+        {"$set": {"owner": new_owner, "updatedAt": _now()}, "$push": {"transfers": entry}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return ChangesetDoc.model_validate(_to_doc(res)).model_dump() if res else None
+
+
+async def delete_changeset(cs_id: str, expected_owner: str, statuses: tuple[str, ...]) -> int | None:
+    """Doc 104: borra la cabecera (sólo si sigue en `statuses` y con el dueño
+    que el llamador leyó) y después TODOS sus cambios. Devuelve cuántos cambios
+    se borraron, o None si la condición ya no se cumplía (nada se borra).
+
+    `delete_many` y no `delete_one` a propósito: en el adaptador de Lakebase
+    `delete_many` es un DELETE con la condición en su propio WHERE, que Postgres
+    RE-EVALÚA si otra transacción cambió la fila en paralelo (un submit que
+    gana la carrera deja el request intacto); `delete_one` resuelve la fila en
+    una subconsulta previa que no se re-evalúa. La cabecera va PRIMERO: desde
+    ahí `set_change` (paso 1, touch condicionado a draft) ya no escribe.
+    Doc 105: tampoco con una carga Excel escribiendo (lock de la cabecera)."""
+    db = await get_db()
+    pending = await db[CHANGES_COLL].count_documents({"csId": cs_id})
+    # Lápida ANTES de la cabecera (revisión R1): si el proceso muere entre la
+    # cabecera y sus cambios, la purga del arranque sabe qué versión limpiar
+    # sin recorrer todo el ledger. Propia de ESTE intento (ronda 3).
+    stone = f"{cs_id}:{uuid.uuid4().hex}"
+    await db[DELETED_COLL].insert_one({"_id": stone, "csId": cs_id, "at": _clock()})
+    res = await db[COLL].delete_many(
+        {"_id": cs_id, "status": {"$in": list(statuses)}, "owner": expected_owner,
+         "partialApplyAt": None,              # nulo o ausente: sin publish a medias
+         **upload_lock_free()})
+    if not res.deleted_count:
+        await _drop_tombstone(db, stone)      # sólo la propia: otro intento en curso conserva la suya
+        return None
+    # Doc 105 (H2): la versión YA no existe. Si borrar sus cambios falla (o el
+    # proceso muere acá), quedan huérfanos que ningún lector ve: la lápida los
+    # deja para la purga del arranque (`purge_orphan_changes`) y la eliminación
+    # responde bien.
+    try:
+        gone = await db[CHANGES_COLL].delete_many({"csId": cs_id})
+    except Exception:  # noqa: BLE001
+        log.warning("changes of a deleted version left for the startup purge", extra={"cs_id": cs_id},
+                    exc_info=True)
+        return pending
+    await _drop_tombstone(db, stone)
+    return gone.deleted_count
+
+
+async def _drop_tombstone(db, stone: str) -> None:
+    try:
+        await db[DELETED_COLL].delete_many({"_id": stone})
+    except Exception:  # noqa: BLE001 — la purga la retira después
+        log.warning("tombstone of a version delete left for the startup purge", extra={"stone": stone},
+                    exc_info=True)
+
+
+async def purge_orphan_changes() -> int:
+    """Doc 105 (H2): borra los cambios cuya versión ya no existe (una eliminación
+    que se cortó entre la cabecera y sus cambios). Idempotente; corre al
+    arrancar la app. Revisión R1: sigue las LÁPIDAS de `delete_changeset` (antes
+    un `distinct` sobre todo el ledger — en Lakebase, un escaneo completo en
+    cada arranque de cada worker). Una lápida reciente puede ser una
+    eliminación en curso en el otro proceso: se deja. Si su versión sigue viva
+    (el proceso murió antes de borrar la cabecera, o la eliminación se negó),
+    sólo se retira la lápida. Seguro con escrituras en curso: sin cabecera
+    `set_change` no escribe."""
+    db = await get_db()
+    old = _clock() - TOMBSTONE_GRACE_SECONDS
+    by_cs: dict[str, list[dict]] = {}
+    for stone in await db[DELETED_COLL].find({}, {"csId": 1, "at": 1}).to_list(None):
+        by_cs.setdefault(str(stone.get("csId") or stone["_id"]), []).append(stone)
+    purged = 0
+    for cs_id, stones in by_cs.items():
+        if await db[COLL].find_one({"_id": cs_id}, {"_id": 1}) is None:
+            # Sin cabecera, nada en curso que proteger: sus cambios son huérfanos
+            # (un intento que siga vivo borraría lo mismo — idempotente).
+            purged += (await db[CHANGES_COLL].delete_many({"csId": cs_id})).deleted_count
+            done = [s["_id"] for s in stones]
+        else:
+            # Viva: intento negado, o en curso que aún no borró la cabecera — sólo
+            # se retiran las lápidas viejas LEÍDAS (una posterior sigue).
+            done = [s["_id"] for s in stones if float(s.get("at") or 0) < old]
+        if done:
+            await db[DELETED_COLL].delete_many({"_id": {"$in": done}})
+    return purged
+
+
+# ── Doc 105: lock de carga Excel en la cabecera ─────────────────────────
+# `uvicorn --workers 2`: el lock de «un apply por versión» no puede vivir en la
+# memoria de un proceso. Va en la cabecera, así transferir, eliminar y enviar a
+# revisión lo respetan en la MISMA sentencia que los condiciona al dueño.
+UPLOAD_LOCK_STALE_SECONDS = 10 * 60
+_clock = time.time
+
+
+def upload_lock_free(now: float | None = None) -> dict:
+    """Condición de filtro: ninguna carga escribiendo (o la que había murió:
+    su latido tiene más de UPLOAD_LOCK_STALE_SECONDS)."""
+    now = _clock() if now is None else now
+    return {"$or": [{"uploadLock": None},
+                    {"uploadLock.heartbeat": {"$lt": now - UPLOAD_LOCK_STALE_SECONDS}}]}
+
+
+def upload_lock_active(cs: dict | None, now: float | None = None) -> bool:
+    lock = (cs or {}).get("uploadLock")
+    if not lock:
+        return False
+    now = _clock() if now is None else now
+    return float(lock.get("heartbeat") or 0) >= now - UPLOAD_LOCK_STALE_SECONDS
+
+
+async def claim_upload_lock(cs_id: str, owner: str, job_id: str) -> dict | None:
+    """Toma el lock para el job, sólo si la versión sigue en draft, con ese
+    dueño y sin otra carga viva escribiendo. None = no se pudo (el llamador
+    re-lee la cabecera para decir por qué)."""
+    now = _clock()
+    db = await get_db()
+    res = await db[COLL].find_one_and_update(
+        {"_id": cs_id, "status": "draft", "owner": owner, **upload_lock_free(now)},
+        {"$set": {"uploadLock": {"jobId": job_id, "owner": owner, "at": now, "heartbeat": now}}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return ChangesetDoc.model_validate(_to_doc(res)).model_dump() if res else None
+
+
+async def heartbeat_upload_lock(cs_id: str, job_id: str) -> bool:
+    """Latido del lock. False si ya no es de este job (venció y otra carga lo
+    tomó, o la versión ya no existe): el apply tiene que cortarse (doc 105, R1)."""
+    db = await get_db()
+    res = await db[COLL].update_one({"_id": cs_id, "uploadLock.jobId": job_id},
+                                    {"$set": {"uploadLock.heartbeat": _clock()}})
+    return bool(res.matched_count)
+
+
+async def release_upload_lock(cs_id: str, job_id: str) -> None:
+    """Suelta el lock SÓLO si sigue siendo de ese job (uno muerto que otro
+    reemplazó no suelta el ajeno)."""
+    db = await get_db()
+    await db[COLL].update_one({"_id": cs_id, "uploadLock.jobId": job_id}, {"$set": {"uploadLock": None}})
+
+
 async def capture_before_images(plan: list[tuple]) -> dict[tuple[str, str], dict | None]:
     """Imagen PREVIA publicada de cada entidad del plan de apply — {(colección,
     entityId): doc | None}. None = no existe activa (el rollback la borra).
@@ -371,16 +601,50 @@ async def capture_before_images(plan: list[tuple]) -> dict[tuple[str, str], dict
     return out
 
 
-async def store_before_images(cs_id: str, befores: dict[tuple[str, str], dict | None]) -> None:
-    """Estampa la imagen previa en cada doc de cambio. `beforeAt $exists:false`
-    en el filtro: un RE-APPLY tras un fallo parcial no debe re-capturar (la
-    'previa' de ese reintento ya estaría contaminada por el apply a medias)."""
+async def store_before_images(cs_id: str, befores: dict[tuple[str, str], dict | None],
+                              keep_existing: bool = True) -> None:
+    """Estampa la imagen previa en cada doc de cambio, en UNA escritura por lote
+    (doc 105: antes era una sentencia por entidad — miles en una versión
+    grande, antes de escribir producción).
+
+    `keep_existing` (el publish lo pasa = la cabecera tiene `partialApplyAt`):
+    un RE-APPLY tras un apply que YA escribió producción no debe re-capturar
+    (la 'previa' de ese reintento estaría contaminada por el apply a medias):
+    se estampa sólo lo que no tiene marca. Sin escritura previa (el approve
+    falló antes de escribir, o nunca se intentó) se re-captura TODO fresco —
+    otra versión pudo publicar esas entidades en el medio (doc 105, H4b)."""
+    if not befores:
+        return
     db = await get_db()
     now = _now()
-    for (collection, entity_id), doc in befores.items():
-        await db[CHANGES_COLL].update_one(
-            {"_id": change_key(cs_id, collection, entity_id), "beforeAt": {"$exists": False}},
-            {"$set": {"beforeAt": now, "before": doc}})
+    keys = {change_key(cs_id, collection, entity_id): doc for (collection, entity_id), doc in befores.items()}
+    if keep_existing:
+        # Revisión R1/R2: las marcas que ya están se leen ANTES (por `_id`) y se
+        # escribe sólo lo que falta con filtro `_id` puro — el camino rápido del
+        # adaptador (un `beforeAt: {$exists}` en el filtro lo sacaba de ahí: una
+        # sentencia por entidad). Seguro: con la versión reclamada por este
+        # publish nadie más escribe sus cambios.
+        ids = list(keys)
+        for i in range(0, len(ids), _BULK_BATCH):
+            marked = await db[CHANGES_COLL].find(
+                {"_id": {"$in": ids[i:i + _BULK_BATCH]}, "beforeAt": {"$exists": True}}, {"_id": 1}).to_list(None)
+            for d in marked:
+                keys.pop(str(d["_id"]), None)
+    ops = [UpdateOne({"_id": key}, {"$set": {"beforeAt": now, "before": doc}}) for key, doc in keys.items()]
+    for i in range(0, len(ops), _BULK_BATCH):
+        await db[CHANGES_COLL].bulk_write(ops[i:i + _BULK_BATCH], ordered=False)
+
+
+async def project_of(collection: str, ids: list[str]) -> dict[str, str | None]:
+    """Doc 105 (H7): `projectId` del documento que HOY existe con cada id — vivo
+    o borrado (un upsert por `_id` lo revive) —, para el gate del publish que
+    impide escribir sobre entidades de otro proyecto. Ids sin documento no
+    aparecen."""
+    if not ids:
+        return {}
+    db = await get_db()
+    docs = await db[collection].find({"_id": {"$in": list(ids)}}, {"projectId": 1}).to_list(None)
+    return {str(d["_id"]): d.get("projectId") for d in docs}
 
 
 async def latest_applied_id(project_id: str) -> str | None:
@@ -433,7 +697,7 @@ async def changesets_by_ids(cs_ids: list[str]) -> dict[str, dict]:
         {"_id": {"$in": sorted(set(cs_ids))}},
         {"versionLabel": 1, "title": 1, "owner": 1, "status": 1, "projectId": 1,
          "appliedAt": 1, "reviewedBy": 1, "approvals": 1,
-         "restoredFrom": 1}).to_list(None)
+         "restoredFrom": 1, "transfers": 1}).to_list(None)
     out: dict[str, dict] = {}
     for d in docs:
         d = dict(d)
@@ -527,7 +791,7 @@ async def deleted_at(collection: str, ids: list[str]) -> dict[str, str | None]:
 _DELETION_MARKS = ("deletedAt", "deletedIn")
 
 
-async def apply_changes(plan: list[tuple]) -> dict[str, int]:
+async def apply_changes(plan: list[tuple], progress: dict | None = None) -> dict[str, int]:
     """Aplica el plan a las colecciones publicadas con UN `bulk_write` por
     colección (upsert / soft-delete por entidad). El loop viejo de un
     `update_one` awaiteado por entidad tardaba minutos con miles de cambios y
@@ -549,8 +813,7 @@ async def apply_changes(plan: list[tuple]) -> dict[str, int]:
             upsert_ids.setdefault(collection, []).append(entity_id)
     revived: dict[str, list[str]] = {}
     for collection, ids in upsert_ids.items():
-        # Proyección de un campo REAL: `{"_id": 1}` el adaptador la lee como
-        # «sin exclusiones» y trae los documentos completos.
+        # Proyección chica: sólo hace falta saber cuáles están borradas.
         docs = await db[collection].find({"_id": {"$in": ids}, "flgactive": False},
                                          {"flgactive": 1}).to_list(None)
         if docs:
@@ -572,6 +835,10 @@ async def apply_changes(plan: list[tuple]) -> dict[str, int]:
                 upsert=True,
             ))
     counts: dict[str, int] = {}
+    if progress is not None:
+        # Doc 104: desde acá se ESCRIBE en producción (antes sólo se leyó): si
+        # algo falla de aquí en adelante, parte pudo llegar.
+        progress["writing"] = True
     for collection, ops in ops_by_coll.items():      # orden del plan (dependencias)
         await db[collection].bulk_write(ops, ordered=False)
         if revived.get(collection):

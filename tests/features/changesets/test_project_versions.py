@@ -45,7 +45,9 @@ def test_rollback_solo_compone_versiones_del_proyecto(monkeypatch):
         "canonical_tables": {"t1": {"op": "upsert", "payload": {"x": 1}, "beforeAt": "t", "before": None}}}))
     _summaries(monkeypatch)
     monkeypatch.setattr(service.repository, "create", AsyncMock(side_effect=lambda t, o, extra=None: {"id": "d", **(extra or {})}))
-    monkeypatch.setattr(service.repository, "set_change", AsyncMock())
+    # Doc 105: los inversos van en UN lote; la marca «incompleto» se quita al final.
+    monkeypatch.setattr(service.repository, "set_changes_bulk", AsyncMock(return_value={"id": "d"}))
+    monkeypatch.setattr(service.repository, "set_status", AsyncMock())
     monkeypatch.setattr(service.repository, "get", AsyncMock(side_effect=[ROWS[0], {"id": "d", "projectId": "A"}]))
     out = asyncio.run(service.rollback("a1", "ana"))
     after.assert_awaited_once_with("A", ROWS[0]["appliedAt"])

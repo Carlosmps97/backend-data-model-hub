@@ -24,7 +24,13 @@ from app.features.udp import repository as udp_repo
 from .context import UploadContext
 from .profiles import repository as profiles_repo
 
-TABLE_PROJECTION = {"physicalName": 1, "logicalName": 1, "schema": 1, "description": 1, "udpValues": 1}
+# TODOS los campos de `CanonicalTableDoc` (doc 105): el update de una tabla
+# existente se arma desde este doc — sin `projectId` la validación fallaba (la
+# carga no podía actualizar tablas ya publicadas) y un booleano ausente llegaba
+# con su default (override y facetas se pisaban con False). Guarda:
+# test_la_proyeccion_de_tablas_del_loader_trae_todos_los_campos_del_modelo.
+TABLE_PROJECTION = {"projectId": 1, "physicalName": 1, "logicalName": 1, "schema": 1, "description": 1,
+                    "udpValues": 1, "physicalNameOverridden": 1, "logicalOnly": 1, "physicalOnly": 1}
 VIEW_PROJECTION = {"name": 1, "schema": 1, "sourceTableIds": 1}
 _SCOPES = ("table", "column")
 _ID_BATCH = 500

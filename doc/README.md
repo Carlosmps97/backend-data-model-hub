@@ -1,6 +1,6 @@
 # Documentación del backend — Data Model Hub
 
-Actualizado: 2026-07-31.
+Actualizado: 2026-09-30.
 
 `backend-data-model-hub` es el servicio de plataforma del **Data Model Hub (DMH)**: una API REST en **FastAPI (Python)** que administra el modelo de datos canónico (tablas, columnas, relaciones, vistas), su estructura tipo Erwin (proyectos → folders → canvases), el versionado con flujo de aprobación (changesets), los Data Standards (glosario, dominios, UDP, reglas del DDL Export), el motor de consulta del reporting, y la identidad/RBAC/auditoría. La base de datos productiva y única es **Databricks Lakebase Postgres** (workspace corporativo), accedida a través de un adaptador propio con superficie de consulta estilo `pymongo` sobre documentos JSONB.
 
@@ -9,12 +9,12 @@ Actualizado: 2026-07-31.
 | # | Documento | Qué responde |
 |---|-----------|--------------|
 | 1 | [arquitectura.md](arquitectura.md) | La visión completa: capas (router → service → repository → db), stack y librerías con versiones exactas, scaffolding del árbol `app/`, ciclo de vida de un request, workflows de negocio y el adaptador Lakebase. **Punto de entrada.** |
-| 2 | [esquema-datos.md](esquema-datos.md) | Las 21 colecciones propias campo por campo (19 pre-creadas + 2 on-demand del DDL Export), el alcance del versionado, referencias entre colecciones y la foto del estado actual de la BD. |
-| 3 | [api-contract.md](api-contract.md) | El contrato completo de la API (`/api/*`): convenciones, envelope, permisos y las 128 rutas con ejemplos de request/response. |
+| 2 | [esquema-datos.md](esquema-datos.md) | Las 26 colecciones propias campo por campo (19 pre-creadas + 7 on-demand: las 2 del DDL Export, `upload_profiles`, `sheet_templates` y —doc 105— los jobs de la carga Excel `upload_jobs`/`upload_job_bodies` y las lápidas `deleted_changesets`), el alcance del versionado, referencias entre colecciones y la foto del estado actual de la BD. |
+| 3 | [api-contract.md](api-contract.md) | El contrato completo de la API (`/api/*`): convenciones, envelope, permisos y las 168 rutas (contadas sobre `app.routes` el 2026-09-30) con ejemplos de request/response. |
 | 4 | [seguridad.md](seguridad.md) | Las tres capas de autenticación en producción (SSO de Databricks Apps, login propio JWT, service principal → Lakebase), rate limiting, CORS, RBAC, auditoría y endurecimiento. |
 | 5 | [despliegue.md](despliegue.md) | Cómo y dónde corre: Databricks Apps vía bundle, deploy parametrizado por GitHub Variables, apps pre-creadas (bind), variables de entorno, arranque local y carga de data en un workspace nuevo. |
 | 6 | [migracion-erwin.md](migracion-erwin.md) | El kit de migración Erwin XML → plataforma: gates de calidad, carga multi-archivo con reglas de merge, auto-arrange ELK, auditoría post-carga, seeds y marcador de versión base. |
-| 7 | [testing.md](testing.md) | La estrategia de pruebas: 543 tests de la suite normal + 43 de la suite viva del adaptador, E2E contra backend real y comandos. |
+| 7 | [testing.md](testing.md) | La estrategia de pruebas: suite normal de 2 904 tests + 48 de la suite viva del adaptador (2 952 recolectados al 2026-09-30), E2E contra el backend real o en memoria (doc 105) y comandos. |
 | 8 | [consideraciones-y-limites.md](consideraciones-y-limites.md) | Límites conocidos y decisiones de escala: alcance del adaptador Lakebase, reglas del motor de reporting, escala probada (sintética y real) y mitigaciones pendientes. |
 
 ## Stack en una mirada

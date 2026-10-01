@@ -68,6 +68,16 @@ class SubmitBody(BaseModel):
     reviewers: list[str] | None = None
 
 
+class TransferBody(BaseModel):
+    """Doc 104: nuevo dueño de un draft (username) + motivo opcional
+    («vacaciones», «cambio de equipo»), que queda en `transfers[]`."""
+    to: str = Field(min_length=1, max_length=320)
+    note: str | None = Field(default=None, max_length=500)
+    # Dueño que mostraba la pantalla al decidir: si cambió en el medio (otra
+    # sesión la transfirió), 409 en vez de mover el draft de otra persona.
+    expectedOwner: str | None = Field(default=None, max_length=320)
+
+
 class ReviewDecisionBody(BaseModel):
     """Decisión de UN revisor asignado (X-Dev-User) sobre el request."""
     decision: Literal["approve", "reject"]

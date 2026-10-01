@@ -217,7 +217,10 @@ class _FakeParentColl:
 
     async def find_one(self, flt, projection=None):
         self.s["recheck_calls"].append(flt)
-        return {"_id": flt.get("_id")} if self.s["draft_at_recheck"] else None
+        if "status" in flt:                                   # re-check: ¿sigue en draft?
+            return {"_id": flt.get("_id")} if self.s["draft_at_recheck"] else None
+        # Doc 104: ¿la cabecera existe? (enviada a revisión sí; eliminada no)
+        return None if self.s["deleted"] else {"_id": flt.get("_id")}
 
 
 class _FakeChangesColl:
@@ -245,11 +248,11 @@ class _FakeDb:
         raise KeyError(name)
 
 
-def _patch_db(monkeypatch, *, draft_at_touch=True, draft_at_recheck=True, prev_docs=()):
+def _patch_db(monkeypatch, *, draft_at_touch=True, draft_at_recheck=True, prev_docs=(), deleted=False):
     state = {
         "parent": {"_id": "c1", "projectId": "p1", "title": "t", "owner": "ana", "status": "draft",
                    "createdAt": "2026-08-13T00:00:00+00:00", "updatedAt": "2026-08-13T00:00:00+00:00"},
-        "draft_at_touch": draft_at_touch, "draft_at_recheck": draft_at_recheck,
+        "draft_at_touch": draft_at_touch, "draft_at_recheck": draft_at_recheck, "deleted": deleted,
         "prev_docs": list(prev_docs),
         "touch_calls": [], "recheck_calls": [], "bulk_calls": [],
     }
@@ -327,6 +330,25 @@ def test_set_changes_bulk_compensa_si_pierde_el_draft(monkeypatch):
     assert restore._doc["wtoken"] == "viejo"              # restaura el cambio previo
     assert by_kind["DeleteOne"]._filter == {"_id": change_key("c1", "canonical_columns", "e1"),
                                             "wtoken": token}
+
+
+def test_set_changes_bulk_version_eliminada_no_restaura_el_previo(monkeypatch):
+    # Doc 104: si lo que ganó la carrera fue un BORRADO de la versión, restaurar
+    # el cambio previo dejaría un cambio huérfano: se borra todo lo propio.
+    key0 = change_key("c1", "canonical_columns", "e0")
+    prev = {"_id": key0, "csId": "c1", "collection": "canonical_columns",
+            "entityId": "e0", "op": "upsert", "payload": {"x": 1}, "wtoken": "viejo"}
+    state = _patch_db(monkeypatch, draft_at_recheck=False, prev_docs=[prev], deleted=True)
+    assert asyncio.run(repository.set_changes_bulk("c1", _items(2))) is None
+    comp = state["bulk_calls"][1]
+    assert [type(o).__name__ for o in comp] == ["DeleteOne", "DeleteOne"]
+
+
+def test_set_changes_bulk_con_owner_lo_exige_en_el_touch(monkeypatch):
+    # Doc 104: la cabecera puede cambiar de dueño entre la lectura y la escritura.
+    state = _patch_db(monkeypatch)
+    asyncio.run(repository.set_changes_bulk("c1", _items(1), owner="ana"))
+    assert state["touch_calls"][0][0] == {"_id": "c1", "status": "draft", "owner": "ana"}
 
 
 def test_set_changes_bulk_dedupe_por_entidad_ultimo_gana(monkeypatch):

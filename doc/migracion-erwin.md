@@ -1,6 +1,6 @@
 # Migración Erwin → Data Model Hub — guía de scripts
 
-**Actualizado:** 2026-09-08 (doc 75: proyectos independientes) · Aplica a exports **"Save As XML" de Erwin 10.x**
+**Actualizado:** 2026-09-30 (doc 105: canvases que ya existen, tablas y vistas borradas en la app; antes, doc 75: proyectos independientes) · Aplica a exports **"Save As XML" de Erwin 10.x**
 (formato `<erwin xmlns="http://www.erwin.com/dm">`, probado con archivos de
 50 MB y de **1.8 GB** — el parser es streaming: ~38 s y ~0.4 GB de RAM por
 GB de XML). Índice general de TODOS los scripts: `scripts/README.md`.
@@ -12,7 +12,10 @@ cross-archivo es la clave natural (`schema.nombre`); lo repetido se ADOPTA
 uso** (2×relaciones + canvases + vistas), la misma FK en dos archivos no se
 duplica (tampoco una subcategoría: doc 100 — antes la lectura de las relaciones
 existentes no traía `subcategory` y en Lakebase nunca se reconocían), y
-folders/canvases homónimos del mismo proyecto se fusionan. Todos
+folders/canvases homónimos del mismo proyecto se fusionan (doc 105: la fusión
+conserva las tablas y vistas vivas, el layout, los dibujos y los UDP que el
+canvas ya tenía, y re-correr un canvas con aportes de otros archivos también es
+fusión — ver §4, «Canvases que ya existen»). Todos
 los archivos de una familia cargan al MISMO proyecto (`--project` explícito,
 obligatorio si ya existe). Cada carga deja un reporte JSON de decisiones en
 `migration-reports/`.
@@ -54,7 +57,7 @@ resolvió por estructura, no por nombres.
 | Vaciar la BD ANTES de una carga limpia (DROPea todas las tablas del schema `dmh`, incluidos usuarios/roles/auditoría; el one-shot vuelve a crear `admin`) | `reset_for_migration` | Sí (con `--apply`) |
 | Cargar el modelo REAL a la plataforma | `migrate` | Sí (con `--apply`) |
 | Ordenar los canvases después de cargar | `arrange_all` | Sí |
-| Validar consistencia después de cargar | `audit_data_consistency` | Solo lee |
+| Validar consistencia después de cargar (y sanear con `--fix`) | `audit_data_consistency` | Sin `--fix`, sólo lee; con `--fix`, sí |
 | Crear el usuario `admin` (BD nueva, para poder entrar) | `create_admin` | Sí (upsert) |
 | Sembrar el ruleset base del DDL Export (8 reglas + lookups) | `seed_ddl_export_rules` | Sí (con `--apply`) |
 | Sembrar el perfil de carga «Plantilla BCP» (doc 78) | `seed_upload_profiles` | Sí (con `--apply`) |
@@ -257,7 +260,11 @@ muestra el plan sin abrir conexión a la BD.
   distinta entre archivos: el primero gana; un `abbrev` o `defaultDataType`
   distinto en otro archivo queda en `glossary_conflicts`/`domain_conflicts` del
   reporte y en la hoja «Dominios en conflicto» de `migration_detail_report`);
-  el `naming_config` del proyecto se siembra con `$setOnInsert`.
+  el `naming_config` del proyecto se siembra con `$setOnInsert`. Al LEER el
+  naming existente para physicalizar, el kit usa la misma regla que la app
+  (`settings.repository._usable`, doc 105): un valor que el motor no puede
+  usar (p. ej. un `case` que volvió por un rollback viejo) cae al default del
+  scope — antes abortaba la carga.
 - **Relaciones v2 (doc 19):** UN doc por relación Erwin con TODOS sus pares
   de columnas (`parentTableId/childTableId + pairs[]` — las FK compuestas ya
   no se parten en N docs) + `identifying` (tipo 2) y cardinalidad del hijo.
@@ -299,6 +306,85 @@ muestra el plan sin abrir conexión a la BD.
   desde Erwin; los LAYOUTS de canvas trabajados en la plataforma se PRESERVAN.
   El `views.sql` (CREATE VIEW original) es referencia congelada: el Export DDL
   de la plataforma siempre genera desde la estructura (`sources`).
+- **Canvases que ya existen (doc 105, P7 + A2-o2 — decisión del owner:
+  conservar):** lo hecho en la app sobre un canvas sobrevive a la re-corrida y
+  a la fusión R8 (canvas homónimo del mismo folder que viene de otro archivo):
+  sus dibujos (`drawings`, que el XML no trae) quedan intactos y sus UDP se
+  combinan con los del XML encima (antes la re-corrida los pisaba y ambas
+  escribían `drawings: []`). En la fusión, los `tableIds` y `viewIds` son la
+  unión de los que el canvas ya tenía —sólo los VIVOS: activos del proyecto o
+  creados/adoptados en la corrida; lo borrado no vuelve al canvas— y los del
+  XML (el prefetch no proyectaba `viewIds` y, en Lakebase, la unión partía de
+  `[]`: el canvas perdía sus vistas), con el layout existente intacto (la
+  grilla sólo ubica los nodos nuevos). Revisión R2: en el canvas,
+  `erwinLongId` es el diagrama que lo CREÓ (antes la fusión lo pisaba con el
+  último archivo) y `erwinLongIds` todos sus aportes; re-correr el archivo
+  creador de un canvas con aportes de otros archivos también es fusión — antes
+  lo aportado salía del canvas y su layout volvía a la grilla; el reporte lo
+  cuenta aparte: «canvases re-corridos como fusión (tienen aportes de otros
+  archivos)». Un canvas del kit anterior (sólo `erwinLongId`) se reconoce igual:
+  si ese id difiere del diagrama que lo creó, hubo fusión. Un canvas de un solo
+  archivo re-corrido sigue mandando el XML. `migration_detail_report` ubica un
+  canvas por cualquiera de sus diagramas (antes, el del otro archivo salía
+  «(canvas no encontrado)») y, si hay varios, prefiere el canvas activo y el
+  que ese diagrama CREÓ (los inactivos, sólo como último recurso). Ronda 3:
+  ni la re-corrida ni la fusión devuelven a un canvas las tablas o vistas que
+  se borraron en la app, ni las reviven (el kit escribe `flgactive` sólo al
+  insertar: lo decide el owner; si el XML aún las dibuja, su id no vuelve al
+  canvas — colgando, la app rechazaba cada guardado con 409), y la re-corrida
+  conserva la posición que el canvas guarda de los símbolos de subcategoría
+  de relaciones vivas del proyecto (`layout[subtypeSymbolId]`: no son nodos
+  del XML y antes volvían a la grilla). Tests:
+  `tests/erwin_migration/test_canvas_merge_doc105.py` (20) y
+  `tests/scripts/test_migration_detail_report_doc105.py` (3).
+- **Tablas y vistas borradas en la app (doc 105, rondas 3–7):** si el XML
+  todavía trae una tabla que se borró en la app (inactiva en el proyecto),
+  el kit no la revive —`flgactive` sólo se escribe al insertar: revivir lo
+  decide el owner— ni la toca, y la omite en la corrida con todo lo que
+  dependa de ella: sus columnas (también las nuevas del XML), las relaciones
+  con un extremo en ella y las vistas con una fuente en ella. Antes la
+  re-escribía muerta y le colgaba lo nuevo del XML: columnas bajo una tabla
+  muerta, relaciones con un extremo muerto y vistas huérfanas que la
+  auditoría marcaba (C4/C6). La reconoce por su id (aunque se haya
+  renombrado en la app) y, cuando no hay una homónima VIVA, por su clave
+  natural `esquema.físico` —ronda 4: en una familia, el archivo que la había
+  adoptado trae OTRO id propio y la daba de alta nueva y viva al re-correr la
+  carpeta— y por el físico CRUDO del XML —ronda 5: con una homónima viva en
+  otro esquema, la política `_DUPn` la renombra y su clave efectiva ya no era
+  la de la borrada—; ronda 7 (R18b): el crudo sólo cuenta si ese
+  `esquema.físico` no tiene una tabla VIVA, y ninguna de las dos claves toma
+  la tabla borrada de OTRA entidad del mismo XML (una cuyo `erwinLongId` es
+  de otra entidad del archivo: una homónima NUEVA del mismo archivo se omitía
+  como «borrada en la app»). Una vista borrada en la app tampoco revive (por id o por
+  `esquema.nombre` sin homónima viva). Ronda 4: una vista con UNA de sus
+  fuentes borrada —multi-fuente incluida— no se re-escribe (su columna caía
+  en otra fuente: otra tabla, columna inexistente); si existe viva, queda como
+  la dejó la app —el publish exigió sacarle esa fuente— y sigue en el canvas.
+  Las estadísticas lo cuentan:
+  «tablas borradas en la app (no se reviven; se omiten con sus columnas, relaciones y vistas)»,
+  «vistas borradas en la app (no se reviven)»,
+  «relaciones omitidas (tabla borrada en la app)» y
+  «vistas omitidas (fuente borrada en la app)». El reporte de decisiones
+  lista la tabla en `deleted_in_app` (`key` esquema.tabla —ronda 7: el nombre
+  REAL con el que existió, p. ej. `S1.TAB_A_DUP1` si se borró la copia, o el
+  que le dieron en la app antes de borrarla—, `tableId` y `columns`, las del
+  XML; una vista, con `key` y `viewId`), la vista omitida
+  en `views_discarded` con `reason: "source deleted in the app"` (la que no
+  tiene fuente resoluble —política R7— sigue sin `reason`) y —ronda 5— cada
+  relación omitida en `rels_deleted_in_app` (`erwinLongId`, `name`). La tabla
+  omitida no figura como copia `_DUPn` (ronda 6, R16/K1): se saca de
+  `renamed_dups` —la hoja «Tablas homónimas (_DUPn)» del reporte de
+  incongruencias la listaba como una copia que no existe— y de la estadística
+  «tablas duplicadas → renombradas con sufijo _DUPn».
+  `migration_detail_report` muestra esas vistas en la hoja «Vistas» con el
+  caso «Fuente borrada en la plataforma (no migrada)», no como «Sin tabla
+  fuente resoluble (no migrada)», y esas relaciones en «Relaciones
+  incongruentes» con el tipo «Tabla borrada en la plataforma» —el quinto: la
+  leyenda dice «Cinco tipos»; antes salían como «Sin pares de columnas» y se
+  pedía corregir en Erwin una relación que está bien—, con su conteo en el
+  resumen; un reporte JSON anterior, sin `rels_deleted_in_app`, se sigue
+  leyendo. Tests: `tests/erwin_migration/test_tablas_borradas_doc105.py` (14)
+  y `tests/scripts/test_migration_detail_report_rels_doc105.py`.
 - **Tipos complejos iguales en las dos facetas (doc 96 D8):** Erwin guarda el
   `Logical_Data_Type` de una columna ARRAY/STRUCT/MAP sin estructura (`Array`
   a secas, que se homologa a `ARRAY<>`) o con su `CHAR(18)` por defecto; la
@@ -316,6 +402,13 @@ muestra el plan sin abrir conexión a la BD.
   No hay orden de llave aparte: el `PRIMARY KEY(...)` del DDL y el bloque PK
   del canvas siguen el `ordinal` (doc 94 retiró `pkPosition`). El orden físico
   de la BD de Erwin (`Physical_Columns_Order_Ref_Array`) ya no se persiste.
+- **UDP sin booleanos (doc 105, ronda 5):** el catálogo fijo
+  (`standard_udps.py`) sólo trae definiciones `list` y `string`, y el tipo de
+  un UDP de Erwin se lee como uno de esos dos (`policies.udp_datatype`): el
+  kit no escribe UDP booleanos, numéricos ni de fecha, así que la validación
+  por tipo de Data Standards y de la carga Excel (booleano normalizado a
+  «true»/«false», número finito, fecha ISO real — `app/core/udp_values.py`)
+  no le cambia nada.
 - **Idempotente y NO destructivo:** ids deterministas
   (`uuid5("<projectId>|<Long_Id de Erwin>")`) → re-correr el mismo archivo al
   mismo proyecto actualiza en su sitio. Los estándares ya existentes del
@@ -327,8 +420,12 @@ muestra el plan sin abrir conexión a la BD.
   en lotes de 1,000 (fast-path del adaptador Lakebase: 2 round-trips por
   lote) + prefetch de claves naturales.
 - **Reporte de decisiones:** cada `--apply` deja
-  `migration_report_<archivo>_<fecha>.json` en `migration-reports/`
-  (adopciones, conflictos resueltos por score, alias, fusiones).
+  `<archivo>-<fecha>.json` en `migration-reports/` (o en la ruta de
+  `--report`): `stats` y, en `decisions`, adopciones, conflictos resueltos
+  por score, alias, fusiones, vistas descartadas (`views_discarded`, con su
+  `reason` si la fuente se borró en la app), tablas y vistas borradas en la
+  app omitidas (`deleted_in_app`, doc 105) y las relaciones que se omitieron
+  por ellas (`rels_deleted_in_app`, ronda 5).
 - **Después de `--apply`:** layout inicial en grilla → correr `arrange_all`
   (§5) y `audit_data_consistency` (§6). En una BD estrenada, cerrar con
   `seed_ddl_export_rules` (§6b), `seed_upload_profiles` (perfil de carga),
@@ -355,11 +452,30 @@ físico y lógico).
 ```bash
 .venv/bin/python -m scripts.audit_data_consistency
 ```
-Chequeos C1–C10 de integridad referencial y campos requeridos sobre la BD
-(C1/C3 verifican además que cada columna/relación apunte a docs del MISMO
-`projectId`, doc 75). Esperado tras una migración limpia: **0 hallazgos
-fixables** (más los informativos conocidos: C10 particiones reasignadas, C5
-vistas multi-fuente, C8b grafías variantes fieles al XML).
+Chequeos C1–C11 de integridad referencial y campos requeridos sobre la BD
+(C5 se retiró en el doc 91 D12: una vista multi-fuente sin JOIN ya no es
+anomalía). Sin argumentos sólo REPORTA; con `--fix` sanea lo fixable
+(renombra duplicados, poda y soft-deletea referencias muertas, `$unset` de
+campos) y el reporte vuelve a 0 — es idempotente. C1 y C3 buscan duplicados
+DENTRO de cada proyecto (`projectId` + nombre físico de tabla, o + término y
+scope del glosario, doc 75). Esperado tras una migración limpia: **0 hallazgos
+fixables**, más los informativos conocidos (marcados «INFORME», nunca se
+auto-corrigen): C6b/C6c pares con la columna padre sin PK o la hija sin FK,
+C8b valores UDP fuera de `allowedValues` (grafías variantes fieles al XML) y
+C10/C10b particiones (correlativo `PART_nn` reasignado; columnas `PART_nn` sin
+`isPartition`). C11 (doc 94) hace `$unset` de los campos retirados
+`glossary_terms.wordType` y `canonical_columns.pkPosition`. C9 revisa (y con
+`--fix` poda) en cada canvas los `tableIds` muertos (C9a), las entradas de
+layout de nodos inexistentes o de otro proyecto (C9b), desde el doc 105 (A2-o3)
+los `viewIds` colgando (C9c: vista borrada o inexistente — ese canvas no se
+podía editar) y, desde su revisión R2, los miembros VIVOS de OTRO proyecto
+(C9d: la app rechaza todo guardado de ese canvas con 409; antes los activos se
+comparaban en conjuntos globales y pasaban como sanos). Sólo se juzga el
+proyecto cuando el canvas y el miembro tienen `projectId`; un `viewIds` nulo
+(canvas legacy: sus vistas salen por `showOnCanvas`) no se toca. Ronda 3: C9
+sólo mira canvases activos y conserva en el layout las posiciones de los
+símbolos de subcategoría (`subtypeSymbolId`) de relaciones activas del mismo
+proyecto — no son tabla ni vista, y la poda las borraba.
 
 ## 6b. `seed_ddl_export_rules` — ruleset base del DDL Export
 

@@ -102,8 +102,57 @@ catálogo completo aunque un valor no se use; niveles no-Entity/Attribute/Model
   proyecto es otro documento.
 - **No pisa datos ajenos**: docs con la misma clave natural pero otro id
   (creados a mano) → estándares se reúsan, tablas/vistas se omiten con aviso.
+- **Tablas y vistas borradas en la app (doc 105, rondas 3–7)**: una tabla que
+  se borró en la app y el XML todavía trae no se revive ni se toca: se omite
+  en la corrida con sus columnas (también las nuevas del XML), las relaciones
+  con un extremo en ella y las vistas con una fuente en ella (antes quedaban
+  colgando de una tabla muerta y la auditoría las marcaba en C4/C6). Se la
+  reconoce por su id (aunque se haya renombrado en la app) y, sin homónima
+  viva, por su clave natural (ronda 4: en una familia, el archivo que la
+  adoptó trae otro id y la daba de alta nueva) y por el físico crudo del XML
+  (ronda 5: con una homónima viva en otro esquema, `_DUPn` la renombraba y su
+  clave ya no calzaba) —ronda 7 (R18b): el crudo, sólo si esa clave no tiene
+  una tabla viva, y nunca la borrada de OTRA entidad del mismo XML (una
+  homónima nueva del archivo se omitía)—. Una vista borrada en la app tampoco revive, y una
+  vista con una fuente borrada —multi-fuente incluida— no se re-escribe: si
+  existe viva, queda como la dejó la app y sigue en el canvas (ronda 4).
+  Estadísticas:
+  «tablas borradas en la app (no se reviven; se omiten con sus columnas, relaciones y vistas)»,
+  «vistas borradas en la app (no se reviven)»,
+  «relaciones omitidas (tabla borrada en la app)» y
+  «vistas omitidas (fuente borrada en la app)»; en el reporte,
+  `deleted_in_app` (`key` —ronda 7: el nombre real con el que existió—,
+  `tableId`, `columns`; una vista, `key` y `viewId`),
+  la vista en `views_discarded` con `reason: "source deleted in the app"` y
+  —ronda 5— cada relación omitida en `rels_deleted_in_app` (`erwinLongId`,
+  `name`); la tabla omitida no figura como copia `_DUPn` en `renamed_dups` ni
+  en su estadística (ronda 6). `migration_detail_report` muestra la vista como «Fuente borrada en
+  la plataforma (no migrada)» y la relación con el tipo «Tabla borrada en la
+  plataforma» (la leyenda de «Relaciones incongruentes» dice «Cinco tipos» y
+  el resumen la cuenta).
+- **Canvases (doc 105)**: la re-corrida y la fusión R8 conservan lo hecho en la
+  app — posiciones del layout, dibujos (`drawings`) y UDP del canvas (los del
+  XML se aplican encima). La fusión une las tablas y vistas del XML a los
+  `tableIds`/`viewIds` existentes, de los que conserva sólo los vivos (activos
+  del proyecto o creados/adoptados en la corrida): lo borrado no revive ni
+  queda colgando; el layout existente queda intacto (la grilla sólo ubica los
+  nodos nuevos). Re-correr el archivo que CREÓ un canvas con aportes de otros
+  archivos también es fusión (estadística «canvases re-corridos como fusión
+  (tienen aportes de otros archivos)»): antes lo aportado por los otros salía
+  del canvas y su layout volvía a la grilla. Ronda 3: ni la re-corrida ni la
+  fusión devuelven a un canvas tablas o vistas borradas en la app, ni las
+  reviven (el kit escribe `flgactive` sólo al insertar), y la re-corrida
+  conserva la posición de los símbolos de subcategoría de relaciones vivas del
+  proyecto (`layout[subtypeSymbolId]`). Al leer el `naming_config` del
+  proyecto, un valor que el motor no puede usar cae al default del scope (la
+  misma regla que la app).
 - **Trazabilidad**: cada doc migrado lleva `migratedFrom:"erwin"` +
-  `erwinLongId` (la API los ignora al leer, `extra="ignore"`).
+  `erwinLongId` (la API los ignora al leer, `extra="ignore"`). En un canvas
+  (doc 105), `erwinLongId` es el diagrama que lo CREÓ y `erwinLongIds` la
+  lista de todos los diagramas que le aportaron; uno escrito por el kit
+  anterior sólo trae `erwinLongId` (si difiere del diagrama que lo creó, hubo
+  fusión). `migration_detail_report` ubica un canvas por cualquiera de ellos y,
+  si hay varios, prefiere el activo y el que ese diagrama creó.
 - `--apply` obligatorio para escribir; el gate con ERRORs corta salvo `--force`.
 
 ## Pendientes de confirmar (owner)
@@ -133,6 +182,10 @@ ambas facetas («Clasificacion del Dato») son defs DISTINTAS: las físicas cons
 `migrate` lo siembra completo SIEMPRE y solo asocia los VALORES del XML: match case/espacios-
 insensitive + `ALIASES` de typos conocidos → grafía canónica; sin match → default (key no escrita;
 muestra en `udp_values_unmatched` del reporte). `--keep-unused-udp-defs` quedó deprecado (no-op).
+Todas las defs son `list` o `string` (el tipo de un UDP de Erwin se lee como uno de esos dos:
+`policies.udp_datatype`): el kit no escribe UDP booleanos, numéricos ni de fecha, así que la
+validación por tipo del doc 105 (ronda 5: booleano normalizado a «true»/«false», número finito,
+fecha ISO real — `app/core/udp_values.py`, en Data Standards y la carga Excel) no le cambia nada.
 
 ### Facetas lógico/físico (doc 69)
 

@@ -27,17 +27,32 @@ from .spec import QuerySpec
 router = APIRouter(prefix="/api/reporting", tags=["reporting-query"])
 
 
+# Doc 105 (ronda 4): tope del texto del editor SQL — sqlglot parsea de forma
+# síncrona (~0,85 s por MB): sin tope, un texto enorme frenaba el event loop.
+# Ronda 5: se valida aquí (no con `max_length`), para responder un `detail` de
+# TEXTO — la lista de pydantic el front la mostraba como «Unexpected response shape».
+SQL_TEXT_MAX = 100_000
+SQL_TOO_LONG = f"The SQL text is too long: up to {SQL_TEXT_MAX:,} characters."
+
+
 class SqlBody(BaseModel):
     text: str
     projectId: str = Field(min_length=1)
 
 
-async def _spec_from_sql(text: str, project_id: str) -> QuerySpec:
-    from_ = parser.parse_from(text)
+async def _spec_from_sql(text: str, project_id: str) -> tuple[QuerySpec, dict]:
+    """(spec, catálogo) del texto — parseado UNA vez (doc 105, ronda 4)."""
+    if len(text) > SQL_TEXT_MAX:
+        raise HTTPException(422, SQL_TOO_LONG)
+    stmt = parser.parse_statement(text)
+    from_ = parser.view_name(stmt)
     if from_ not in ex.COLL_OF:
         raise parser.SqlError(f"Unknown view in FROM: {from_}")
     cat = build_catalog(from_, await ex._udp_defs(project_id))
-    return parser.to_spec(text, cat, from_, project_id)
+    try:
+        return parser.to_spec(stmt, cat, from_, project_id), cat
+    except RecursionError:                            # doc 105 (ronda 5): nunca un 500
+        raise parser.SqlError(parser.TOO_DEEP_SQL)
 
 
 @router.get("/catalog")
@@ -67,17 +82,22 @@ async def validate_sql(body: SqlBody):
     """SQL-like → QuerySpec (round-trip para el editor). Devuelve {spec, errors}
     con {line,col,message} para subrayar en la caja de texto."""
     try:
-        spec = await _spec_from_sql(body.text, body.projectId)
+        spec, cat = await _spec_from_sql(body.text, body.projectId)
+        # Doc 105 (ronda 4): también lo que el motor rechazaría al correrla —
+        # antes «válido» y luego `/query/sql` respondía 422.
+        ex.check_spec(spec, cat)
         return ok({"spec": spec.model_dump(by_alias=True), "errors": []})
     except parser.SqlError as e:
         return ok({"spec": None, "errors": [{"line": e.line, "col": e.col, "message": e.message}]})
+    except QueryError as e:
+        return ok({"spec": None, "errors": [{"line": 1, "col": 1, "message": str(e)}]})
 
 
 @router.post("/query/sql")
 async def run_sql(body: SqlBody, cursor: str | None = Query(default=None)):
     """Parsea el SQL → QuerySpec y lo ejecuta (mismo motor que /query)."""
     try:
-        spec = await _spec_from_sql(body.text, body.projectId)
+        spec, _ = await _spec_from_sql(body.text, body.projectId)
     except parser.SqlError as e:
         raise HTTPException(400, e.message) from e
     try:
@@ -90,8 +110,17 @@ async def run_sql(body: SqlBody, cursor: str | None = Query(default=None)):
 async def export_csv(spec: QuerySpec):
     """Export CSV por STREAMING (O(1) memoria): keyset-pagina internamente y hace
     yield línea por línea. Respeta los filtros/columnas del spec; nunca materializa
-    todo ni construye el archivo en el browser."""
+    todo ni construye el archivo en el browser. Doc 105 (P12, revisión): la
+    PRIMERA página se pide antes de abrir el stream — un spec inválido (campo,
+    valor u orden) es un 4xx con `detail`; dentro del generador era un 500 o un
+    archivo cortado."""
     page_spec = spec.model_copy(update={"limit": 2000})
+    try:
+        # Doc 105: un agrupado se exporta ENTERO (todos sus grupos o hasta el
+        # LIMIT) — antes, la «página» de 2 000 cortaba el CSV en silencio.
+        first = await ex.run_query(page_spec, cursor=None, all_groups=True)
+    except QueryError as e:
+        raise HTTPException(e.code, str(e)) from e
 
     async def _gen():
         buf = io.StringIO()
@@ -102,7 +131,6 @@ async def export_csv(spec: QuerySpec):
             buf.seek(0); buf.truncate(0)
             return data
 
-        first = await ex.run_query(page_spec, cursor=None)
         keys = [c["key"] for c in first["columns"]]
         w.writerow([c["label"] for c in first["columns"]]); yield flush()
         page = first

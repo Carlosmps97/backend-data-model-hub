@@ -67,12 +67,14 @@ async def update_entry(project_id: str, entry_id: str, body: AbbreviationBody) -
     existing = await repository.get_entry(entry_id)
     if existing is None:
         return None
-    _ensure_complete(body.term, body.abbrev)   # doc 102
+    # Doc 105 (C1): el bloqueo manda sobre el contenido — antes salía el 422 de
+    # campo vacío aunque el término estuviera bloqueado.
     if existing.get("locked"):
         raise HTTPException(
             status_code=409,
             detail=(f"The term '{existing['term']}' is locked by an admin; "
                     "unlock it before editing it."))
+    _ensure_complete(body.term, body.abbrev)   # doc 102
     # Solo se re-valida si CAMBIA el texto del término (editar la abreviatura
     # no dispara el chequeo de corpus). Se excluye a sí mismo del chequeo de
     # duplicados.

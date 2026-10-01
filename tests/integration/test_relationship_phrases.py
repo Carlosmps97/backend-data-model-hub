@@ -139,25 +139,12 @@ def test_changeset_rechaza_una_frase_que_no_es_texto(api, world):
         ana.change(cs, "relationships", w["rel"], _rel_payload(w, parentToChildPhrase=malo), expect=422)
 
 
-def test_endpoint_directo_guarda_y_actualiza_frases(api, world, fake_db):
-    ana = api("ana")
+def test_endpoint_directo_ya_no_escribe_frases(api, world, fake_db):
+    """Doc 105: las relaciones se escriben SÓLO por una versión (las frases
+    viajan y se normalizan por el changeset: tests de arriba)."""
     w = world
-    st, tbl = ana.call("POST", f"/api/projects/{w['pid']}/catalog/tables",
-                       {"logicalName": "Tabla Directa", "physicalName": "M_DIRECTA", "schema": "STG"}, expect=201)
-    st, col = ana.call("POST", f"/api/catalog/tables/{tbl['id']}/columns",
-                       {"logicalName": "Codigo Cliente", "physicalName": "CODCLIENTE", "dataType": "STRING"}, expect=201)
-    body = {"parentTableId": w["t1"], "childTableId": tbl["id"],
-            "pairs": [{"parentColumnId": w["c_a"], "childColumnId": col["id"]}],
+    body = {"parentTableId": w["t1"], "childTableId": w["t2"],
+            "pairs": [{"parentColumnId": w["c_a"], "childColumnId": w["c_c"]}],
             "parentToChildPhrase": "Cliente origina"}
-    st, rel = ana.call("POST", "/api/relationships", body, expect=201)
-    assert rel["parentToChildPhrase"] == "Cliente origina" and rel["childToParentPhrase"] is None
-    st, upd = ana.call("PUT", f"/api/relationships/{rel['id']}",
-                       {**body, "childToParentPhrase": " es originada por un Cliente "}, expect=200)
-    assert upd["parentToChildPhrase"] == "Cliente origina"
-    assert upd["childToParentPhrase"] == "es originada por un Cliente"
-    # Lo ALMACENADO queda normalizado (reporting y diffs leen el valor crudo).
-    stored = fake_db.raw["relationships"].find_one({"_id": rel["id"]})
-    assert stored["childToParentPhrase"] == "es originada por un Cliente"
-    ana.call("PUT", f"/api/relationships/{rel['id']}", {**body, "parentToChildPhrase": "   "}, expect=200)
-    assert fake_db.raw["relationships"].find_one({"_id": rel["id"]})["parentToChildPhrase"] is None
-    ana.call("PUT", f"/api/relationships/{rel['id']}", {**body, "parentToChildPhrase": 7}, expect=422)
+    api("ana").call("PUT", f"/api/relationships/{w['rel']}", body, expect=409)
+    assert fake_db.raw["relationships"].find_one({"_id": w["rel"]}).get("parentToChildPhrase") is None

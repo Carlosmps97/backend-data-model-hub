@@ -77,7 +77,29 @@ def normalized_existing(existing: dict) -> dict:
 
 
 def changed_fields(before: dict, after: dict) -> list[str]:
+    """Campos que el doc planeado cambia. `physicalNameOverridden` cuenta como
+    cualquier otro: el planeado conserva el del existente si el físico no
+    cambia (`keep_override`), así que una re-carga idéntica queda «unchanged»
+    sin esconder nada (doc 105, R2)."""
     return [k for k in after if k != "id" and before.get(k) != after.get(k)]
+
+
+def keep_override(existing: dict | None, physical: str) -> bool:
+    """Doc 105 (R2): `physicalNameOverridden` del doc planeado. La hoja no trae
+    el flag y el changeset estampa «flag del payload OR físico≠derivado» (doc
+    68): con el flag en False, un override cuyo físico HOY coincide con el
+    derivado se bajaba en silencio en cualquier update. Se conserva el del
+    existente si el físico no cambia; si cambia, lo re-evalúa el estampado.
+    Puro."""
+    return bool(existing is not None and physical == existing.get("physicalName")
+                and existing.get("physicalNameOverridden"))
+
+
+def too_long(name: str, current: str | None, max_len: int) -> bool:
+    """¿El nombre que se GRABA excede el tope? Mismo «grandfather» que el
+    changeset para tablas y columnas (`changesets.service`: alta suelta y
+    lote): el nombre actual —sin mirar mayúsculas— no se penaliza. Puro."""
+    return bool(max_len and len(name) > max_len and (current is None or name.casefold() != current.casefold()))
 
 
 def _headers(parsed: ParsedWorkbook) -> Callable[[str, str], str]:
@@ -137,6 +159,11 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
         return TablePlan(row=r.row, logical=logical, physical=physical, schema=None, id=str(existing["id"]),
                          action="error", existing=existing, canvas=_canvas_of(r))
     canvas = _canvas_of(r)
+    if existing is not None and not declared and matched_by == "physical":
+        # Doc 105 (ronda 5): sin físico declarado la fila no pide un nombre: la
+        # tabla que calza por el derivado (sólo puede diferir en mayúsculas)
+        # conserva el grabado, como la misma edición desde la app.
+        physical = str(existing.get("physicalName") or physical)
     if existing is not None and matched_by == "logical":
         physical = str(existing.get("physicalName") or physical)
         rb.warning(SHEET_TABLES, "matched-by-logical",
@@ -167,7 +194,7 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
     errors_before = rb.error_count
     # Longitud del físico (al crear o renombrar; heredado sin cambios no penaliza).
     current_phys = str(existing.get("physicalName") or "") if existing else None
-    if max_len and len(physical) > max_len and physical != current_phys:
+    if too_long(physical, current_phys, max_len):   # doc 105: casefold, como el changeset
         rb.error(SHEET_TABLES, "name-too-long",
                  f"Physical name '{physical}' has {len(physical)} characters, over the {max_len}-character limit.",
                  row=r.row, column=h("physicalName", "TABLA_FISICA") if declared else h("logicalName", "TABLA_LOGICO"))
@@ -198,6 +225,7 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
     if existing is not None:   # doc 69: flags de faceta se conservan en el update
         plan.doc["logicalOnly"] = bool(existing.get("logicalOnly"))
         plan.doc["physicalOnly"] = bool(existing.get("physicalOnly"))
+        plan.doc["physicalNameOverridden"] = keep_override(existing, physical)   # doc 105 (R2)
     if existing is None:
         plan.action = "create"
         return plan

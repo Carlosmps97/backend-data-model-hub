@@ -16,10 +16,10 @@ from . import service
 from .schemas import CanonicalColumnBody, CanonicalTableBody
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"],
-                   dependencies=[Depends(write_guard("model.edit"))])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True))])
 
 projects_catalog_router = APIRouter(prefix="/api/projects/{project_id}/catalog", tags=["catalog"],
-                                    dependencies=[Depends(write_guard("model.edit")), Depends(alive_project)])
+                                    dependencies=[Depends(write_guard("model.edit", versioned=True)), Depends(alive_project)])
 
 
 @projects_catalog_router.get("/tables")

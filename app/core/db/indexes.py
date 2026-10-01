@@ -84,6 +84,8 @@ async def ensure_indexes(db: Any) -> None:
         # Doc 78: perfiles de carga (colección chica, por proyecto).
         _try("upload_profiles", [("flgactive", 1)]),
         _try("upload_profiles", [("projectId", 1)]),
+        # Doc 105: jobs de la carga Excel en la BD (tope por usuario, desalojo).
+        _try("upload_jobs", [("owner", 1)]),
         # Doc 95 D11: plantillas Excel del Reporting (colección chica, por proyecto).
         _try("sheet_templates", [("projectId", 1)]),
         _try("canonical_tables", [("flgactive", 1)]),

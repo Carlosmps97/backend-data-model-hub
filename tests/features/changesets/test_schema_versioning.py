@@ -151,11 +151,12 @@ def _mock_rename_env(monkeypatch, *, tables: list[dict], views: list[dict],
         {"id": "s1", "name": "core", "description": None}]))
     recorded: list[tuple] = []
 
-    async def fake_add_change(cs_id, actor, collection, entity_id, op, payload):
-        recorded.append((collection, entity_id, op, payload))
+    async def fake_add_changes_bulk(cs_id, actor, items):
+        # Doc 105 (H1): el rename graba TODO en un solo lote (todo o nada).
+        recorded.extend((i["collection"], i["entityId"], i["op"], i["payload"]) for i in items)
         return {"id": cs_id}
 
-    monkeypatch.setattr(service, "add_change", fake_add_change)
+    monkeypatch.setattr(service, "add_changes_bulk", fake_add_changes_bulk)
 
     async def _pub(collection, flt=None, **kwargs):
         return {"canonical_tables": tables, "views": views}.get(collection, [])
@@ -294,11 +295,12 @@ def test_rename_schema_conserva_kind(monkeypatch):
         {"id": "s1", "name": "core_vu", "description": None, "kind": "views"}]))
     recorded: list[tuple] = []
 
-    async def fake_add_change(cs_id, actor, collection, entity_id, op, payload):
-        recorded.append((collection, entity_id, op, payload))
+    async def fake_add_changes_bulk(cs_id, actor, items):
+        # Doc 105 (H1): el rename graba TODO en un solo lote (todo o nada).
+        recorded.extend((i["collection"], i["entityId"], i["op"], i["payload"]) for i in items)
         return {"id": cs_id}
 
-    monkeypatch.setattr(service, "add_change", fake_add_change)
+    monkeypatch.setattr(service, "add_changes_bulk", fake_add_changes_bulk)
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=[]))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value={}))
     out = asyncio.run(service.rename_schema("c1", "u1", "s1", "core_v2_vu"))

@@ -13,15 +13,47 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.core.datatypes import mirror_complex, synced_other_facet
+from app.core.naming import apply_case
 from app.features.catalog.models import CanonicalColumnDoc
 
 from .normalize import clean_logical, clean_text, is_pk_mark, norm_ci, norm_key, norm_name, norm_type, partition_correlative
 from .parser import ColumnRow, ParsedWorkbook
-from .plan_tables import TableIndex, TablePlan, changed_fields
+from .plan_tables import TableIndex, TablePlan, changed_fields, keep_override, too_long
 from .report import SHEET_COLUMNS, ReportBuilder
 from .standards import Standards, apply_udps
 
 _PARTITION_KEY = "particion"   # norm_key del UDP «Particion»
+
+# Doc 83 → doc 105: scopes cuyo físico el changeset normaliza al `case` del
+# scope al grabar (`changesets.service._CASE_NORMALIZED`): sólo columnas; las
+# tablas entran tal cual (decisión owner 2026-09-10). Un test ata ambos.
+CASE_NORMALIZED_SCOPES = ("column",)
+
+
+def persisted_physical(std: Standards, physical: str) -> str:
+    """Doc 105: un físico de columna con la regla de `case` del scope, como lo
+    normaliza el changeset (`_apply_naming_rules`) cuando se tipea o cambia.
+    Puro."""
+    if "column" not in CASE_NORMALIZED_SCOPES:
+        return physical
+    return apply_case(physical, (std.ctx.naming.get("column") or {}).get("case") or "upper")
+
+
+def requested_physical(std: Standards, asked: str, by_phys: dict[str, dict],
+                       declared: bool = True) -> tuple[str, dict | None]:
+    """Doc 105: (físico que se grabará, columna existente). Identidad por el
+    texto de la fila o por el normalizado (camel re-segmenta: «cod_cliente» es
+    «codCliente»); lo tipeado distinto del grabado se normaliza («cod» sobre
+    «COD» no es renombre). Ronda 4 — como el changeset: el texto IDÉNTICO al
+    grabado queda tal cual aunque sea un legado fuera de la regla (renombrarlo
+    en silencio dejaba vistas colgando y cambiaba el override). Ronda 5: SIN
+    físico declarado la fila no pide un nombre (`asked` es el derivado): la
+    columna que calza —sólo puede diferir en mayúsculas— conserva el grabado,
+    como la misma edición desde la app. Puro."""
+    persisted = persisted_physical(std, asked)
+    existing = by_phys.get(norm_ci(asked)) or by_phys.get(norm_ci(persisted))
+    keep = existing is not None and (not declared or existing.get("physicalName") == asked)
+    return (str(existing.get("physicalName") or asked) if keep else persisted), existing
 
 
 @dataclass
@@ -144,7 +176,33 @@ def _plan_table_columns(tp: TablePlan, rows: list[ColumnRow], ctx, std: Standard
             continue
         cp.fields["projectId"] = ctx.project_id            # doc 75 I1
         _close(cp, rb, tp, h)
+    _clash_with_untouched(plans, existing_cols, rb, tp, h)
     return plans
+
+
+def _clash_with_untouched(plans: list[ColumnPlan], existing_cols: list[dict], rb: ReportBuilder,
+                          tp: TablePlan, h: Callable[[str, str], str]) -> None:
+    """Doc 105 (ronda 4): el nombre que se graba no puede chocar —sin mirar
+    mayúsculas, como la unicidad del changeset— con OTRA columna de la tabla
+    que la carga no toca (entre filas lo cubre «duplicate-in-file»). Pasa
+    cuando lo tipeado se normaliza (camel re-segmenta: «NBR_CLIENTE» →
+    «nbrCliente» choca con «nbrcliente»): el apply daba 409 con tandas previas
+    ya grabadas; ahora lo ve la validación."""
+    touched = {cp.existing["id"] for cp in plans if cp.existing is not None}
+    others: dict[str, dict] = {}
+    for c in existing_cols:
+        if c.get("id") not in touched:
+            others.setdefault(norm_ci(c.get("physicalName")), c)
+    for cp in plans:
+        if cp.action not in ("create", "update"):
+            continue
+        clash = others.get(norm_ci(cp.doc["physicalName"]))
+        if clash is not None:
+            rb.error(SHEET_COLUMNS, "duplicate-name",
+                     f"Column '{cp.doc['physicalName']}' of '{tp.physical}' would clash with the existing column "
+                     f"'{clash.get('physicalName')}' (physical names are unique regardless of case).",
+                     row=cp.row, column=h("physicalName", "CAMPO_FISICO"))
+            cp.action, cp.doc = "error", None
 
 
 def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical: dict[str, list[dict]],
@@ -157,9 +215,8 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
                  row=r.row, column=h("logicalName", "CAMPO_LOGICO"))
         return ColumnPlan(row=r.row, table=tp, id=new_id(), action="error")
     declared = bool(clean_text(r.physical))
-    physical = clean_text(r.physical) if declared else std.physicalize(logical, "column")
-
-    existing = by_phys.get(norm_ci(physical))
+    asked = clean_text(r.physical) if declared else std.physicalize(logical, "column")
+    physical, existing = requested_physical(std, asked, by_phys, declared)
     if existing is None and not declared:
         candidates = by_logical.get(norm_name(logical), [])
         if len(candidates) > 1:
@@ -189,6 +246,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
     cp = ColumnPlan(row=r.row, table=tp, id=cid, action="create" if existing is None else "update",
                     existing=existing, pk=r.pk)
 
+    # Duplicados y longitud sobre el nombre que se GRABA (`physical`).
     pk_key, lk = norm_ci(physical), norm_name(logical)
     dup_row = seen_phys.get(pk_key) or seen_logical.get(lk)
     if dup_row is not None:
@@ -202,7 +260,7 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
 
     errors_before = rb.error_count
     current_phys = str(existing.get("physicalName") or "") if existing else None
-    if max_len and len(physical) > max_len and physical != current_phys:
+    if too_long(physical, current_phys, max_len):
         rb.error(SHEET_COLUMNS, "name-too-long",
                  f"Physical name '{physical}' has {len(physical)} characters, over the {max_len}-character limit.",
                  row=r.row, column=h("physicalName", "CAMPO_FISICO") if declared else h("logicalName", "CAMPO_LOGICO"))
@@ -287,6 +345,8 @@ def _plan_row(r: ColumnRow, tp: TablePlan, by_phys: dict[str, dict], by_logical:
         "logicalDataType": logical_type, "logicalTypeOverridden": logical_overridden,
         "logicalOnly": bool((existing or {}).get("logicalOnly")),
         "physicalOnly": bool((existing or {}).get("physicalOnly")),
+        # Doc 105 (R2): el override (doc 68) se conserva si el físico no cambia.
+        "physicalNameOverridden": keep_override(existing, physical),
         # Doc 85: el comment físico no viene de la plantilla — se conserva.
         "physicalDescription": (existing or {}).get("physicalDescription"),
     }

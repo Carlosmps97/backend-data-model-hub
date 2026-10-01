@@ -12,7 +12,8 @@ import json
 
 import pytest
 
-from app.core.db.lakebase.translate import Sql, update_expr, upsert_doc, validate_update
+from app.core.db.lakebase.collection import _apply_projection
+from app.core.db.lakebase.translate import Sql, projection_expr, update_expr, upsert_doc, validate_update
 
 ACTOR = "carlos.perez@corp.com.pe"
 ENTRY = {"status": "approved", "at": "2026-08-30T21:00:00+00:00"}
@@ -58,3 +59,32 @@ def test_merge_objects_en_upsert_doc():
         {"$mergeObjects": {"approvals": {ACTOR: ENTRY}}, "$set": {"updatedAt": "T1"}})
     assert base["approvals"] == {ACTOR: ENTRY}
     assert base["updatedAt"] == "T1"
+
+
+# ── Doc 105 (P9): proyección sólo `_id` ─────────────────────────────────────
+# `{"_id": 1}` es una INCLUSIÓN de `_id` (Mongo devuelve sólo el id). El
+# traductor la leía como exclusión vacía (`doc - '{}'`) y traía el documento
+# completo: cada «¿existe?» o «dame los ids» viajaba con todo el doc.
+
+DOC = {"_id": "t1", "projectId": "p1", "physicalName": "M_CLIENTE", "udpValues": {"a": "b"}}
+
+
+@pytest.mark.parametrize("flag", [1, True])
+def test_proyeccion_solo_id_arma_solo_el_id(flag):
+    s = Sql()
+    assert projection_expr({"_id": flag}, s) == "(jsonb_build_object('_id', doc -> '_id'))"
+    assert s.params == []
+
+
+def test_proyeccion_sin_id_sigue_siendo_todo_menos_el_id():
+    s = Sql()
+    assert projection_expr({"_id": 0}, s) == "(doc - $1::text[])"
+    assert s.params == [["_id"]]
+
+
+def test_apply_projection_solo_id_devuelve_solo_el_id():
+    """El mismo caso en Python (`find_one_and_update` proyecta el doc devuelto)."""
+    assert _apply_projection(dict(DOC), {"_id": 1}) == {"_id": "t1"}
+    assert _apply_projection(dict(DOC), {"_id": True}) == {"_id": "t1"}
+    assert _apply_projection(dict(DOC), {"_id": 0}) == {"projectId": "p1", "physicalName": "M_CLIENTE",
+                                                        "udpValues": {"a": "b"}}

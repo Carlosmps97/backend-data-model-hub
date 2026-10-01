@@ -136,3 +136,16 @@ def test_update_que_borra_la_abreviatura_422(monkeypatch):
         asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term="codigo", abbrev="")))
     assert exc.value.status_code == 422
     updated.assert_not_awaited()
+
+
+# ── Doc 105 (C1): el bloqueo manda sobre el contenido ─────────────────────
+@pytest.mark.parametrize("term, abbrev", [("codigo", ""), ("  ", "COD"), ("", "")])
+def test_c1_bloqueado_sale_409_aunque_venga_vacio(monkeypatch, term, abbrev):
+    monkeypatch.setattr(service.repository, "get_entry", AsyncMock(return_value=LOCKED))
+    updated = AsyncMock()
+    monkeypatch.setattr(service.repository, "update_entry", updated)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.update_entry("p1", "t1", AbbreviationBody(term=term, abbrev=abbrev)))
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "The term 'codigo' is locked by an admin; unlock it before editing it."
+    updated.assert_not_awaited()

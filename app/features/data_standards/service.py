@@ -16,15 +16,19 @@ from fastapi import HTTPException
 
 from app.core.audit import audit
 from app.core.logging import get_logger
+from app.core.udp_values import canonical_number, is_finite_number, iso_date, list_key, normalize_boolean
 from app.features.ddl_rules import repository as rules_repo
 from app.features.ddl_rules import service as rules_svc
 from app.features.ddl_rules.engine import generators as ddl_generators
 from app.features.ddl_rules.engine import validate as ddl_validate
+from app.features.ddl_rules.models import DdlRuleDoc
 from app.features.ddl_rules.output import normalize_output as ddl_normalize_output
 from app.features.glossary import repository as dict_repo, service as dict_svc
 from app.features.domains import repository as dom_repo, service as dom_svc
+from app.features.domains.models import ParentDomainDoc
 from app.features.settings import repository as set_repo, service as set_svc
 from app.features.udp import repository as udp_repo
+from app.features.udp.models import UdpDefinitionDoc
 
 from . import repository
 from .models import KINDS
@@ -279,6 +283,211 @@ def _title_for(body, diff: dict) -> str:
     return f"{len(parts)} standard changes" if parts else "Standard change"
 
 
+# ── Doc 105 (P1/P1-bis): un lote sin cambios no registra versión ──────────
+
+NO_CHANGES = "There are no changes to apply."
+BATCH_META = ("kind", "title", "description")
+BATCH_CHANGES = ("termsUpsert", "termsDelete", "namingConfig", "domainsUpsert", "domainsDelete",
+                 "udpUpsert", "udpDelete", "rulesUpsert", "rulesDelete")
+DDL_PATCH_BLOCKS = ("lookups", "functions", "output")
+
+
+def _empty_batch(body) -> bool:
+    """¿El lote no trae ningún cambio? Antes igual registraba una versión
+    «Standard change» vacía. `ddlConfigPatch` cuenta si trae algún bloque (un
+    bloque vacío REEMPLAZA: vaciar los lookups sí es un cambio). Puro."""
+    patch = getattr(body, "ddlConfigPatch", None)
+    if patch is not None and any(getattr(patch, k, None) is not None for k in DDL_PATCH_BLOCKS):
+        return False
+    return not any(getattr(body, k, None) for k in BATCH_CHANGES)
+
+
+def changed_terms(upserts: list, before_terms: dict[str, dict]) -> list:
+    """Upserts de término con término y abreviatura RECORTADOS, sin los que
+    dejan la entrada tal cual está (mismo texto, abreviatura y scope, comparados
+    recortados): editar y volver al valor original no es un cambio — no
+    registra versión ni re-deriva los físicos de todo el proyecto. No muta la
+    entrada. Puro."""
+    out = []
+    for t in upserts:
+        t = t.model_copy(update={"term": (t.term or "").strip(), "abbrev": (t.abbrev or "").strip()})
+        prev = before_terms.get(t.id) if t.id else None
+        if prev is not None and (t.term, t.abbrev, t.scope) == (
+                (prev.get("term") or "").strip(), (prev.get("abbrev") or "").strip(), prev.get("scope")):
+            continue
+        out.append(t)
+    return out
+
+
+def existing_only(ids: list[str], before: dict[str, dict]) -> list[str]:
+    """Bajas sólo de ids que existen EN EL PROYECTO: borrar lo que no está no
+    es un cambio, y los repos de estándares borran por `_id` — un id de otro
+    proyecto se soft-deleteaba (incluso un término bloqueado: el guard del lock
+    mira sólo este proyecto). Puro."""
+    return [i for i in ids if i in before]
+
+
+def changed_naming(edits: dict, current: dict[str, dict]) -> dict:
+    """`namingConfig` sin los scopes que ya están así: reescribirlos igual no
+    cambia ningún nombre y re-derivaba los físicos de todo el proyecto. Puro."""
+    return {scope: rule for scope, rule in edits.items()
+            if (rule.separator, rule.case, rule.maxLength)
+            != tuple((current.get(scope) or {}).get(k) for k in ("separator", "case", "maxLength"))}
+
+
+# «Idéntico» = el documento que el apply efectivamente grabaría, normalizado y
+# leído como lo lee la plataforma, igual al vigente — no el body crudo (un body
+# distinto puede grabar lo mismo y uno parecido puede cambiar algo real).
+
+def _same_doc(model, prev: dict | None, written: dict) -> bool:
+    """¿`prev` pisado con `written` se lee igual que `prev`? Ambos lados pasan
+    por el MISMO modelo de lectura; un doc que no valida nunca es «idéntico»
+    (ante la duda, se graba). Puro."""
+    if prev is None:
+        return False
+    try:
+        before = model.model_validate({"projectId": "", **prev}).model_dump()
+        after = model.model_validate({"projectId": "", **prev, **written}).model_dump()
+    except ValueError:
+        return False
+    return after == before
+
+
+def same_domain(edit, prev: dict | None) -> bool:
+    """¿El upsert deja el dominio como está? El apply graba sólo los campos no
+    nulos del edit (`$set`) y la plataforma lo lee con `ParentDomainDoc` (el
+    físico en blanco es «derivado»). Puro."""
+    written = {k: v for k, v in edit.model_dump(exclude_none=True).items() if k != "id"}
+    return _same_doc(ParentDomainDoc, prev, written)
+
+
+def same_udp(edit, prev: dict | None) -> bool:
+    """Ídem para una definición UDP, con la normalización de su repositorio
+    (nivel/tipo válidos, faceta efectiva, sin valores si no es lista). Puro."""
+    written = {k: v for k, v in udp_repo._clean(edit.model_dump(exclude_none=True)).items() if k != "id"}
+    return _same_doc(UdpDefinitionDoc, prev, written)
+
+
+def same_rule(edit, report: dict, state: str, prev: dict | None) -> bool:
+    """Ídem para una regla DDL: se graba con la condición canónica, los udpRefs
+    y la validación RECALCULADOS — si revalidar cambia el estado, es un cambio
+    real. `updatedBy` no entra: el edit no lo trae (el apply lo estampa al
+    grabar), así que un guardado idéntico de otra persona no es un cambio. Puro."""
+    data = {**edit.model_dump(), "condition": report["condition"], "udpRefs": report["udpRefs"],
+            "validationState": state,
+            "validationReport": {k: report[k] for k in ("state", "checks", "errors", "warnings")}}
+    written = {k: v for k, v in rules_repo._clean(data).items() if k != "id"}
+    return _same_doc(DdlRuleDoc, prev, written)
+
+
+def changed_config(patch, output: dict | None, current: dict):
+    """El patch de la config DDL sin los bloques iguales a los vigentes (cada
+    bloque REEMPLAZA el suyo; `output` ya normalizado). Devuelve (patch, output
+    a grabar). Puro."""
+    keep = {"lookups": patch.lookups if patch.lookups is not None and patch.lookups != current.get("lookups") else None,
+            "functions": (patch.functions if patch.functions is not None
+                          and patch.functions != current.get("functions") else None),
+            "output": patch.output if output is not None and output != current.get("output") else None}
+    return patch.model_copy(update=keep), (output if keep["output"] is not None else None)
+
+
+# Doc 105: (campo del lote, colección, etiqueta del mensaje, campo con el nombre).
+_OWNED_UPSERTS = (("termsUpsert", "glossary_terms", "term", "term"),
+                  ("domainsUpsert", "parent_domains", "domain", "name"),
+                  ("udpUpsert", "udp_definitions", "UDP", "name"),
+                  ("rulesUpsert", "ddl_rules", "rule", "name"))
+
+
+async def _owned_elsewhere(project_id: str, body, before: dict[str, dict]) -> str | None:
+    """Doc 105: un upsert con un id que ya existe FUERA de los activos del
+    proyecto —en otro proyecto, o borrado en este— caía al alta y chocaba por
+    clave duplicada (500) después de las escrituras previas del lote. Mensaje
+    del primero, o None. Sólo lee."""
+    for field, coll, label, key in _OWNED_UPSERTS:
+        items = [x for x in getattr(body, field) if x.id and x.id not in before[field]]
+        found = await repository.owners(coll, [x.id for x in items]) if items else {}
+        for x in items:
+            owner = found.get(x.id)
+            if owner is None:
+                continue                                  # id nuevo elegido por el cliente: alta
+            if owner["projectId"] != project_id:
+                return f"The {label} '{getattr(x, key)}' belongs to another project."
+            return f"The {label} '{getattr(x, key)}' was deleted; reload the standards and try again."
+    return None
+
+
+# ── Doc 105 (ronda 5): valores de UDP por TIPO ─────────────────────────────
+
+def typed_udp_value(data_type: str | None, allowed, value) -> tuple[object, str | None]:
+    """(valor a grabar, motivo del rechazo) de un valor de UDP según el tipo de
+    su definición: booleano normalizado a «true»/«false» (las grafías del motor
+    del Reporting), número finito en su forma canónica (la del motor, ronda 6),
+    fecha ISO `YYYY-MM-DD` real (de una fecha-hora ISO, sólo la fecha) y lista
+    dentro de `allowedValues` (con su grafía). Vacío/None pasa tal cual. Puro."""
+    if value is None or not str(value).strip():
+        return value, None
+    kind = data_type or "string"
+    if kind == "boolean":
+        normalized = normalize_boolean(value)
+        return (normalized, None) if normalized else (None, "is not a boolean (use true or false)")
+    if kind == "number":
+        return (canonical_number(value), None) if is_finite_number(value) else (None, "is not a finite number")
+    if kind == "date":
+        day = iso_date(value)
+        return (day, None) if day else (None, "is not a valid date (use YYYY-MM-DD)")
+    if kind == "list":
+        options = [str(a) for a in (allowed or [])]
+        key = list_key(value)
+        hit = next((a for a in options if list_key(a) == key), None)
+        if hit is None:
+            return None, f"is not one of its allowed values ({', '.join(options) or 'none defined'})"
+        return hit, None
+    return value, None
+
+
+def checked_udp_values(body, before_udp: dict[str, dict],
+                       before_domains: dict[str, dict] | None = None) -> tuple[object, str | None]:
+    """Doc 105 (ronda 5): el default de cada definición del lote y los valores
+    UDP de cada dominio (doc 85) se validan por el tipo de su definición —la
+    del lote si se edita en él— y los booleanos se normalizan. Antes se grababa
+    cualquier texto («Sí», «nan», «31/02/2024», fuera de la lista) y la carga
+    Excel lo escribía en cada entidad nueva. Una clave de dominio sin
+    definición conocida pasa tal cual. Ronda 6 (R16): de un dominio sólo se
+    validan los valores que CAMBIAN respecto de los guardados — el front manda
+    todos, y uno que dejó de valer (se sacó de la lista, la definición cambió
+    de tipo) bloqueaba cualquier edición del dominio. Devuelve (lote
+    normalizado, mensaje del primer valor inválido o None). Puro."""
+    deleted = set(body.udpDelete or [])
+    defs = {uid: u for uid, u in before_udp.items() if uid not in deleted}
+    udp_upsert = []
+    for u in body.udpUpsert:
+        clean = udp_repo._clean(u.model_dump())
+        value, problem = typed_udp_value(clean["dataType"], clean.get("allowedValues"), u.defaultValue)
+        if problem:
+            return body, f"The default value '{u.defaultValue}' of UDP '{u.name}' {problem}."
+        edited = u.model_copy(update={"defaultValue": value})
+        udp_upsert.append(edited)
+        if u.id:
+            defs[u.id] = {**clean, "defaultValue": value}
+    domains = []
+    for d in body.domainsUpsert:
+        if not d.udpValues:
+            domains.append(d)
+            continue
+        stored = ((before_domains or {}).get(d.id or "") or {}).get("udpValues") or {}
+        values = {}
+        for uid, raw in d.udpValues.items():
+            defn = defs.get(uid)
+            unchanged = uid in stored and stored[uid] == raw
+            value, problem = (raw, None) if defn is None or unchanged else typed_udp_value(
+                defn.get("dataType"), defn.get("allowedValues"), raw)
+            if problem:
+                return body, f"The value '{raw}' of UDP '{defn.get('name')}' in domain '{d.name}' {problem}."
+            values[uid] = value
+        domains.append(d.model_copy(update={"udpValues": values}))
+    return body.model_copy(update={"udpUpsert": udp_upsert, "domainsUpsert": domains}), None
+
+
 # ── Async ──────────────────────────────────────────────────────────────────
 
 
@@ -320,6 +529,42 @@ async def apply(actor: str, project_id: str, body) -> dict:
     before_udp = {u["id"]: u for u in await udp_repo.list_udp(project_id)}
     before_rules = {r["id"]: r for r in await rules_repo.list_rules(project_id)}
 
+    # Doc 105: un upsert con el id de algo que no es de este proyecto → 409
+    # antes de escribir nada (antes: 500 con el lote a medias).
+    foreign = await _owned_elsewhere(project_id, body, {
+        "termsUpsert": before_terms, "domainsUpsert": before_domains,
+        "udpUpsert": before_udp, "rulesUpsert": before_rules})
+    if foreign:
+        raise HTTPException(status_code=409, detail=foreign)
+
+    # Doc 105 (ronda 5): valores de UDP por tipo (defaults y dominios) — 422
+    # antes de escribir nada; normalizados antes de decidir si algo cambia.
+    body, udp_error = checked_udp_values(body, before_udp, before_domains)
+    if udp_error:
+        raise HTTPException(status_code=422, detail=udp_error)
+
+    # Doc 105 (P1/P1-bis): lo que no cambia nada no es un cambio — términos
+    # recortados y sin las ediciones idénticas, bajas sólo de ids del proyecto,
+    # naming sin los scopes que ya están así y dominios/UDP que se grabarían
+    # iguales. Un lote que queda sin cambios responde 422 — antes registraba
+    # una versión y, con un término o el naming, re-derivaba los físicos de
+    # todo el proyecto. (Reglas y config DDL se descartan más abajo.)
+    updates = {"termsUpsert": changed_terms(body.termsUpsert, before_terms),
+               "termsDelete": existing_only(body.termsDelete, before_terms),
+               "domainsDelete": existing_only(body.domainsDelete, before_domains),
+               "udpDelete": existing_only(body.udpDelete, before_udp),
+               "rulesDelete": existing_only(body.rulesDelete, before_rules),
+               "domainsUpsert": [d for d in body.domainsUpsert
+                                 if not same_domain(d, before_domains.get(d.id or ""))],
+               "udpUpsert": [u for u in body.udpUpsert if not same_udp(u, before_udp.get(u.id or ""))]}
+    if body.namingConfig:
+        # Contra lo GUARDADO (no lo visible): regrabar el valor visible sobre uno
+        # inválido guardado cuenta como cambio y lo limpia (doc 105, ronda 3).
+        updates["namingConfig"] = changed_naming(body.namingConfig, await set_svc.get_naming_stored(project_id))
+    body = body.model_copy(update=updates)
+    if _empty_batch(body):
+        raise HTTPException(status_code=422, detail=NO_CHANGES)
+
     # ── Guards de DDL Export Rules (doc 30) — fail-fast, sin estado a medias ──
     rules_upsert = getattr(body, "rulesUpsert", []) or []
     rules_delete = set(getattr(body, "rulesDelete", []) or [])
@@ -331,6 +576,11 @@ async def apply(actor: str, project_id: str, body) -> dict:
             ddl_output = ddl_normalize_output(ddl_patch.output)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
+    # Doc 105 (P1-bis): los bloques de la config iguales a los vigentes no se reescriben.
+    ddl_config_now = await rules_repo.get_config(project_id)
+    if ddl_patch is not None:
+        ddl_patch, ddl_output = changed_config(ddl_patch, ddl_output, ddl_config_now)
+        body = body.model_copy(update={"ddlConfigPatch": ddl_patch})
 
     # Estado de reglas POST-batch: (previas − borradas) pisadas por los upserts.
     post_rules: dict[str, dict] = {rid: r for rid, r in before_rules.items()
@@ -360,7 +610,6 @@ async def apply(actor: str, project_id: str, body) -> dict:
     # de un lookup se BLOQUEA con la lista (spec §4). Si el mismo batch borra la
     # regla que lo referenciaba, pasa.
     udp_delete_ids = set(getattr(body, "udpDelete", []) or [])
-    ddl_config_now = await rules_repo.get_config(project_id)
     post_config = {
         "lookups": (ddl_patch.lookups if ddl_patch is not None and ddl_patch.lookups is not None
                     else ddl_config_now.get("lookups") or {}),
@@ -407,6 +656,15 @@ async def apply(actor: str, project_id: str, body) -> dict:
                 detail=f"Rule '{data['name']}' has a validation error: {first['message']}")
         state = report["state"] if core_edited else ddl_validate.passive_state(report)
         rules_reports.append((report, state))
+    # Doc 105 (P1-bis): una regla que se grabaría igual (validación recalculada
+    # incluida) no se reescribe; si ya no queda nada en el lote → 422.
+    keep = [not same_rule(r, rep, st, before_rules.get(r.id or "")) for r, (rep, st) in zip(rules_upsert, rules_reports)]
+    if not all(keep):
+        rules_upsert = [r for r, k in zip(rules_upsert, keep) if k]
+        rules_reports = [x for x, k in zip(rules_reports, keep) if k]
+        body = body.model_copy(update={"rulesUpsert": rules_upsert})
+    if _empty_batch(body):
+        raise HTTPException(status_code=422, detail=NO_CHANGES)
 
     # Cascada de generadores (spec §7.3) — solo si el batch toca reglas: borrar
     # un generador cuya salida es la FUENTE de otro activo → 409 con la lista;
@@ -436,10 +694,8 @@ async def apply(actor: str, project_id: str, body) -> dict:
     # abbrev no. El botón Validar del front es cortesía).
     # Doc 102: término Y abreviatura obligatorios (antes el front descartaba la
     # fila incompleta y el lote vacío igual registraba una versión «Saved»).
-    for t in body.termsUpsert:
-        err = dict_svc.blank_term_error(t.term, t.abbrev)
-        if err:
-            raise HTTPException(status_code=422, detail=err)
+    # Doc 105 (C1): primero el bloqueo (409) y después el contenido (422) —
+    # antes un término bloqueado con un campo vacío respondía el 422.
     for tid in body.termsDelete:
         prev = before_terms.get(tid)
         if prev and prev.get("locked"):
@@ -447,7 +703,6 @@ async def apply(actor: str, project_id: str, body) -> dict:
                 status_code=409,
                 detail=(f"The term '{prev['term']}' is locked by an admin; "
                         "unlock it before deleting it."))
-    claimed: set[tuple[str, str]] = set()  # (término normalizado, scope) que ESTE batch da de alta/renombra
     for t in body.termsUpsert:
         prev = before_terms.get(t.id) if t.id else None
         if prev and prev.get("locked"):
@@ -455,6 +710,13 @@ async def apply(actor: str, project_id: str, body) -> dict:
                 status_code=409,
                 detail=(f"The term '{prev['term']}' is locked by an admin; "
                         "unlock it before editing it."))
+    for t in body.termsUpsert:
+        err = dict_svc.blank_term_error(t.term, t.abbrev)
+        if err:
+            raise HTTPException(status_code=422, detail=err)
+    claimed: set[tuple[str, str]] = set()  # (término normalizado, scope) que ESTE batch da de alta/renombra
+    for t in body.termsUpsert:
+        prev = before_terms.get(t.id) if t.id else None
         renamed = prev is not None and (
             (t.term or "").strip().lower() != (prev.get("term") or "").strip().lower())
         if prev is None or renamed:

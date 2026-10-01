@@ -1,8 +1,8 @@
 # Contrato de API — Data Model Hub Backend
 
-Actualizado: 2026-09-08 (doc 75: proyectos independientes). Referencia completa de los 143 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
+Actualizado: 2026-09-30 (doc 105: el modelo y los estándares sólo se escriben por versión; rondas 4 a 7: motor del Reporting, valores de UDP por tipo y nombres legados). Referencia completa de los 168 endpoints de la API REST, dividida en dos partes por dominio. Todas las respuestas siguen el envelope estándar `{ "success": true, "data": ... }` o `{ "success": false, "error": "..." }`.
 
-> **Alcance por proyecto (doc 75).** Cada proyecto es un universo independiente: su catálogo, sus esquemas, sus Data Standards (glosario, dominios, UDP, naming, reglas DDL), sus versiones y sus reportes. Todo lo que es de un proyecto cuelga de **`/api/projects/{project_id}/…`** (catálogo, esquemas, glosario, dominios, UDP, standards, ddl-rules, settings, versions, folders, subject-areas, counts) o exige `projectId` (snapshot de changeset, reporting, summary). Toda ruta `/api/projects/{project_id}/…` lleva la dependencia `alive_project`: si el proyecto no existe o fue borrado responde **404 `Project not found.`**; una operación sobre un changeset de un proyecto borrado responde **409 `This project was deleted.`**. Los recursos por id (`/api/catalog/tables/{id}/…`, `/api/schemas/{sid}`, `/api/subject-areas/{sa_id}`, `/api/relationships/{rid}`, `/api/views/{vid}`, `/api/changesets/{cs_id}/…`) llevan el `projectId` en el documento y el servidor lo valida. Se retiraron en el doc 75: `GET /api/me`, `POST /api/glossary/logicalize`, `PUT /api/subject-areas/{sa_id}/udp` (los UDP de canvas van por el draft), `PUT/DELETE /api/projects/{pid}` (renombrar/describir/borrar van por el draft) y `GET /api/versions/published` (ahora por proyecto).
+> **Alcance por proyecto (doc 75).** Cada proyecto es un universo independiente: su catálogo, sus esquemas, sus Data Standards (glosario, dominios, UDP, naming, reglas DDL), sus versiones y sus reportes. Todo lo que es de un proyecto cuelga de **`/api/projects/{project_id}/…`** (catálogo, esquemas, glosario, dominios, UDP, standards, ddl-rules, settings, versions, folders, subject-areas, counts) o exige `projectId` (snapshot de changeset, reporting, summary). Toda ruta `/api/projects/{project_id}/…` lleva la dependencia `alive_project`: si el proyecto no existe o fue borrado responde **404 `Project not found.`**; una operación sobre un changeset de un proyecto borrado responde **409 `This project was deleted.`**. Los recursos por id (`/api/catalog/tables/{id}/…`, `/api/schemas/{sid}`, `/api/subject-areas/{sa_id}`, `/api/relationships/{rid}`, `/api/views/{vid}`, `/api/changesets/{cs_id}/…`) llevan el `projectId` en el documento; el servidor lo valida en las escrituras del changeset (guard I2, `_cross_project_check`). **Doc 105**: el modelo ya no se escribe directo — las escrituras de canvases, carpetas, esquemas, vistas, relaciones y tablas/columnas del catálogo (que no validaban el proyecto) responden **409 `This change requires a version in edit mode.`** (D1; sólo `POST /api/projects` sigue directo), y las de glosario, dominios y naming, 409 porque van por `standards/apply` (D1b). Se retiraron en el doc 75: `GET /api/me`, `POST /api/glossary/logicalize`, `PUT /api/subject-areas/{sa_id}/udp` (los UDP de canvas van por el draft), `PUT/DELETE /api/projects/{pid}` (renombrar/describir/borrar van por el draft) y `GET /api/versions/published` (ahora por proyecto).
 
 ---
 
@@ -109,8 +109,9 @@ Los permisos son data-driven: cada usuario tiene un rol y cada rol declara una m
 
 Se aplican de dos maneras:
 
-- `require_permission("<perm>")`: dependency por endpoint; exige el permiso siempre (403 si falta). Se usa en `admin`, en las escrituras de `glossary`, en `data_standards` (apply con `standards.edit`, rollback con `rollback`), en `ddl_rules` (`/render` con `export`) y en los endpoints de `changesets` (`model.edit` / `review.decide` / `rollback`).
-- `write_guard("<perm>")`: dependency a nivel de router que gatea por método: lecturas (GET/HEAD/OPTIONS) solo requieren sesión válida; escrituras (POST/PUT/PATCH/DELETE) exigen el permiso (403 si falta o el usuario está deshabilitado). Además audita la acción (salvo los sufijos ruidosos de alta frecuencia `/layout`, `/drawings`, `/tables`, `/udp`). Se usa en `catalog` (`model.edit`), `domains` (`standards.edit`), `settings` (`standards.edit`) y, en la Parte 2, en `projects`, `folders`, `schemas`, `relationships` y `views` (`model.edit`).
+- `require_permission("<perm>")`: dependency por endpoint; exige el permiso siempre (403 si falta). Se usa en `admin`, en `glossary` (lock/unlock con `admin.manage`), en `data_standards` (apply con `standards.edit`, rollback con `rollback`), en `ddl_rules` (`/render` con `export`) y en los endpoints de `changesets` (`model.edit` / `review.decide` / `rollback`).
+- `write_guard("<perm>")`: dependency a nivel de router que gatea por método: lecturas (GET/HEAD/OPTIONS) solo requieren sesión válida; escrituras (POST/PUT/PATCH/DELETE) exigen el permiso (403 si falta o el usuario está deshabilitado). Además audita la acción (salvo los sufijos ruidosos de alta frecuencia `/layout`, `/drawings`, `/tables`). Se usa en `catalog` y, en la Parte 2, en `projects`, `folders`, `schemas`, `relationships` y `views` (todos con `model.edit`). **Doc 105 (D1)**: esos seis routers lo montan con `versioned=True` — el modelo se edita SÓLO por una versión en edición: con el permiso, una escritura directa a producción responde **409 `This change requires a version in edit mode.`** sin tocar nada (sin permiso sigue siendo 403, que sale antes) y el intento rechazado no se audita. La única escritura que sigue directa es `POST /api/projects` (`direct_ok`, doc 75 D5: el proyecto nace con su v1).
+- `standards_direct_write` / `standards_read_only` (`app/features/data_standards/deps.py`, **doc 105, D1b**): los Data Standards se escriben SÓLO por `standards/apply` (versionado, con rollback). El CRUD directo del glosario y `rephysicalize` (por ruta), y las escrituras de `domains` y `settings` (por router: sus lecturas sólo exigen sesión) siguen declarados pero responden **409 `Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.`** antes de cualquier efecto (tampoco se auditan); sin `standards.edit`, 403.
 - `alive_project` (`app/features/projects/deps.py`): dependency de TODO router `/api/projects/{project_id}/…` — 404 `Project not found.` si el proyecto no existe o fue borrado (doc 75 D5).
 
 Resumen de gating por router (Parte 1):
@@ -120,13 +121,13 @@ Resumen de gating por router (Parte 1):
 | `auth` | login y warmup públicos; logout/me requieren sesión |
 | `admin` | todos requieren `admin.manage` |
 | `identity` | `GET /api/users` requiere sesión (`current_principal`) |
-| `catalog` | `write_guard("model.edit")` en ambos routers (`/api/projects/{pid}/catalog` + `/api/catalog`): GET abierto a sesión, escrituras con permiso; el router por proyecto suma `alive_project` |
-| `glossary` (`/api/projects/{pid}/glossary`) | GET/physicalize abiertos; validate exige sesión; create/update/delete/rephysicalize requieren `standards.edit`; lock/unlock requieren `admin.manage` |
-| `domains` (`/api/projects/{pid}/domains`) | `write_guard("standards.edit")`: GET e impact abiertos a sesión, escrituras con permiso |
+| `catalog` | `write_guard("model.edit", versioned=True)` en ambos routers (`/api/projects/{pid}/catalog` + `/api/catalog`): GET abierto a sesión; escrituras (alta de tabla y de columna): 403 sin permiso y, con él, 409 (doc 105, D1: sólo por una versión); el router por proyecto suma `alive_project` |
+| `glossary` (`/api/projects/{pid}/glossary`) | GET/physicalize abiertos; validate e impact exigen sesión; create/update/delete/rephysicalize: 403 sin `standards.edit` y, con él, 409 (doc 105, D1b: los términos se cambian por `standards/apply`); lock/unlock requieren `admin.manage` |
+| `domains` (`/api/projects/{pid}/domains`) | `standards_read_only` (doc 105, D1b): GET e impact abiertos a sesión; escrituras (alta, edición, baja, propagate): 403 sin `standards.edit` y, con él, 409 |
 | `udp` (`/api/projects/{pid}/udp`) | `GET` abierto |
 | `data_standards` (`/api/projects/{pid}/standards`) | snapshot/versions/summary abiertos; apply requiere `standards.edit`; rollback requiere `rollback` |
 | `ddl_rules` (`/api/projects/{pid}/ddl-rules`) | lecturas y validate/test/impact abiertos (no escriben); `/render` requiere `export` |
-| `settings` (`/api/projects/{pid}/settings`) | `write_guard("standards.edit")`: GET abierto a sesión, PUT con permiso |
+| `settings` (`/api/projects/{pid}/settings`) | `standards_read_only` (doc 105, D1b): GET abierto a sesión; PUT: 403 sin `standards.edit` y, con él, 409 (el naming se cambia por `standards/apply`) |
 
 Nota: "abierto" significa que no exige un permiso puntual, pero igual pasa por la resolución de identidad global; con `REQUIRE_AUTH=true` sin token válido es 401 en cualquier ruta.
 
@@ -142,12 +143,12 @@ Además hay lockout de cuenta: tras 8 fallos de login consecutivos, la cuenta se
 |---|---|
 | 200 | Lectura o mutación correcta |
 | 201 | Creación de recurso (POST de creación) |
-| 400 | Regla de negocio violada (dejar el sistema sin admin, rol con usuarios, scope/case inválido) |
+| 400 | Regla de negocio violada (dejar el sistema sin admin, rol con usuarios, scope/case inválido); doc 105: texto con el carácter NUL (U+0000) en la ruta, la query o el cuerpo JSON → `Text can't contain the NUL character (U+0000).`, o con un surrogate UTF-16 suelto en el cuerpo → `Text contains an invalid character (an unpaired UTF-16 surrogate).`, o un cuerpo que no es UTF-8 válido → `The request body isn't valid UTF-8 text.` (ronda 4: decodificación estricta — el `json.loads` de FastAPI decodifica con `surrogatepass` y un surrogate en bytes crudos, sin escape, llegaba al handler), en toda la API (middleware `app/core/nul_guard.py`, antes de tocar la base: Postgres no acepta NUL en `text`/`jsonb` ni asyncpg codifica un surrogate suelto — eran 500) |
 | 401 | Sin sesión válida (token ausente/inválido/expirado con `REQUIRE_AUTH`) |
 | 403 | Sesión válida pero sin el permiso requerido |
 | 404 | Recurso inexistente (usuario, rol, versión de estándares) |
-| 409 | Conflicto de estado o de datos (término del glosario bloqueado o duplicado, UDP referida por reglas DDL al borrarla) |
-| 422 | Body que no valida contra el schema |
+| 409 | Conflicto de estado o de datos (término del glosario bloqueado o duplicado, UDP referida por reglas DDL al borrarla; doc 105: escritura directa del modelo o de los estándares, que van por una versión) |
+| 422 | Body que no valida contra el schema; doc 105: `standards/apply` sin cambios efectivos (`There are no changes to apply.`) o con un valor de UDP que no calza con el tipo de su definición (ronda 5, §10.3) |
 | 429 | Rate limit del login excedido |
 | 500 | Error interno no controlado |
 
@@ -159,10 +160,10 @@ Además hay lockout de cuenta: tras 8 fallos de login consecutivos, la cuenta se
 
 El backend es una app FastAPI (ASGI, servida con Uvicorn). Los dos entornos vigentes:
 
-- **Producción — Databricks Apps (workspace corporativo)**: dos apps, `bknd-data-model-hub` (este backend) y `frnt-data-model-hub` (el front). El navegador habla SOLO con el front: `server.mjs` del front sirve la SPA y **proxya `/api/*` al backend servidor-a-servidor** con un token OAuth M2M de su service principal (un solo origen — así se evita el doble muro SSO por app de Databricks, doc 36). Corre con `REQUIRE_AUTH=true`, que además oculta `/docs`, `/redoc` y `/openapi.json`. El deploy va por bundle (`databricks.yml`) desde GitHub Actions, parametrizado por GitHub Variables; detalle en [despliegue.md](despliegue.md).
+- **Producción — Databricks Apps (workspace corporativo)**: dos apps, `bknd-data-model-hub` (este backend) y `frnt-data-model-hub` (el front). El navegador habla SOLO con el front: `server.mjs` del front sirve la SPA y **proxya `/api/*` al backend servidor-a-servidor** con un token OAuth M2M de su service principal (un solo origen — así se evita el doble muro SSO por app de Databricks, doc 36). Corre con `uvicorn app.main:app --workers 2` (dos procesos) y `REQUIRE_AUTH=true`, que además oculta `/docs`, `/redoc` y `/openapi.json`. El deploy va por bundle (`databricks.yml`) desde GitHub Actions, parametrizado por GitHub Variables; detalle en [despliegue.md](despliegue.md).
 - **Local (desarrollo)**: `uvicorn app.main:app --reload` en `:8000`; el `vite dev` del front proxya `/api` hacia ahí.
 
-No requiere infraestructura propia más allá de la base de datos y las variables de entorno. En despliegue multi-réplica conviene mover el rate limiting a un backend Redis (hoy el estado es en memoria por proceso, así que con varias réplicas el límite efectivo se multiplica).
+No requiere infraestructura propia más allá de la base de datos y las variables de entorno. El estado del rate limiting es en memoria por proceso: con los 2 workers cada proceso ya cuenta por separado (hasta el doble del límite nominal) y con varias réplicas se multiplica además; para un límite estricto habría que moverlo a un backend compartido (Redis).
 
 ### 2.2 Variables de entorno
 
@@ -186,6 +187,7 @@ No requiere infraestructura propia más allá de la base de datos y las variable
 | `CORS_ORIGINS` | Allowlist exacta de orígenes (solo se usa sin regex) | `http://localhost:3000,http://127.0.0.1:3000` |
 | `ALLOWED_HOSTS` | Allowlist de hosts (TrustedHost) en producción | vacío (desactivado) |
 | `LOG_FORMAT` / `LOG_LEVEL` | `pretty` o `json` / nivel | `pretty` / `INFO` |
+| `BUILD_SHA` / `BUILD_TIME` | Identidad del build que devuelve `GET /api/health` (doc 82); las estampa el workflow de deploy | `""` |
 
 Falla-cerrado importante: con `REQUIRE_AUTH=true` y `SECRET_KEY` en el default de desarrollo, la app NO arranca (`assert_secure_config`), porque con esa clave pública cualquiera forjaría un token de sesión admin.
 
@@ -193,11 +195,11 @@ Falla-cerrado importante: con `REQUIRE_AUTH=true` y `SECRET_KEY` en el default d
 
 - Base ÚNICA = **Databricks Lakebase Postgres**: el adaptador (`app/core/db/lakebase/`) expone una superficie de consulta async que emula la de pymongo (find/aggregate/bulk_write/…) sobre tablas `(id, doc jsonb)` en el schema `LAKEBASE_PGSCHEMA`; el password de cada conexión es un token OAuth de ~1 hora que la app acuña sola. La conexión se abre en el lifespan de la app y se cierra al parar; si falla al arranque, un task de fondo reintenta con backoff. (No hay driver ni conmutador de backend; `pymongo` permanece solo como vocabulario que el adaptador emula, sin conexión a Mongo.)
 - Colecciones tocadas por esta parte del contrato: `users`, `roles`, `audit_log`, `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config`, `standards_versions`, `ddl_rules`, `ddl_ruleset_config`.
-- El `_id` es la clave natural en varias colecciones (`users._id == username`, `roles._id == role key`, `naming_config._id == scope`). Al serializar, el backend renombra `_id -> id` y descarta campos internos (`flgactive`, `deletedAt`, `updatedAt`, `createdAt`).
+- El `_id` es la clave natural en varias colecciones (`users._id == username`, `roles._id == role key`, `naming_config._id == "<projectId>:<scope>"`, doc 75). Al serializar, el backend renombra `_id -> id` y descarta campos internos (`flgactive`, `deletedAt`, `updatedAt`, `createdAt`).
 - Borrado lógico (soft-delete): las eliminaciones marcan `flgactive=false` en vez de borrar el documento; los listados filtran por `flgactive != false`.
 - Los modelos se validan con `extra="ignore"`, por lo que campos no declarados en el modelo del documento se descartan al leer/escribir (invariante de persistencia: un campo nuevo necesita declararse en el modelo Pydantic o desaparece en el round-trip).
-- `.sort()` requiere índice sobre el campo ordenado (invariante de escala mantenido como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` crea ~35 índices idempotentes al conectar.
-- `standards_versions` es append-only con `seq` monotónico e índice único en `seq` (reintento ante colisión concurrente) — el único índice unique del sistema.
+- `.sort()` requiere índice sobre el campo ordenado (invariante de escala mantenido como contrato: p. ej. `canonical_tables.physicalName` para la búsqueda con `limit`). `ensure_indexes()` declara 52 índices idempotentes al conectar (y retira 6 obsoletos).
+- `standards_versions` es append-only con `seq` monotónico POR PROYECTO e índice único en `(projectId, seq)` (reintento ante colisión concurrente, doc 75) — el único índice unique del sistema.
 
 ```mermaid
 erDiagram
@@ -656,17 +658,18 @@ Respuesta 200 (cada entrada: `{ id, at, actor, action, target?, targetType?, met
 
 ## 5. Identity (`/api`)
 
-Prefijo del router: `/api`. Expone la lista de usuarios reales para asignar revisores. (`GET /api/me` se retiró en el doc 75 D14: duplicaba `GET /api/auth/me`, que es el que enriquece con rol y permisos.)
+Prefijo del router: `/api`. Expone la lista de usuarios reales para asignar revisores (y, doc 105, para resolver nombres). (`GET /api/me` se retiró en el doc 75 D14: duplicaba `GET /api/auth/me`, que es el que enriquece con rol y permisos.)
 
 ### 5.1 GET /api/users
 
-Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Requiere sesión (`current_principal`, doc 38: la whitelist es un directorio de correos y no debe ser enumerable de forma anónima); con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed).
+Propósito: usuarios REALES de la plataforma (`{ id, name, initials }`, colección `users`, sin los deshabilitados) para la asignación de revisores. Con el query `can`, solo usuarios cuyo ROL otorga ese permiso — el selector de revisores usa `can=review.decide` para no asignar a alguien que jamás podría votar (dejaba el request trabado: la unanimidad no se cumplía nunca). Requiere sesión (`current_principal`, doc 38: la whitelist es un directorio de correos y no debe ser enumerable de forma anónima); con filtro `can`, una lista vacía es una respuesta válida. Fallback a la lista fija simulada solo si la colección está vacía (dev sin seed). Doc 105 (U1): con `includeDisabled=true` suma también a los deshabilitados, marcados con `disabled: true` (los activos no traen la marca) — SÓLO para resolver nombres: quien dejó la empresa sigue siendo dueño o autor de su versión y se muestra con su nombre, no con su correo. Con `can` se ignora: a un deshabilitado nunca se le ofrece revisar ni recibir una versión.
 
 Query params:
 
 | Param | Tipo | Default | Notas |
 |---|---|---|---|
 | `can` | string | null | permiso del rol (p. ej. `review.decide`) |
+| `includeDisabled` | bool | false | doc 105: suma los deshabilitados (`disabled: true`) para resolver nombres; se ignora con `can` |
 
 curl:
 
@@ -690,7 +693,7 @@ Respuesta 200:
 
 ## 6. Catalog (`/api/projects/{project_id}/catalog` · `/api/catalog`)
 
-Dos routers con `write_guard("model.edit")` (lecturas con sesión; escrituras con `model.edit`): **`/api/projects/{project_id}/catalog`** para lo que se lista/busca/crea dentro de un proyecto (`tables`, `columns`, `search`, `inventory`; lleva `alive_project`) y **`/api/catalog`** para los recursos por id (`tables/{table_id}/columns`, `tables/{table_id}/usage`, `inspect/*`).
+Dos routers con `write_guard("model.edit", versioned=True)` (lecturas con sesión; las dos escrituras — §6.2 y §6.4 — responden 409 desde el doc 105, D1: tablas y columnas se crean por una versión en edición, `PUT /api/changesets/{cs_id}/changes`): **`/api/projects/{project_id}/catalog`** para lo que se lista/busca/crea dentro de un proyecto (`tables`, `columns`, `search`, `inventory`; lleva `alive_project`) y **`/api/catalog`** para los recursos por id (`tables/{table_id}/columns`, `tables/{table_id}/usage`, `inspect/*`).
 
 Es el pool canónico **del proyecto** (doc 75): tablas (`canonical_tables`) y columnas (`canonical_columns`, colección separada), ambas con `projectId`. El nombre físico de tabla es único **por proyecto** (case-insensitive): `M_CLIENTE` puede existir en dos proyectos distintos.
 
@@ -731,7 +734,9 @@ Respuesta 200:
 
 ### 6.2 POST /api/projects/{project_id}/catalog/tables
 
-Propósito: crear una tabla canónica en el proyecto (camino directo sin changeset; el front escribe siempre vía draft). Requiere `model.edit`. 409 si ya existe una tabla activa con ese físico en el proyecto. Si no se envía `physicalName`, se deriva del `logicalName` con el motor de naming (glosario + naming_config del scope `column`, ver Glossary/Settings).
+> **Cerrada (doc 105, D1).** Con `model.edit` responde **409 `This change requires a version in edit mode.`** y no escribe nada (sin el permiso, 403); el intento no se audita. Crear una tabla directo en producción la dejaba sin revisión ni historial de versión (y sin auditoría: el sufijo `/tables` es de los que `write_guard` no audita): se crea como cambio de un draft (`PUT /api/changesets/{cs_id}/changes`, Parte 2 §8.5). Lo que sigue describe el comportamiento del service, que ya no se alcanza por HTTP.
+
+Propósito: crear una tabla canónica en el proyecto (camino directo sin changeset; el front escribe siempre vía draft). Requiere `model.edit`. No validaba la unicidad del físico (el doc prometía un 409 que el service no tenía: dos `M_CLIENTE` activas eran posibles — uno de los motivos del cierre); la unicidad por proyecto la garantiza el changeset. Si no se envía `physicalName`, se deriva del `logicalName` con el motor de naming (glosario + naming_config del scope `column`, ver Glossary/Settings).
 
 Body (`CanonicalTableBody`):
 
@@ -750,9 +755,10 @@ curl -s -X POST https://api.ejemplo.com/api/projects/p-001/catalog/tables \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"logicalName":"Dimension Producto","schema":"ventas","udpValues":{"udp-clasif":"NO DAC"}}'
+# → 409 {"detail":"This change requires a version in edit mode."}   (doc 105)
 ```
 
-Respuesta 201:
+Respuesta 201 del service (hasta el doc 104 por esta ruta):
 
 ```json
 {
@@ -788,6 +794,8 @@ Respuesta 200:
 
 ### 6.4 POST /api/catalog/tables/{table_id}/columns
 
+> **Cerrada (doc 105, D1).** Igual que §6.2: con `model.edit` responde **409 `This change requires a version in edit mode.`** sin escribir (sin el permiso, 403); la columna se crea como cambio de un draft. Lo que sigue describe el service.
+
 Propósito: crear una columna canónica en la tabla. Requiere `model.edit`. Deriva `physicalName` del `logicalName` si no se envía, y resuelve `dataType`: si se manda `dataType`, gana como override manual (marca `typeOverridden=true`); si no, hereda el `defaultDataType` del dominio (`parentDomainId`).
 
 Path: `table_id` (string).
@@ -815,9 +823,10 @@ curl -s -X POST https://api.ejemplo.com/api/catalog/tables/t-001/columns \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"logicalName":"Cliente Fecha Alta","parentDomainId":"dom-fecha","isNullable":false,"ordinal":2}'
+# → 409 {"detail":"This change requires a version in edit mode."}   (doc 105)
 ```
 
-Respuesta 201 (dataType heredado del dominio `dom-fecha`):
+Respuesta 201 del service (hasta el doc 104 por esta ruta; dataType heredado del dominio `dom-fecha`):
 
 ```json
 {
@@ -894,9 +903,9 @@ Respuesta 200:
 
 ## 7. Glossary (`/api/projects/{project_id}/glossary`)
 
-Prefijo del router: `/api/projects/{project_id}/glossary` (con `alive_project`). Diccionario de abreviaturas DEL proyecto (términos que cascadean nombres físicos de ese proyecto) más conversión lógico→físico. Editar términos es editar estándares, así que las mutaciones requieren `standards.edit`; el endpoint de cómputo (`physicalize`) y el `GET` quedan abiertos (los usa el modelador para previsualizar sin mutar); `validate` exige sesión; `lock`/`unlock` requieren `admin.manage`. (`logicalize` se retiró en el doc 75 D14.)
+Prefijo del router: `/api/projects/{project_id}/glossary` (con `alive_project`). Diccionario de abreviaturas DEL proyecto (términos que cascadean nombres físicos de ese proyecto) más conversión lógico→físico. Editar términos es editar estándares: desde el doc 105 (D1b) se hace SÓLO por `standards/apply` (§10.3: versión, historial y rollback). El CRUD directo (§7.2–7.4) y `rephysicalize` (§7.6) siguen declarados pero responden **409 `Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.`** antes de cualquier efecto (no se auditan); sin `standards.edit`, 403. El endpoint de cómputo (`physicalize`) y el `GET` quedan abiertos (los usa el modelador para previsualizar sin mutar); `validate` e `impact` exigen sesión; `lock`/`unlock` requieren `admin.manage`. (`logicalize` se retiró en el doc 75 D14.)
 
-Forma de un término (`AbbreviationDoc`): `{ id, projectId, term, abbrev, scope, locked, lockedBy, lockedAt }`. `scope` es `column | table` (doc 94: el antiguo `wordType` se retiró; un body que lo mande lo pierde). Una entrada con `locked=true` es intocable para TODOS (editar/eliminar devuelve 409, tanto por CRUD directo como por `standards/apply`) hasta que un admin la desbloquee. Doc 102: `term` y `abbrev` son obligatorios (no vacíos): vacíos → **422** (`Every glossary entry needs a term and an abbreviation.` · `Every glossary entry needs a term.` · `The term '…' needs an abbreviation.`), en el alta, la edición y `standards/apply`.
+Forma de un término (`AbbreviationDoc`): `{ id, projectId, term, abbrev, scope, locked, lockedBy, lockedAt }`. `scope` es `column | table` (doc 94: el antiguo `wordType` se retiró; un body que lo mande lo pierde). Una entrada con `locked=true` es intocable para TODOS (editarla o eliminarla por `standards/apply` devuelve 409) hasta que un admin la desbloquee. Doc 102: `term` y `abbrev` son obligatorios (no vacíos): vacíos → **422** (`Every glossary entry needs a term and an abbreviation.` · `Every glossary entry needs a term.` · `The term '…' needs an abbreviation.`) en `standards/apply`. Doc 105 (C1): con un término bloqueado, el 409 del bloqueo sale antes que el 422 de vacío (antes salía el 422).
 
 ### 7.1 GET /api/projects/{project_id}/glossary
 
@@ -928,6 +937,8 @@ Respuesta 200:
 
 ### 7.2 POST /api/projects/{project_id}/glossary
 
+> **Cerrada (doc 105, D1b)** — igual que §7.3, §7.4 y §7.6: con `standards.edit` responde **409** (`Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.`) sin escribir ni auditar; sin el permiso, 403. Escribía fuera de `standards_versions` (sin versión ni rollback) y el front ya no la usaba: los términos viajan en `termsUpsert`/`termsDelete` de `standards/apply` (§10.3). Lo que sigue describe el service, que el apply reutiliza.
+
 Propósito: crear un término. Requiere `standards.edit`.
 
 Body (`AbbreviationBody`):
@@ -955,6 +966,8 @@ Respuesta 201:
 
 ### 7.3 PUT /api/projects/{project_id}/glossary/{entry_id}
 
+> **Cerrada (doc 105, D1b)**: 409, como §7.2.
+
 Propósito: actualizar un término. Requiere `standards.edit`. Si el término no existe, devuelve `data: null` (no lanza 404).
 
 Path: `entry_id` (string). Body: `AbbreviationBody` (igual que en la creación).
@@ -975,6 +988,8 @@ Respuesta 200:
 ```
 
 ### 7.4 DELETE /api/projects/{project_id}/glossary/{entry_id}
+
+> **Cerrada (doc 105, D1b)**: 409, como §7.2.
 
 Propósito: eliminar (soft-delete) un término. Requiere `standards.edit`. Devuelve un bool.
 
@@ -1021,6 +1036,8 @@ Respuesta 200:
 
 ### 7.6 POST /api/projects/{project_id}/glossary/rephysicalize
 
+> **Cerrada (doc 105, D1b)**: 409, como §7.2 — reescribía los físicos del modelo publicado sin versión ni revisión. El re-derivado lo hace `standards/apply` por su cuenta cuando el lote cambia el glosario o el naming (mismo service).
+
 Propósito: re-physicalize retroactivo. Recomputa el `physicalName` de TODAS las entidades del scope a partir de su `logicalName` (glosario + naming actual). Requiere `standards.edit`. Update directo sobre las colecciones publicadas. Sin `scope`, aplica a tablas y columnas.
 
 Body (`RephysicalizeBody`):
@@ -1046,7 +1063,7 @@ Respuesta 200:
 
 ### 7.7 POST /api/projects/{project_id}/glossary/validate
 
-Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados **de su scope** (doc 94 D9: un término de columna solo mira columnas; uno de tabla, solo tablas — los físicos de tabla solo usan términos de tabla; doc 95 D1: el endpoint devuelve la lista **completa** de coincidencias, para que el popup muestre todas las columnas en conflicto; el enforcement de los writes solo necesita el total). El 409 del write dice, en inglés: `The term 'X' can't be added: it already exists in the glossary or appears as a full phrase in logical column names (N conflicts). Adding it would rename those columns.` No muta; el enforcement real vive en los writes (POST/PUT de este router y `standards/apply`, que devuelven 409 ante conflicto). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
+Propósito: validar un término NUEVO antes de agregarlo — chequeo 1: duplicado exacto (case-insensitive) en el glosario del scope; chequeo 2: el término aparece como frase completa contigua en los nombres lógicos publicados **de su scope** (doc 94 D9: un término de columna solo mira columnas; uno de tabla, solo tablas — los físicos de tabla solo usan términos de tabla; doc 95 D1: el endpoint devuelve la lista **completa** de coincidencias, para que el popup muestre todas las columnas en conflicto; el enforcement de los writes solo necesita el total). El 409 del write dice, en inglés: `The term 'X' can't be added: it already exists in the glossary or appears as a full phrase in logical column names (N conflicts). Adding it would rename those columns.` No muta; el enforcement real vive en el write: `standards/apply`, que devuelve 409 ante conflicto (el POST/PUT directos de este router están cerrados desde el doc 105, D1b). Exige SESIÓN (lee el catálogo: un anónimo no debe enumerar tablas/columnas en producción) pero NO `standards.edit` — el botón Validate del front lo usan también usuarios sin ese permiso. Un término vacío o solo espacios devuelve el contrato "sin conflictos" sin tocar la BD.
 
 Body (`ValidateTermBody`):
 
@@ -1131,7 +1148,7 @@ Propósito: desbloquear la entrada. Requiere `admin.manage`. Audita. Misma forma
 
 ## 8. Domains (`/api/projects/{project_id}/domains`)
 
-Prefijo del router: `/api/projects/{project_id}/domains` (con `alive_project`). Router con `write_guard("standards.edit")`: lecturas (incluida `impact`) requieren sesión; escrituras (crear/editar/borrar/propagate) requieren `standards.edit`.
+Prefijo del router: `/api/projects/{project_id}/domains` (con `alive_project`). Router con `standards_read_only` (doc 105, D1b): lecturas (incluida `impact`) requieren sesión; las escrituras (crear/editar/borrar/propagate, §8.2–8.4 y §8.6) siguen declaradas pero, con `standards.edit`, responden **409 `Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.`** antes de cualquier efecto (sin el permiso, 403): escribían fuera de `standards_versions`, sin versión ni rollback. Los dominios se cambian por `domainsUpsert`/`domainsDelete` de `standards/apply` (§10.3), que usa la misma cascada. Lo que §8.2–8.4 y §8.6 describen es el service.
 
 Los Parent Domains son DEL proyecto (doc 75: el dominio «Codigo» puede ser `VARCHAR(30)` en un proyecto y `VARCHAR(20)` en otro) y definen un `defaultDataType` que cascadea a las columnas del proyecto que los usan (respetando overrides manuales).
 
@@ -1162,6 +1179,8 @@ Respuesta 200:
 
 ### 8.2 POST /api/projects/{project_id}/domains
 
+> **Cerrada (doc 105, D1b)**: 409 (ver la intro de §8).
+
 Propósito: crear un dominio. Requiere `standards.edit`.
 
 Body (`ParentDomainBody`):
@@ -1190,6 +1209,8 @@ Respuesta 201:
 
 ### 8.3 PUT /api/projects/{project_id}/domains/{domain_id}
 
+> **Cerrada (doc 105, D1b)**: 409 (ver la intro de §8).
+
 Propósito: actualizar un dominio. Requiere `standards.edit`. Si cambia `defaultDataType`, cascadea el tipo nuevo a las columnas que aún tienen el tipo viejo y no fueron editadas a mano (`typeOverridden != true`). Si el dominio no existe, devuelve `data: null`.
 
 Path: `domain_id` (string). Body: `ParentDomainBody`.
@@ -1210,6 +1231,8 @@ Respuesta 200:
 ```
 
 ### 8.4 DELETE /api/projects/{project_id}/domains/{domain_id}
+
+> **Cerrada (doc 105, D1b)**: 409 (ver la intro de §8).
 
 Propósito: eliminar (soft-delete) un dominio. Requiere `standards.edit`. Devuelve un bool.
 
@@ -1292,6 +1315,8 @@ Respuesta 200 (totales globales, no dependen de `q`/`status`; `tables` = todas l
 
 ### 8.6 POST /api/projects/{project_id}/domains/{domain_id}/propagate
 
+> **Cerrada (doc 105, D1b)**: 409 (ver la intro de §8) — re-tipaba columnas publicadas sin versión; el re-tipado lo hace la cascada del apply cuando un `domainsUpsert` cambia el tipo.
+
 Propósito: aplicar el `defaultDataType` actual del dominio a todas sus columnas sin override (retroactivo, directo sobre `canonical_columns`). Requiere `standards.edit`. Si el dominio no existe o no tiene tipo, devuelve `updated: 0`.
 
 Path: `domain_id` (string). Body: ninguno.
@@ -1343,9 +1368,9 @@ Respuesta 200:
 
 ## 10. Data Standards (`/api/projects/{project_id}/standards`)
 
-Prefijo del router: `/api/projects/{project_id}/standards` (con `alive_project`). Módulo de versionado independiente de los estándares (Glossary + Parent Domains + UDP + naming + **reglas de DDL Export**, doc 30 — un solo stream `standards_versions` para todo), **por proyecto** (doc 75 D3): cada proyecto tiene su historial (`seq`/`label` arrancan en `v1` en cada uno), su producción de estándares y su rollback; nada cruza entre proyectos. La lectura (`snapshot`, `versions`, `summary`) es abierta; `apply` requiere `standards.edit`; `rollback` requiere el permiso `rollback`.
+Prefijo del router: `/api/projects/{project_id}/standards` (con `alive_project`). Módulo de versionado independiente de los estándares (Glossary + Parent Domains + UDP + naming + **reglas de DDL Export**, doc 30 — un solo stream `standards_versions` para todo), **por proyecto** (doc 75 D3): cada proyecto tiene su historial (`seq`/`label` arrancan en `v1` en cada uno), su producción de estándares y su rollback; nada cruza entre proyectos. La lectura (`snapshot`, `versions`, `summary`) es abierta; `apply` requiere `standards.edit`; `rollback` requiere el permiso `rollback`. Desde el doc 105 (D1b), `apply`/`rollback` son el ÚNICO camino para cambiar el contenido de los estándares (el lock/unlock del glosario sólo marca la entrada): las rutas directas de glosario, dominios y naming (§7, §8, §11) responden 409.
 
-Cada `apply`/`rollback` aplica los cambios directo a las colecciones publicadas del proyecto y registra una versión append-only en `standards_versions` (con `projectId`) con snapshot completo, diff legible, impacto y autor. Un cambio de glosario/naming re-physicaliza SÓLO las tablas y columnas de ese proyecto.
+Cada `apply`/`rollback` aplica los cambios directo a las colecciones publicadas del proyecto y registra una versión append-only en `standards_versions` (con `projectId`) con snapshot completo, diff legible, impacto y autor. Un cambio de glosario/naming re-physicaliza SÓLO las tablas y columnas de ese proyecto. Un `apply` sin cambios efectivos no registra versión (422, doc 105, P1 — §10.3).
 
 Forma de una versión (`StandardsVersionDoc`):
 
@@ -1426,7 +1451,13 @@ Respuesta 200:
 
 ### 10.3 POST /api/projects/{project_id}/standards/apply
 
-Propósito: aplicar un batch de cambios de estándares del proyecto como UNA versión. Requiere `standards.edit`. Aplica términos (upsert/delete), naming, dominios (con cascada), definiciones UDP y reglas/config de DDL Export; re-deriva nombres físicos del proyecto si cambió glosario/naming; registra la versión. Es el ÚNICO camino de mutación de las reglas DDL (el router `/api/projects/{project_id}/ddl-rules` es read-only).
+Propósito: aplicar un batch de cambios de estándares del proyecto como UNA versión. Requiere `standards.edit`. Aplica términos (upsert/delete), naming, dominios (con cascada), definiciones UDP y reglas/config de DDL Export; re-deriva nombres físicos del proyecto si cambió glosario/naming; registra la versión. Es el ÚNICO camino de mutación de las reglas DDL (el router `/api/projects/{project_id}/ddl-rules` es read-only) y, desde el doc 105 (D1b), también de términos, dominios y naming.
+
+**Ids de otro proyecto (doc 105).** Antes de escribir nada, un upsert (`termsUpsert`, `domainsUpsert`, `udpUpsert`, `rulesUpsert`) cuyo `id` ya existe fuera de los estándares activos del proyecto responde **409**: `The {term|domain|UDP|rule} '<nombre>' belongs to another project.` si es de OTRO proyecto, o `The {…} '<nombre>' was deleted; reload the standards and try again.` si es uno BORRADO de este (antes caía al alta y chocaba por clave duplicada: 500 con el lote a medias). Un `id` nuevo elegido por el cliente sigue siendo un alta.
+
+**Valores de UDP por tipo (doc 105, ronda 5).** Después de ese 409 y antes de depurar el lote, el `defaultValue` de cada `udpUpsert` y los `udpValues` de cada `domainsUpsert` se validan contra el `dataType` de su definición —la del lote si se edita en él; una clave de dominio sin definición conocida pasa tal cual— con las reglas compartidas de `app/core/udp_values.py` (`data_standards/service.typed_udp_value` / `checked_udp_values`): `boolean` se normaliza a `true`/`false` (las grafías del motor del Reporting: `true`, `1`, `sí`/`si`, `yes`, `verdadero` y `false`, `0`, `no`, `falso`, sin distinguir mayúsculas ni espacios de borde), `number` debe ser un número finito en notación decimal con dígitos ASCII —signo, punto decimal y exponente opcionales; «1_000», «١٢» o «１２», que `float()` acepta, no (`is_finite_number`)— y se graba en su forma canónica (`canonical_number`, la misma con la que el motor del Reporting lo busca: «10.50» → «10.5», «1e3» → «1000», «+007» → «7»; ronda 6), `date` una fecha real en ISO `YYYY-MM-DD` —de una fecha-hora ISO (`YYYY-MM-DD HH:MM[:SS]`, con espacio o `T`, sin zona ni fracciones) se graba sólo la fecha (`iso_date`, ronda 6)— y `list` uno de sus `allowedValues`, comparado con `list_key` —sin bordes, con los espacios internos colapsados y sin distinguir mayúsculas: la misma tolerancia de la carga Excel (ronda 6)— y grabado con la grafía de la lista; un valor vacío pasa tal cual. De un dominio se validan sólo los valores que CAMBIAN respecto de los guardados (ronda 6, R16): el front los manda todos, y uno ya guardado que dejó de valer —se sacó de la lista, la definición cambió de tipo— bloqueaba cualquier edición del dominio; ese valor se conserva tal cual, y cambiarlo por otro inválido sigue siendo 422. Lo que se compara en la depuración es el valor ya normalizado. El primer valor inválido responde **422** sin escribir nada: `The default value '<valor>' of UDP '<nombre>' is not a boolean (use true or false).` (o `… is not a finite number.`, `… is not a valid date (use YYYY-MM-DD).`, `… is not one of its allowed values (<valores> | none defined).`) y, en un dominio, `The value '<valor>' of UDP '<nombre>' in domain '<dominio>' …` con el mismo motivo. Antes se grababa cualquier texto («Sí», «nan», «31/02/2024», uno fuera de la lista) y la carga Excel lo escribía en cada entidad nueva (la carga, Parte 2 §8.18, aplica las mismas reglas a booleano, número y fecha). Riesgo residual: los `udpValues` de tablas, columnas, vistas y canvases que llegan por un cambio de changeset (Parte 2, §8.5) no pasan por esta validación.
+
+**Lo que no cambia nada no es un cambio (doc 105, P1/P1-bis).** El lote se depura antes de escribir: los términos de `termsUpsert` se **recortan** (término y abreviatura; así se validan y se guardan); se descartan los upserts que se grabarían iguales — términos (mismo término, abreviatura y scope, comparados recortados), dominios, UDP y reglas DDL (comparados ya normalizados por el mismo modelo de lectura; una regla, con su condición y su validación recalculadas: si revalidarla cambia su estado, es un cambio) — y los bloques de `ddlConfigPatch` iguales a los vigentes (cada bloque REEMPLAZA el suyo: uno vacío distinto del vigente sí es un cambio); las bajas (`termsDelete`, `domainsDelete`, `udpDelete`, `rulesDelete`) sólo cuentan para ids activos del proyecto — una de un id inexistente o de otro proyecto se descarta (los repos borran por `_id`: antes se soft-deleteaba, incluso en OTRO proyecto); y `namingConfig` pierde los scopes que ya están así en lo GUARDADO (mismo `separator`, `case` y `maxLength`; se compara sin enmascarar valores inválidos — `settings.repository.get_stored` —, así que regrabar el valor visible sobre uno inválido guardado sí se escribe y lo limpia). Si no queda nada efectivo, **422 `There are no changes to apply.`**, sin versión ni efectos — antes registraba una versión «Standard change» vacía y, con un término o el naming, re-derivaba los físicos de todo el proyecto. Los guards del glosario van en este orden (C1): término bloqueado (409) → término o abreviatura vacíos (422) → duplicado en el lote o conflicto con el glosario/corpus (409).
 
 Body (`ApplyBody`):
 
@@ -1449,9 +1480,9 @@ Body (`ApplyBody`):
 Sub-esquemas:
 
 - `TermEdit`: `{ id?: string, term: string, abbrev: string, scope: string }` (id `null` = nuevo).
-- `DomainEdit`: `{ id?: string, name: string, defaultDataType: string, namingTerm?: string, description?: string }`.
-- `NamingEdit`: `{ separator: string, case: string, maxLength?: int (def 150) }` — `maxLength` = límite de caracteres del nombre físico (tabla/columna), versionado acá (doc 24).
-- `UdpEdit`: `{ id?: string, name: string, level?: string (def "column", acepta "table" | "column" | "canvas"), dataType?: string (def "string"), defaultValue?: string, allowedValues?: string[], description?: string }`.
+- `DomainEdit`: `{ id?: string, name: string, defaultDataType: string, logicalDataType?: string, namingTerm?: string, description?: string, inheritsName?: bool, physicalName?: string, physicalDescription?: string, udpValues?: { [udpId]: string } }` — `udpValues` (doc 85) son los valores por defecto de UDP de columna que hereda quien asigna el dominio; doc 105 (ronda 5): se validan por el tipo de su definición (ver arriba; ronda 6: sólo los que cambian).
+- `NamingEdit`: `{ separator: string, case: string, maxLength?: int (def 150) }` — `maxLength` = límite de caracteres del nombre físico (tabla/columna), versionado acá (doc 24). Doc 105: como `standards/apply` es el único camino de escritura del naming, valida lo que validaba el PUT cerrado — claves de `namingConfig` sólo `column | table`, `case` ∈ `upper | lower | camel`, `maxLength` entero ≥ 0 (0 = límite DESACTIVADO, como lo leen el guard de longitud del changeset y la carga Excel; estricto: un `true` no pasa por 1) — con **422** antes de escribir nada (antes un `case` desconocido se grababa y el re-derivado, `physicalize` y el alta de columnas daban 500).
+- `UdpEdit`: `{ id?: string, name: string, level?: string (def "column"; "table" | "column" | "canvas" | "view", otro cae a "column"), view?: string (def "physical"; "logical" | "physical", doc 69 — "view" y "canvas" siempre "physical"), dataType?: string (def "string"; "string" | "number" | "boolean" | "date" | "list", otro cae a "string"), defaultValue?: string (doc 105: validado por `dataType`, ver arriba), allowedValues?: string[] (sólo con "list"), description?: string }`.
 - `DdlRuleEdit`: `{ id?: string, name: string, description?: string, kind?: "rule" | "generator" (def "rule"), target?: "column" | "table" (def "column"; solo kind=rule), sourceArtifact?: string (solo kind=generator), condition?: string (DSL), udpRefs?: [{udpId, level}], action?: dict (expression | tags | tblproperties | emit), appliesTo?: string[], priority?: int (def 100), enabled?: bool (def true), validationState?: string, validationReport?: dict }`.
 - `DdlConfigPatch`: `{ lookups?: dict, functions?: list, output?: dict }` — cada bloque no-nulo REEMPLAZA el set completo (sin deltas). `output` = *Output settings* del Export DDL (doc 93, ver §12.2): se normaliza (claves desconocidas se descartan) y un valor inválido responde **422** con el motivo (`{ "detail": "Output setting 'typeCase' must be one of: lower, upper." }`).
 
@@ -1500,7 +1531,7 @@ Respuesta 200 (la versión creada):
 
 Propósito: restaurar el estado de estándares al snapshot de una versión objetivo (dominios, términos, naming, UDP y también reglas/config DDL), re-derivar solo lo necesario, y registrar una versión NUEVA (`kind = rollback`). Requiere el permiso `rollback` (dejó de ser `standards.edit` en el doc 27, cuando el rollback pasó a ser un permiso propio de la matriz). 404 si la versión objetivo no existe.
 
-Doc 95 D9: solo re-tipa los dominios cuyo tipo cambia, desde el tipo actual (borrados incluidos) y con la regla de la cascada de ida (`app/features/domains/cascade.py`: columna activa, mismo `parentDomainId`, sin override en esa faceta y con el tipo actual del dominio); no reescribe filas sin cambio. Las columnas «divorciadas» (override o tipo ya distinto) no se tocan. `impact.columns` = columnas re-tipadas (máximo entre facetas por dominio). Lo que hará se ve antes con §10.4b.
+Doc 95 D9: solo re-tipa los dominios cuyo tipo cambia, desde el tipo actual (borrados incluidos) y con la regla de la cascada de ida (`app/features/domains/cascade.py`: columna activa, mismo `parentDomainId`, sin override en esa faceta y con el tipo actual del dominio); no reescribe filas sin cambio. Las columnas «divorciadas» (override o tipo ya distinto) no se tocan. `impact.columns` = columnas re-tipadas (máximo entre facetas por dominio). Lo que hará se ve antes con §10.4b. Doc 105: el naming del snapshot se restaura con la regla de lectura — un valor inválido o ausente (p. ej. un `case: 'Upper'` o un `maxLength: null` de antes del doc 105) se graba como `null`, que al leer es el default del scope (`restore_naming`); antes volvía a la BD tal cual y el kit Erwin, que lee `naming_config` directo, abortaba.
 
 Body (`RollbackBody`):
 
@@ -1587,11 +1618,11 @@ Respuesta 200: `{ "success": true, "data": { "glossary": 120, "domains": 46, "ud
 
 ## 11. Settings (`/api/projects/{project_id}/settings`)
 
-Prefijo del router: `/api/projects/{project_id}/settings` (con `alive_project`). Configuración de naming (separador, case y largo máximo del nombre físico) por scope, DEL proyecto. Router con `write_guard("standards.edit")`: la lectura requiere sesión; la escritura requiere `standards.edit`.
+Prefijo del router: `/api/projects/{project_id}/settings` (con `alive_project`). Configuración de naming (separador, case y largo máximo del nombre físico) por scope, DEL proyecto. Router con `standards_read_only` (doc 105, D1b): la lectura requiere sesión; el PUT (§11.2) sigue declarado pero, con `standards.edit`, responde **409 `Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.`** antes de cualquier efecto (sin el permiso, 403).
 
 Hay un documento por (proyecto, scope) (`column`, `table`) en `naming_config`; el `_id` es `<projectId>:<scope>`. La lectura siembra defaults si el documento no existe (no escribe). Regla corporativa vigente: join (sin separador) + UPPER en AMBOS scopes — así se derivan los físicos reales del catálogo (p. ej. `CODCLAVESUJETOCLI`): `column -> { separator: "", case: "upper", maxLength: 150 }`, `table -> { separator: "", case: "upper", maxLength: 150 }`.
 
-Forma de un doc de naming en respuesta (`NamingConfigDoc`): `{ scope, projectId, separator, case, maxLength }`. `case` es `upper | lower | camel`; `maxLength` (doc 24) es el límite de caracteres del nombre físico, aplicado al crear/renombrar en el changeset (`NameTooLongError` → 400) con grandfather de los nombres heredados. El naming config también se versiona en Data Standards (viaja en `namingConfig` de `standards/apply`).
+Forma de un doc de naming en respuesta (`NamingConfigDoc`): `{ scope, projectId, separator, case, maxLength }`. `case` es `upper | lower | camel`; `maxLength` (doc 24) es el límite de caracteres del nombre físico, aplicado al crear/renombrar en el changeset (`NameTooLongError` → 400) con grandfather de los nombres heredados; `0` = sin límite (doc 105). El naming config se cambia SÓLO por Data Standards (viaja en `namingConfig` de `standards/apply`, versionado; doc 105, D1b). Doc 105: la LECTURA ignora un valor guardado que el motor de naming no puede usar (un `case` desconocido, un `maxLength` que no es entero ≥ 0 —un booleano tampoco—, un separador que no es texto — guardado antes por API o vuelto por un rollback o una copia de estándares) y usa el default del scope, dejándolo en el log: antes daba 500 en cada alta o edición de columna y en `physicalize`.
 
 ### 11.1 GET /api/projects/{project_id}/settings/naming
 
@@ -1617,6 +1648,8 @@ Respuesta 200:
 ```
 
 ### 11.2 PUT /api/projects/{project_id}/settings/naming/{scope}
+
+> **Cerrada (doc 105, D1b)**: con `standards.edit` responde **409** (ver la intro de §11) sin escribir; sin el permiso, 403. Escribía el naming fuera de `standards_versions` (sin versión ni rollback). Lo que sigue describe el service.
 
 Propósito: upsertear `{ separator, case, maxLength }` para un scope. Requiere `standards.edit`. Valida el scope (`column | table`) y el case (`upper | lower | camel`); 400 si son inválidos.
 
@@ -1871,7 +1904,7 @@ Forma de cada pieza:
 | GET | `/api/auth/warmup/{next_b64}` | público | Warm-up SSO Databricks Apps (302 a `next`; inerte con el proxy del front) |
 | POST | `/api/auth/logout` | sesión | Logout (audita) |
 | GET | `/api/auth/me` | sesión | Usuario enriquecido (rol + permisos) |
-| GET | `/api/users` | sesión | Usuarios reales para asignar revisores (query `can=`) |
+| GET | `/api/users` | sesión | Usuarios reales para asignar revisores (query `can=`; doc 105: `includeDisabled=true` suma los deshabilitados para resolver nombres) |
 | GET | `/api/admin/users` | `admin.manage` | Listar usuarios |
 | POST | `/api/admin/users` | `admin.manage` | Crear usuario |
 | PUT | `/api/admin/users/{username}` | `admin.manage` | Actualizar usuario |
@@ -1882,36 +1915,36 @@ Forma de cada pieza:
 | GET | `/api/admin/permissions` | `admin.manage` | Catálogo de permisos |
 | GET | `/api/admin/audit` | `admin.manage` | Log de auditoría |
 | GET | `/api/projects/{pid}/catalog/tables` | sesión | Listar/buscar tablas del proyecto (`q`+`limit`, `schema`) |
-| POST | `/api/projects/{pid}/catalog/tables` | `model.edit` | Crear tabla en el proyecto |
+| POST | `/api/projects/{pid}/catalog/tables` | `model.edit` → **409** | Cerrada (doc 105, D1): la tabla se crea por una versión |
 | GET | `/api/projects/{pid}/catalog/columns` | sesión | Búsqueda por columna en el proyecto (doc 29) |
 | GET | `/api/projects/{pid}/catalog/search` | sesión | Buscador del Model (⌘K, doc 70 §11) |
 | GET | `/api/projects/{pid}/catalog/inventory` | sesión | Inventario del proyecto para el Explorer (doc 72) |
 | GET | `/api/catalog/tables/{table_id}/columns` | sesión | Listar columnas |
-| POST | `/api/catalog/tables/{table_id}/columns` | `model.edit` | Crear columna |
+| POST | `/api/catalog/tables/{table_id}/columns` | `model.edit` → **409** | Cerrada (doc 105, D1): la columna se crea por una versión |
 | GET | `/api/catalog/tables/{table_id}/usage` | sesión | Canvases que usan la tabla (query `changesetId`) |
 | GET | `/api/catalog/inspect/tables/{table_id}` · `/inspect/views/{view_id}` | sesión | Object Inspector (doc 72) |
 | GET | `/api/projects/{pid}/glossary` | abierto | Listar términos del proyecto (query `scope`) |
-| POST | `/api/projects/{pid}/glossary` | `standards.edit` | Crear término |
-| PUT | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Actualizar término |
-| DELETE | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` | Eliminar término |
+| POST | `/api/projects/{pid}/glossary` | `standards.edit` → **409** | Cerrada (doc 105, D1b): por `standards/apply` |
+| PUT | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` → **409** | Cerrada (doc 105, D1b) |
+| DELETE | `/api/projects/{pid}/glossary/{entry_id}` | `standards.edit` → **409** | Cerrada (doc 105, D1b) |
 | POST | `/api/projects/{pid}/glossary/physicalize` | abierto | Lógico a físico |
 | POST | `/api/projects/{pid}/glossary/validate` | sesión | Validar término nuevo (duplicado + corpus del scope) |
 | POST | `/api/projects/{pid}/glossary/impact` | sesión | Dry-run: nombres físicos que cambiaría el borrador (doc 94) |
-| POST | `/api/projects/{pid}/glossary/rephysicalize` | `standards.edit` | Re-derivar físicos del proyecto |
+| POST | `/api/projects/{pid}/glossary/rephysicalize` | `standards.edit` → **409** | Cerrada (doc 105, D1b): el apply re-deriva por su cuenta |
 | POST | `/api/projects/{pid}/glossary/{entry_id}/lock` | `admin.manage` | Bloquear entrada |
 | POST | `/api/projects/{pid}/glossary/{entry_id}/unlock` | `admin.manage` | Desbloquear entrada |
 | GET | `/api/projects/{pid}/domains` | sesión | Listar dominios del proyecto |
-| POST | `/api/projects/{pid}/domains` | `standards.edit` | Crear dominio |
-| PUT | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Actualizar dominio (cascada) |
-| DELETE | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` | Eliminar dominio |
+| POST | `/api/projects/{pid}/domains` | `standards.edit` → **409** | Cerrada (doc 105, D1b): por `standards/apply` |
+| PUT | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` → **409** | Cerrada (doc 105, D1b) |
+| DELETE | `/api/projects/{pid}/domains/{domain_id}` | `standards.edit` → **409** | Cerrada (doc 105, D1b) |
 | GET | `/api/projects/{pid}/domains/{domain_id}/impact` | sesión | Impacto de propagar |
 | GET | `/api/projects/{pid}/domains/{domain_id}/impact/columns` | sesión | Lista exacta de columnas que re-tipa la cascada, paginada (doc 95, §8.5b) |
-| POST | `/api/projects/{pid}/domains/{domain_id}/propagate` | `standards.edit` | Propagar tipo |
+| POST | `/api/projects/{pid}/domains/{domain_id}/propagate` | `standards.edit` → **409** | Cerrada (doc 105, D1b): la cascada del apply re-tipa |
 | GET | `/api/projects/{pid}/udp` | abierto | Listar definiciones UDP del proyecto |
 | GET | `/api/projects/{pid}/standards/snapshot` | abierto | Estado actual de estándares del proyecto (+ `ddlRules`/`ddlConfig`) |
 | GET | `/api/projects/{pid}/standards/versions` | abierto | Historial de versiones del proyecto |
 | GET | `/api/projects/{pid}/standards/summary` | abierto | Conteos por bloque (New project · copyFrom) |
-| POST | `/api/projects/{pid}/standards/apply` | `standards.edit` | Aplicar batch + versionar (incluye reglas DDL) |
+| POST | `/api/projects/{pid}/standards/apply` | `standards.edit` | Aplicar batch + versionar (incluye reglas DDL; desde el doc 105, el único camino de términos, dominios y naming; 422 si no trae cambios) |
 | POST | `/api/projects/{pid}/standards/rollback` | `rollback` | Restaurar versión + versionar |
 | GET | `/api/projects/{pid}/standards/rollback-preview?targetSeq=N` | abierto | Qué re-tipa y qué re-deriva el rollback, sin mutar (doc 95, §10.4b) |
 | GET | `/api/projects/{pid}/standards/domains/{domain_id}/history` | abierto | Historial de UN parent domain (doc 95, §10.4c) |
@@ -1924,9 +1957,9 @@ Forma de cada pieza:
 | POST | `/api/projects/{pid}/ddl-rules/impact` | sesión | "N columns across M tables" (no escribe) |
 | POST | `/api/projects/{pid}/ddl-rules/render` | `export` | Puente puro del Export DDL |
 | GET | `/api/projects/{pid}/settings/naming` | sesión | Config de naming del proyecto (ambos scopes) |
-| PUT | `/api/projects/{pid}/settings/naming/{scope}` | `standards.edit` | Upsert naming por scope |
+| PUT | `/api/projects/{pid}/settings/naming/{scope}` | `standards.edit` → **409** | Cerrada (doc 105, D1b): el naming va en `namingConfig` del apply |
 
-Nota sobre "sesión" vs "abierto": los endpoints marcados como "sesión" usan `write_guard` (lectura sin permiso puntual) o `current_principal`, por lo que con `REQUIRE_AUTH=true` exigen token válido; los "abierto" no declaran dependencia de auth, aunque igual pasan por el pipeline global (y por CORS/rate limiting cuando aplica).
+Nota sobre "sesión" vs "abierto": los endpoints marcados como "sesión" usan `write_guard` o `standards_read_only` (lectura sin permiso puntual) o `current_principal`, por lo que con `REQUIRE_AUTH=true` exigen token válido; los "abierto" no declaran dependencia de auth, aunque igual pasan por el pipeline global (y por CORS/rate limiting cuando aplica).
 
 ---
 
@@ -1975,10 +2008,10 @@ Los guards de escritura conviven en dos formas:
 
 | Guard | Semántica | Códigos |
 |---|---|---|
-| `write_guard("model.edit")` (router-level) | Lecturas (GET/HEAD/OPTIONS) sólo exigen sesión válida; escrituras (POST/PUT/PATCH/DELETE) exigen el permiso indicado. Audita la acción (salvo `/layout`, `/drawings`, `/tables`, `/udp`, que son guardados de alta frecuencia o auditan aparte). | 401 sin sesión, 403 sin permiso |
+| `write_guard("model.edit", versioned=True)` (router-level) | Lecturas (GET/HEAD/OPTIONS) sólo exigen sesión válida; escrituras (POST/PUT/PATCH/DELETE) exigen el permiso indicado y, **con él, responden 409 `This change requires a version in edit mode.`** sin tocar nada (doc 105, D1: el modelo se edita SÓLO por una versión en edición — la escritura directa a producción entraba sin revisión ni historial de versión, sin la unicidad del changeset y cruzando proyectos). El intento rechazado no se audita. Única escritura directa por diseño: `POST /api/projects` (`direct_ok`, doc 75 D5), que sí se audita. | 401 sin sesión, 403 sin permiso (sale antes que el 409), 409 escritura directa |
 | `require_permission("model.edit")` / `require_permission("review.decide")` / `require_permission("rollback")` | Dependency por-endpoint que exige el permiso siempre. | 401 / 403 |
 
-Routers protegidos por `write_guard("model.edit")`: **projects**, **folders**, **schemas**, **relationships**, **views**.
+Routers protegidos por `write_guard("model.edit", versioned=True)`: **projects** (canvases incluidos), **folders**, **schemas**, **relationships**, **views** (más los dos del catálogo, Parte 1 §6). Sus 21 escrituras directas del modelo — canvases (§4.1, §4.3–4.7 y `PUT …/views`), carpetas (§3.3–3.5), esquemas (§7.2–7.4), vistas (§6.2–6.4), relaciones (§5.2–5.4) y las altas de tabla y columna del catálogo — responden 409; lo que esas secciones describen es el service, que ya no se alcanza por HTTP. El camino es `PUT /api/changesets/{cs_id}/changes` (§8.5) sobre un draft propio.
 Router **changesets**: usa `require_permission` por endpoint — `model.edit` para editar/crear/enviar/retirar/reabrir; `review.decide` para aprobar/rechazar/decidir; `rollback` para revertir a una versión publicada.
 Toda ruta `/api/projects/{project_id}/…` lleva además `alive_project` (doc 75): 404 `Project not found.` si el proyecto no existe o fue borrado.
 Routers **reporting**, **summary**, **health**: lecturas abiertas (el login global gatea en producción); los reportes guardados usan `current_principal` para ligar al owner.
@@ -1987,18 +2020,18 @@ Routers **reporting**, **summary**, **health**: lecturas abiertas (el login glob
 
 | Código | Cuándo |
 |---|---|
-| 400 | SQL inválido, cursor inválido, campo desconocido en `/query`, nombre físico sobre `maxLength` del naming. |
+| 400 | SQL inválido, cursor inválido, campo desconocido en `/query`, valor de filtro inválido (doc 105: número no finito o fuera de rango, comparación sin valor), nombre físico sobre `maxLength` del naming; doc 105: texto con NUL (U+0000) en la ruta, la query o el cuerpo JSON (`Text can't contain the NUL character (U+0000).`) o con un surrogate UTF-16 suelto en el cuerpo (`Text contains an invalid character (an unpaired UTF-16 surrogate).`), o un cuerpo que no es UTF-8 válido (`The request body isn't valid UTF-8 text.`, ronda 4), middleware `nul_guard`. |
 | 401 | Sin sesión válida (en producción). |
 | 403 | Falta permiso, o el actor no es el owner / no es revisor asignado. |
 | 404 | Entidad inexistente / soft-deleted (`_found` levanta 404 en vez de devolver `data: null`); proyecto inexistente o borrado (`Project not found.`). |
-| 409 | Conflicto de estado o de datos (versión ya no está en draft, request ya decidido/retirado, nombre duplicado EN EL PROYECTO, esquema en uso, vista sin fuente); el proyecto del changeset fue borrado (`This project was deleted.`); un cambio referencia una entidad de OTRO proyecto (doc 75 I2); compare entre versiones de proyectos distintos. |
-| 422 | Payload inválido (no valida contra el modelo), colección no versionada, op no permitida para el tipo de campo. |
+| 409 | Conflicto de estado o de datos (versión ya no está en draft, request ya decidido/retirado, nombre duplicado EN EL PROYECTO, esquema en uso, vista sin fuente); el proyecto del changeset fue borrado (`This project was deleted.`); un cambio referencia una entidad de OTRO proyecto (doc 75 I2); compare entre versiones de proyectos distintos; escritura directa del modelo sin versión (doc 105, D1: `This change requires a version in edit mode.`). |
+| 422 | Payload inválido (no valida contra el modelo), colección no versionada, op no permitida para el tipo de campo; doc 105: texto del editor SQL de más de 100 000 caracteres (§11.6/§11.7). |
 
 ---
 
 ## 2. Projects
 
-Router: `app/features/projects/router.py` — prefijo `/api`, guard `write_guard("model.edit")`.
+Router: `app/features/projects/router.py` — prefijo `/api`, guard `write_guard("model.edit", versioned=True)` con `POST /api/projects` como única escritura directa (doc 105, D1: las de canvases, §4, responden 409).
 
 Un **Project** es la raíz del alcance (doc 75): todo lo demás (tablas, columnas, esquemas, relaciones, vistas, carpetas, canvases, estándares, versiones, reportes) lleva su `projectId`. Una **Subject Area** (canvas) es un módulo que referencia un subconjunto del pool de tablas canónicas DEL proyecto más su layout. El modelo de datos (`models.py`):
 
@@ -2094,7 +2127,7 @@ Ver sección 3 (folders). Existe como forma anidada equivalente a `GET /api/fold
 
 ## 3. Folders
 
-Router: `app/features/folders/router.py` — prefijo `/api`, guard `write_guard("model.edit")`.
+Router: `app/features/folders/router.py` — prefijo `/api`, guard `write_guard("model.edit", versioned=True)`. Doc 105 (D1): las escrituras (§3.3–3.5) responden **409 `This change requires a version in edit mode.`** (sin permiso, 403); las carpetas se crean, renombran, mueven y borran como cambios de un draft (colección `folders`, §8.5). Las lecturas siguen.
 
 Carpetas anidadas del Model Explorer (estilo Erwin). Agrupan canvases y/o subcarpetas dentro de un proyecto. Modelo:
 
@@ -2134,6 +2167,8 @@ curl http://localhost:8000/api/folders/f-01
 
 ### 3.3 POST /api/folders
 
+> **Cerrada (doc 105, D1)**: 409, como §3.4 y §3.5. Lo que sigue describe el service.
+
 Propósito: crea una carpeta. Body `FolderCreateBody`:
 
 | Campo | Tipo | Default |
@@ -2153,6 +2188,8 @@ Respuesta: `201 Created` con la carpeta creada.
 
 ### 3.4 PATCH /api/folders/{folder_id}
 
+> **Cerrada (doc 105, D1)**: 409.
+
 Propósito: actualización parcial (rename, mover de padre, reordenar). Body `FolderRenameBody` — todos opcionales; sólo se aplican los campos presentes (`exclude_unset`).
 
 | Campo | Tipo | Nota |
@@ -2169,6 +2206,8 @@ curl -X PATCH http://localhost:8000/api/folders/f-02 \
 
 ### 3.5 DELETE /api/folders/{folder_id}
 
+> **Cerrada (doc 105, D1)**: 409.
+
 Propósito: elimina la carpeta. La cascada de subcarpetas se resuelve con la función pura `descendant_ids` (tolera ciclos, visita cada id una sola vez).
 
 ```bash
@@ -2179,20 +2218,22 @@ curl -X DELETE http://localhost:8000/api/folders/f-02
 
 ## 4. Subject Areas (canvases)
 
-Router: `app/features/projects/router.py` (mismo router que projects). Guard `write_guard("model.edit")`.
+Router: `app/features/projects/router.py` (mismo router que projects). Guard `write_guard("model.edit", versioned=True)`.
 
-Un canvas = un diagrama ER. `tableIds`, `viewIds`, `layout`, `drawings`, `udpValues` y `routes` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip). Existe también `PUT /api/subject-areas/{sa_id}/views` (doc 70; body `{ viewIds: [] }`, la membresía COMPLETA de vistas del canvas), hermano de `/tables`. Los UDP de canvas (`udpValues`) se editan SOLO por el draft (el `PUT …/udp` directo se retiró en el doc 75 D14). Un canvas sólo puede referenciar tablas/vistas de SU proyecto (guard I2, 409).
+> **Escrituras cerradas (doc 105, D1).** Las siete escrituras directas de canvases — `POST /api/subject-areas` (§4.1), `PUT /{sa_id}` (§4.3), `PUT /{sa_id}/tables` (§4.4), `PUT /{sa_id}/views`, `PUT /{sa_id}/layout` (§4.5), `PUT /{sa_id}/drawings` (§4.6) y `DELETE /{sa_id}` (§4.7) — responden **409 `This change requires a version in edit mode.`** sin tocar nada (sin permiso, 403). Escribían producción sin revisión, cruzando proyectos (no tenían el guard I2) y podían dejar un canvas imposible de editar (una vista colgando en `viewIds`). El canvas se edita como documento COMPLETO por el draft (`PUT /api/changesets/{cs_id}/changes`, colección `subject_areas`, §8.5). Las lecturas (§4.2, §4.8) siguen; lo que §4.1 y §4.3–4.7 describen es el service.
+
+Un canvas = un diagrama ER. `tableIds`, `viewIds`, `layout`, `drawings`, `udpValues` y `routes` son **aditivos** (invariante de persistencia §2.6: campo declarado ⇒ persiste en el round-trip). Existe también `PUT /api/subject-areas/{sa_id}/views` (doc 70; body `{ viewIds: [] }`, la membresía COMPLETA de vistas del canvas), hermano de `/tables` (cerrado como él, doc 105). Los UDP de canvas (`udpValues`) se editan SOLO por el draft (el `PUT …/udp` directo se retiró en el doc 75 D14). Un canvas sólo puede referenciar tablas/vistas de SU proyecto (guard I2 del changeset, 409; las escrituras directas, que no lo aplicaban, están cerradas desde el doc 105).
 
 > **Trazos manuales de wires — `routes` (doc 99).** El canvas guarda, por wire, los puntos de quiebre que el modelador puso a mano: `routes: { "<id del wire>": [{"x": 420, "y": 180}, …] }`, en coordenadas del canvas y en orden padre → hijo. El id del wire es el de la relación (wire crow's-foot y rama de subcategoría) o `subsym-{símbolo}` (tronco supertipo → símbolo). Un wire sin entrada se dibuja con el camino automático.
 > - **No hay endpoint propio**: el trazo viaja en el documento COMPLETO del canvas por el changeset (`PUT /api/changesets/{cs_id}/changes`, colección `subject_areas`), igual que las posiciones en una sesión de edición. Se versiona con el documento: dos drafts sobre el mismo canvas ⇒ gana el último que publica, con su canvas completo (posiciones y trazos juntos).
 > - **Escritura estricta** (solo lo que manda el cliente, en `/changes` y `/changes/bulk`): `routes` debe ser un objeto de listas de `{x, y}` con números finitos, `|coordenada| ≤ 1 000 000`, a lo más **32 puntos por wire** y **5 000 wires por canvas**; el id del wire no puede estar vacío, pasar de 200 caracteres ni llevar caracteres de control → si no, `422` (`subject_areas/<id>: routes.<wire>[<i>] x must be a finite number`). También se rechaza una llave de primer nivel `routes.<algo>` (el trazo se manda como el objeto `routes` completo). Ausente, `null` y lista vacía valen (sin trazo).
 > - **Lectura tolerante**: un trazo corrupto en la BD se descarta entero al leer (el wire vuelve al camino automático) — nunca deja un canvas ni el árbol del proyecto sin abrir. `GET …/diagram`, `GET /subject-areas/{id}`, la lista de canvases y `GET /changesets/{cs_id}/effective/subject_areas` devuelven `routes` ya saneado.
-> - **Publish**: el canvas se publica SIEMPRE con la llave `routes` (saneada; `{}` si el payload no la trae). El apply es un `` (merge): sin la llave explícita, un draft de un cliente viejo publicaría sus posiciones con los trazos de otro, y un rollback no quitaría un trazo agregado después.
+> - **Publish**: el canvas se publica SIEMPRE con la llave `routes` (saneada; `{}` si el payload no la trae). El apply es un `$set` (merge): sin la llave explícita, un draft de un cliente viejo publicaría sus posiciones con los trazos de otro, y un rollback no quitaría un trazo agregado después.
 > - **Revisión**: `routes` es ruido del diff, como `layout` y `drawings`.
 
 ### 4.1 POST /api/subject-areas
 
-Propósito: crea un canvas. Body `SubjectAreaBody`:
+**Cerrada (doc 105, D1): 409.** Propósito (service): crea un canvas. Body `SubjectAreaBody`:
 
 | Campo | Tipo | Req. |
 |---|---|---|
@@ -2214,11 +2255,11 @@ Propósito: un canvas por id (metadata, sin resolver tablas/columnas). 404 si no
 
 ### 4.3 PUT /api/subject-areas/{sa_id}
 
-Propósito: actualiza metadata del canvas (mismo body `SubjectAreaBody`). 404 si no existe.
+**Cerrada (doc 105, D1): 409.** Propósito (service): actualiza metadata del canvas (mismo body `SubjectAreaBody`). 404 si no existe.
 
 ### 4.4 PUT /api/subject-areas/{sa_id}/tables
 
-Propósito: fija el conjunto de tablas referenciadas. Body `TablesBody`:
+**Cerrada (doc 105, D1): 409.** Propósito (service): fija el conjunto de tablas referenciadas. Body `TablesBody`:
 
 ```json
 { "tableIds": ["t-1", "t-2", "t-3"] }
@@ -2234,7 +2275,7 @@ curl -X PUT http://localhost:8000/api/subject-areas/sa-1/tables \
 
 ### 4.5 PUT /api/subject-areas/{sa_id}/layout
 
-Propósito: **merge** de posiciones por tabla (conserva las no enviadas). Body `LayoutBody`:
+**Cerrada (doc 105, D1): 409.** Propósito (service): **merge** de posiciones por tabla (conserva las no enviadas). Body `LayoutBody`:
 
 ```json
 { "layout": { "t-1": {"x": 120, "y": 240}, "t-2": {"x": 500, "y": 80} } }
@@ -2244,7 +2285,7 @@ Internamente `merge_layout(layout_actual, updates)` — función pura `{**layout
 
 ### 4.6 PUT /api/subject-areas/{sa_id}/drawings
 
-Propósito: persiste la capa DRAWING (formas/texto con estilo). **Reemplaza el array completo**. Body `DrawingsBody`:
+**Cerrada (doc 105, D1): 409.** Propósito (service): persiste la capa DRAWING (formas/texto con estilo). **Reemplaza el array completo**. Body `DrawingsBody`:
 
 ```json
 { "drawings": [ {"type":"rect","x":10,"y":10,"w":200,"h":80,"fill":"#eef"} ] }
@@ -2254,7 +2295,7 @@ No se audita.
 
 ### 4.7 DELETE /api/subject-areas/{sa_id}
 
-Propósito: elimina el canvas. 404 si no existe.
+**Cerrada (doc 105, D1): 409.** Propósito (service): elimina el canvas. 404 si no existe.
 
 ### 4.8 GET /api/subject-areas/{sa_id}/diagram
 
@@ -2301,7 +2342,7 @@ flowchart TD
 
 ## 5. Relationships
 
-Router: `app/features/relationships/router.py` — prefijo `/api/relationships`, guard `write_guard("model.edit")`.
+Router: `app/features/relationships/router.py` — prefijo `/api/relationships`, guard `write_guard("model.edit", versioned=True)`. Doc 105 (D1): las escrituras (§5.2–5.4) responden **409 `This change requires a version in edit mode.`** (sin permiso, 403); las relaciones se crean, editan y borran como cambios de un draft (colección `relationships`, §8.5). Las lecturas (§5.1, §5.5, §5.6) siguen.
 
 Relación ER (PK/FK entre tablas canónicas del MISMO proyecto; `projectId` lo estampa el servidor). Modelo:
 
@@ -2336,7 +2377,7 @@ curl "http://localhost:8000/api/relationships?tableId=t-1"
 
 ### 5.2 POST /api/relationships
 
-Propósito: crea una relación. Body `RelationshipBody`:
+**Cerrada (doc 105, D1): 409.** Propósito (service): crea una relación. Body `RelationshipBody`:
 
 | Campo | Tipo | Default |
 |---|---|---|
@@ -2359,15 +2400,15 @@ Respuesta: `201 Created`.
 
 ### 5.3 PUT /api/relationships/{rid}
 
-Propósito: actualiza una relación (mismo body). **404** (`"Relación no encontrada."`) si no existe.
+**Cerrada (doc 105, D1): 409.** Propósito (service): actualiza una relación (mismo body). **404** (`"Relationship not found."`) si no existe.
 
 ### 5.4 DELETE /api/relationships/{rid}
 
-Propósito: elimina. **404** si no existe. Respuesta: `{ "id": "<rid>" }`.
+**Cerrada (doc 105, D1): 409.** Propósito (service): elimina. **404** si no existe. Respuesta: `{ "id": "<rid>" }`.
 
 ### 5.5 GET /api/relationships/impact
 
-Propósito: impacto GLOBAL de eliminar una columna — relaciones activas (publicadas + overlay del changeset) donde la columna es extremo de algún par, enriquecidas con el otro extremo (`tabla.columna`) y los canvases donde la relación es visible (contienen ambas tablas). Lo consume el popup de confirmación al borrar una columna. Lectura (sesión).
+Propósito: impacto GLOBAL de eliminar una columna — relaciones activas (publicadas + overlay del changeset) donde la columna es extremo de algún par, enriquecidas con el otro extremo (`tabla.columna`) y los canvases donde la relación es visible (contienen ambas tablas). Lo consume el popup de confirmación al borrar una columna. Lectura (sesión); con `changesetId`, la misma visibilidad que `/links` (`ensure_changeset_visible`, doc 105 H8 — antes no la verificaba): 403 si es una versión no publicada de otro usuario y el actor no es su revisor asignado ni tiene `versions.view_all` (lo implica `admin.manage`); 404 si la versión ya no existe (doc 104).
 
 Query params:
 
@@ -2428,7 +2469,7 @@ Respuesta (`data`):
 
 ## 6. Views
 
-Router: `app/features/views/router.py` — prefijo `/api/views`, guard `write_guard("model.edit")`.
+Router: `app/features/views/router.py` — prefijo `/api/views`, guard `write_guard("model.edit", versioned=True)`. Doc 105 (D1): las escrituras (§6.2–6.4) responden **409 `This change requires a version in edit mode.`** (sin permiso, 403); las lecturas (§6.1, `/for-table`) siguen.
 
 Vistas SQL, columna por columna y multi-fuente (docs 07b-2, 20 y 22), del proyecto de sus tablas fuente (`projectId`). Modelo (aditivos del editor de vista, todos con default no-breaking):
 
@@ -2454,21 +2495,21 @@ class ViewDoc:
 
 > Nota: `schema` es palabra reservada de Pydantic; internamente es `sql_schema` con alias `schema`. El campo viaja como `schema` en ambos sentidos. `sources[].description` es la definición funcional de la columna EN la vista (doc 22 F5).
 
-Las vistas son VERSIONADAS (doc 20): en sesión de edición el front las escribe vía changeset (`collection: "views"`); este router es el camino directo sin changeset.
+Las vistas son VERSIONADAS (doc 20): se escriben SÓLO vía changeset (`collection: "views"`, §8.5); este router era el camino directo sin changeset y desde el doc 105 sólo lee.
 
 ### 6.1 GET /api/views
 
-Propósito: lista las vistas. Query opcional `tableId` (vistas atadas a una tabla base) o `tableIds` (CSV — trae en UNA request las vistas de todas las tablas de un canvas, p. ej. para el Export DDL, sin N llamadas por tabla).
+Propósito: lista las vistas. Query opcional `tableId` (vistas atadas a una tabla base) o `tableIds` (CSV — trae en UNA request las vistas de todas las tablas de un lote, sin N llamadas por tabla). Sin tabla, `projectId` es obligatorio (doc 75 D6: nunca la colección completa): sin ninguno de los tres, **422** `projectId is required when no table is given.`
 
 ```bash
-curl http://localhost:8000/api/views
+curl "http://localhost:8000/api/views?projectId=p-001"
 curl "http://localhost:8000/api/views?tableId=t-1"
 curl "http://localhost:8000/api/views?tableIds=t-1,t-2,t-3"
 ```
 
 ### 6.2 POST /api/views
 
-Propósito: crea una vista. Body `ViewBody`. **409** si no trae ninguna fuente (`sourceTableIds` vacío y sin `tableId`): `{ "detail": "The view needs at least one source table." }` — una vista sin tabla fuente no puede derivar ni DDL ni canvas. Con 2 o más fuentes el DDL del front las lista `FROM t1, t2` (doc 91 D5, como Erwin); el backend no valida joins.
+**Cerrada (doc 105, D1): 409 `This change requires a version in edit mode.`** Propósito (service): crea una vista. Body `ViewBody`. **409** si no trae ninguna fuente (`sourceTableIds` vacío y sin `tableId`): `{ "detail": "The view needs at least one source table." }` — una vista sin tabla fuente no puede derivar ni DDL ni canvas. Con 2 o más fuentes el DDL del front las lista `FROM t1, t2` (doc 91 D5, como Erwin); el backend no valida joins.
 
 ```bash
 curl -X POST http://localhost:8000/api/views \
@@ -2489,11 +2530,11 @@ Respuesta: `201 Created`.
 
 ### 6.3 PUT /api/views/{vid}
 
-Propósito: actualiza. **404** (`"View not found."`) si no existe. Misma normalización de `customSql` que el POST.
+**Cerrada (doc 105, D1): 409.** Propósito (service): actualiza. **404** (`"View not found."`) si no existe. Misma normalización de `customSql` que el POST.
 
 ### 6.4 DELETE /api/views/{vid}
 
-Propósito: elimina. **404** si no existe. Respuesta: `{ "id": "<vid>" }`.
+**Cerrada (doc 105, D1): 409.** Propósito (service): elimina. **404** si no existe. Respuesta: `{ "id": "<vid>" }`.
 
 ### 6.5 ~~POST /api/views/sql/parse~~ *(retirado, doc 91 D6)*
 
@@ -2503,9 +2544,9 @@ El sandbox de validación del doc 61 se eliminó: el User-Defined SQL no se vali
 
 ## 7. Schemas
 
-Router: `app/features/schemas/router.py` — dos prefijos con guard `write_guard("model.edit")`: `/api/projects/{project_id}/schemas` (listar/crear, con `alive_project`) y `/api/schemas/{sid}` (editar/borrar por id). Doc 18: el esquema de BD es una ENTIDAD, ya no texto libre; doc 75: es una entidad DEL proyecto (`projectId`), con nombre único **por proyecto** — el mismo nombre puede existir en dos proyectos.
+Router: `app/features/schemas/router.py` — dos prefijos con guard `write_guard("model.edit", versioned=True)`: `/api/projects/{project_id}/schemas` (listar/crear, con `alive_project`) y `/api/schemas/{sid}` (editar/borrar por id). Doc 18: el esquema de BD es una ENTIDAD, ya no texto libre; doc 75: es una entidad DEL proyecto (`projectId`), con nombre único **por proyecto** — el mismo nombre puede existir en dos proyectos.
 
-El GET es lectura para cualquier sesión válida: lo consumen los dropdowns de esquema y el Database Explorer, incluso con rol lector. Las escrituras exigen `model.edit` y son el camino directo SIN changeset — en sesión de edición el front escribe SIEMPRE vía changeset (cambio `collection: "schemas"` por `PUT .../changes`, o los endpoints de rename/delete del changeset, ver 8.17).
+El GET es lectura para cualquier sesión válida: lo consumen los dropdowns de esquema y el Database Explorer, incluso con rol lector. Las escrituras (§7.2–7.4) eran el camino directo SIN changeset; desde el doc 105 (D1), con `model.edit` responden **409 `This change requires a version in edit mode.`** sin tocar nada (sin el permiso, 403): los esquemas se escriben SÓLO vía changeset (cambio `collection: "schemas"` por `PUT .../changes`, o los endpoints de rename/delete del changeset, ver 8.17). Lo que §7.2–7.4 describen es el service.
 
 Forma de un esquema: `{ id, projectId, name, description, kind }`. `kind` (doc 44) declara qué contiene el esquema — `"tables"` | `"views"` | `null` (sin clasificar): el XML de Erwin no trae ese dato, así que nace en la plataforma (la UI lo pide al crear; la migración lo deriva de los miembros; `scripts/backfill_schema_kind.py` clasifica el stock por uso real). Lo consumen los combobox de esquema de CTAS/New table para acotar a esquemas de tablas sin consultar el pool.
 
@@ -2527,7 +2568,7 @@ Respuesta (`data`):
 
 ### 7.2 POST /api/projects/{project_id}/schemas
 
-Propósito: crea un esquema en el proyecto. Body `SchemaBody` (`{ name, description?, kind? }`; `kind` ∈ `tables|views`, opcional). Respuesta `201 Created`.
+**Cerrada (doc 105, D1): 409.** Propósito (service): crea un esquema en el proyecto. Body `SchemaBody` (`{ name, description?, kind? }`; `kind` ∈ `tables|views`, opcional). Respuesta `201 Created`.
 
 Errores: **422** nombre inválido o `kind` fuera del enum; **409** nombre duplicado en el proyecto.
 
@@ -2539,11 +2580,11 @@ curl -X POST http://localhost:8000/api/projects/p-001/schemas \
 
 ### 7.3 PATCH /api/schemas/{sid}
 
-Propósito: actualiza (rename/descripción). Mismo body; `kind` AUSENTE significa "no tocar el vigente" (un PATCH de solo nombre no borra la clasificación). Errores: **422** nombre inválido; **409** duplicado en el proyecto del esquema; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá — ese camino espeja el doc efectivo completo, así que conserva `kind`.
+**Cerrada (doc 105, D1): 409.** Propósito (service): actualiza (rename/descripción). Mismo body; `kind` AUSENTE significa "no tocar el vigente" (un PATCH de solo nombre no borra la clasificación). Errores: **422** nombre inválido; **409** duplicado en el proyecto del esquema; **404** no existe. El rename VERSIONADO con propagación a tablas/vistas va por el changeset (8.17), no por acá — ese camino espeja el doc efectivo completo, así que conserva `kind`.
 
 ### 7.4 DELETE /api/schemas/{sid}
 
-Propósito: elimina el esquema, con guard de uso. Respuesta: `{ "deleted": true }`.
+**Cerrada (doc 105, D1): 409.** Propósito (service): elimina el esquema, con guard de uso. Respuesta: `{ "deleted": true }`.
 
 Errores: **409** `{ "detail": "The schema has tables or views: it can't be deleted." }`; **404** no existe.
 
@@ -2557,42 +2598,34 @@ Un **changeset** es la unidad de versionado/cambio del modelo y pertenece a **UN
 
 ```mermaid
 stateDiagram-v2
-    [*] --> draft: snapshot / create
+    [*] --> draft: snapshot
     draft --> submitted: submit (asigna revisores)
     submitted --> draft: withdraw (owner)
     submitted --> approved: review (unanimidad de aprobaciones)
     submitted --> rejected: review (algun rechazo)
     rejected --> draft: reopen (owner)
+    draft --> draft: transfer (owner o admin, doc 104)
+    draft --> [*]: delete (owner o admin, doc 104)
     approved --> [*]: appliedAt estampado
 ```
 
 Reglas clave:
 - **Owner-only** para editar/enviar/retirar/reabrir.
+- **Administrar un draft (doc 104)**: transferirlo a otro usuario (§8.21) o eliminarlo (§8.22) lo puede su owner (si su rol tiene `model.edit`) o cualquier usuario con `admin.manage`. Administrar no es editar: el administrador sigue sin escribir en un draft ajeno salvo que se lo transfiera. Una versión en revisión se retira primero; una publicada no se transfiere ni se elimina nunca.
+- **Versión inexistente = 404 (doc 104)**: `GET /{cs_id}`, `/diff`, `PUT /changes`, `/changes/bulk`, `submit`, `reopen` y toda lectura changeset-aware del canvas (`effective`, diagrama, links, inventario, búsqueda…) responden 404 `This version no longer exists — it may have been deleted. Open another version.` Antes una escritura sobre un id inexistente respondía 200 con `null`.
 - **Unanimidad**: se aplica a producción sólo cuando **todos** los revisores asignados aprobaron. Un rechazo → `rejected`.
-- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` / `PUT .../changes/bulk` (los endpoints de esquema de 8.17 también registran cambios, server-side).
+- Los cambios NO viven embebidos en el doc del changeset: cada cambio es un documento de `changeset_changes` (`_id` determinista `{csId}::{collection}::{entityId}`; el versionado por changesets trata cada cambio como su propio documento → updates chicos y diffs por slice). Los cambios se agregan **sólo** vía `PUT .../changes` / `PUT .../changes/bulk` (los endpoints de esquema de 8.17 y la carga Excel de 8.18 también registran cambios, server-side). Desde el doc 105 (D1) es el ÚNICO camino de escritura del modelo: las rutas directas de canvases, carpetas, esquemas, vistas, relaciones y catálogo responden 409 `This change requires a version in edit mode.` (sólo `POST /api/projects` sigue directo).
 - Colecciones versionadas (`VERSIONED`, whitelist dura — la ESTRUCTURA también es versionada desde los docs 16 y 18): `projects`, `folders`, `subject_areas`, `schemas`, `canonical_tables`, `canonical_columns`, `relationships`, `views`.
 - **Guards de proyecto (doc 75 I1/I2)**: `payload.projectId` lo estampa el servidor con el del changeset; una referencia (`tableId`, `parentTableId`/`childTableId`, `sourceTableIds`, `parentDomainId`, `folderId`, `schema`) a una entidad de OTRO proyecto es **409**; en `projects` sólo se admite la entidad `cs.projectId` (renombrar/describir/borrar el propio proyecto — crear proyectos va por `POST /api/projects`).
 - **Borrado del proyecto (D5)**: un cambio `projects/<projectId> op=delete` marca el draft como «Deletion pending» (`version_row.deletesProject = true`, `diff.impact.deletesProject`); al aprobarse, el apply cascadea el soft-delete de TODO lo del proyecto (modelo + estándares; se conservan `changesets` y `standards_versions` como historial) y desde entonces sus rutas responden 404 / sus changesets 409 `This project was deleted.`.
 - `appliedAt` se estampa recién con el apply completo: es el marcador de "esta versión está en producción". Al aplicar, cada cambio estampa además su imagen `before` (la usa el rollback y el diff de detalles).
 - **Rollback** (doc 27): `POST /{cs_id}/rollback` (permiso `rollback`) crea un DRAFT inverso que restaura el modelo al estado de esa versión publicada; el draft pasa por el flujo normal submit → review → approve.
 
-Modelo `ChangesetDoc` (campos principales): `id`, `title`, `owner`, `status` (`draft|submitted|approved|rejected`), `description`, `versionLabel` (`v1`, `v2`, ... autoincremental por proyecto), `projectId`, `reviewers[]`, `approvals{userId: {status, note?, at}}`, `comments[]`, `restoredFrom` (doc 65), timestamps (`createdAt`, `updatedAt`, `submittedAt`, `reviewedBy`, `reviewedAt`, `reviewNote`, `appliedAt`). En las proyecciones (`version_row`, detalle) viaja además `deletesProject` (derivado del ledger, no persistido).
+Modelo `ChangesetDoc` (campos principales): `id`, `title`, `owner`, `status` (`draft|submitted|approved|rejected`), `description`, `versionLabel` (`v1`, `v2`, ... autoincremental por proyecto), `projectId`, `reviewers[]`, `approvals{userId: {status, note?, at}}`, `comments[]`, `restoredFrom` (doc 65), `transfers[]` (doc 104: `{from, to, by, at, note?}`; `owner` es siempre el dueño actual y `transfers[0].from` quien la inició), `partialApplyAt` (doc 104: un approve falló cuando ya escribía producción, §8.22), `uploadLock` (doc 105: `{jobId, owner, at, heartbeat}` de la carga Excel que está escribiendo, §8.18), `restoreIncomplete` (doc 105: draft de restauración a medio grabar, §8.16), timestamps (`createdAt`, `updatedAt`, `submittedAt`, `reviewedBy`, `reviewedAt`, `reviewNote`, `appliedAt`). En las proyecciones (`version_row`, detalle) viaja además `deletesProject` (derivado del ledger, no persistido).
 
-### 8.1 POST /api/changesets
+### 8.1 ~~POST /api/changesets~~ *(retirado, doc 82)*
 
-Propósito: crea un changeset "vacío" (compat M-series). Permiso `model.edit`. Body `ChangesetCreate`:
-
-```json
-{ "title": "Ajustes dominio Ventas" }
-```
-
-```bash
-curl -X POST http://localhost:8000/api/changesets \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Ajustes dominio Ventas"}'
-```
-
-Respuesta: `201 Created` — el changeset en `draft`, `owner = usuario en sesión`.
+El create M-series (`{ "title": … }`) creaba una cabecera SIN proyecto y, desde el doc 75, respondía 500 en la validación del modelo. El único alta de una versión es `POST /api/changesets/snapshot {projectId}` (§8.3); el front nunca usó el viejo. `/api/changesets` sólo acepta GET (§8.2): un POST responde **405**. `tests/architecture/test_no_legacy_features.py` impide que vuelva.
 
 ### 8.2 GET /api/changesets
 
@@ -2664,6 +2697,8 @@ Respuestas de error específicas:
 | 409 | El changeset ya no está en `draft` (fue enviado o cerrado): hay que abrir una versión nueva. También 409 por unicidad de nombres EN EL PROYECTO (crear/renombrar chocaría con una entidad existente — el Save queda bloqueado acá y el publish re-chequea); por referencia a una entidad de OTRO proyecto (doc 75 I2); por tocar en `projects` una entidad distinta de `cs.projectId`; o porque el proyecto del changeset fue borrado (`This project was deleted.`). |
 | 400 | Nombre físico sobre el `maxLength` del naming config del proyecto (`NameTooLongError`, doc 24; los nombres heredados quedan grandfathered). |
 
+**Reglas de naming del físico (doc 83 + doc 68; doc 105, rondas 4 y 5).** Antes de la unicidad y la longitud, `_apply_naming_rules` (`changesets/service.py`) pasa al `case` del naming del proyecto el `physicalName` de una COLUMNA (las tablas conservan su grafía) y estampa `physicalNameOverridden` en tablas y columnas (flag del payload o físico ≠ derivado); si las reglas no cargan, el payload pasa tal cual. Doc 105: la regla rige para lo que se TIPEA o cambia — un físico que YA existe para esa columna (el publicado, aunque el draft tenga un borrado o un renombre pendiente, o el pendiente del draft) y que el cambio repite tal cual no se renombra: editar sólo la descripción, re-guardar o el Undo que re-graba la pre-imagen dejan un legado fuera de la regla como está (antes se renombraba en silencio, las vistas que lo nombran quedaban colgando y podía chocar con otra columna). Su flag depende del lógico (rondas 5 a 7, R15/R16/R18b): con el MISMO lógico que un estado existente —el mismo texto o uno que deriva el mismo físico, así que un cambio sólo de mayúsculas no es un lógico nuevo—, o sin `logicalName` en el payload, conserva el flag del payload o, si no viene, el de ese estado (recalcularlo sobre el legado lo marcaba «custom»: diff espurio y el Glosario dejaba de re-derivarlo); con un lógico NUEVO el físico conservado ya no es su derivado y el flag se estampa (flag del payload o físico ≠ derivado: queda custom; si no, el próximo Save & apply del Glosario lo renombraría). Las tablas no cambian: conservan su grafía y el flag se estampa como siempre (doc 68). Si los nombres existentes no se pueden leer, se normaliza (nunca bloquea). Vale también en 8.5b; la carga Excel planifica con la misma regla (§8.18).
+
 ### 8.5b PUT /api/changesets/{cs_id}/changes/bulk
 
 Propósito: registra un **lote** de cambios en una sola request — cascadas de borrar tabla (vistas + relaciones + columnas) y de crear tabla desde fuentes (tabla + columnas). El camino cambio-por-cambio de 8.5 sigue vigente para ediciones puntuales; a escala DDV (tablas de miles de columnas) el loop de N requests secuenciales tomaba minutos y este endpoint lo resuelve en segundos. Permiso `model.edit`. Body `ChangesBulkBody`:
@@ -2672,7 +2707,7 @@ Propósito: registra un **lote** de cambios en una sola request — cascadas de 
 |---|---|---|
 | `changes` | `ChangeBody[]` (1–2000) | mismos campos que 8.5; el front trocea en tandas de 1000 |
 
-Semántica: equivale a repetir 8.5 en orden, con dos diferencias deliberadas. (1) La validación corre **completa antes de escribir** — un ítem inválido/duplicado devuelve el error y NO graba nada del lote (el loop viejo podía dejar la cascada a medias). (2) Los slices de unicidad se consultan una vez por lote; la unicidad se evalúa contra un *pending* que evoluciona ítem a ítem (un delete del lote libera su nombre para un upsert posterior, igual que en secuencia). Se dedup-ea por entidad (último gana) y la escritura usa el protocolo de 3 pasos con compensación de `set_change` pagado una vez por lote (`set_changes_bulk`, tandas de 1000 vía `bulk_write` — fast-path del adaptador). Mismos errores que 8.5 (422/403/409/400); 422 nombra la primera colección fuera de `VERSIONED` o junta los primeros 5 payloads inválidos.
+Semántica: equivale a repetir 8.5 en orden, con dos diferencias deliberadas. (1) La validación corre **completa antes de escribir** — un ítem inválido/duplicado devuelve el error y NO graba nada del lote (el loop viejo podía dejar la cascada a medias). (2) Los slices de unicidad se consultan una vez por lote; la unicidad se evalúa contra un *pending* que evoluciona ítem a ítem (un delete del lote libera su nombre para un upsert posterior, igual que en secuencia). Se dedup-ea por entidad (último gana) y la escritura usa el protocolo de 3 pasos con compensación de `set_change` pagado una vez por lote (`set_changes_bulk`, tandas de 1000 vía `bulk_write` — fast-path del adaptador). Doc 105: si una tanda falla con una excepción (p. ej. un timeout) o la llamada se cancela (el proceso se apaga), deshace lo que ya grabó (filtro por su `wtoken`) antes de relanzar el error — el lote queda todo o nada, salvo que la base tampoco deje compensar (queda en el log). Mismos errores que 8.5 (422/403/409/400); 422 nombra la primera colección fuera de `VERSIONED` o junta los primeros 5 payloads inválidos.
 
 ```bash
 curl -X PUT http://localhost:8000/api/changesets/cs-9/changes/bulk \
@@ -2699,8 +2734,9 @@ Query params:
 | `q` | string | búsqueda por nombre (contains, case-insensitive) — modales de catálogo y búsqueda por columna del Database Explorer en modo draft |
 | `limit` | int (1–500) | tope de resultados |
 | `schema` | string | tablas/vistas de UN esquema, draft-aware (Database Explorer, doc 25) |
+| `tableIds` | string | doc 105 (P2), sólo `views`: vistas de un LOTE de tablas (ids separados por coma, 1 a 300 distintos) — las que tienen alguna de esas tablas como fuente (`sourceTableIds`) o como base legacy (`tableId`), publicadas + overlay, en una lectura. Lo usa «Import existing tables» en lotes de 100 (antes un GET por tabla) |
 
-Reglas: sin filtro, se traería la colección publicada completa (inviable con 300k columnas). Con filtro, los cambios del changeset también se acotan al slice. `q`+`limit` hacen búsqueda server-side por nombre (re-filtra post-overlay: un upsert puede renombrar y sacar la entidad del match). 422 si `collection` no está en `VERSIONED`.
+Reglas: sin filtro, se traería la colección publicada completa (inviable con 300k columnas). Con filtro, los cambios del changeset también se acotan al slice. `q`+`limit` hacen búsqueda server-side por nombre (re-filtra post-overlay: un upsert puede renombrar y sacar la entidad del match). 422 si `collection` no está en `VERSIONED`. `tableIds` presente pero vacío o con más de 300 ids → **422** `tableIds must list between 1 and 300 tables.` (nunca «todo el proyecto» por un lote mal armado); en otra colección → **422** `tableIds only applies to views.`
 
 ```bash
 curl "http://localhost:8000/api/changesets/cs-9/effective/canonical_columns?tableId=t-1&limit=100"
@@ -2753,7 +2789,7 @@ curl -X POST http://localhost:8000/api/changesets/cs-9/submit \
   -d '{"title":"Rediseño facturación","reviewers":["ana","luis"]}'
 ```
 
-Errores: **400** sin revisores; **400** si algún revisor asignado tiene un rol SIN `review.decide` (jamás podría votar y el request quedaría trabado — la respuesta lista los nombres); **403** si el actor no es el owner; **409** si no está en draft (un request en revisión se retira primero con withdraw).
+Errores: **400** sin revisores; **400** `Disabled user(s) can't review: <nombres>. Assign active reviewers.` si algún revisor asignado está deshabilitado (doc 105, A5-o3: tampoco votaría nunca — sale antes que el chequeo de rol); **400** si algún revisor asignado tiene un rol SIN `review.decide` (jamás podría votar y el request quedaría trabado — la respuesta lista los nombres); **403** si el actor no es el owner; **404** si la versión ya no existe (doc 104); **409** si no está en draft (un request en revisión se retira primero con withdraw); **409** si una carga Excel se está escribiendo en la versión (doc 105: lock `uploadLock`, condición de la misma transición — el request llevaría media carga); **409** `This restore draft wasn't fully created: delete it and restore the version again.` si es un draft de restauración cuyos inversos no terminaron de grabarse (doc 105: marca `restoreIncomplete`, §8.16); **409** `This project was deleted.` si el proyecto ya no existe — salvo la versión cuyo publish a medias borró SU propio proyecto (`partialApplyAt` + delete de `projects`): esa se re-envía para completar el borrado (doc 105, H3).
 
 ### 8.9 POST /api/changesets/{cs_id}/review
 
@@ -2771,7 +2807,9 @@ curl -X POST http://localhost:8000/api/changesets/cs-9/review \
 
 Doc 88 §5-6: con `decision: "reject"` la `note` es **obligatoria** (422 «A rejection must include the reason…» si viene vacía). Un rechazo devuelve la versión **directo a `draft`** (approvals y `submittedAt` limpios; `reviewedBy` / `reviewedAt` / `reviewNote` estampados) y cierra el ciclo en `requests[]`; un approve lo cierra `approved`. `requests[]` = historial de solicitudes, un registro por envío: `{id, cycle, submittedAt, submittedBy, title, description, reviewers, outcome: pending | approved | rejected | withdrawn, decidedAt?, decidedBy?, note?, decisions?}` — sobrevive a que la versión vuelva a draft, se re-envíe o se publique (Review lo lista).
 
-Errores: **403** no asignado; **409** ya no está en revisión (fue retirado o ya decidido); **422** rechazo sin motivo (doc 88 §5); **422** el publish falló por un payload inválido; **409** el publish falló por una carrera de nombres con otro publish (`DuplicateEntityError`) o por un delete de esquema con tablas/vistas efectivas (`SchemaInUseError`). En los tres casos de fallo del publish el claim se revirtió y producción quedó intacta; el owner debe retirar, corregir y re-enviar.
+Errores: **403** no asignado; **409** ya no está en revisión (fue retirado o ya decidido); **422** rechazo sin motivo (doc 88 §5); **422** el publish falló por un payload inválido; **409** el publish falló por una carrera de nombres con otro publish (`DuplicateEntityError`) o por un delete de esquema con tablas/vistas efectivas (`SchemaInUseError`); **409** `code: table_in_use` (doc 105) si una tabla que el request borra todavía tiene columnas, relaciones (v2 o legacy v1 `sourceTableId`/`targetTableId`) o vistas vivas en el estado efectivo (publicado + el request; se lee en lotes de 300 tablas) — `Table <FÍSICO> is deleted but still has 3 column(s), 1 view(s)`: el front las borra en la misma operación, pero un draft armado por API o una cascada cortada publicaba referencias huérfanas; **409** `code: cross_project` si el plan referencia una entidad de otro proyecto (doc 75 I2) o, desde el doc 105 (H7), si escribe por `_id` una entidad que HOY es de otro proyecto, viva o borrada — la mudaría a su proyecto o la borraría (`<colección> <id> belongs to another project`; un doc sin `projectId`, legacy, no bloquea). Los fallos del publish traen el detalle estructurado `{code, message, items, next}` (doc 84 D1). En todos los casos de fallo del publish el claim se revirtió y producción quedó intacta; el owner debe retirar, corregir y re-enviar. Doc 105 (H5): una falla que NO es de negocio en esos gates (p. ej. un timeout de la BD) también devuelve el request a revisión antes de propagarse como 500 — antes dejaba la versión `approved` sin `appliedAt`, fuera de la bandeja y sin salida. Si el apply falla cuando ya escribía, además deja `partialApplyAt` (doc 104, §8.22). `appliedAt` se estampa con una transición condicionada al claim de ESE publish (`appliedAt` nulo y el mismo `reviewedAt`): si en el medio la devolvieron a revisión (`reapply_changeset.py --force` con el apply todavía vivo), queda en revisión con `partialApplyAt` — no «en revisión con `appliedAt`» — y el approve responde **409** «This request was applied, but it was sent back to review while it was being applied: approve it again to finish.»; como la aprobación SÍ escribió producción, queda auditada (`changeset.decide` con `result: sent-back`). Re-aprobarla converge. **409** `This project was deleted.` si el proyecto ya no existe, salvo la versión cuyo publish a medias borró SU proyecto (doc 105, H3): re-aprobarla termina el borrado, y en ese caso una referencia a algo que la cascada ya borró no la traba (una a OTRO proyecto sí).
+
+**Imágenes previas (doc 105).** Antes de escribir producción, el publish estampa en cada documento de cambio la imagen previa de su entidad (`before`/`beforeAt`, la usan el rollback, `asof:` y Change details), en una escritura por lote (antes una sentencia por entidad; con `partialApplyAt`, primero lee cuáles ya tienen marca y escribe el resto por `_id`, el camino rápido del adaptador). Si un publish anterior de la misma versión ya escribió a medias (`partialApplyAt`), se conservan las imágenes ya estampadas — y re-editar esa entidad en el draft las arrastra (H4: antes se perdían y el re-approve las re-capturaba de la producción a medio escribir, contaminando rollback y `asof:`); si el approve falló ANTES de escribir, el reintento las re-captura frescas (H4b: otra versión pudo publicar esas entidades en el medio).
 
 ### 8.10 POST /api/changesets/{cs_id}/approve · POST /api/changesets/{cs_id}/reject
 
@@ -2879,6 +2917,8 @@ curl -X POST http://localhost:8000/api/changesets/cs-8/rollback
 
 Respuesta: el draft creado (mismo shape que `snapshot`), listo para revisar y enviar.
 
+Doc 105 (A1-o2): el draft nace con la marca `restoreIncomplete: true`, recibe TODOS sus cambios inversos en lotes (`set_changes_bulk`, condicionado al dueño y con compensación si una tanda falla o la llamada se cancela; antes era un `set_change` por entidad y una caída en el medio dejaba un restore PARCIAL que se podía enviar y aprobar) y recién con todo grabado se le quita la marca. Si el proceso muere antes, el draft queda marcado y el envío responde **409** `This restore draft wasn't fully created: delete it and restore the version again.` (§8.8): se elimina (§8.22) y se pide el rollback de nuevo.
+
 Errores:
 
 | Código | Motivo |
@@ -2898,7 +2938,7 @@ La entidad `schemas` opera dentro del changeset con endpoints propios (doc 18): 
 { "name": "ventas", "tables": 12, "views": 3, "canvases": 4 }
 ```
 
-**POST /api/changesets/{cs_id}/schemas/{schema_id}/rename** — registra en el draft el rename del esquema + un upsert por cada tabla/vista efectiva que lo usa. Permiso `model.edit`, owner-only. Body `SchemaRenameBody`: `{ "newName": "ventas_v2" }`. Respuesta: `{ "tables": 12, "views": 3 }` (lo propagado). Errores: 422 nombre inválido; 409 nombre duplicado o draft cerrado; 403 no owner; 404 versión o esquema inexistente. Audita `changeset.schema_rename`.
+**POST /api/changesets/{cs_id}/schemas/{schema_id}/rename** — registra en el draft el rename del esquema + un upsert por cada tabla/vista efectiva que lo usa, todo en UN `add_changes_bulk` (doc 105, H1): valida dueño, estado, payloads y unicidad del lote entero ANTES de grabar y lo graba con el protocolo de `set_changes_bulk` (un solo touch condicionado a draft + dueño, con compensación — también si una tanda falla con una excepción: todo o nada, salvo que la base tampoco deje compensar; antes eran N+1 `add_change` y una transferencia, un envío o un timeout en el medio lo dejaban a medias). Permiso `model.edit`, owner-only. Body `SchemaRenameBody`: `{ "newName": "ventas_v2" }`. Respuesta: `{ "tables": 12, "views": 3 }` (lo propagado). Errores: 422 nombre inválido; 409 nombre duplicado o draft cerrado; 403 no owner; 404 versión o esquema inexistente. Audita `changeset.schema_rename`.
 
 **POST /api/changesets/{cs_id}/schemas/{schema_id}/delete** — registra el delete del esquema en el draft, solo si su estado efectivo (publicado + este draft) no tiene tablas ni vistas. Permiso `model.edit`, owner-only. Body: ninguno. Respuesta: `{ "deleted": true }`. Error 409 si el esquema todavía tiene tablas/vistas efectivas (con el conteo). Audita `changeset.schema_delete`.
 
@@ -2906,19 +2946,19 @@ La entidad `schemas` opera dentro del changeset con endpoints propios (doc 18): 
 
 ### 8.18 Carga masiva desde Excel (`/api/changesets/{cs_id}/uploads`)
 
-Propósito (doc 55 · doc 78 · doc 87): crear o actualizar **carpetas, canvases, esquemas, tablas, columnas y vistas `_vu`** dentro del draft a partir de un workbook Excel interpretado por un **perfil de carga** del proyecto (§8.19). El front lee el `.xlsx` (SheetJS) y manda **todas las hojas como grillas crudas** + `profileId`; el backend ubica hojas y cabeceras según el perfil, mapea cada columna a un campo o a uno o varios UDP (lógico y/o físico), corre las reglas y políticas del perfil, y recién valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos; arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** (perfil releído) y escribe por `add_changes_bulk` (tandas de 1000, orden carpetas → esquemas → tablas → columnas → vistas → canvases: cada colección después de las que referencia, doc 87 §3.4). Doc 87: por cada fila de la hoja de tablas se crean además sus **vistas `_vu`** (la normal siempre; `<TABLA>DAC` si el UDP de tabla «Clasificacion del Dato» = DAC) en `<esquema>_vu` (se crea con `kind: views` si falta), réplica de todas las columnas efectivas en orden de display (doc 102: en una tabla DAC la vista normal va SIN las columnas cuya «Clasificacion del Dato» de columna empieza con `DAC-` —la misma regla del Export DDL `excluir_dac_vista_sin_dac`—, la DAC las lleva todas; si la tabla solo tiene columnas DAC, la normal no se crea y sale el warning `view-only-dac-columns`); una vista que ya existe no se toca. La carga es **upsert**: nunca emite deletes. Todo corre como **job asíncrono** en memoria del proceso (`app/features/bulk_upload/jobs.py`: TTL 30 min tras terminar, 1 h para colgados, 20 jobs por usuario, un lock por changeset para el apply); el front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403), la versión estar en `draft` (409) y el perfil existir en el proyecto de la versión (404).
+Propósito (doc 55 · doc 78 · doc 87): crear o actualizar **carpetas, canvases, esquemas, tablas, columnas y vistas `_vu`** dentro del draft a partir de un workbook Excel interpretado por un **perfil de carga** del proyecto (§8.19). El front lee el `.xlsx` (SheetJS) y manda **todas las hojas como grillas crudas** + `profileId`; el backend ubica hojas y cabeceras según el perfil, mapea cada columna a un campo o a uno o varios UDP (lógico y/o físico), corre las reglas y políticas del perfil, y recién valida contra el estado **efectivo** del changeset (publicado + overlay) y los Data Standards vivos; arma un plan de cambios (docs COMPLETOS) con un reporte de errores/warnings y, al aplicar, **re-valida** (perfil releído) y escribe por `add_changes_bulk` (tandas de 1000, orden carpetas → esquemas → tablas → columnas → vistas → canvases: cada colección después de las que referencia, doc 87 §3.4). Doc 87: por cada fila de la hoja de tablas se crean además sus **vistas `_vu`** (la normal siempre; `<TABLA>DAC` si el UDP de tabla «Clasificacion del Dato» = DAC) en `<esquema>_vu` (se crea con `kind: views` si falta), réplica de todas las columnas efectivas en orden de display (doc 102: en una tabla DAC la vista normal va SIN las columnas cuya «Clasificacion del Dato» de columna empieza con `DAC-` —la misma regla del Export DDL `excluir_dac_vista_sin_dac`—, la DAC las lleva todas; si la tabla solo tiene columnas DAC, la normal no se crea y sale el warning `view-only-dac-columns`); una vista que ya existe no se toca. La carga es **upsert**: nunca emite deletes. Todo corre como **job asíncrono** cuyo estado vive en la BD (doc 105: `app.yaml` corre `--workers 2` y el polling, el apply y el descarte pueden caer en cualquier proceso) — `app/features/bulk_upload/jobs.py`: colecciones `upload_jobs` (estado, avance, reporte, resultado) y `upload_job_bodies` (las hojas crudas, que el apply re-valida en el proceso que lo tome); TTL 30 min tras terminar; un job activo sin avance en 10 min es de un proceso que murió y se informa `failed` con «The upload stopped unexpectedly…» (se puede descartar); 20 jobs por usuario. El desalojo y el tope por usuario borran con el predicado en la MISMA sentencia (un job que otro proceso reclamó en el medio no se va), y el job se inserta ANTES que su cuerpo. El desalojo barre además los cuerpos sin job de más de 40 min (el vencimiento de un job muerto + el TTL: un borrado de job cortado antes que el de su cuerpo los dejaba para siempre), a lo más una vez cada 30 min por proceso (`SWEEP_EVERY_SECONDS`, ronda 4: leer los cuerpos —hojas crudas de varios MB— costaba en cada carga, y los huérfanos son raros e inofensivos) y, dentro del POST, es best-effort: una falla al limpiar jobs ajenos no tumba la carga de este usuario (se reintenta en la próxima). **Un apply por versión**: lock `uploadLock` en la cabecera del changeset (`{jobId, owner, at, heartbeat}`, con latido por paso y por tanda; muerto a los 10 min sin latido — cada latido confirma que el lock sigue siendo del job: si no, porque venció y otra carga lo tomó o porque la versión se eliminó, el apply se corta con «Another upload took over this version (this one had stopped responding), so the upload stopped. N of M batches had already been saved in it.» o «The version was deleted, so the upload stopped: nothing of it is kept.»), tomado en una escritura condicionada a draft + dueño + sin otro lock vivo; mientras está tomado, transferir, eliminar y **enviar a revisión** responden 409 («An Excel upload is being written into this version right now…»), condición incluida en su misma sentencia. El front hace polling. Permiso `model.edit` en los cuatro endpoints; además el actor debe ser el **owner** del changeset (403), la versión estar en `draft` (409) y el perfil existir en el proyecto de la versión (404).
 
 | Método y ruta | Cuerpo / respuesta |
 |---|---|
 | `POST …/uploads` | `UploadWorkbookBody` = `{fileName, profileId, sheets: [{name, rows: [{row, cells: string[]}]}], targetFolderId?}` (todas las hojas del workbook, filas vacías fuera, `row` = nº de fila Excel; `targetFolderId` = carpeta «proyecto interno» destino, doc 87 §3.5 — obligatoria solo con `mode: choose`). Topes: 30 hojas, 20,000 filas por hoja y 200 celdas por fila (413); más de 20 jobs activos del usuario → 429; `profileId` inexistente en el proyecto → 404. Responde **202** con el job en `validating` |
 | `GET …/uploads/targets` | Doc 87 §3.5: capa de proyectos internos del proyecto de la versión (carpetas raíz EFECTIVAS con subcarpetas): `{mode: 'none' \| 'auto' \| 'choose', candidates: [{id, name, folders, canvases}]}`. `none` = sin capa (SPACE/SUBJECT/DIAGRAMA cuelgan de la raíz), `auto` = una sola (el backend la toma solo), `choose` = 2+ (el popup exige elegir). Mismos guards que subir (404/403/409) |
-| `GET …/uploads/{job_id}` | `{id, csId, fileName, status, progress: {phase, done, total}, report, result, error, createdAt, updatedAt}`. 404 si el job no existe o expiró (reinicio del proceso) — el front pide validar de nuevo |
+| `GET …/uploads/{job_id}` | `{id, csId, fileName, status, progress: {phase, done, total}, report, result, error, createdAt, updatedAt}`. 404 si el job no existe o ya se desalojó (puede pasar desde 30 min después de terminar) — el front pide validar de nuevo. Doc 105: un reinicio ya no lo pierde (vive en la BD); el de un proceso que murió sale `failed` con «The upload stopped unexpectedly…» |
 | `POST …/uploads/{job_id}/apply` | **202** con el job en `applying`; 409 si no está `validated`, si el reporte tiene errores, si hay otro apply en curso sobre la misma versión, o si el draft ya no acepta cambios |
-| `DELETE …/uploads/{job_id}` | `{deleted: true}`; cancela la validación si sigue corriendo; 409 mientras aplica (cancelar a mitad dejaría tandas sin el resto) |
+| `DELETE …/uploads/{job_id}` | `{deleted: true}`; cancela la validación si sigue corriendo en ese proceso (doc 105: si corre en el otro, termina sola y no revive el job); 409 mientras aplica (cancelar a mitad dejaría tandas sin el resto) salvo que su proceso haya muerto (doc 105: 10 min sin avance); si el estado cambió entre la lectura y el borrado (otro proceso terminó de validarlo o lo reclamó), re-lee y decide de nuevo — tras 3 intentos, 409 |
 
 Estados: `validating → validated | failed`; `validated → applying → applied | failed`. Fases de progreso: Reading workbook → Loading profile → Applying profile and rules → Loading columns of referenced tables → Validating rows → Building report. `report` = `{summary: {projects|folders|canvases|schemas|tables|columns|views: {create, update, unchanged}}, tables: [{row, logicalName, physicalName, schema, action, canvas, columns, views, issues}], errors: Issue[], warnings: Issue[], errorCount, warningCount, profile: {id, name}, sheets: [{role, name, found, headerRow, rows}]}` con `Issue = {severity, sheet, row, column, code, message}` — `sheet` es el nombre REAL de la hoja del perfil (o `Workbook` / `Profile`) y `column` la cabecera real del Excel (hasta 500 listadas por severidad; los totales siempre completos). `result` (solo `applied`) = `{affectedCanvasIds, counts}` — el front auto-arregla esos canvases con ELK.
 
-Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing`. Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain (doc 96 D8: si es un complejo con estructura, el tipo lógico toma el mismo texto — un complejo es el mismo en las dos facetas); PK autoritativa para las columnas listadas (doc 94: sin orden de llave aparte; las columnas nuevas nacen PK primero); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft. Doc 87: `target-folder-required` / `target-folder-invalid` (proyecto destino, error sin fila); `view-no-columns` / `view-no-schema` (warning: la tabla no tiene columnas o esquema, sus vistas no se crean); `view-only-dac-columns` (doc 102, warning: tabla DAC con solo columnas DAC — su vista normal no se crea); `view-schema-kind` (error: `<esquema>_vu` catalogado como esquema de tablas); `existing-canvas` cuenta también las vistas que entran al canvas.
+Reglas de validación (detalle en `plan-implementacion/55-CARGA-MASIVA-EXCEL.md` §4-5 y `78-CARGA-EXCEL-PERFILES-PERSONALIZADOS.md` §5-6): hoja requerida ausente → `missing-sheet`; fila de cabecera = `headerRow` del perfil o búsqueda de la cabecera clave (`header-row-moved` / `missing-header`); cabecera del perfil ausente → `missing-header` (obligatoria) o `header-not-found`; cabecera del archivo sin mapeo → `unknown-header` según la política del perfil; reglas por columna → `rule-required` · `rule-max-length` · `rule-pattern` · `rule-allowed-values` · `rule-unique` (con la severidad de cada regla) y `must-exist` (objeto que el perfil exige existente); política `reject` → `existing-not-allowed`; perfil roto → `profile-invalid` / `profile-udp-missing` (frenan la carga; un default del perfil inválido, en cambio, es la advertencia `profile-default-invalid`: ver los UDP, más abajo). Siguen las del doc 55: lógico obligatorio; físico declarado manda, vacío → `physicalize` con glosario + `naming_config` (y `maxLength` del scope: un físico más largo es `name-too-long` al crear o renombrar, 0 = sin tope; doc 105: en tablas y columnas con el mismo «grandfather» que el changeset —alta suelta y lote—, el nombre ACTUAL sin mirar mayúsculas no se penaliza, así que pasar a mayúsculas un legado largo no es error — `plan_tables.too_long`, compartido); identidad de tabla por físico CI global con fallback por lógico único (ambiguo → error); columnas por físico dentro de su tabla; esquema obligatorio al crear (se crea si no existe, `kind: tables`; uno de vistas → error); subject/space/diagram se crean o reusan por nombre dentro del proyecto de la versión; UDP por el mapeo del perfil (valores de lista contra `allowedValues` de CADA def, vacío → default del mapeo solo al crear, si no default de la def cuando la entidad no tenía valor / conserva al actualizar; doc 105, ronda 5: con las reglas de `app/core/udp_values.py` —las mismas de Data Standards y del motor del Reporting—, un `boolean` se graba normalizado a `true`/`false`, y un `number` no finito («nan», «inf») o fuera de la notación decimal con dígitos ASCII («1_000», «١٢», «１２») o una `date` que no es una fecha real ISO `YYYY-MM-DD` son `invalid-udp-value` —antes se grababan tal cual—; ronda 6: el `number` válido se graba en su forma canónica (`canonical_number`: «10.50» → «10.5», «1e3» → «1000») y la `date` con hora —así manda el front una celda de fecha con hora: `YYYY-MM-DD HH:MM[:SS]`— graba sólo la fecha (`iso_date`); el default de la definición pasa por la misma regla y uno inválido es un error de la fila: `The default value of UDP '<nombre>' in Data Standards is invalid: …`; también el default del MAPEO del perfil (sólo en una entidad nueva con la celda vacía), cuyo error lo dice: `The default value '<valor>' of UDP '<nombre>' in the upload profile is invalid: …` (ronda 6); ronda 7: si ese default QUEDÓ inválido después de guardar el perfil —Data Standards sacó el valor de la lista, o la definición cambió de tipo—, la carga no se frena: sale la advertencia `profile-default-invalid` (hoja `Profile`, `column` = el camino del mapeo en el perfil: `Profile '<perfil>': <motivo> Rows that leave this cell empty will fail; fix the profile.`) y sólo la fila que lo usaría da ese error); tipo de dato con la gramática del front (catálogo + argumentos + STRUCT/ARRAY/MAP) o el default de un parent domain (doc 96 D8: si es un complejo con estructura, el tipo lógico toma el mismo texto — un complejo es el mismo en las dos facetas); PK autoritativa para las columnas listadas (doc 94: sin orden de llave aparte; las columnas nuevas nacen PK primero); entidad existente que cambia → warning `existing-*`; sin cambios → `unchanged` y ningún cambio en el draft (doc 105: para actualizar una tabla ya publicada, el loader la lee con TODOS los campos de `CanonicalTableDoc` — `projectId`, `physicalNameOverridden`, `logicalOnly`, `physicalOnly` —: antes la carga fallaba al validarla y pisaba override y facetas con `False`; en tablas y columnas, el plan conserva el `physicalNameOverridden` del existente si el físico no cambia — `keep_override`: la hoja no trae el flag y el changeset estampa «flag del payload o físico ≠ derivado» (doc 68), así que con el flag en `False` un override cuyo físico hoy coincide con el derivado se bajaba en silencio —, y una re-carga idéntica queda `unchanged`. El físico de una columna se planifica como lo GRABARÁ el changeset — el `case` del scope, la misma regla de `_apply_naming_rules`; sólo columnas: las tablas conservan su grafía, doc 83 — (`plan_columns.persisted_physical` / `requested_physical`): la identidad calza por el texto de la fila o por el normalizado (un camel con separadores, `cod_cliente`, calza con la columna ya grabada, `codCliente`), un cambio sólo de mayúsculas no es renombre y queda `unchanged` sin tocar el override, y la longitud, los duplicados del archivo y las vistas `_vu` se miden sobre el nombre que se graba, que es también el físico del payload de un update. Un nombre legado fuera de la regla que la fila repite TAL CUAL se conserva, como en el changeset (ronda 4, §8.5): queda `unchanged` si nada más cambia y, si algo cambia, se escribe con ese mismo nombre, sin renombre ni cambio del override (antes se normalizaba y salía el warning `rename`). Una fila SIN físico declarado no pide un nombre (ronda 5): la columna o la tabla que calza por el derivado —sólo puede diferir en mayúsculas— conserva la grafía grabada, como la misma edición desde la app. Y el nombre que se graba no puede chocar —sin mirar mayúsculas, como la unicidad del changeset— con OTRA columna de la tabla que la carga no toca: error `duplicate-name` «Column '<físico>' of '<tabla>' would clash with the existing column '<otra>' (physical names are unique regardless of case).» (ronda 4; p. ej. `NBR_CLIENTE`, que el camel lleva a `nbrCliente`, frente a una `nbrcliente` existente — antes el apply daba 409 con tandas previas ya grabadas)). Doc 87: `target-folder-required` / `target-folder-invalid` (proyecto destino, error sin fila); `view-no-columns` / `view-no-schema` (warning: la tabla no tiene columnas o esquema, sus vistas no se crean); `view-only-dac-columns` (doc 102, warning: tabla DAC con solo columnas DAC — su vista normal no se crea); `view-schema-kind` (error: `<esquema>_vu` catalogado como esquema de tablas); `existing-canvas` cuenta también las vistas que entran al canvas.
 
 ```bash
 curl -X POST http://localhost:8000/api/changesets/cs-9/uploads \
@@ -2938,7 +2978,7 @@ Propósito (doc 78): la configuración reutilizable que dice cómo interpretar u
 | Método y ruta | Cuerpo / respuesta |
 |---|---|
 | `GET …/upload-profiles` | Lista de perfiles activos: el default primero, luego por nombre |
-| `POST …/upload-profiles` | `UploadProfileBody` (perfil sin id/proyecto/auditoría) → **201** doc; **422** `{detail: {message, problems: [{path, code, message}]}}` si la validación estructural falla (`name-empty`, `sheet-name-empty`, `sheet-names-equal`, `header-row-invalid`, `header-empty`, `header-duplicate`, `field-unknown`, `field-duplicate`, `field-required-missing`, `udp-empty`, `udp-unknown`, `udp-wrong-level`, `udp-duplicate`, `rule-unknown`, `rule-duplicate`, `rule-value-invalid`, `rule-not-applicable`, `default-not-applicable`, `policy-invalid`); **409** nombre repetido |
+| `POST …/upload-profiles` | `UploadProfileBody` (perfil sin id/proyecto/auditoría) → **201** doc; **422** `{detail: {message, problems: [{path, code, message}]}}` si la validación estructural falla (`name-empty`, `sheet-name-empty`, `sheet-names-equal`, `header-row-invalid`, `header-empty`, `header-duplicate`, `field-unknown`, `field-duplicate`, `field-required-missing`, `udp-empty`, `udp-unknown`, `udp-wrong-level`, `udp-duplicate`, `rule-unknown`, `rule-duplicate`, `rule-value-invalid`, `rule-not-applicable`, `default-not-applicable`, `default-invalid`, `policy-invalid`; doc 105, ronda 6: `default-invalid` = el `defaultValue` de un mapeo a UDP no vale para el tipo de alguno de sus UDP —la regla de la celda: lista contra `allowedValues`, número finito, fecha ISO real, booleano reconocible—, en `sheets.tables.mappings[i].defaultValue` o `sheets.columns.mappings[i].defaultValue`, con `The default value '<valor>' of UDP '<nombre>' in the upload profile is invalid: …`; antes fallaba recién en cada fila nueva); **409** nombre repetido |
 | `GET …/upload-profiles/catalog` | `{fields: {tables: [{field, label, attr, required, key, mustExist}], columns: […]}, ruleTypes: [{type, label, valueKind, appliesTo}], policies: {…: [valores]}}` — catálogo fijo para el editor |
 | `POST …/upload-profiles/validate` | `UploadProfileBody` → `{problems: […]}` SIN guardar |
 | `POST …/upload-profiles/suggest` | `{sheet: 'tables' \| 'columns', headers: string[]}` → `[{header, target, matched: 'field' \| 'udp' \| null}]` — mapeo sugerido por nombre (alias de campos; UDP del nivel por nombre normalizado, todas las facetas que coincidan) |
@@ -2959,7 +2999,7 @@ Propósito (doc 95 D11): un formato Excel FIJO que se guarda como dato — nombr
 
 Permisos (spec D11: «dueño + compartida, como los saved reports»): cualquiera en sesión ve las suyas + las compartidas del proyecto y crea las suyas (el servidor fija `owner`); edita y borra el dueño; un admin (`admin.manage`) también las compartidas —así la «QA_MODELO» sembrada por el one-shot (dueño `system`) sigue siendo editable— y, al editar una compartida ajena, la plantilla sigue compartida. Una ajena que no se puede editar responde 404 (no existe o no es tuya), como los saved reports.
 
-Una plantilla = `{id, projectId, name, sheetName, description, columns: [{header, source}], shared, fileName, owner, origin ('user' | 'builtin:qa-modelo'), createdBy, updatedBy, createdAt, updatedAt}`. Reglas de forma (**422** si fallan): `name` 1–80 caracteres; `sheetName` 1–31 caracteres sin `: \ / ? * [ ]` (regla de Excel); 1–200 columnas; `header` no vacío (≤ 120) y único sin distinguir mayúsculas; `source` = `table.<campo>` · `column.<campo>` · `table.udp:<nombre>` · `column.udp:<nombre>` (el catálogo de campos vive en el front; doc 102 sumó `table.space` · `table.subject` · `table.diagram`); `fileName` opcional (doc 102): hasta 120 caracteres sin `\ / : * ? " < > |`, sin `.xlsx` final (se quita), solo los marcadores `{yyyy}` `{MM}` `{dd}` `{HH}` `{mm}` `{ss}` (el front los resuelve con la hora LOCAL de quien exporta); vacío = `<plantilla>-<AAAA-MM-DD>.xlsx`. Nombre único (CI) entre las que ve quien escribe —las suyas + las compartidas— (**409**).
+Una plantilla = `{id, projectId, name, sheetName, description, columns: [{header, source}], shared, fileName, owner, origin ('user' | 'builtin:qa-modelo'), createdBy, updatedBy, createdAt, updatedAt}`. Reglas de forma (**422** si fallan): `name` 1–80 caracteres; `sheetName` 1–31 caracteres sin `: \ / ? * [ ]` (regla de Excel; doc 105: el tope se cuenta en unidades UTF-16, como Excel, SheetJS y el front — un emoji cuenta 2; antes se contaban code points y pasaban nombres que el export no podía escribir. Rige sólo al ESCRIBIR — crear o editar —: una plantilla guardada antes con más de 31 unidades se lista y se abre para corregirla, en vez de dejar en 500 el listado del proyecto); 1–200 columnas; `header` no vacío (≤ 120) y único sin distinguir mayúsculas; `source` = `table.<campo>` · `column.<campo>` · `table.udp:<nombre>` · `column.udp:<nombre>` (el catálogo de campos vive en el front; doc 102 sumó `table.space` · `table.subject` · `table.diagram`); `fileName` opcional (doc 102): hasta 120 caracteres sin `\ / : * ? " < > |`, sin `.xlsx` final (se quita), solo los marcadores `{yyyy}` `{MM}` `{dd}` `{HH}` `{mm}` `{ss}` (el front los resuelve con la hora LOCAL de quien exporta); vacío = `<plantilla>-<AAAA-MM-DD>.xlsx`. Nombre único (CI) entre las que ve quien escribe —las suyas + las compartidas— (**409**).
 
 | Método y ruta | Cuerpo / respuesta |
 |---|---|
@@ -2978,6 +3018,44 @@ curl -X POST http://localhost:8000/api/projects/<pid>/sheet-templates \
   -H "Content-Type: application/json" \
   -d '{"name":"Solo PK","sheetName":"PK","columns":[{"header":"TABLA","source":"table.physicalName"},{"header":"CAMPO","source":"column.physicalName"}]}'
 ```
+
+### 8.21 POST /api/changesets/{cs_id}/transfer
+
+Propósito (doc 104): pasar un **draft** a otro usuario — quien lo empezó sale de vacaciones, deja la empresa o lo entrega a medio camino. Desde ese momento el nuevo dueño lo edita, lo envía a revisión y **figura como autor** en el historial al publicarse; la versión guarda la traza en `transfers[]` y cada evento del historial de tablas/columnas (`GET /api/changesets/history/{collection}/{entity_id}`, doc 51) trae `startedBy` (quien la inició; `null` si nunca cambió de manos). Lo hace el owner (con `model.edit`) o un usuario con `admin.manage`, también hacia sí mismo.
+
+Body `TransferBody`:
+
+| Campo | Tipo | Nota |
+|---|---|---|
+| `to` | string | username del nuevo dueño (usuario activo cuyo rol tiene `model.edit`) |
+| `note` | string \| null | motivo opcional, máx. 500 |
+| `expectedOwner` | string \| null | el dueño que mostraba la pantalla; si ya no lo es (otra sesión la transfirió), 409 en vez de mover el draft de otra persona |
+
+```bash
+curl -X POST http://localhost:8000/api/changesets/cs-9/transfer \
+  -H "Content-Type: application/json" \
+  -d '{"to":"carla@empresa.com","note":"Vacaciones hasta el 15"}'
+```
+
+Respuesta: la cabecera actualizada (`owner` = nuevo dueño, `transfers` con la entrada nueva). La escritura es atómica y condicionada al estado y al dueño leídos: si en el medio la enviaron a revisión, la transfirieron o la eliminaron, no toca nada (409). Audita `changeset.transfer` (`from`, `to`, `note`).
+
+Errores: **404** no existe · **403** ni owner con `model.edit` ni administrador (el owner cuyo rol ya no edita recibe un mensaje propio: «Your role can no longer edit models…») · **409** en revisión (retirar primero), publicada, no está en draft, una carga Excel se está escribiendo en ella, `expectedOwner` distinto o cambió en el medio · **409** `This project was deleted.` si el proyecto ya no existe, salvo el draft cuyo publish a medias borró SU proyecto (doc 105, la misma salvedad H3 de enviar y decidir: se puede pasar a quien termine el borrado) · **400** el destino ya es el dueño, no existe o está deshabilitado, o su rol no edita modelos · **422** body inválido.
+
+Desde el doc 104 el dueño PUEDE cambiar, así que las escrituras owner-only van condicionadas al dueño en la misma sentencia: el touch de `set_change`/`set_changes_bulk` (`PUT /changes`, `/changes/bulk`, carga Excel) y las transiciones de `submit`/`withdraw`/`reopen`. Un envío o guardado del dueño anterior que se cruza con la transferencia responde **403** y no toca el draft del nuevo dueño.
+
+### 8.22 DELETE /api/changesets/{cs_id}
+
+Propósito (doc 104): eliminar un **draft** con TODOS sus cambios (cabecera + `changeset_changes`). Nunca tocó producción, así que no hay nada que deshacer. Mismos permisos que §8.21. También elimina un `rejected` legacy (anterior al doc 88). Un proyecto borrado no bloquea (es limpieza).
+
+```bash
+curl -X DELETE "http://localhost:8000/api/changesets/cs-9?expectedOwner=ana@empresa.com"
+```
+
+Respuesta: `{ "id": "cs-9", "deleted": true, "versionLabel": "v14", "title": "…", "owner": "ana@empresa.com", "projectId": "p-001", "changes": 37 }` (`changes` = documentos de cambio borrados). Audita `changeset.delete` con esos datos. Doc 105 (H2): la cabecera se borra primero; si después falla el borrado de sus cambios, la eliminación igual responde (con `changes` = los que tenía): la versión ya no existe y esos cambios huérfanos no los ve ningún lector (sin cabecera, `set_change` tampoco escribe). Antes de borrar la cabecera se escribe una LÁPIDA en `deleted_changesets`, una por intento (`{_id: "<csId>:<uuid>", csId, at}`: dos intentos en paralelo no se pisan), que se retira al terminar —o si el borrado no procede: sólo la propia—; si el borrado de los cambios falla, la lápida queda. Al arrancar, cada proceso de la app corre en segundo plano `repository.purge_orphan_changes` (idempotente) sobre las lápidas — antes recorría todo el ledger con un `distinct` —: si la cabecera ya no existe, borra ya los cambios de esa versión y retira sus lápidas; si sigue viva (intento negado, o uno en curso que aún no la borró), sólo retira las lápidas leídas de más de 10 min (`TOMBSTONE_GRACE_SECONDS`). Nota: si se elimina el draft de número más alto, el siguiente draft del proyecto vuelve a usar esa etiqueta.
+
+`expectedOwner` (query, opcional; vacío = no enviado): como en §8.21. Una aprobación cuyo apply falló cuando YA escribía en producción deja la marca `partialApplyAt` en la cabecera (parte pudo llegar): ese draft NO se elimina (409 «…some of its changes may already be in production…»): su ledger es el único rastro; se vuelve a enviar para completar el publish. La marca es de la cabecera: re-editar el draft no la borra. Un fallo ANTES de escribir (p. ej. al estampar las imágenes previas) no la deja. Doc 105: la recuperación de un publish cuyo PROCESO murió (`scripts/reapply_changeset.py` → `recover_interrupted_publish`, que devuelve la versión a revisión) la pone siempre, por conservadora: no se sabe si alcanzó a escribir. Sólo toca claims de más de 30 min (`RECOVER_MIN_AGE_SECONDS`): uno más reciente puede ser un publish vivo en el otro proceso y se saltea («recent»), igual que uno sin fecha de aprobación legible (cabeceras legadas: «undated», no se puede probar que murió); el script informa los dos por separado y `--force` los incluye. `GET /{cs_id}` trae `changeCount` (todos los documentos de cambio: lo que se borra).
+
+Errores: **404** no existe · **403** sin permiso (o el owner cuyo rol ya no edita) · **409** en revisión, publicada, publish a medias, una carga Excel escribiéndose, `expectedOwner` distinto o cambió en el medio (el borrado va condicionado al estado y al dueño leídos). Tras eliminarlo, `POST /{cs_id}/comments` y `GET /api/relationships/impact?changesetId=` también responden 404.
 
 ## 9. Requests (Home / Review)
 
@@ -3063,7 +3141,7 @@ Dos routers comparten el prefijo `/api/reporting`:
 
 Lecturas abiertas (el login global gatea en producción); los saved reports usan `current_principal` para ligar al owner. **Todo el reporting es de UN proyecto (doc 75 D13)**: `projectId` es obligatorio en cada endpoint (query param en los GET; campo del `QuerySpec`/`SqlBody`/`SavedReportBody` en los POST) y acota tablas, columnas, vistas, relaciones, canvases, defs UDP, dominios y glosario a ese proyecto. No hay reporte cross-project.
 
-**Doc 102 — versión propia.** Toda lectura del reporte tabular (`/tables`, `/tables/count`, `/filters`, `/columns`, `/views`, `/insights/relationships` y los POST de lote de §11.2) acepta `changesetId` = una versión PROPIA sin publicar (`draft` o `submitted`) del MISMO proyecto: el reporte muestra producción + los cambios de esa versión (el mismo overlay del canvas y del Explorer: altas, bajas, renombres y revividos de tablas, columnas, relaciones, canvases, carpetas y vistas; conteos de columnas con la regla del Explorer). Errores: **404** `Version not found.` (incluye un `asof:`) · **409** si es de otro proyecto o ya no está abierta (publicada o cerrada) · **403** si es ajena sin `versions.view_all`. UDP y parent domains se leen vivos (no son parte de la versión del modelo). El motor de consulta (Design report e Insights, salvo relaciones) sigue leyendo producción.
+**Doc 102 — versión propia.** Toda lectura del reporte tabular (`/tables`, `/tables/count`, `/filters`, `/columns`, `/views`, `/insights/relationships`, los POST de lote de §11.2 y — doc 105 — `POST /insights/relationships/query`, §11.11) acepta `changesetId` = una versión PROPIA sin publicar (`draft` o `submitted`) del MISMO proyecto: el reporte muestra producción + los cambios de esa versión (el mismo overlay del canvas y del Explorer: altas, bajas, renombres y revividos de tablas, columnas, relaciones, canvases, carpetas y vistas; conteos de columnas con la regla del Explorer). Errores: **404** `Version not found.` (incluye un `asof:`) · **409** si es de otro proyecto o ya no está abierta (publicada o cerrada) · **403** si es ajena sin `versions.view_all`. UDP y parent domains se leen vivos (no son parte de la versión del modelo). El motor de consulta (Design report e Insights, salvo relaciones) sigue leyendo producción. Doc 105 (A7): la cabecera de la versión se lee UNA vez por request (la visibilidad se decide sobre esa misma lectura, con la regla del canvas `can_view`; antes se leía dos veces).
 
 ### 11.1 GET /api/reporting/tables
 
@@ -3074,13 +3152,15 @@ Propósito: filas del reporte a **nivel tabla** del proyecto. Params:
 | `projectId` | string | **requerido** |
 | `schema` | string | igualdad exacta sobre el schema de la tabla |
 | `subjectArea` | string | canvas (nombre) |
-| `limit` | int (≥0) | acota tras ordenar (carga inicial liviana; fast-path sin filtros) |
-| `offset` | int (≥0, def 0) | doc 92 D3: página del scroll infinito del front — sólo aplica en el fast-path sin filtros (orden `physicalName`) |
+| `limit` | int (0–100 000) | acota tras ordenar (carga inicial liviana; fast-path sin filtros). Doc 105 (A2-o4): fuera de rango → **422** (sin tope, un entero fuera de int8 llegaba al `LIMIT` de Lakebase y salía 500) |
+| `offset` | int (0–1 000 000, def 0) | doc 92 D3: página del scroll infinito del front — sólo aplica en el fast-path sin filtros (orden `physicalName`). Doc 105: fuera de rango → **422** |
 
 ```bash
 curl "http://localhost:8000/api/reporting/tables?projectId=p-001&schema=ventas&limit=50"
 curl "http://localhost:8000/api/reporting/tables?projectId=p-001&limit=50&offset=100"
 ```
+
+Doc 105 (A7): con `changesetId`, `/tables` trae del ledger de columnas de la versión sólo `op` + `payload.tableId` (lo justo para ajustar `columnCount`), no los payloads completos: con un draft de carga Excel era la lectura dominante del reporte. Una versión sin cambios que toquen el reporte de tablas usa la página rápida, como producción (antes armaba siempre el proyecto entero).
 
 **GET /api/reporting/tables/count?projectId=** *(doc 92 D4)* — `{ "total": <int> }`: tablas activas del proyecto. Es el conteo REAL que muestra la barra del Reporting y el que usa «Select all» aunque la grilla tenga cargada sólo una página.
 
@@ -3109,7 +3189,7 @@ Propósito: detalle a **nivel columna** para el export por niveles. Params:
 | `tableIds` | string | ids separados por coma (export acotado a un lote) |
 | `limit` | int (1–100000) | tope |
 
-Sin filtro de tabla se aplica un tope de seguridad (`limit` o `UNFILTERED_COLUMNS_CAP = 20000`) para no volcar cientos de miles de columnas.
+Sin filtro de tabla se aplica un tope de seguridad (`limit` o `UNFILTERED_COLUMNS_CAP = 20000`) para no volcar cientos de miles de columnas; como en producción, trunca en silencio. Doc 105: con `changesetId`, ese tope (o el `limit` pedido) se aplica también DESPUÉS del overlay — antes acotaba sólo lo publicado y el overlay sumaba todas las altas del draft. Doc 105 (R2-A1): `tableIds` PRESENTE pero sin ningún id (`tableIds=` o `tableIds=,`) es **422** `At least one table id is required.`, como el POST de lote — antes equivalía a no filtrar (todo el proyecto). Vale también para `GET /views`. Y `tableId=` vacío también es **422** (en modo versión devolvía TODO el draft).
 
 ```bash
 curl "http://localhost:8000/api/reporting/columns?projectId=p-001&tableId=t-1"
@@ -3125,13 +3205,13 @@ Cada fila (`ReportColumnRow`): `tableId`, `physicalName`, `logicalName`, `dataTy
 | `tableIds` | string | ids separados por coma — vistas derivadas de las tablas seleccionadas (export acotado) |
 | `schema` | string | solo las vistas de ese esquema (Database Explorer) |
 
-Sin filtros aplica un tope de seguridad.
+Sin filtros aplica un tope de seguridad. `tableIds` y `schema` se combinan (AND); doc 105 (A3): también con `changesetId` — antes, en una versión, `tableIds` tapaba a `schema`.
 
 ```bash
 curl "http://localhost:8000/api/reporting/views?projectId=p-001&tableIds=t-1,t-2"
 ```
 
-**POST /api/reporting/columns/query** · **POST /api/reporting/views/query** *(doc 102)* — el mismo resultado que los GET con `tableIds`, pero con los ids en el CUERPO: `{ "projectId": "p-001", "tableIds": ["t-1", "t-2"], "changesetId": null }` (1–5 000 ids, **422** fuera de rango; se ignoran vacíos y repetidos, y si no queda ningún id válido → **422** `At least one table id is required.` — un lote vacío nunca es «todo el proyecto»). Con `changesetId`, las columnas de cada lote leen del ledger SOLO los cambios que tocan ese lote (por `_id` de las columnas leídas + upserts con `payload.tableId` en el lote), no el ledger entero de la versión. Motivo: con cientos de ids en la URL el servidor del front (Node, 16 KB de línea de pedido + cabeceras) respondía **431** sin cuerpo y la pantalla mostraba «Invalid JSON response (HTTP 431)». El front manda columnas en lotes de 300 tablas y vistas en lotes de 2 000; los GET con `tableIds` quedan por compatibilidad durante el deploy.
+**POST /api/reporting/columns/query** · **POST /api/reporting/views/query** *(doc 102)* — el mismo resultado que los GET con `tableIds`, pero con los ids en el CUERPO: `{ "projectId": "p-001", "tableIds": ["t-1", "t-2"], "changesetId": null }` (1–5 000 ids, **422** fuera de rango; se ignoran vacíos y repetidos, y si no queda ningún id válido → **422** `At least one table id is required.` — un lote vacío nunca es «todo el proyecto»). Con `changesetId`, las columnas de cada lote leen del ledger SOLO los cambios que tocan ese lote (por `_id` de las columnas leídas + upserts con `payload.tableId` en el lote), no el ledger entero de la versión; una edición en sitio llega por las dos lecturas y se valida una sola vez (doc 105, R2-A3). Motivo: con cientos de ids en la URL el servidor del front (Node, 16 KB de línea de pedido + cabeceras) respondía **431** sin cuerpo y la pantalla mostraba «Invalid JSON response (HTTP 431)». El front manda columnas en lotes de 300 tablas y vistas en lotes de 2 000; los GET con `tableIds` quedan por compatibilidad durante el deploy.
 
 ```bash
 curl -X POST http://localhost:8000/api/reporting/columns/query \
@@ -3150,11 +3230,13 @@ class QuerySpec:
     from_: Literal["columns","tables","relationships","views",
                    "view_columns","models"] = "columns"  # alias "from"
     select: list[str]              # keys públicas
-    where: WhereGroup | None
+    where: WhereGroup | None      # doc 105 (ronda 5): hasta 50 niveles de grupos anidados
     groupBy: list[str]
     aggregations: list[Aggregation]
     orderBy: list[OrderBy]
-    limit: int = 100              # 1..5000
+    limit: int = 100              # tamaño de PÁGINA, 1..5000
+    maxRows: int | None = None    # doc 105: tope del resultado TOTAL (LIMIT n del editor SQL), 1..10 000 000
+    resultColumns: list[str] | None = None  # doc 105 (ronda 5): columnas del resultado AGRUPADO, en orden
     cursor: str | None
 
 class Condition:  # extra="forbid"
@@ -3177,10 +3259,20 @@ class OrderBy:
 ```
 
 Notas de diseño relevantes para el consumidor:
-- **`op` es un enum cerrado** → cero inyección; el `value` se castea al tipo del campo. `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario).
+- **`op` es un enum cerrado** → cero inyección; el `value` se castea al tipo del campo. `contains`/`startsWith` usan `re.escape` (nunca regex arbitrario). Doc 105: un valor de campo `number` debe ser un número finito dentro del rango de un float (**400** `Invalid number for <campo>: it must be a finite number.`; algo que no es número, `Invalid number for <campo>: <valor>`), y `gt`/`gte`/`lt`/`lte`/`between` exigen valor (**400** `The <op> filter on <campo> needs a value.`) — antes llegaban al traductor de Lakebase y daban 500. Un campo `boolean` acepta sólo `true`/`false` (también `1`/`0` y el texto `true`/`false`/`True`/`TRUE`…): otro valor es **400** `Invalid boolean for <campo>: '<valor>' (use true or false).` (doc 105, ronda 3: se volvía `false` y el filtro devolvía los registros contrarios sin avisar).
+- **UDP, `schema` y anidamiento (doc 105, rondas 4 y 5).** Un UDP se guarda como TEXTO: un UDP `number` sólo admite `eq`/`ne`/`in`/`exists`/`isnull` —un rango (`gt`…`between`) es **422** `udp."<nombre>": UDP numbers are stored as text — filter them with =, <> or IN (a range would compare text: '10' < '5').`— y busca el valor tal como se escribió más su forma canónica (`10.0` busca «10.0» y «10»; un entero, exacto —`9007199254740993` se buscaba como «…992» al pasar por float—; un float pierde el «.0» sólo si es entero y menor que 2^53; ronda 6: es `canonical_number` de `app/core/udp_values.py`, la forma con la que la carga Excel y Data Standards graban un UDP `number`); un UDP `boolean` con `eq`/`ne` compara contra las grafías booleanas sin distinguir mayúsculas (`true`, `1`, `sí`, `yes`, `verdadero` y `false`, `0`, `no`, `falso` — `app/core/udp_values.py`, las mismas con las que escriben la carga Excel y Data Standards; antes `= TRUE` buscaba «True») y acepta esas grafías como valor. Un campo `boolean` admite también `isnull` (ronda 4). `schema` en `columns` vive en la tabla: sólo se filtra con `eq`/`in` (**422** `The schema filter only supports = and in (schema comes from the table).`). Los mensajes nombran un UDP por su nombre, `udp."<nombre>"`, no por su key `udp.<defId>` (ronda 5). Un `where` con más de 50 niveles de grupos anidados se rechaza en la validación del cuerpo (**422**, `The filter is nested too deeply (more than 50 levels).`; ronda 5: la recursión congelaba el event loop o daba 500).
 - **Planner de escala**: un `orderBy` por un campo sin índice (`sortable=false`) se **rechaza con 422** — invariante de escala mantenido como contrato (a escala, un orden sin índice sería full-scan). El orden debe ir por un campo indexado (p. ej. `physicalName`).
-- **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`).
-- **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`. Orden por defecto: `physicalName` (tablas, columnas), `name` (`models`) y `_id` (relaciones y vistas, que no tienen `physicalName` — doc 100: ordenar por un campo inexistente dejaba `null` en cada cursor y la página 2 fallaba en Lakebase). Un registro sin el campo de orden va primero en ascendente y último en descendente, y no corta la paginación.
+- **`groupBy`/`aggregations`** activan modo agrupado (`is_grouped`). Doc 105:
+  - El agrupado **no pagina**: devuelve a lo más `limit` grupos (y no más que `maxRows`), con `nextCursor: null`; si la página lo cortó —no el `LIMIT` pedido— avisa en `meta.warnings` «Only the first N groups are shown: filter or group by fewer values.»
+  - `count` cuenta FILAS: con un campo es **422** `count counts rows and takes no field: use countDistinct to count distinct values.`; `countDistinct` cuenta valores distintos NO vacíos (ignora nulo, ausente y texto vacío, como `COUNT(DISTINCT x)` de SQL — antes el vacío contaba como un valor más).
+  - El nombre de una agregación (`as`) es una columna de salida: identificador simple de hasta 64 (letras, dígitos y `_`, sin empezar con dígito), distinto de `_id`, sin repetirse ni chocar con un campo del `groupBy` —sin distinguir mayúsculas, como un identificador SQL (ronda 5: `COUNT(*) AS DATATYPE` agrupando por `dataType` tapaba al campo en el ORDER BY)— → si no, **422** (`Invalid aggregation name '<x>': …` / `The aggregation name '<x>' is repeated: …`). En el pipeline las dimensiones y agregados usan claves internas (`g0…`, `a0…`) y la respuesta los devuelve con su nombre público: agrupar por un UDP (`udp.<defId>`, con punto) ya trae la dimensión (antes salía siempre `null`).
+  - Un agregado GLOBAL (sin `groupBy`) sin filas devuelve UNA fila, como SQL (conteos en 0, el resto `null`).
+  - Ordenar un agrupado por un campo que no es dimensión ni agregado se ignora con un aviso en `meta.warnings` (`Sort by '<campo>' was ignored: …`); el editor SQL lo rechaza (400).
+  - Qué se agrupa y agrega (ronda 4): un campo de otra entidad (`schema` en `columns`) no se agrupa ni se agrega —**422** `Field 'schema' comes from the table: it can't be grouped or aggregated here.` (agrupaba todo en un único grupo `null`)—; `sum`/`avg` exigen un campo `number` que no sea UDP —**422** `SUM and AVG need a numeric field: '<campo>' isn't one.` (de texto daban 0)— y un UDP `number` no admite `sum`/`avg`/`min`/`max` —**422** `udp."<nombre>": UDP numbers are stored as text — SUM, AVG, MIN and MAX would compare text.`—. `sum` de un grupo sin ningún valor numérico es `null`, como SQL (antes 0).
+  - Una dimensión `boolean` —y, ronda 5, un `min`/`max` de un `boolean`— se ordena por una clave auxiliar 0/1 (vacío = `null`) que no sale en la respuesta: Lakebase no ordena booleanos jsonb y `true`/`false` empataban (ronda 4).
+  - `resultColumns` (ronda 5): las columnas del resultado agrupado, en orden —dimensiones y agregados intercalados; una dimensión del `groupBy` que no está ahí no sale—. Lo arma el editor SQL con su SELECT; la respuesta y el CSV siguen ese orden. Sin él (`null`), `groupBy` + agregados. Un nombre que no es dimensión ni agregado es **422** `resultColumns must list grouped fields or aggregation names: '<x>' isn't one.`; en una consulta de filas, **422** `resultColumns only applies to grouped queries.` — también en `view_columns`, en `/query` y en `/export` (ronda 6: se ignoraba en silencio), y `/query/validate` lo marca (`check_spec`).
+- **Filas: un solo campo de orden.** El keyset pagina por él + `_id`: más de un `orderBy` es **422** `Sort by one field: rows are paged by a single sort field.` (doc 105: el segundo se ignoraba). En `view_columns`, un campo desconocido en `select`/`orderBy` es **400** `Unknown field: …` (antes se descartaba y el orden caía a `name`) y más de un orden, **422** `Sort by one field.`
+- **Paginación keyset** (no skip/limit profundo) vía `cursor` opaco (base64) sobre el primer campo de orden + `_id`. **Tope total (doc 105): `maxRows`** — el editor SQL lo arma con `LIMIT n` —: las páginas siguientes y el export se detienen ahí; con `maxRows`, el cursor lleva un 3.er elemento (las filas ya entregadas: `[valor, _id, entregadas]`, entero de 0 a 10 000 000) y al llegar al tope no hay `nextCursor` (un cursor que ya está en el tope da una página vacía). Sin `maxRows`, todo el resultado por páginas de `limit`. El cursor se valida antes de tocar la BD: el valor de orden sólo puede ser `null`, texto (sin NUL ni un surrogate UTF-16 suelto — ronda 3: asyncpg no lo codifica) o un número FINITO y el `_id`, texto con la misma regla; si no, **400** `Invalid cursor` (doc 105, P12: un booleano o NaN/±Infinity llegaban al traductor de Lakebase y daban 500; un dict/list inyectaría operadores). `view_columns` pagina por offset (su cursor es el offset en base64): de 0 a 1 000 000, si no **400** `Invalid cursor` (doc 105, A2-o4); el offset es lo ya entregado y también respeta `maxRows`. Su orden lleva un desempate único —el `_id` de la vista, `sources.outputAlias`, `sources.column`, `sources.tableId` y `sources.expression`— (ronda 4: con sólo el `_id` de la vista, sus columnas empataban y el skip-paging podía repetir o saltar filas; ronda 5: + tabla y expresión), y el `_id` de cada fila es `<vista>#<alias>` o, sin alias, `<vista>#<columna o expresión>@<tableId>` (ronda 5: la misma columna de dos tablas repetía el `_id`). Orden por defecto: `physicalName` (tablas, columnas), `name` (`models`) y `_id` (relaciones y vistas, que no tienen `physicalName` — doc 100: ordenar por un campo inexistente dejaba `null` en cada cursor y la página 2 fallaba en Lakebase). Un registro sin el campo de orden va primero en ascendente y último en descendente, y no corta la paginación.
 - **UDP dinámicos**: cada UDP def del proyecto agrega un campo seleccionable/filtrable con key `udp.<defId>` (path `udpValues.<defId>`), cubierto por el índice wildcard.
 - **Alcance**: el executor antepone `{projectId, flgactive}` a todo `$match`; el `projectId` del spec no es un filtro opcional sino el universo de la consulta.
 
@@ -3221,7 +3313,7 @@ Campos estáticos por vista:
 | `view_columns` | viewName, schema, outputName, sourceColumn, sourceTableId, castType, expression, description — entidad VIRTUAL (doc 22 F5): 1 fila por columna de cada vista (unwind de `views.sources`), por un camino dedicado del executor; no admite groupBy |
 | `models` | name, folderId, tableCount — entidad `models` (canvases/`subject_areas` del proyecto); `tableCount` es derivado post-fetch (no filtra/agrupa) |
 
-\* `schema` en `columns` es cross-entity (vive en la tabla): se pre-resuelve a `tableId $in [...]` y sólo soporta `= / in`. Los UDP de nivel `canvas` aparecen en la vista `models`.
+\* `schema` en `columns` es cross-entity (vive en la tabla): se pre-resuelve a `tableId $in [...]`, sólo soporta `= / in` y no es agrupable (`groupable: false`; doc 105, ronda 4). Los UDP de nivel `canvas` aparecen en la vista `models`. Doc 105 (ronda 4): los `ops` de un `boolean` incluyen `isnull`, y los de un UDP `number` son sólo `eq`, `ne`, `in`, `exists` e `isnull` (se guarda como texto: un rango compararía texto).
 
 ### 11.5 POST /api/reporting/query
 
@@ -3253,13 +3345,13 @@ Respuesta (`data`):
     {"key":"dataType","label":"Data type","type":"string","udp":false},
     {"key":"parentDomainId","label":"Parent domain","type":"string","udp":false}
   ],
-  "nextCursor": "eyJ2IjpbIkNMSUVOVEVfSUQiLCJjLTEiXX0=",
+  "nextCursor": "WyJDTElFTlRFX0lEIiwgImMtMSJd",
   "hasMore": true,
   "meta": { "grouped": false, "warnings": [], "scan": "index" }
 }
 ```
 
-> Los valores hidratados: `parentDomainId` se resuelve al **nombre** del dominio; los `udp.<defId>` se leen de `udpValues`; `schema` en `columns` se resuelve desde la tabla.
+> Los valores hidratados: `parentDomainId` se resuelve al **nombre** del dominio; los `udp.<defId>` se leen de `udpValues`; `schema` en `columns` se resuelve desde la tabla. Doc 105 (ronda 4): se leen sólo los dominios y las tablas de los ids de ESA página (antes, todos los del proyecto en cada página).
 
 **Ejemplo — agrupado:**
 ```bash
@@ -3287,7 +3379,7 @@ Respuesta (`data`):
 }
 ```
 
-Errores: `QueryError` → 400 (campo/cursor inválido) o 422 (op no permitida para el tipo, orden por campo sin índice).
+Errores: `QueryError` → 400 (campo/cursor inválido — doc 105: incluye un cursor cuyo valor de orden no es `null`, texto ni número finito, un conteo de entregadas inválido, un offset de `view_columns` fuera de 0–1 000 000, un número no finito, una comparación sin valor y un booleano no reconocible; ver §11.3) o 422 (op no permitida para el tipo, orden por campo sin índice o por más de un campo, `count` con campo, nombre de agregación inválido o repetido; doc 105, rondas 4 y 5: un rango o `sum`/`avg`/`min`/`max` sobre un UDP `number`, `sum`/`avg` de un campo no numérico, agrupar o agregar `schema` o filtrarlo con otro operador que `eq`/`in`, un `resultColumns` inválido o en una consulta de filas, y un `where` de más de 50 niveles).
 
 ### 11.6 POST /api/reporting/query/validate
 
@@ -3304,13 +3396,21 @@ curl -X POST http://localhost:8000/api/reporting/query/validate \
 ```
 
 Respuesta OK: `{ "spec": {…QuerySpec…}, "errors": [] }`.
-Respuesta con error: `{ "spec": null, "errors": [ {"line":1,"col":1,"message":"Campo desconocido: 'foo'"} ] }`.
+Respuesta con error: `{ "spec": null, "errors": [ {"line":1,"col":1,"message":"Unknown field: 'foo'"} ] }`.
+
+Doc 105 (ronda 4): además del parseo corre lo que el motor rechazaría al ejecutar (`executor.check_spec`: el compilador —o las reglas de `view_columns`— sin tocar la BD); antes decía «válido» y luego `/query/sql` respondía 422. Esos errores llegan en `errors` con `line`/`col` 1. Un texto de más de 100 000 caracteres es **422** con `detail` (`The SQL text is too long: up to 100,000 characters.`), no en `errors` — como en `/query/sql`.
 
 ### 11.7 POST /api/reporting/query/sql
 
 Propósito: parsea el SQL → `QuerySpec` y lo **ejecuta** (mismo motor que `/query`). Query opcional `cursor`. Body `SqlBody`.
 
-SQL soportado (subset, sqlglot con allowlist estricto): `SELECT campos|*`, `FROM <vista>`, `WHERE` con `AND/OR/NOT`, comparadores, `IN`, `LIKE` (`%x%`→contains, `x%`→startsWith), `IS [NOT] NULL`, `GROUP BY`, agregados `COUNT/SUM/AVG/MIN/MAX`, `ORDER BY`, `LIMIT`. **Rechaza**: JOIN, subqueries, CTE, UNION, DDL/DML y múltiples statements.
+SQL soportado (subset, sqlglot con allowlist estricto): `SELECT campos|*` (`*, campo` = todos los campos), `FROM <vista>` (el nombre solo), `WHERE` con `AND/OR/NOT`, comparadores, `IN`, `[NOT] LIKE` (`'x%'`→startsWith, `'%x%'`→contains, `'x'`→igualdad; doc 105: `NOT LIKE` se ejecutaba como `LIKE`), `IS NULL` / `IS NOT NULL`, `[NOT] BETWEEN a AND b` (doc 105, ronda 4), `GROUP BY` (campos o la posición del ítem del SELECT: `GROUP BY 1`), agregados `COUNT(*)`, `COUNT(DISTINCT campo)`, `SUM/AVG/MIN/MAX(campo)` (con alias `AS nombre`), `ORDER BY` (en filas, un solo campo; en agrupados, una dimensión, un alias o un agregado que esté en el SELECT; también la posición: `ORDER BY 2`) y `LIMIT n` — el tope TOTAL (`maxRows`, doc 105; la página es de a lo más 5 000 y las páginas siguientes —el scroll de la grilla— y el export se detienen ahí; antes era sólo el tamaño de la primera página). **Rechaza**: JOIN, subqueries, CTE, UNION, DDL/DML y múltiples statements.
+
+Doc 105: lo que no está en el allowlist es **400** con el motivo — antes varias cláusulas y formas se ignoraban o se traducían mal y la consulta devolvía otro resultado sin avisar: `DISTINCT` (salvo `COUNT(DISTINCT …)`), `OFFSET`, `HAVING`, `QUALIFY`, `WITH`, `WINDOW`, `SORT/CLUSTER/DISTRIBUTE BY`, `FOR UPDATE`, `INTO`, `TABLESAMPLE`, `LATERAL`, `PIVOT`, `CONNECT BY` → `<CLÁUSULA> isn't supported.`; `FETCH` → `FETCH isn't supported: use LIMIT n.`; otro modificador del LIMIT → `Only LIMIT n is supported (a whole number of rows).`; `LIMIT 0` → `LIMIT must be at least 1.`; `FROM db.tabla` → `Use the view name alone: FROM columns, FROM tables…`; `x = NULL` / `IN (NULL)` → `Compare with NULL using IS NULL or IS NOT NULL.`; `IS TRUE`/`IS FALSE` → `Only IS NULL and IS NOT NULL are supported: …`; `LIKE '%x'` → `LIKE '%text' (ends with) isn't supported: use '%text%' or 'text%'.`; un `%` en medio → `LIKE supports 'text%', '%text%' or 'text' — not '%' inside the text.`; alias de columna → `Column aliases aren't supported (only on aggregations): …`; `COUNT(campo)` → `COUNT(field) isn't supported: use COUNT(*) or COUNT(DISTINCT field).`; `SUM(DISTINCT …)` → `DISTINCT is only supported as COUNT(DISTINCT field).`; `SELECT *` con agrupación → `SELECT * can't be combined with GROUP BY or aggregations.`; un campo suelto → `Field '<x>' must be in GROUP BY (or inside an aggregation).`; ordenar un agrupado fuera de él → `Can't sort by '<x>': in a grouped query sort by a GROUP BY field or an aggregation name.`; dos campos de orden en filas → `Sort by one field: rows are paged by a single sort field.`; `NULLS FIRST/LAST` contrario al motor → `Empty values come first in ASC and last in DESC: NULLS FIRST/LAST can't change that.`.
+
+**Rondas 4 y 5 (doc 105).** El texto se parsea UNA vez por request (`parser.parse_statement`; antes dos, y un `;` inicial daba 500: hoy los statements vacíos se descartan). La vista, los campos, los nombres de UDP y los alias se resuelven sin distinguir mayúsculas, como en SQL (un nombre escrito exacto gana; si más de uno calza sin mirar mayúsculas, hay que escribirlo exacto). `GROUP BY 1` / `ORDER BY 2` toman el ítem N del SELECT (`GROUP BY 3: there is no SELECT item 3.`, `GROUP BY 2: that SELECT item isn't a field.`, `ORDER BY 1: that SELECT item is *.`). `ORDER BY COUNT(*)` ordena por un agregado que esté en el SELECT, comparado ya resuelto —`COUNT(1)` ≡ `COUNT(*)`, `MAX(c.x)` ≡ `MAX(x)` (ronda 5)—; si no está: `ORDER BY an aggregation that is in the SELECT: …`. Un agregado sin alias se llama como su función (`count`, `sum`…; `COUNT(DISTINCT …)` también `count`) y, si el nombre ya está tomado, `count_2`, `count_3`… (antes, dos `COUNT(*)` sin alias eran 400 por nombre repetido). «Tomado» se mira sin distinguir mayúsculas, como `check_aggregation_names` (ronda 6): `COUNT(*) AS Count, COUNT(DISTINCT tableId)` da `Count` y `count_2` —elegía `count` y era 400 «is repeated»—; dos alias EXPLÍCITOS que sólo difieren en mayúsculas (`AS n`, `AS N`) siguen siendo el mismo nombre (400). El SELECT de un agrupado fija las columnas del resultado y su orden (`resultColumns`, ronda 5): los agregados pueden ir antes que las dimensiones y una dimensión del `GROUP BY` puede faltar en el SELECT (no sale) — antes, dos 400. Una cadena de `AND`/`OR` es UN grupo de N condiciones (ronda 5: el árbol binario de 300 `OR` congelaba el event loop y 1 000 daban 500); el anidamiento real (paréntesis, `NOT`) tiene tope: más de 50 niveles → `The WHERE is nested too deeply (more than 50 levels).` Contra un UDP `number` el número va tal como se escribió (`9007199254740993`, exacto) y un UDP `boolean` acepta `TRUE`, `'sí'`, `'yes'`… (§11.3). El texto admite hasta 100 000 caracteres: más es **422** `The SQL text is too long: up to 100,000 characters.` (sqlglot parsea de forma síncrona, ~0,85 s por MB; `detail` de texto, también en `/query/validate`).
+
+Diferencias de semántica que quedan (documentadas; el fuzz con SQLite de oráculo las evita): en `LIKE`, `_` es literal (no comodín); `LIKE` sin `%` es igualdad exacta y, con `%`, no distingue mayúsculas; `<>` y `NOT` incluyen los registros con el campo vacío (semántica del motor, no la de SQL con `NULL`).
 
 ```bash
 curl -X POST http://localhost:8000/api/reporting/query/sql \
@@ -3318,9 +3418,9 @@ curl -X POST http://localhost:8000/api/reporting/query/sql \
   -d '{"projectId":"p-001","text":"SELECT dataType, COUNT(*) AS total FROM columns GROUP BY dataType ORDER BY total DESC LIMIT 20"}'
 ```
 
-Errores: 400 si el SQL no parsea o `FROM` es una vista desconocida; 400/422 del motor al ejecutar.
+Errores: 400 si el SQL no parsea o `FROM` es una vista desconocida; 400/422 del motor al ejecutar. Doc 105: también 400 con `Invalid number: …` / `Number out of range: …` (literal no numérico, o infinito como `1e999`), `LIMIT must be a whole number.`, `Expected a field name: …` (p. ej. `SUM(1)`), `LIKE needs a text pattern: …`, `Missing value.` (un literal ausente) y `Unsupported value: …` (p. ej. `-'x'`) — antes algunos eran 500 —, más los de arriba; un nombre de agregación inválido o repetido (sin distinguir mayúsculas, ronda 5) también es 400 acá (en `/query`, 422). En `/query/validate` llegan como `errors`.
 
-Referirse a un UDP en SQL: `udp."Criticidad"` (por label) o `udp.<defId>`.
+Referirse a un UDP en SQL: `udp."Criticidad"` (por label; doc 105, ronda 4: sin distinguir mayúsculas si el nombre es único) o `udp.<defId>`.
 
 ### 11.8 POST /api/reporting/export
 
@@ -3333,7 +3433,7 @@ curl -X POST http://localhost:8000/api/reporting/export \
   -o report-columns.csv
 ```
 
-Respuesta: `200` `text/csv`, header `Content-Disposition: attachment; filename="report-columns.csv"`. La primera línea son los `label` de las columnas del spec.
+Respuesta: `200` `text/csv`, header `Content-Disposition: attachment; filename="report-columns.csv"`. La primera línea son los `label` de las columnas del spec. Doc 105: la PRIMERA página se pide antes de abrir el stream, así que un spec inválido (campo, valor u orden) responde 4xx con `detail` — antes era un 500 o un archivo cortado. El export hereda el tope total `maxRows` (el `LIMIT n` del editor SQL): se detiene ahí. Un **agrupado** se exporta ENTERO en una sola agregación — todos sus grupos, hasta `maxRows` o el tope duro `MAX_EXPORT_GROUPS` (100 000) — en vez de la «página» de 2 000 que lo cortaba en silencio; si se pasaría del tope duro, **422** `The grouped result has more than 100000 groups: filter, group by fewer fields or add LIMIT.` antes de abrir el stream. Las columnas del CSV de un agrupado siguen `resultColumns` (ronda 5: el orden del SELECT del editor SQL).
 
 ```mermaid
 flowchart TD
@@ -3406,9 +3506,9 @@ curl -X POST http://localhost:8000/api/reporting/reports \
 
 ### 11.11 Insights (vistas curadas)
 
-Métricas del proyecto calculadas con pocas agregaciones `$group` en paralelo (escala a 400k). Todas son GET con `projectId` **requerido**.
+Métricas del proyecto calculadas con pocas agregaciones `$group` en paralelo (escala a 400k). Todas son GET con `projectId` **requerido**, salvo el POST de lote de relaciones (doc 105, con `projectId` en el cuerpo).
 
-**GET /api/reporting/insights/scorecard?projectId=** — Model Health Scorecard del proyecto.
+**GET /api/reporting/insights/scorecard?projectId=** — Model Health Scorecard del proyecto. Doc 105: `tablesWithoutPk` y `orphanTables` son conteos reales — huérfana = tabla ACTIVA sin ninguna relación (extremos v2 o legacy; una relación hacia una tabla inactiva no cuenta); «con PK» = tabla ACTIVA con alguna columna PK (ronda 3: una columna PK huérfana, de una tabla que ya no está activa, contaba como «tabla con PK») — y un proyecto vacío da 0 y `completenessScore` 1.0 (antes contaba «1 tabla sin PK» y su completitud salía 0,75). Ronda 4: las métricas de columnas —`columns`, `pkColumns`, `fkColumns`, `columnsWithoutDomain`, `columnsWithoutDescription`, `columnsTypeOverridden` y `udpFillRateColumn`— se agrupan por tabla y suman sólo las de tablas ACTIVAS (una columna activa de una tabla borrada contaba).
 
 ```bash
 curl "http://localhost:8000/api/reporting/insights/scorecard?projectId=p-001"
@@ -3433,10 +3533,17 @@ Respuesta (`data`):
 
 **GET /api/reporting/insights/glossary-usage** — uso de cada término del glosario (`columnUsage` = columnas cuyo `physicalName` contiene la abreviatura; heurística acotada por RU).
 
-**GET /api/reporting/insights/relationships** — relaciones con ambos extremos resueltos (`schema.tabla.columna`), cardinalidad (`1:N`), flags `identifying`/`isSelfReferencing`/`crossSchema`, y un `label` legible. Query `limit` (default 2000, 1–5000). Cada fila lleva además las frases de la relación, `parentToChildPhrase` y `childToParentPhrase` (`null` si no tiene); al ser datos de la RELACIÓN, se repiten en cada fila de par. Doc 102: `changesetId` opcional (versión propia sin publicar; ver §11).
+**GET /api/reporting/insights/relationships** — relaciones con ambos extremos resueltos (`schema.tabla.columna`), cardinalidad (`1:N`), flags `identifying`/`isSelfReferencing`/`crossSchema`, y un `label` legible. Query `limit` (default 2000, 1–5000). Cada fila lleva además las frases de la relación, `parentToChildPhrase` y `childToParentPhrase` (`null` si no tiene); al ser datos de la RELACIÓN, se repiten en cada fila de par. Doc 102: `changesetId` opcional (versión propia sin publicar; ver §11). Doc 105 (A4): con `changesetId`, el `limit` se aplica DESPUÉS del overlay y sobre un orden estable (por id) — antes cortaba antes del overlay: salían más filas que el tope (altas de la versión) o faltaban las que sí entraban (bajas).
 
 ```bash
 curl "http://localhost:8000/api/reporting/insights/relationships?projectId=p-001&limit=500"
+```
+
+**POST /api/reporting/insights/relationships/query** *(doc 105, A3-o1)* — las MISMAS filas que el GET, pero sólo de las relaciones con el padre o el hijo en un LOTE de tablas, **sin tope global** (el lote ya acota) y ordenadas por id. Body `{ "projectId": "p-001", "tableIds": ["t-1", "t-2"], "changesetId": null }`: 1–300 ids (**422** fuera de rango; se ignoran vacíos y repetidos, y si no queda ninguno → **422** `At least one table id is required.`). Con `changesetId`, la versión propia con el mismo overlay (entran las altas y mudanzas hacia el lote; salen las bajas y mudanzas fuera) y los mismos 404/409/403 que el GET, leyendo del ledger SÓLO lo que toca el lote (sus relaciones y los nombres de las tablas y columnas de sus pares), no la versión entera en cada lote. Motivo: la hoja Relationships del export pedía las primeras 5 000 relaciones de TODO el proyecto y filtraba en el navegador — en proyectos grandes faltaban relaciones sin aviso; el front ahora manda los ids en lotes.
+
+```bash
+curl -X POST http://localhost:8000/api/reporting/insights/relationships/query \
+  -H 'Content-Type: application/json' -d '{"projectId":"p-001","tableIds":["t-1","t-2"]}'
 ```
 
 Respuesta (`data`, una fila):
@@ -3545,13 +3652,13 @@ Tabla completa en §2.2 de la Parte 1. Las que más tocan a esta parte del contr
 - **Un doc por cambio**: los cambios de un changeset viven en la colección `changeset_changes` (un doc por cambio, `_id` determinista `{csId}::{collection}::{entityId}`), no embebidos — regla del versionado por changesets: docs chicos = updates baratos y diffs por slice.
 - **Índices y escala del reporting**: el planner **rechaza** ordenar por campos sin índice (invariante de escala: a ese volumen sería full-scan). La paginación es por keyset (no skip profundo), con `maxTimeMS` como circuit-breaker (15s en el motor de filas, 30s en insights). Los UDP se cubren con un índice wildcard `udpValues.$**` (equality/`$in`/`$exists` = seek).
 - **Adaptador Lakebase**: cada colección es una tabla `(id, doc jsonb)` con índice GIN; el adaptador traduce filtros/updates/aggregations de pymongo a SQL (alcance cerrado, fail-fast con `NotImplementedError` fuera del subset). Detalle en [arquitectura.md](arquitectura.md) y [esquema-datos.md](esquema-datos.md).
-- **Colecciones tocadas por este contrato**: `projects`, `folders`, `subject_areas`, `schemas`, `relationships`, `views`, `changesets`, `changeset_changes`, `saved_reports`, y las colecciones publicadas `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`.
+- **Colecciones tocadas por este contrato**: `projects`, `folders`, `subject_areas`, `schemas`, `relationships`, `views`, `changesets`, `changeset_changes`, `saved_reports`, `upload_profiles`, `sheet_templates`, `upload_jobs` y `upload_job_bodies` (doc 105: los jobs de la carga Excel viven en la BD porque `app.yaml` corre `uvicorn --workers 2`), `deleted_changesets` (doc 105: lápidas del borrado de drafts, §8.22), y las colecciones publicadas `canonical_tables`, `canonical_columns`, `parent_domains`, `glossary_terms`, `udp_definitions`.
 
 ---
 
 ## 14. Índice rápido de endpoints (Parte 2)
 
-Las 102 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el total del backend es 163, contado sobre `app.routes` el 2026-09-25 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28; las de perfiles de carga, 8.19, el 2026-09-09; las 5 de plantillas de hoja, 8.20, y las 3 de la Parte 1 del doc 95 —impacto por columna, preview del rollback e historial de dominio—, el 2026-09-25).
+Las 107 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el total del backend es 168, contado sobre `app.routes` el 2026-09-30 — las 4 de la carga masiva, 8.18, entraron el 2026-08-28; las de perfiles de carga, 8.19, el 2026-09-09; las 5 de plantillas de hoja, 8.20, y las 3 de la Parte 1 del doc 95 —impacto por columna, preview del rollback e historial de dominio—, el 2026-09-25; después, los 2 POST de lote del Reporting (doc 102), transferir y eliminar un draft (doc 104) y el POST de lote de relaciones (doc 105)). Doc 105 (D1): las escrituras directas de §3–§7 siguen montadas pero responden 409 (`This change requires a version in edit mode.`); de las de esta tabla, sólo `POST /api/projects` escribe directo.
 
 | Método | Ruta | Sección |
 |---|---|---|
@@ -3572,7 +3679,7 @@ Las 102 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el
 | PUT/DELETE | `/api/views/{vid}` | 6.3 / 6.4 |
 | GET/POST | `/api/projects/{project_id}/schemas` | 7.1 / 7.2 |
 | PATCH/DELETE | `/api/schemas/{sid}` | 7.3 / 7.4 |
-| GET/POST | `/api/changesets` | 8.2 / 8.1 |
+| GET | `/api/changesets` | 8.2 (el POST se retiró en el doc 82, §8.1) |
 | POST | `/api/changesets/snapshot` (`projectId`) | 8.3 |
 | GET | `/api/changesets/history/{collection}/{entity_id}` | doc 51 |
 | GET | `/api/changesets/{cs_id}` | 8.4 |
@@ -3583,6 +3690,8 @@ Las 102 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el
 | POST | `/api/changesets/{cs_id}/diff/details` | 8.15 |
 | POST | `/api/changesets/{cs_id}/submit` `/review` `/approve` `/reject` `/withdraw` `/reopen` `/comments` | 8.8–8.13 |
 | POST | `/api/changesets/{cs_id}/rollback` | 8.16 |
+| POST | `/api/changesets/{cs_id}/transfer` | 8.21 |
+| DELETE | `/api/changesets/{cs_id}` | 8.22 |
 | GET | `/api/changesets/{cs_id}/schemas/{schema_id}/impact` | 8.17 |
 | POST | `/api/changesets/{cs_id}/schemas/{schema_id}/rename` `/delete` | 8.17 |
 | POST | `/api/changesets/{cs_id}/uploads` | 8.18 |
@@ -3603,6 +3712,9 @@ Las 102 rutas de esta parte (las otras 61 están en el resumen de la Parte 1; el
 | GET/POST | `/api/versions/compare` · `/compare/details` | 10.3 |
 | GET | `/api/reporting/tables` `/filters` `/columns` `/catalog` `/facets` (todos con `projectId`) | 11.1 / 11.2 / 11.4 / 11.9 |
 | GET | `/api/reporting/views` | 11.2 |
+| GET | `/api/reporting/tables/count` | 11.1 |
+| POST | `/api/reporting/columns/query` `/views/query` (lotes, doc 102) | 11.2 |
+| POST | `/api/reporting/insights/relationships/query` (lotes, doc 105) | 11.11 |
 | POST | `/api/reporting/query` `/query/sql` `/query/validate` `/export` | 11.5 / 11.7 / 11.6 / 11.8 |
 | GET/POST | `/api/reporting/reports` | 11.10 |
 | PUT/DELETE | `/api/reporting/reports/{rid}` | 11.10 |

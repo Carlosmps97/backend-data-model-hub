@@ -372,6 +372,11 @@ async def list_column_rows(project_id: str, table_id: str | None = None,
         col_changes = await _column_changes(changeset_id, columns, lot)
         if col_changes:
             columns = overlay_columns(columns, col_changes, project_id, lot)
+        if limit:
+            # Doc 105: el MISMO tope que producción, que trunca en silencio (la
+            # lista, sin flag): el tope acotaba sólo lo publicado y el overlay
+            # sumaba TODAS las altas del draft — por API, sin límite.
+            columns = columns[:limit]
     parent_domains = await repository.parent_domains(project_id)
     udp_defs = await repository.udp_definitions(project_id)
     return column_rows(columns, parent_domains, udp_defs)

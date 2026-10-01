@@ -24,8 +24,13 @@ def _mock(monkeypatch, changes, published):
     monkeypatch.setattr(service.repository, "published", AsyncMock(return_value=published))
     monkeypatch.setattr(service.dom_repo, "types_by_ids", AsyncMock(return_value={"pd": ("UUID", "TEXT")}))
     payloads: dict = {}
-    monkeypatch.setattr(service.repository, "set_change",
-                        AsyncMock(side_effect=lambda did, coll, eid, op, payload: payloads.update({eid: payload})))
+
+    async def bulk(did, items, owner=None):             # doc 105: un lote
+        payloads.update({i["entityId"]: i["payload"] for i in items})
+        return {"id": did}
+
+    monkeypatch.setattr(service.repository, "set_changes_bulk", bulk)
+    monkeypatch.setattr(service.repository, "set_status", AsyncMock())
     return payloads
 
 

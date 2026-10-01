@@ -35,12 +35,6 @@ ROOT = Path(__file__).resolve().parents[2]
 #: Árboles barridos. `scripts/` entra porque el one-shot corre contra la BD viva.
 TREES = (ROOT / "app", ROOT / "scripts")
 
-#: Deuda CONOCIDA, no licencia: `scripts/e2e/` quedó desactualizado con el doc 75
-#: (sus escenarios además pegan a rutas pre-`/api/projects/{pid}/…`). Se aísla
-#: acá para que el resto de `scripts/` —el kit de migración— sí quede cubierto.
-#: Al reescribir el harness, borrar esta entrada.
-_KNOWN_DEBT = ("scripts/e2e/",)
-
 
 def _module_of(path: Path) -> str:
     return ".".join(path.relative_to(ROOT).with_suffix("").parts)
@@ -98,8 +92,6 @@ def _mismatches() -> list[str]:
         if "__pycache__" in path.parts:
             continue
         rel_path = path.relative_to(ROOT).as_posix()
-        if rel_path.startswith(_KNOWN_DEBT):
-            continue
         module = _module_of(path)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

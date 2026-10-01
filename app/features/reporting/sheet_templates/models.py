@@ -16,6 +16,7 @@ from app.core.models import DOC_CONFIG
 SOURCE_RE = re.compile(r"^(table|column)\.(udp:.+|[A-Za-z][A-Za-z0-9]*)$")
 # Excel: nombre de hoja de 1 a 31 caracteres, sin : \ / ? * [ ].
 _BAD_SHEET = re.compile(r"[:\\/?*\[\]]")
+SHEET_NAME_RULE = "The sheet name must be 1–31 characters, without : \\ / ? * [ ]."
 
 # Doc 102: nombre del archivo del export. Los marcadores los resuelve el front
 # con la hora LOCAL de quien exporta; acá solo la FORMA (espejo de
@@ -94,7 +95,18 @@ class SheetTemplateBody(BaseModel):
     def _check_sheet(cls, v: str) -> str:
         v = v.strip()
         if not v or _BAD_SHEET.search(v):
-            raise ValueError("The sheet name must be 1–31 characters, without : \\ / ? * [ ].")
+            raise ValueError(SHEET_NAME_RULE)
+        return v
+
+    @field_validator("sheetName")
+    @classmethod
+    def _sheet_fits_excel(cls, v: str) -> str:
+        # Doc 105: el tope de 31 de Excel (y de SheetJS, que escribe el export)
+        # cuenta unidades UTF-16 — igual que el front; `len()` contaba code
+        # points y dejaba pasar nombres que el export no podía escribir. Sólo al
+        # ESCRIBIR: `SheetTemplateDoc` lo anula (ver ahí).
+        if len(v.encode("utf-16-le")) // 2 > 31:
+            raise ValueError(SHEET_NAME_RULE)
         return v
 
     @field_validator("fileName")
@@ -121,3 +133,12 @@ class SheetTemplateDoc(SheetTemplateBody):
     owner: str | None = None      # dueño (lo fija el servidor); la sembrada: `system`
     createdBy: str | None = None
     updatedBy: str | None = None
+
+    @field_validator("sheetName")
+    @classmethod
+    def _sheet_fits_excel(cls, v: str) -> str:
+        """Doc 105 (revisión, hallazgo 4): al LEER no rige el tope UTF-16 — una
+        plantilla guardada antes (≤31 code points, p. ej. con emoji) dejaba en
+        500 el listado de TODO el proyecto y ni siquiera se podía abrir para
+        corregirla. Editarla sí lo exige (`SheetTemplateBody`)."""
+        return v

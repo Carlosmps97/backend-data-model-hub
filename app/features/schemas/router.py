@@ -20,9 +20,9 @@ from .schemas import SchemaBody
 from .service import DuplicateSchemaError, InvalidSchemaNameError
 
 router = APIRouter(prefix="/api/projects/{project_id}/schemas", tags=["schemas"],
-                   dependencies=[Depends(write_guard("model.edit")), Depends(alive_project)])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True)), Depends(alive_project)])
 router_by_id = APIRouter(prefix="/api/schemas", tags=["schemas"],
-                         dependencies=[Depends(write_guard("model.edit"))])
+                         dependencies=[Depends(write_guard("model.edit", versioned=True))])
 
 
 @router.get("")

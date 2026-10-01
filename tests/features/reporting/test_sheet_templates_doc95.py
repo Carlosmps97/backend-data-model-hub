@@ -158,3 +158,12 @@ def test_rutas_crud_y_default(api, monkeypatch):
     assert api.put("/api/projects/p1/sheet-templates/zz", json=BODY).status_code == 404
     monkeypatch.setattr(service, "delete_template", AsyncMock(return_value=False))
     assert api.delete("/api/projects/p1/sheet-templates/zz").status_code == 404
+
+
+def test_nombre_de_hoja_cuenta_como_excel_en_utf16():
+    """Doc 105: Excel (y SheetJS) cuentan el tope de 31 en unidades UTF-16; el
+    backend contaba code points y aceptaba 16 emojis (32 unidades) que el
+    export después no podía escribir. El front ya contaba UTF-16."""
+    SheetTemplateBody.model_validate({**BODY, "sheetName": "😀" * 15})            # 30 unidades
+    with pytest.raises(ValidationError):
+        SheetTemplateBody.model_validate({**BODY, "sheetName": "😀" * 16})        # 32 unidades

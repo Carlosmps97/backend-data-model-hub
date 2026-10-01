@@ -27,6 +27,11 @@ async def get_naming(project_id: str) -> dict[str, dict]:
     return await repository.get_all(project_id)
 
 
+async def get_naming_stored(project_id: str) -> dict[str, dict]:
+    """Lo guardado por scope, sin enmascarar valores inválidos (ver repository)."""
+    return await repository.get_stored(project_id)
+
+
 async def get_naming_for(project_id: str, scope: str) -> dict:
     """Config de un scope del proyecto (default sembrado). Usado por el motor de naming."""
     _validate_scope(scope)

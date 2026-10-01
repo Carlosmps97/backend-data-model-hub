@@ -16,7 +16,7 @@ from . import service
 from .schemas import FolderCreateBody, FolderRenameBody
 
 router = APIRouter(prefix="/api", tags=["folders"],
-                   dependencies=[Depends(write_guard("model.edit"))])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True))])   # doc 105
 
 
 @router.get("/projects/{project_id}/folders")

@@ -516,6 +516,37 @@ def test_agg_two_stage_group_tbl_pk(coll):
     assert rows == [{"_id": None, "withCols": 2, "withPk": 1}]
 
 
+# Doc 105 (ronda 4): el scorecard trae las métricas de columnas POR TABLA y
+# suma sólo las de tablas activas (fuera del pipeline).
+SCORECARD_COLUMNS_BY_TABLE = [
+    {"$match": ACTIVE},
+    {"$group": {"_id": "$tableId",
+                "columns": {"$sum": 1},
+                "noDomain": {"$sum": {"$cond": [{"$not": ["$parentDomainId"]}, 1, 0]}},
+                "noDesc": {"$sum": {"$cond": [{"$in": [{"$ifNull": ["$description", ""]}, [None, ""]]}, 1, 0]}},
+                "overridden": {"$sum": {"$cond": ["$typeOverridden", 1, 0]}},
+                "withUdp": {"$sum": {"$cond": [{"$gt": [{"$size": {"$ifNull": [{"$objectToArray": "$udpValues"}, []]}},
+                                                        0]}, 1, 0]}},
+                "pk": {"$sum": {"$cond": ["$isPrimaryKey", 1, 0]}},
+                "fk": {"$sum": {"$cond": ["$isForeignKey", 1, 0]}}}},
+]
+_METRICS = ("columns", "noDomain", "noDesc", "overridden", "withUdp", "pk", "fk")
+
+
+def test_agg_scorecard_columns_by_table(coll):
+    seed(coll, [
+        {"_id": "c1", "tableId": "T1", "isPrimaryKey": True, "parentDomainId": "d1", "description": "x",
+         "udpValues": {"u1": "A"}},
+        {"_id": "c2", "tableId": "T1", "isForeignKey": True, "description": ""},
+        {"_id": "c3", "tableId": "T2", "typeOverridden": True, "udpValues": {}},
+        {"_id": "c4", "tableId": "T3", "isPrimaryKey": True, "flgactive": False},      # columna inactiva
+    ])
+    rows = {r["_id"]: r for r in run(coll.aggregate(SCORECARD_COLUMNS_BY_TABLE).to_list(None))}
+    assert set(rows) == {"T1", "T2"}
+    assert [rows["T1"][k] for k in _METRICS] == [2, 1, 1, 0, 1, 1, 1]
+    assert [rows["T2"][k] for k in _METRICS] == [1, 1, 1, 1, 0, 0, 0]
+
+
 def test_agg_rel_pipe_project_array_unwind_count(coll):
     seed(coll, [
         {"_id": "r1", "sourceTableId": "T1", "targetTableId": "T2"},
@@ -529,6 +560,40 @@ def test_agg_rel_pipe_project_array_unwind_count(coll):
         {"$count": "involved"},
     ]).to_list(None))
     assert rows == [{"involved": 3}]
+
+
+# Doc 105 (revisión, hallazgo 7): el pipeline de relaciones del scorecard ya no
+# es el de arriba — extremos v2 con fallback a los legacy, en un solo `$group`.
+SCORECARD_REL_ENDS = [
+    {"$match": ACTIVE},
+    {"$group": {"_id": None,
+                "parents": {"$addToSet": {"$ifNull": ["$parentTableId", "$targetTableId"]}},
+                "children": {"$addToSet": {"$ifNull": ["$childTableId", "$sourceTableId"]}}}},
+]
+
+
+def test_agg_scorecard_rel_ends_group_addtoset_ifnull(coll):
+    seed(coll, [
+        {"_id": "r1", "parentTableId": "T1", "childTableId": "T2"},                     # v2
+        {"_id": "r2", "sourceTableId": "T3", "targetTableId": "T1"},                    # legacy
+        {"_id": "r3", "parentTableId": "T4", "childTableId": "T5",                      # v2 gana a
+         "sourceTableId": "X9", "targetTableId": "X8"},                                 # legacy viejo
+        {"_id": "r4", "parentTableId": "T6", "childTableId": "T6"},                     # auto-referencial
+        {"_id": "r5"},                                                                  # sin extremos
+        {"_id": "r6", "parentTableId": "T7", "childTableId": "T8", "flgactive": False}, # inactiva
+        {"_id": "r7", "parentTableId": None, "targetTableId": "T9", "sourceTableId": "T2"},  # null → fallback
+    ])
+    rows = run(coll.aggregate(SCORECARD_REL_ENDS).to_list(None))
+    assert len(rows) == 1 and rows[0]["_id"] is None
+    # `$addToSet` no garantiza orden; sin repetidos ni nulos (el FILTER descarta
+    # el extremo ausente de r5).
+    assert sorted(rows[0]["parents"]) == ["T1", "T4", "T6", "T9"]
+    assert sorted(rows[0]["children"]) == ["T2", "T3", "T5", "T6"]
+
+
+def test_agg_scorecard_rel_ends_without_active_rows_returns_no_rows(coll):
+    seed(coll, [{"_id": "r1", "parentTableId": "T1", "childTableId": "T2", "flgactive": False}])
+    assert run(coll.aggregate(SCORECARD_REL_ENDS).to_list(None)) == []
 
 
 def test_agg_count_empty_returns_no_rows(coll):

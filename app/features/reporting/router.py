@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.api.envelope import ok
 from app.core.identity import Principal, current_principal
 
-from . import service, versions
-from .schemas import ReportBatchBody
+from . import service, versions, views
+from .schemas import ReportBatchBody, ReportRelationshipBatchBody
 
 router = APIRouter(prefix="/api/reporting", tags=["reporting"])
 
@@ -34,16 +34,18 @@ def _lot(values: list[str]) -> list[str]:
 async def report_tables(
     projectId: str = Query(min_length=1),
     schema: str | None = Query(default=None),
-    limit: int | None = Query(default=None, ge=0),
-    offset: int = Query(default=0, ge=0),
+    limit: int | None = Query(default=None, ge=0, le=100_000),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     changesetId: str | None = Query(default=None),
     principal: Principal = Depends(current_principal),
 ):
     """Filas del reporte por tabla del proyecto. Filtro opcional por `schema`;
     `limit` acota la cantidad (carga inicial liviana del front) y `offset`
     (doc 92 D3) pagina el scroll infinito — sólo aplica en el fast path sin
-    filtros (orden `physicalName`). Doc 102: `changesetId` = versión propia."""
-    changes = await versions.version_changes(projectId, changesetId, principal, versions.TABLE_INPUTS)
+    filtros (orden `physicalName`). Doc 102: `changesetId` = versión propia.
+    Doc 105 (A2-o4): ambos con tope (422) — sin él, un entero fuera de int8
+    llegaba al LIMIT/OFFSET de Lakebase y salía como 500."""
+    changes = await versions.table_changes(projectId, changesetId, principal)
     filters = {"schema": schema} if schema is not None else {}
     return ok(await service.list_table_rows(projectId, filters, limit, offset, changes=changes))
 
@@ -73,7 +75,7 @@ async def report_filters(projectId: str = Query(min_length=1),
 @router.get("/columns")
 async def report_columns(
     projectId: str = Query(min_length=1),
-    tableId: str | None = Query(default=None),
+    tableId: str | None = Query(default=None, min_length=1),
     tableIds: str | None = Query(default=None, description="ids separados por coma (compat: el front usa POST /columns/query)"),
     limit: int | None = Query(default=None, ge=1, le=100000),
     changesetId: str | None = Query(default=None),
@@ -83,9 +85,12 @@ async def report_columns(
     export a las tablas seleccionadas; sin filtros se aplica un tope de seguridad
     (`limit` o el cap por defecto) para no volcar cientos de miles de columnas.
     Doc 102: los lotes van por `POST /columns/query`; `tableIds` queda por
-    compatibilidad durante el deploy."""
+    compatibilidad durante el deploy. Doc 105 (R2-A1): `tableIds` presente pero
+    vacío (`tableIds=,`) es 422, como el POST — antes era todo el proyecto. Doc
+    105 (revisión, hallazgo 3): `tableId=` vacío también es 422 — en modo
+    versión el lote quedaba vacío y salía TODO el draft (producción daba [])."""
+    id_list = _lot(tableIds.split(",")) if tableIds is not None else None
     cs_id = await versions.open_version(projectId, changesetId, principal)
-    id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
     return ok(await service.list_column_rows(projectId, tableId, id_list, limit, changeset_id=cs_id))
 
 
@@ -109,9 +114,10 @@ async def report_views(
     SQL y detalle columna a columna (alias de salida, origen, casteo,
     expresión). `tableIds` acota a las vistas derivadas de las tablas
     seleccionadas; `schema` a las de un esquema (Database Explorer); sin
-    filtros aplica un tope de seguridad. Doc 102: `changesetId` = versión propia."""
+    filtros aplica un tope de seguridad. Doc 102: `changesetId` = versión propia.
+    Doc 105 (R2-A1): `tableIds` presente pero vacío es 422 (como `/columns`)."""
+    id_list = _lot(tableIds.split(",")) if tableIds is not None else None
     changes = await versions.version_changes(projectId, changesetId, principal, versions.VIEW_INPUTS)
-    id_list = [s for s in (tableIds.split(",") if tableIds else []) if s] or None
     return ok(await service.list_view_rows(projectId, id_list, schema=schema, changes=changes))
 
 
@@ -121,3 +127,18 @@ async def report_views_batch(body: ReportBatchBody, principal: Principal = Depen
     ids = _lot(body.tableIds)
     changes = await versions.version_changes(body.projectId, body.changesetId, principal, versions.VIEW_INPUTS)
     return ok(await service.list_view_rows(body.projectId, ids, changes=changes))
+
+
+@router.post("/insights/relationships/query")
+async def report_relationships_batch(body: ReportRelationshipBatchBody,
+                                     principal: Principal = Depends(current_principal)):
+    """Doc 105 (A3-o1): las MISMAS filas que `GET /insights/relationships`
+    (query/router.py), pero sólo de las relaciones con el padre o el hijo en el
+    LOTE (1–300 ids en el CUERPO) y sin tope global. La hoja Relationships del
+    export pedía las primeras 5 000 del PROYECTO y filtraba en el navegador: en
+    proyectos grandes faltaban relaciones sin aviso. Con `changesetId`, la
+    versión propia (mismo overlay y mismos 403/404/409 que el GET), leyendo
+    del ledger SÓLO lo que toca el lote (no el ledger entero por lote)."""
+    ids = _lot(body.tableIds)
+    cs_id = await versions.open_version(body.projectId, body.changesetId, principal)
+    return ok(await views.relationships_lot_report(body.projectId, ids, cs_id))

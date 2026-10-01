@@ -16,6 +16,7 @@ from pymongo import UpdateOne
 
 from app.core.db.client import get_db
 from app.core.scope import naming_id, scoped
+from app.features.settings.repository import _usable as _naming_usable
 
 from .models import StandardsVersionDoc
 
@@ -50,6 +51,18 @@ async def get_version(project_id: str, seq: int) -> dict | None:
     db = await get_db()
     doc = await db[COLL].find_one(scoped(project_id, {"seq": seq}))
     return _to_doc(doc) if doc else None
+
+
+async def owners(collection: str, ids: list[str]) -> dict[str, dict]:
+    """`{id: {projectId, flgactive}}` de los docs de `collection` con esos ids,
+    de CUALQUIER proyecto y también los borrados (doc 105: un upsert del apply
+    no puede dar de alta un id que ya existe)."""
+    if not ids:
+        return {}
+    db = await get_db()
+    docs = await db[collection].find({"_id": {"$in": list(ids)}}, {"projectId": 1, "flgactive": 1}).to_list(None)
+    return {str(d["_id"]): {"projectId": d.get("projectId"), "flgactive": d.get("flgactive", True) is not False}
+            for d in docs}
 
 
 async def max_seq(project_id: str) -> int:
@@ -136,10 +149,20 @@ async def restore_dict(project_id: str, entries: list[dict], preserve_ids: set[s
 
 
 async def restore_naming(project_id: str, config: dict) -> None:
-    """Upsert de naming_config de ambos scopes DEL PROYECTO desde el snapshot."""
+    """Upsert de naming_config de ambos scopes DEL PROYECTO desde el snapshot.
+    Doc 105 (R5): no regraba valores que el motor no puede usar — misma regla
+    que la lectura de la app (`settings.repository._usable`): un snapshot
+    anterior al doc 105 con, p. ej., `case: 'Upper'` volvía a la BD y el kit
+    Erwin, que lee `naming_config` directo, abortaba. Se graban como None (=
+    el default del scope al leer)."""
     db = await get_db()
     for scope, rule in (config or {}).items():
-        fields = {k: v for k, v in (rule or {}).items() if k in ("separator", "case", "maxLength")}
+        # Lo inválido o ausente (None) del snapshot se restaura como None: la
+        # lectura lo toma como el default del scope — lo que la app veía de ese
+        # snapshot (ronda 3: omitirlo dejaba el valor de AHORA, p. ej. un
+        # `maxLength: None` legado no volvía a 150).
+        fields = {k: (v if v is not None and _naming_usable(k, v) else None)
+                  for k, v in (rule or {}).items() if k in ("separator", "case", "maxLength")}
         if not fields:
             continue
         await db[NAMING].update_one(

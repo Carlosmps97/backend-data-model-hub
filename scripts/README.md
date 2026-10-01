@@ -1,6 +1,12 @@
 # Scripts del backend — kit XML → Lakebase
 
-**Actualizado:** 2026-09-08 (doc 75: proyectos independientes) · **Todo corre
+**Actualizado:** 2026-09-30 (doc 105: suite E2E al día y en memoria,
+`reapply_changeset` devuelve a revisión —y saltea los claims recientes salvo
+`--force`—, C9 con `viewIds` y miembros de otro proyecto, fusión de canvases
+con aportes de otros archivos, tablas y vistas borradas en la app que el XML
+aún trae omitidas sin revivirlas —también al re-correr la familia— y sus
+relaciones con su propio tipo en el reporte de incongruencias; doc 75:
+proyectos independientes) · **Todo corre
 contra Lakebase** (conexión del `.env`), **desde la raíz del backend** con su
 `.venv`.
 
@@ -21,7 +27,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | 2 | `crosscheck` | **Gate 2 — el archivo contra la BD** (y entre archivos): solapes de tablas/vistas/schemas con veredicto ADOPTA/ACTUALIZA (score), estándares (enums que crecen, defs A4), estimación de carga | Solo lee |
 | 3 | `extract_standards` / `extract_model` | **Resúmenes a archivos** (JSON/CSV): glosario/dominios/UDP · tablas/columnas/vistas/relaciones/canvases | No |
 | 4 | `reset_for_migration` | Reset DESTRUCTIVO: DROPea todas las tablas del schema `dmh` (modelo, estándares, governance, usuarios, roles, auditoría); el one-shot vuelve a crear `admin` y los roles | Sí (`--apply`) |
-| 5 | `migrate` | **La carga real** (merge multi-archivo + lotes) dentro de UN proyecto. Sin `--apply` = dry-run. `--project` obligatorio si el proyecto ya existe; `--description` si se crea | Sí (`--apply`) |
+| 5 | `migrate` | **La carga real** (merge multi-archivo + lotes) dentro de UN proyecto. Sin `--apply` = dry-run. `--project` obligatorio si el proyecto ya existe; `--description` si se crea. Doc 105: una tabla o vista borrada en la app que el XML aún trae no revive —la reconoce por id y, sin homónima viva, por clave natural (rondas 4–5: también al re-correr la familia y aunque vaya a `_DUPn`; ronda 7: nunca la de OTRA entidad del mismo XML, ni por el físico crudo si esa clave tiene una tabla viva)— y la tabla se omite con sus columnas, relaciones y vistas (una vista con una fuente borrada no se re-escribe). Reporte: `deleted_in_app` (con el nombre real con el que existió; la omitida no figura como copia `_DUPn`) y `rels_deleted_in_app`; `migration_detail_report` muestra esas vistas como «Fuente borrada en la plataforma (no migrada)» y esas relaciones con el tipo «Tabla borrada en la plataforma» | Sí (`--apply`) |
 
 ```bash
 # 1. Gate 1: auditar el XML (siempre primero)
@@ -51,7 +57,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 | Script | ¿Qué hace? | ¿Cuándo? |
 |---|---|---|
 | `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros). Doc 99: cada canvas que arregla pierde sus trazos manuales de wires (`routes`) — con las posiciones nuevas ya no calzan | Siempre tras `migrate --apply` |
-| `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C11 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes, campos retirados `wordType`/`pkPosition` — doc 94…) | Siempre tras migrar (esperado: 0 fixables) |
+| `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C11 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes, campos retirados `wordType`/`pkPosition` — doc 94…). Doc 105 (A2-o3): C9 revisa (y con `--fix` poda) en cada canvas también los `viewIds` colgando (C9c: vista borrada o inexistente — ese canvas no se podía editar) y, desde su revisión R2, los miembros vivos de OTRO proyecto (C9d: el guardado del canvas daba 409; C9b cuenta también el layout de nodos de otro proyecto); sólo se juzga el proyecto si canvas y miembro traen `projectId`; un `viewIds` nulo (canvas legacy) no se toca. Ronda 3: C9 sólo mira canvases ACTIVOS y conserva en el layout las posiciones de los símbolos de subcategoría (`subtypeSymbolId`) de relaciones activas del proyecto — no son tabla ni vista, pero tampoco nodos inexistentes | Siempre tras migrar (esperado: 0 fixables) |
 | `create_admin` | Cuenta local `admin` (contraseña en el script) + 4 roles + whitelist SSO de Modeladores (idempotente) | BD nueva, para poder entrar |
 | `mark_base_version` | **Marca lo cargado como versión base DE CADA PROYECTO**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards del proyecto si su stream está vacío y permiso `rollback`. Idempotente; un proyecto con versiones aplicadas no recibe marcador | UNA vez, al FINAL de la carga completa (después del último XML) |
 | `seed_ddl_export_rules` | **Ruleset base de DDL Export** (doc 76, los 7 DDL de la macro BCP) POR PROYECTO (`--project "X"` o `--all-projects`): 17 elementos — 12 reglas + 5 generadores (DROP comentado, TBLPROPERTIES vacuum, tags `updateFrequency`/`isDAC`/`DAC`, tabla `_rej`, vistas técnicas y de rechazos NoDAC/DAC, desencriptación `decrypt_column_view` en vistas DAC y de negocio, `CHAR(n)` → `VARCHAR(n)` en la física y la `_rej` — doc 90) + lookups `vacuum_map`/`update_frequency_map`/`dac_flag_map`/`dac_map` + Output settings (doc 93: sin comillas, tipos en minúscula, prefijos `TABLE-`/`VIEW_NEG-`/`VIEW_TEC-`), como UNA versión de Data Standards del proyecto. Salta los proyectos que ya tienen reglas. Doc 101: a los proyectos de `ORACLE_PROJECTS` («MODELO RDV DataEntry») NO les siembra reglas — solo las Output settings con Oracle como dialecto por default | BD nueva, tras `create_admin` |
@@ -72,21 +78,25 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 
 | Script | ¿Qué hace? |
 |---|---|
-| `e2e/` | Suite E2E contra el backend **en vivo** (`E2E_BASE`, default `localhost:8000`): login real por rol → flujos completos vía HTTP. Auto-limpia lo que crea (los escenarios de rollback dejan registros de versión — limpiar con §4) |
-| `reapply_changeset` | Recuperación: re-aplica un publish interrumpido (changeset `approved` sin `appliedAt`). Idempotente |
+| `e2e/` | Suite E2E de 26 escenarios (`s01`–`s26`): login real por rol → flujos completos vía HTTP. Corre contra el backend **en vivo** (`E2E_BASE`, default `localhost:8000`) o **en memoria** (`tests/scripts/test_e2e_inprocess.py`, dentro del `pytest` normal). Doc 105 (A2-o6): cada escenario trabaja en un proyecto propio y escribe el modelo SIEMPRE por versiones (las escrituras directas se verifican cerradas); al terminar, `cleanup()` borra directo en la BD del `.env` esos proyectos con sus versiones, los jobs de la carga Excel de esas versiones con sus cuerpos (`upload_jobs`/`upload_job_bodies`, que no llevan `projectId`) y los usuarios/roles que registró |
+| `reapply_changeset` | Recuperación de un publish interrumpido (changeset `approved` sin `appliedAt`). Doc 105 (A1-o1): ya NO re-aplica (saltaba los gates, las imágenes previas del rollback, la poda de canvases y la cascada): devuelve cada versión trabada a revisión (`service.recover_interrupted_publish`, con `partialApplyAt` conservador: ese draft no se puede eliminar) y el revisor la vuelve a aprobar desde Review, que corre el publish completo. Con `--workers 2` el publish puede seguir VIVO en el otro proceso: una aprobación de hace menos de 30 min (`RECOVER_MIN_AGE_SECONDS`, medida desde `reviewedAt`) se saltea y se informa («reintenta más tarde o usa --force»); una sin fecha de aprobación legible (cabecera legada: no se puede probar que su proceso murió) también se saltea, pero el script la informa APARTE («sin fecha»: verificar a mano que ningún proceso la esté publicando y usar `--force` — reintentar no sirve); `--force` la devuelve igual (aun así el publish vivo no deja un estado imposible: su `appliedAt` va condicionado al claim y la versión queda en revisión). Idempotente |
 | `databricks/apps_prender_apagar_notebook.py` | Notebook para un Job de Databricks: prende/apaga las apps según el horario, espera el resultado y muestra el motivo si Databricks rechaza la operación (despliegue.md §2.7) |
 
 ```bash
 # E2E (backend corriendo)
 .venv/bin/python -m scripts.e2e.run_e2e all                 # todos los escenarios
 .venv/bin/python -m scripts.e2e.run_e2e s02_version_lifecycle
-.venv/bin/python scripts/e2e/e2e_schemas.py                 # suites específicas: e2e_relationships,
+.venv/bin/python scripts/e2e/e2e_schemas.py                 # atajos de s22–s26 (doc 105): e2e_relationships,
                                                             # e2e_rollback, e2e_views_versionadas,
-                                                            # e2e_estructura_versionada, e2e_sso
-                                                            # (login SSO + whitelist, doc 38)
+                                                            # e2e_estructura_versionada; e2e_sso sigue
+                                                            # aparte (login SSO + whitelist, doc 38)
 
-# Recuperar un publish que murió a la mitad
-.venv/bin/python scripts/reapply_changeset.py [changeset_id]
+# E2E en memoria (sin backend ni BD: la app real sobre la BD falsa de los tests)
+.venv/bin/python -m pytest tests/scripts/test_e2e_inprocess.py -q
+
+# Devolver a revisión un publish que murió a la mitad (luego se re-aprueba en Review);
+# saltea las aprobaciones de hace menos de 30 min salvo --force
+.venv/bin/python scripts/reapply_changeset.py [--force] [changeset_id]
 ```
 
 ## 4 · Volver a la VERSIÓN BASE (`reset_to_base_version`)

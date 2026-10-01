@@ -42,8 +42,16 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
     create = AsyncMock(return_value={"id": "draft1"})
     monkeypatch.setattr(service.repository, "create", create)
     sets: list[tuple] = []
-    monkeypatch.setattr(service.repository, "set_change",
-                        AsyncMock(side_effect=lambda did, coll, eid, op, payload: sets.append((coll, eid, op))))
+
+    async def bulk(did, items, owner=None):
+        # Doc 105: los inversos van en UN lote condicionado al dueño.
+        assert (did, owner) == ("draft1", "ana")
+        sets.extend((i["collection"], i["entityId"], i["op"]) for i in items)
+        return {"id": did}
+
+    monkeypatch.setattr(service.repository, "set_changes_bulk", bulk)
+    status = AsyncMock()
+    monkeypatch.setattr(service.repository, "set_status", status)
 
     res = asyncio.run(service.rollback("v1", "ana"))
     ops = {(c, e): o for c, e, o in sets}
@@ -54,6 +62,8 @@ def test_rollback_a_version_pasada_deshace_posteriores(monkeypatch):
     # PROCEDENCIA estructurada de la restauración (chip "Restored from vN").
     assert create.await_args.args[0] == "Restore to v1"
     extra = create.await_args.kwargs["extra"]
+    assert extra["restoreIncomplete"] is True                              # doc 105: hasta grabar todo…
+    status.assert_awaited_once_with("draft1", {"restoreIncomplete": None})  # …y recién ahí se quita
     assert extra["versionLabel"] == "v4"
     assert extra["restoredFrom"] == {"csId": "v1", "versionLabel": "v1",
                                      "appliedAt": "2026-01-01"}

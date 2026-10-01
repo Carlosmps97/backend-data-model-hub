@@ -4,10 +4,12 @@ Se aplica por-ruta con el decorator `@limiter.limit(...)` (p.ej. en /api/auth/lo
 sin límite GLOBAL para no frenar el uso legítimo (canvas y reporting disparan
 muchos requests). Key = IP del cliente.
 
-ESTADO EN MEMORIA (por proceso): suficiente para una sola instancia. En producción
-multi-réplica (Databricks Apps con varias instancias) migrar a un backend Redis
-(`Limiter(storage_uri="redis://...")` / fastapi-limiter), si no cada réplica cuenta
-por separado y el límite efectivo se multiplica por el nº de réplicas.
+ESTADO EN MEMORIA (por PROCESO): `app.yaml` corre `uvicorn --workers 2`, así que
+cada worker cuenta por separado y el límite efectivo por IP es hasta el doble (y
+se multiplica otra vez por cada réplica). La defensa principal contra fuerza
+bruta es el lockout por cuenta, que vive en la BD (compartido por todos los
+procesos). Un límite exacto necesitaría un storage compartido
+(`Limiter(storage_uri="redis://...")`).
 """
 from __future__ import annotations
 

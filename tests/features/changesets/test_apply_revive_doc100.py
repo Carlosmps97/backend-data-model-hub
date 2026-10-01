@@ -70,7 +70,8 @@ def test_deleted_at_devuelve_solo_las_borradas(db):
 # Un rollback de una versión que borró N entidades publica N reactivaciones.
 # Con el `$unset` dentro de cada op, el adaptador sacaba el lote del camino
 # rápido (una sentencia por fila) y la lectura previa con `{"_id": 1}` traía
-# documentos completos (el adaptador la lee como «sin exclusiones»).
+# documentos completos (el adaptador la leía como «sin exclusiones» — corregido
+# en el doc 105, P9).
 
 import json  # noqa: E402
 

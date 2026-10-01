@@ -54,6 +54,41 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def canvas_by_erwin_id(sas: dict) -> dict:
+    """{Long_Id de diagrama Erwin: id del canvas}. Doc 105 (R2): un canvas
+    fusionado (R8) guarda en `erwinLongId` el diagrama que lo CREÓ y en
+    `erwinLongIds` todos sus aportes — el diagrama del otro archivo también
+    lo ubica (antes salía «(canvas no encontrado)»)."""
+    # Ronda 3: primero los canvases ACTIVOS y, dentro, el CREADOR del diagrama
+    # sobre uno que sólo recibió su aporte; los inactivos, sólo como último recurso.
+    out: dict = {}
+    for active in (True, False):
+        for creator in (True, False):
+            for sid, s in sas.items():
+                if (s.get("flgactive") is not False) != active:
+                    continue
+                ids = [s.get("erwinLongId")] if creator else (s.get("erwinLongIds") or [])
+                for lid in ids:
+                    if lid:
+                        out.setdefault(lid, sid)
+    return out
+
+
+# Doc 105 (ronda 5): relación que el kit omitió porque una tabla se borró en la app.
+REL_GONE = "Tabla borrada en la plataforma"
+
+
+def discarded_view_texts(d: dict) -> tuple[str, str]:
+    """(caso, detalle) de una vista que el kit no migró. Doc 105 (ronda 3): la
+    que se omitió porque su fuente se borró en la app lo dice (no es un «sin
+    tabla fuente resoluble»)."""
+    if d.get("reason") == "source deleted in the app":
+        return ("Fuente borrada en la plataforma (no migrada)",
+                "Su tabla fuente se borró en la plataforma: el kit no la revive ni migra la vista")
+    return ("Sin tabla fuente resoluble (no migrada)",
+            "No existe en la plataforma: ninguna de sus fuentes se pudo resolver a una tabla física")
+
+
 def cap_names(names, limit=MAX_NAMES):
     names = sorted(names)
     if len(names) <= limit:
@@ -152,7 +187,7 @@ def extract(files: list[dict]) -> dict:
         ACTIVE, {"name": 1, "parentFolderId": 1, "projectId": 1})}
     sas = {s["_id"]: s for s in db.subject_areas.find(
         {}, {"name": 1, "folderId": 1, "projectId": 1, "tableIds": 1, "layout": 1,
-             "erwinLongId": 1, "udpValues": 1})}
+             "erwinLongId": 1, "erwinLongIds": 1, "udpValues": 1, "flgactive": 1})}
 
     log("[db] tablas / columnas / relaciones / vistas …")
     tables = {t["_id"]: t for t in db.canonical_tables.find(
@@ -440,10 +475,14 @@ def extract(files: list[dict]) -> dict:
             "estado": "Vigente: la línea se pinta de ROJO en el canvas",
             "canvases": cap_paths(canvs, "(las tablas no comparten canvas)"),
         })
-    #  c) no migradas (rotas de origen / sin pares de columnas)
+    #  c) no migradas (rotas de origen / sin pares de columnas / tabla borrada)
     db_rel_erwin = {r.get("erwinLongId") for r in rels.values()}
     reused_by_file = {tag: {e["key"] for e in reports[tag]["decisions"]["rels_reused"]}
                       for tag in models}
+    # Doc 105 (ronda 5): las que el kit omitió porque una de sus tablas se borró
+    # en la plataforma (los reportes anteriores no traen la clave).
+    gone_by_file = {tag: {e.get("erwinLongId") for e in reports[tag]["decisions"].get("rels_deleted_in_app", [])}
+                    for tag in models}
     for tag, m in models.items():
         proj, dom = proj_of_tag[tag], dom_of_tag[tag]
         sof = schema_of[tag]
@@ -466,7 +505,11 @@ def extract(files: list[dict]) -> dict:
             elif r.parent_ref not in m.entities or r.child_ref not in m.entities:
                 broken = True
                 motivo = "Relación con un extremo inexistente en el XML (rota de origen)"
-            if not broken:
+            gone = not broken and r.id in gone_by_file[tag]
+            if gone:
+                motivo = ("Tabla borrada en la plataforma: una de sus tablas se borró en la app — el kit "
+                          "no la revive ni migra la relación (no hay nada que corregir en Erwin)")
+            elif not broken:
                 if r.id in db_rel_erwin or r.name in reused_by_file[tag]:
                     continue
                 motivo = ("Sin pares de columnas FK resolubles: no une columna con columna "
@@ -487,11 +530,11 @@ def extract(files: list[dict]) -> dict:
                 diags = sorted(set(obj_diags[tag].get(r.parent_ref, []))
                                & set(obj_diags[tag].get(r.child_ref, [])))
             rows.append({
-                "tipo": ("Rota de origen" if broken else "Sin pares de columnas"),
-                "_orden": 2 if broken else 3, "_n": 0,
+                "tipo": (REL_GONE if gone else "Rota de origen" if broken else "Sin pares de columnas"),
+                "_orden": 4 if gone else 2 if broken else 3, "_n": 0,
                 "relacion_erwin": r.name, "archivo": tag, "proyecto": proj,
                 "tabla_padre": pn, "padre_logico": pl, "tabla_hija": cn, "hija_logico": cl,
-                "pares": "" if broken else "(no une columnas)",
+                "pares": "" if broken or gone else "(no une columnas)",
                 "detalle": motivo + f" — tipo {REL_TYPE_ES.get(r.rel_type, r.rel_type)}",
                 "estado": "No existe en la plataforma",
                 "canvases": cap_paths(
@@ -503,7 +546,7 @@ def extract(files: list[dict]) -> dict:
     log("[relaciones] " + "; ".join(
         f"{t}: {sum(1 for r in rows if r['tipo'] == t)}"
         for t in ["Vínculo con columna no vigente", "Llave incompleta (ROJO)",
-                  "Rota de origen", "Sin pares de columnas"]))
+                  "Rota de origen", "Sin pares de columnas", REL_GONE]))
 
     # ═══ Particiones con orden ilógico (recalculadas del XML) ══════════════
     grouped: dict[tuple, dict] = {}
@@ -578,12 +621,12 @@ def extract(files: list[dict]) -> dict:
             for v in name_to_view.get(d["view"], []):
                 schema = pol.schema_or_default(sof.get(v.id))
                 diags += obj_diags[tag].get(v.id, [])
+            caso, detalle = discarded_view_texts(d)
             rows.append({
                 "archivo": tag, "proyecto": proj,
-                "caso": "Sin tabla fuente resoluble (no migrada)",
+                "caso": caso,
                 "esquema": schema, "vista": d["view"],
-                "detalle": "No existe en la plataforma: ninguna de sus fuentes se pudo "
-                           "resolver a una tabla física",
+                "detalle": detalle,
                 "canvases": cap_paths([f"{dom} / {sa} / {dg}" for sa, dg in sorted(set(diags))],
                                       "(no está dibujada en ningún diagrama del XML)"),
             })
@@ -649,7 +692,7 @@ def extract(files: list[dict]) -> dict:
                     names.add((m.views[ref].name or "?") + " (vista)")
             diag_versions.setdefault(d.id, {})[tag] = names
             diag_meta.setdefault(d.id, (d.subject_area, d.name))
-    sa_by_erwin = {s.get("erwinLongId"): sid for sid, s in sas.items() if s.get("erwinLongId")}
+    sa_by_erwin = canvas_by_erwin_id(sas)
     file_order = list(models)              # orden de carga de la corrida
     rows = []
     for did, per_tag in diag_versions.items():
@@ -941,6 +984,7 @@ def build_excel(D: dict, out_path: str) -> None:
     for r in D["udp"]:
         udp_counts[r["tipo"]] += 1
     n_views_disc = sum(1 for r in D["vistas"] if r["caso"].startswith("Sin tabla fuente"))
+    n_views_gone = sum(1 for r in D["vistas"] if r["caso"].startswith("Fuente borrada"))
     n_views_dup = sum(1 for r in D["vistas"] if r["caso"].startswith("Duplicada"))
 
     MASTER = [
@@ -969,7 +1013,8 @@ def build_excel(D: dict, out_path: str) -> None:
          f"Vínculo con columna no vigente: {rel_counts['Vínculo con columna no vigente']} · "
          f"llave incompleta (ROJO): {rel_counts['Llave incompleta (ROJO)']} · "
          f"rotas de origen: {rel_counts['Rota de origen']} · "
-         f"sin pares de columnas: {rel_counts['Sin pares de columnas']}.",
+         f"sin pares de columnas: {rel_counts['Sin pares de columnas']} · "
+         f"tabla borrada en la plataforma: {rel_counts[REL_GONE]}.",
          "Revisar la llave primaria del padre y las columnas del vínculo; volver a trazar las "
          "rotas; definir columna origen y destino en las que no unen columnas.",
          "Las de llave incompleta se pintan de ROJO en el canvas; las de columna no vigente "
@@ -982,7 +1027,8 @@ def build_excel(D: dict, out_path: str) -> None:
          "El particionado quedó por el ORDEN FÍSICO de las columnas (el correlativo original "
          "no se tocó)."),
         ("Vistas con observaciones", len(D["vistas"]), "Vistas",
-         f"Sin tabla fuente resoluble: {n_views_disc} · duplicadas en el archivo: "
+         f"Sin tabla fuente resoluble: {n_views_disc} · fuente borrada en la plataforma: {n_views_gone} · "
+         f"duplicadas en el archivo: "
          f"{n_views_dup} ({vn['dup_copias']} copias) · multi-fuente sin join: {vn['multi']} · "
          f"columnas de vista sin origen: {vn['vcol']}.",
          "Revisar las fuentes de cada vista y el vínculo de sus columnas.",
@@ -1128,11 +1174,13 @@ def build_excel(D: dict, out_path: str) -> None:
     add_sheet(
         "Relaciones incongruentes", "relacion",
         "Relaciones incongruentes (todas en una sola hoja — filtrar por «Tipo»)",
-        "Cuatro tipos. «Vínculo con columna no vigente»: usaba una columna que no quedó vigente al "
+        "Cinco tipos. «Vínculo con columna no vigente»: usaba una columna que no quedó vigente al "
         "unificar la tabla — está desactivada. «Llave incompleta (ROJO)»: las columnas conectadas no "
         "cubren la llave primaria completa del padre — la línea se pinta de ROJO en el canvas. «Rota de "
         "origen»: apunta a un objeto que no existe en el propio XML. «Sin pares de columnas»: no une "
-        "columna con columna. Limpieza en Erwin: revisar llaves y columnas del vínculo en cada caso.",
+        "columna con columna. «Tabla borrada en la plataforma»: una de sus tablas se borró en la app — el "
+        "kit no la revive ni migra la relación (no hay nada que corregir en Erwin). Limpieza en Erwin: "
+        "revisar llaves y columnas del vínculo en los demás casos.",
         ["Tipo", "Relación en Erwin", "Archivo XML", "Proyecto", "Tabla padre", "Padre (lógico)",
          "Tabla hija", "Hija (lógico)", "Columnas del vínculo (padre → hija)", "Detalle",
          "Estado en la plataforma", "Canvases / dónde verla"],
@@ -1160,7 +1208,8 @@ def build_excel(D: dict, out_path: str) -> None:
         "Vistas", "vista",
         "Vistas con observaciones (filtrar por «Caso»)",
         "Sin tabla fuente resoluble: ninguna fuente se pudo resolver a una tabla física — no existen en "
-        "la plataforma. Duplicada en el archivo: mismo esquema y nombre repetido — quedó una sola. "
+        "la plataforma. Fuente borrada en la plataforma: su tabla fuente se borró en la app — el kit no "
+        "la revive ni migra la vista. Duplicada en el archivo: mismo esquema y nombre repetido — quedó una sola. "
         "Multi-fuente sin join: 2+ tablas fuente sin join declarado ni relación entre ellas — declararlo "
         "en el editor de vistas. Columna de vista sin origen: no pudo vincularse a su columna fuente. "
         "Limpieza en Erwin: revisar fuentes y vínculos de estas vistas.",

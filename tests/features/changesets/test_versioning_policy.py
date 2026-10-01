@@ -264,25 +264,31 @@ def test_apply_and_finalize_reclama_el_estado_antes_de_aplicar(monkeypatch):
     # un withdraw→edit→resubmit cambia submittedAt y el claim tardío falla.
     assert tr.await_args.kwargs["expect"] == {"submittedAt": "T1"}
 
-    # Camino feliz: reclamado el estado, recién ahí se lee, aplica y estampa appliedAt.
-    tr2 = AsyncMock(return_value={"id": "c1", "status": "approved"})
+    # Camino feliz: reclamado el estado, recién ahí se lee, aplica y estampa appliedAt
+    # (doc 105: el estampado es otra transición, condicionada al claim).
+    tr2 = AsyncMock(side_effect=[{"id": "c1", "status": "approved", "reviewedAt": "R1"},
+                                 {"id": "c1", "status": "approved", "reviewedAt": "R1", "appliedAt": "T9"}])
     apply2 = AsyncMock(return_value={"canonical_tables": 1})
-    st = AsyncMock(return_value={"id": "c1", "status": "approved", "appliedAt": "T9"})
     # Captura de imágenes previas (rollback, doc 16 §5d): ocurre ANTES del apply.
     cap = AsyncMock(return_value={("canonical_tables", "t1"): {"id": "t1"}})
     store = AsyncMock()
     monkeypatch.setattr(service.repository, "transition", tr2)
     monkeypatch.setattr(service.repository, "apply_changes", apply2)
-    monkeypatch.setattr(service.repository, "set_status", st)
     monkeypatch.setattr(service.repository, "capture_before_images", cap)
     monkeypatch.setattr(service.repository, "store_before_images", store)
+    # Doc 105 (H7): el gate lee a qué proyecto pertenece cada id que se escribe.
+    monkeypatch.setattr(service.repository, "project_of", AsyncMock(return_value={"t1": "p1"}))
+    monkeypatch.setattr(service, "_publish_table_deletes", AsyncMock(return_value=[]))   # doc 105
     res2 = asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
     assert res2["appliedAt"] == "T9"
     apply2.assert_awaited_once()
     plan = apply2.await_args.args[0]
     assert plan == [("canonical_tables", "t1", "delete", None)]
-    assert "appliedAt" in st.await_args.args[1]
-    store.assert_awaited_once_with("c1", {("canonical_tables", "t1"): {"id": "t1"}})
+    stamp = tr2.await_args_list[-1]
+    assert stamp.args[1] == "approved" and "appliedAt" in stamp.args[2]
+    assert stamp.kwargs["expect"] == {"appliedAt": None, "reviewedAt": "R1"}
+    # Doc 105 (H4b): sin publish a medias previo, las imágenes se capturan frescas.
+    store.assert_awaited_once_with("c1", {("canonical_tables", "t1"): {"id": "t1"}}, keep_existing=False)
 
 
 def test_rollback_plan_invierte_con_imagenes_previas():
@@ -358,13 +364,44 @@ def test_apply_and_finalize_fallo_de_apply_devuelve_a_revision(monkeypatch):
     monkeypatch.setattr(service.repository, "transition", tr)
     monkeypatch.setattr(service.repository, "apply_changes", apply)
     monkeypatch.setattr(service.repository, "changes_map", cm)
+    # Doc 105 (H6): sin estos mocks el test fallaba ANTES del apply (sin BD) y
+    # pasaba por casualidad: ahora debe llegar al apply y fallar ahí.
+    monkeypatch.setattr(service.repository, "project_of", AsyncMock(return_value={"t1": "p1"}))
+    monkeypatch.setattr(service, "_publish_table_deletes", AsyncMock(return_value=[]))   # doc 105
+    monkeypatch.setattr(service.repository, "capture_before_images", AsyncMock(return_value={}))
+    monkeypatch.setattr(service.repository, "store_before_images", AsyncMock())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="cosmos 429"):
         asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
 
+    apply.assert_awaited_once()
     assert tr.await_count == 2  # claim + revert
     revert_args = tr.await_args_list[1].args
     assert revert_args[2]["status"] == "submitted" and revert_args[2]["approvals"] == {}
+    assert not revert_args[2].get("partialApplyAt")          # falló antes de escribir: sin marca
+
+
+def test_apply_and_finalize_fallo_a_mitad_de_escritura_deja_la_marca(monkeypatch):
+    """Doc 105 (H6): si el apply YA empezó a escribir cuando falla, el revert
+    lleva `partialApplyAt` (doc 104: ese draft no se elimina)."""
+    import pytest
+
+    async def partial(plan, progress=None):
+        progress["writing"] = True
+        raise RuntimeError("timeout a mitad")
+
+    tr = AsyncMock(return_value={"id": "c1", "status": "approved"})
+    monkeypatch.setattr(service.repository, "transition", tr)
+    monkeypatch.setattr(service.repository, "apply_changes", AsyncMock(side_effect=partial))
+    monkeypatch.setattr(service.repository, "changes_map",
+                        AsyncMock(return_value={"canonical_tables": {"t1": {"op": "delete"}}}))
+    monkeypatch.setattr(service.repository, "project_of", AsyncMock(return_value={"t1": "p1"}))
+    monkeypatch.setattr(service, "_publish_table_deletes", AsyncMock(return_value=[]))   # doc 105
+    monkeypatch.setattr(service.repository, "capture_before_images", AsyncMock(return_value={}))
+    monkeypatch.setattr(service.repository, "store_before_images", AsyncMock())
+    with pytest.raises(RuntimeError, match="timeout a mitad"):
+        asyncio.run(service._apply_and_finalize({"id": "c1", "projectId": "p1"}, {"status": "approved"}, "T1"))
+    assert tr.await_args_list[1].args[2].get("partialApplyAt")
 
 
 def test_changes_in_cycle_excluye_escrituras_tardias():

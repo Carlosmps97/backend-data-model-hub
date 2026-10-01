@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.datatypes import canonicalize_default_type
+from app.features.settings.service import _validate_case, _validate_scope
 
 
 class TermEdit(BaseModel):
@@ -47,7 +48,21 @@ class DomainEdit(BaseModel):
 class NamingEdit(BaseModel):
     separator: str
     case: str
-    maxLength: int = 150  # límite de caracteres del físico (tabla/columna)
+    # Límite de caracteres del físico (tabla/columna); 0 = límite DESACTIVADO
+    # (así lo leen el guard de longitud del changeset y la carga Excel). Estricto:
+    # un `true` no pasa por 1.
+    maxLength: int = Field(150, ge=0, strict=True)
+
+    # Doc 105 (R2): desde D1b el apply es el ÚNICO camino de escritura del
+    # naming (el PUT de /settings responde 409). Valida lo mismo que validaba
+    # el PUT, con la misma regla de `settings` → 422 antes de escribir nada.
+    # Antes un `case` desconocido se grababa y el re-derivado, el physicalize y
+    # el alta de columnas reventaban (ValueError del motor → 500).
+    @field_validator("case")
+    @classmethod
+    def _known_case(cls, v: str) -> str:
+        _validate_case(v)
+        return v
 
 
 class UdpEdit(BaseModel):
@@ -104,6 +119,15 @@ class ApplyBody(BaseModel):
     rulesUpsert: list[DdlRuleEdit] = []   # reglas de DDL Export a crear/editar
     rulesDelete: list[str] = []           # ids de reglas a borrar
     ddlConfigPatch: DdlConfigPatch | None = None  # lookups/functions/output del ruleset
+
+    # Doc 105 (R2): un scope desconocido se grababa como un doc más de
+    # `naming_config` (y versionaba). Misma regla que el PUT cerrado.
+    @field_validator("namingConfig")
+    @classmethod
+    def _known_scopes(cls, v: dict[str, NamingEdit]) -> dict[str, NamingEdit]:
+        for scope in v:
+            _validate_scope(scope)
+        return v
 
 
 class RollbackBody(BaseModel):

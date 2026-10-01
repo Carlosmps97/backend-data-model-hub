@@ -30,8 +30,11 @@ from .schemas import (
     ViewsBody,
 )
 
+# Doc 105: canvases (subject-areas) sólo por versión; el alta de un proyecto
+# sigue directa (doc 75 D5: nace con su v1).
 router = APIRouter(prefix="/api", tags=["projects"],
-                   dependencies=[Depends(write_guard("model.edit"))])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True,
+                                                     direct_ok=frozenset({("POST", "/api/projects")})))])
 
 
 @router.get("/projects")

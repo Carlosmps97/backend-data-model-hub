@@ -60,6 +60,15 @@ def test_ensure_draft_ajeno_403_salvo_view_all(monkeypatch):
     asyncio.run(access.ensure_changeset_visible("d1", _p("root")))   # admin → pasa
 
 
+def test_ensure_version_inexistente_404(monkeypatch):
+    """Doc 104: una versión ELIMINADA (o un id basura) ya no cae en silencio a
+    producción: el canvas que la tenga abierta recibe 404 y se revalida."""
+    monkeypatch.setattr(access.repository, "get", AsyncMock(return_value=None))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(access.ensure_changeset_visible("gone", _p("ana")))
+    assert exc.value.status_code == 404
+
+
 def test_ensure_owner_pasa_aunque_no_este_registrado(monkeypatch):
     monkeypatch.setattr(access.repository, "get", AsyncMock(return_value=DRAFT))
     monkeypatch.setattr(access.auth_service, "resolve_session_user", AsyncMock(return_value=None))

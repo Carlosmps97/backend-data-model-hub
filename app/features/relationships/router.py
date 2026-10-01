@@ -13,7 +13,7 @@ from . import service
 from .schemas import RelationshipBody
 
 router = APIRouter(prefix="/api/relationships", tags=["relationships"],
-                   dependencies=[Depends(write_guard("model.edit"))])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True))])
 
 
 @router.get("")
@@ -23,10 +23,15 @@ async def list_all(tableId: str | None = Query(default=None)):
 
 
 @router.get("/impact")
-async def impact(columnId: str = Query(...), changesetId: str | None = Query(default=None)):
+async def impact(columnId: str = Query(...), changesetId: str | None = Query(default=None),
+                 principal: Principal = Depends(current_principal)):
     """Impacto GLOBAL de eliminar una columna (spec 10 §8): relaciones activas
     (publicadas + overlay del changeset) donde es extremo, enriquecidas con el
-    otro extremo (tabla.columna) y los canvases donde la relación es visible."""
+    otro extremo (tabla.columna) y los canvases donde la relación es visible.
+    Doc 104: una versión eliminada responde 404 (no el impacto de producción).
+    Doc 105: misma visibilidad que /links (doc 70 §12) — el overlay de un draft
+    ajeno no se lee sin ser su dueño, revisor o administrador."""
+    await ensure_changeset_visible(changesetId, principal)
     return ok(await service.column_impact(columnId, changesetId))
 
 

@@ -73,3 +73,17 @@ class ReportBatchBody(BaseModel):
     projectId: str = Field(min_length=1)
     tableIds: list[str] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     changesetId: str | None = None
+
+
+# Doc 105 (A3-o1): tope de ids por lote de la hoja Relationships (el front manda
+# lotes de 300 tablas, como las columnas).
+MAX_RELATIONSHIP_BATCH_IDS = 300
+
+
+class ReportRelationshipBatchBody(BaseModel):
+    """Doc 105 (A3-o1): un lote de tablas para la hoja Relationships del export
+    — sus relaciones (padre o hijo en el lote), sin tope global."""
+
+    projectId: str = Field(min_length=1)
+    tableIds: list[str] = Field(min_length=1, max_length=MAX_RELATIONSHIP_BATCH_IDS)
+    changesetId: str | None = None

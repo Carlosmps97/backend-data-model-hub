@@ -161,3 +161,48 @@ def test_bulk_duplicate_check_sees_normalized_names(monkeypatch):
         asyncio.run(service.add_changes_bulk(
             "c1", "ana", [_col("col1", "MTO_X"), _col("col2", "mto_x")]))
     assert "MTO_X" in str(exc.value)
+
+
+# ── Doc 105 (ronda 4): un físico LEGADO que el cambio repite sin tocarlo no se renombra ──
+# Antes, editar sólo la descripción de una columna legada «nbr_cliente» la dejaba
+# «NBR_CLIENTE» en silencio: las vistas que la referencian por nombre quedaban
+# colgando, el override cambiaba y podía chocar con otra columna. La regla de case
+# rige para lo que se TIPEA o cambia; lo que ya estaba queda como estaba.
+
+def _current(monkeypatch, pending=None, published=None):
+    monkeypatch.setattr(service.repository, "column_changes_for_tables", AsyncMock(return_value=pending or {}))
+    monkeypatch.setattr(service, "_published_column_physicals",
+                        AsyncMock(return_value={d["id"]: d for d in (published or [])}))
+
+
+def test_legacy_physical_repeated_unchanged_is_not_renamed(monkeypatch):
+    set_change, _ = _mock_repo(monkeypatch)
+    _rules(monkeypatch)
+    _current(monkeypatch, published=[{"id": "col1", "physicalName": "nbr_cliente"}])
+    _add_col("nbr_cliente", eid="col1")
+    assert set_change.await_args.args[4]["physicalName"] == "nbr_cliente"
+
+
+def test_legacy_pending_in_the_draft_also_counts_as_current(monkeypatch):
+    set_change, _ = _mock_repo(monkeypatch)
+    _rules(monkeypatch)
+    _current(monkeypatch, pending={"col1": {"op": "upsert", "payload": {"physicalName": "nbr_cliente"}}})
+    _add_col("nbr_cliente", eid="col1")
+    assert set_change.await_args.args[4]["physicalName"] == "nbr_cliente"
+
+
+def test_a_typed_change_of_a_legacy_name_is_normalized(monkeypatch):
+    set_change, _ = _mock_repo(monkeypatch)
+    _rules(monkeypatch)
+    _current(monkeypatch, published=[{"id": "col1", "physicalName": "nbr_cliente"}])
+    _add_col("nbr_cliente_2", eid="col1")
+    assert set_change.await_args.args[4]["physicalName"] == "NBR_CLIENTE_2"
+
+
+def test_bulk_keeps_unchanged_legacy_and_normalizes_the_rest(monkeypatch):
+    _, set_bulk = _mock_repo(monkeypatch)
+    _rules(monkeypatch)
+    _current(monkeypatch, published=[{"id": "col1", "physicalName": "nbr_cliente"}])
+    asyncio.run(service.add_changes_bulk("c1", "ana", [_col("col1", "nbr_cliente"), _col("col2", "nuevo_campo")]))
+    sent = {i["entityId"]: i["payload"]["physicalName"] for i in set_bulk.await_args.args[1]}
+    assert sent == {"col1": "nbr_cliente", "col2": "NUEVO_CAMPO"}

@@ -14,6 +14,7 @@ from app.core.models import DOC_CONFIG
 
 from ..normalize import clean_text, norm_name
 from ..parser import header_key
+from ..standards import profile_default_error, udp_value
 
 SHEET_ROLES = ("tables", "columns")
 LEVEL_OF_ROLE = {"tables": "table", "columns": "column"}
@@ -213,6 +214,13 @@ def _validate_mappings(role: str, mappings: list[dict], defs_by_id: dict[str, di
                     add(f"{path}.target", "udp-duplicate",
                         f"UDP '{(d or {}).get('name', uid)}' is already mapped (mapping #{udp_seen[uid] + 1}).")
                 udp_seen.setdefault(uid, i)
+                # Doc 105 (ronda 6): el default se valida por el TIPO del UDP al
+                # guardar el perfil — antes fallaba recién en cada fila nueva.
+                default = clean_text(m.get("defaultValue"))
+                if d is not None and default:
+                    _value, err = udp_value(d, default)
+                    if err:
+                        add(f"{path}.defaultValue", "default-invalid", profile_default_error(d, default, err))
         elif kind != "ignore":
             add(f"{path}.target", "target-invalid", "Target must be a field, one or more UDPs, or 'ignore'.")
         if clean_text(m.get("defaultValue")) and kind == "field" and target.get("field") in IDENTITY_FIELDS[role]:

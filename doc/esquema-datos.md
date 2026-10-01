@@ -1,6 +1,6 @@
 # Esquema de datos — Data Model Hub (referencia completa de colecciones)
 
-**Actualizado:** 2026-09-08 (doc 75: proyectos independientes) · Fuente: los modelos Pydantic `*Doc` reales de `app/features/*/models.py` + `app/core/models.py`, los `repository.py` (nombres de colección) y `app/core/db/indexes.py` (índices).
+**Actualizado:** 2026-09-30 (doc 105: jobs de la carga Excel en la BD, marcas nuevas de la cabecera del changeset y valores de UDP por tipo, con los números en su forma canónica) · Fuente: los modelos Pydantic `*Doc` reales de `app/features/*/models.py` + `app/core/models.py`, los `repository.py` (nombres de colección) y `app/core/db/indexes.py` (índices).
 
 Referencia **campo por campo** de todas las colecciones que administra este backend. Describe el **estado actual**, no cómo migrar. Complementa `arquitectura.md` (§7, visión) y `migracion-erwin.md` (carga desde XML de Erwin).
 
@@ -40,7 +40,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 
 ---
 
-## 1. Mapa de colecciones (23 propias)
+## 1. Mapa de colecciones (26 propias)
 
 | Colección | Modelo `*Doc` | `projectId` | Versionada (changeset) | Soft-delete | `_id` |
 |---|---|:--:|:--:|:--:|---|
@@ -63,6 +63,9 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 | `ddl_ruleset_config` | DdlRulesetConfigDoc | ✅ | — (Data Standards) | — | **`<projectId>`** (un doc por proyecto) |
 | `upload_profiles` | UploadProfileDoc | ✅ | — (config operativa, sin versionado) | ✅ | `id` (uuid) |
 | `sheet_templates` | SheetTemplateDoc (en `reporting/sheet_templates/models.py`) | ✅ | — (config operativa, sin versionado) | ✅ | `id` (uuid) |
+| `upload_jobs` | (sin modelo; `bulk_upload/jobs.py`) | — (lleva `csId`) | — (estado operativo, doc 105) | — (se borra por TTL) | `id` (uuid hex) |
+| `upload_job_bodies` | (sin modelo; `bulk_upload/jobs.py`) | — | — (doc 105) | — (se borra con su job) | **= `_id` del job** |
+| `deleted_changesets` | (sin modelo; `changesets/repository.py`) | — | — (lápidas, doc 105) | — (se borran al terminar o en la purga) | **`<csId>:<uuid>`** (una por intento de eliminación) |
 | `users` | UserDoc | — | — | via `status=disabled` | **`username`** |
 | `roles` | RoleDoc | — | — | — | **`key`** (slug del rol) |
 | `saved_reports` | SavedReportDoc (en `reporting/query/reports.py`, no en `models/`) | ✅ | — | ✅ | `id` (uuid) |
@@ -72,7 +75,7 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 >
 > **Entidades virtuales del reporting** (no son colecciones): `COLL_OF` en `reporting/query/executor.py` mapea `view_columns → views` y `models → subject_areas`.
 >
-> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) y `upload_profiles` (doc 78: perfiles de carga — nombre, hojas con fila de cabecera y mapeos cabecera → campo / UDP, reglas por columna, políticas; un `isDefault` por proyecto; `origin` `user` | `builtin:plantilla-bcp`) y `sheet_templates` (doc 95 D11: plantillas de hoja Excel del Reporting) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN.
+> **Tablas físicas en Lakebase:** el adaptador pre-crea 19 tablas (`KNOWN_COLLECTIONS` en `app/core/db/lakebase/collection.py` = las 19 de este mapa); `ddl_rules` y `ddl_ruleset_config` (doc 30) y `upload_profiles` (doc 78: perfiles de carga — nombre, hojas con fila de cabecera y mapeos cabecera → campo / UDP, reglas por columna, políticas; un `isDefault` por proyecto; `origin` `user` | `builtin:plantilla-bcp`) y `sheet_templates` (doc 95 D11: plantillas de hoja Excel del Reporting) se crean on-demand con la misma forma `(id, doc jsonb)` + GIN; también `upload_jobs` y `upload_job_bodies` (doc 105, X1: el estado de los jobs de la carga Excel vive en la BD porque `app.yaml` corre `uvicorn --workers 2`) y `deleted_changesets` (doc 105, H2: lápidas de las eliminaciones de drafts).
 
 ---
 
@@ -84,13 +87,13 @@ Referencia **campo por campo** de todas las colecciones que administra este back
 projects · folders · subject_areas · schemas · canonical_tables · canonical_columns · relationships · views
 ```
 
-Un cambio no toca la colección publicada hasta el **apply del approve**: vive como un doc en `changeset_changes` con el **doc completo** en `payload`. El `overlay(publicado, cambios)` produce el estado efectivo del draft.
+Un cambio no toca la colección publicada hasta el **apply del approve**: vive como un doc en `changeset_changes` con el **doc completo** en `payload`. El `overlay(publicado, cambios)` produce el estado efectivo del draft. Desde el doc 105 (D1) es el ÚNICO camino de escritura de estas colecciones por la API: las rutas directas de canvases, carpetas, esquemas, vistas, relaciones y catálogo responden 409 `This change requires a version in edit mode.` (sólo el alta de un proyecto, `POST /api/projects`, sigue directa).
 
 **Un changeset pertenece a UN proyecto** (`changesets.projectId`, doc 75 D2): cada cambio del draft debe ser de una entidad de ese proyecto (guard I1: `payload.projectId` lo estampa el servidor con el del changeset; una referencia a una entidad de OTRO proyecto — tabla, columna, dominio, esquema — es 409 `CrossProjectError`, guard I2). Las versiones (`versionLabel` `vN`), la producción vigente y el rollback son **por proyecto**: `v3` de «Modelo DDV» y `v3` de «UDV INT FISICO» son versiones distintas e independientes.
 
 **Ciclo de vida del proyecto (doc 75 D5)**: `projects` sigue en `VERSIONED`, pero con asimetría: **crear** es directo (`POST /api/projects` = doc + estándares vacíos o copiados + marcador `v1`, en una request); **renombrar/describir/borrar** van SIEMPRE por un draft del propio proyecto (guard `entityId == cs.projectId`). El borrado es UN cambio `projects/<pid> op=delete`; al aplicarse (approve con unanimidad) el servidor corre `cascade_delete`: soft-delete (`flgactive:false` + `deletedAt` + `deletedIn:<csId>`) de TODO lo del proyecto (`CASCADE_COLLECTIONS` = `PROJECT_SCOPED` menos `changesets` y `standards_versions`, que se conservan como historial) y `$pull` del pid en `users.projectIds`. Después, toda ruta `/api/projects/{pid}/…` responde 404 «Project not found.» y las operaciones sobre sus changesets 409 «This project was deleted.». Restaurar un proyecto borrado está fuera de alcance.
 
-**Data Standards** se versiona **aparte** (no por el changeset) y **por proyecto** (doc 75 D3): `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config` y (doc 30) `ddl_rules` + `ddl_ruleset_config` del proyecto se escriben directo a producción y cada apply/rollback deja una versión con **snapshot completo** en `standards_versions` con el `projectId` del proyecto; `seq`/`label` (`vN`) arrancan en 1 en cada proyecto. Las reglas DDL y su config mutan SOLO vía `POST /api/projects/{pid}/standards/apply` (`rulesUpsert`/`rulesDelete`/`ddlConfigPatch`); el router `/api/projects/{pid}/ddl-rules` es de lectura. Un proyecto nuevo nace con estándares vacíos o copia bloques (`glossary` · `domains` · `udp` · `naming` · `ddl`) de otro proyecto (`copyFrom`, versión `kind=copy`).
+**Data Standards** se versiona **aparte** (no por el changeset) y **por proyecto** (doc 75 D3): `parent_domains`, `glossary_terms`, `udp_definitions`, `naming_config` y (doc 30) `ddl_rules` + `ddl_ruleset_config` del proyecto se escriben directo a producción y cada apply/rollback deja una versión con **snapshot completo** en `standards_versions` con el `projectId` del proyecto; `seq`/`label` (`vN`) arrancan en 1 en cada proyecto. Las reglas DDL y su config mutan SOLO vía `POST /api/projects/{pid}/standards/apply` (`rulesUpsert`/`rulesDelete`/`ddlConfigPatch`); el router `/api/projects/{pid}/ddl-rules` es de lectura. Doc 105 (D1b): lo mismo para términos, dominios y naming — su CRUD directo, `propagate` y `rephysicalize` responden 409 —, un upsert con el id de un estándar de otro proyecto (o de uno borrado de este) responde 409 antes de escribir, y un apply sin cambios efectivos (upserts idénticos y bajas de ids ajenos o inexistentes se descartan) responde 422 sin registrar versión. Un proyecto nuevo nace con estándares vacíos o copia bloques (`glossary` · `domains` · `udp` · `naming` · `ddl`) de otro proyecto (`copyFrom`, versión `kind=copy`).
 
 **No versionado**: `users`, `roles`, `saved_reports`, `audit_log`, `changesets`, `changeset_changes`.
 
@@ -155,6 +158,9 @@ Desde el doc 75 el pool de tablas/columnas es **por proyecto**: `projectId` en c
 | physicalName | str | — | nombre físico (DDL); único por proyecto (CI, soft-delete aparte) |
 | logicalName | str | — | nombre lógico (negocio) |
 | **schema** | str? | null | **alias** de `sql_schema`; el nombre del esquema (ref `schemas.name` **por nombre**) |
+| physicalNameOverridden | bool | false | doc 68: físico editado a mano (o heredado de la BD real) — el re-derivado del glosario no lo pisa; lo estampa el changeset (flag del payload o físico ≠ derivado) |
+| logicalOnly | bool | false | doc 69: existe sólo en la faceta lógica (`Is_Logical_Only` de Erwin) |
+| physicalOnly | bool | false | doc 69: existe sólo en la faceta física (`Is_Physical_Only`) |
 | description | str? | null | definición funcional |
 | udpValues | dict[str,str] | {} | `{udpDefId: value}` (valores de las etiquetas UDP nivel table) |
 
@@ -164,16 +170,22 @@ Desde el doc 75 el pool de tablas/columnas es **por proyecto**: `projectId` en c
 | id | str | uuid4 | PK |
 | projectId | str | — | ref `projects.id` (= el de su tabla) |
 | tableId | str | — | ref `canonical_tables.id` |
-| physicalName | str | — | |
+| physicalName | str | — | por un changeset se graba con el `case` del naming del scope `column` (doc 83); doc 105 (rondas 4 y 5): un físico que ya existe para la columna —publicado o pendiente— y que el cambio repite tal cual se conserva aunque esté fuera de la regla |
 | logicalName | str | — | |
 | parentDomainId | str? | null | ref `parent_domains.id` (un dominio DEL MISMO proyecto) |
 | dataType | str | — | tipo físico |
 | typeOverridden | bool | false | true = `dataType` es override manual (no hereda del dominio) |
+| logicalDataType | str? | null | doc 69: tipo LÓGICO (`dataType` sigue siendo el físico); `null` = no informado |
+| logicalTypeOverridden | bool | false | override manual del tipo lógico respecto del `logicalDataType` del dominio |
+| logicalOnly | bool | false | doc 69: existe sólo en la faceta lógica |
+| physicalOnly | bool | false | doc 69: existe sólo en la faceta física |
+| physicalNameOverridden | bool | false | doc 68: override manual del nombre físico (lo estampa el changeset: flag del payload o físico ≠ derivado); doc 105 (ronda 5): el físico existente que un cambio repite tal cual conserva su flag (el del payload o, si no viene, el del nombre existente) |
 | isPrimaryKey | bool? | null | |
 | isForeignKey | bool? | null | |
 | isNullable | bool | true | |
 | isPartition | bool | false | columna de partición (DDL emite `PARTITIONED BY`) |
 | description | str? | null | definición funcional a nivel columna |
+| physicalDescription | str? | null | doc 85: descripción FÍSICA (Comment de Erwin; el DDL la emite como COMMENT con fallback a `description`); `null` = igual a la lógica |
 | ordinal | int | 0 | **orden único** de la columna en la tabla (el mismo en el modelo lógico y el físico; doc 74) |
 | udpValues | dict[str,str] | {} | `{udpDefId: value}` |
 
@@ -246,8 +258,13 @@ Cabecera del changeset (los cambios en sí viven en `changeset_changes`).
 | approvals | dict[str,dict] | {} | `{userId: {status:'approved'|'rejected', note?, at}}` |
 | comments | list[dict] | [] | `{author, text, at}` |
 | createdAt / updatedAt / submittedAt / reviewedBy / reviewedAt / reviewNote | str? | null | timestamps + compat de revisión single |
-| appliedAt | str? | null | timestamp del apply EXITOSO a producción (`approved` sin `appliedAt` = murió a mitad; recuperable con `scripts/reapply_changeset.py`) |
-| restoredFrom | dict? | null | doc 65: `{id, versionLabel}` de la versión restaurada por un rollback |
+| appliedAt | str? | null | timestamp del apply EXITOSO a producción (`approved` sin `appliedAt` = el proceso murió a mitad; doc 105: `scripts/reapply_changeset.py` la devuelve a revisión — `recover_interrupted_publish`; un claim de menos de 30 min se saltea salvo `--force` — y el revisor re-aprueba). Se estampa con una transición condicionada al claim (`appliedAt: None` + `reviewedAt`): un publish cuya versión volvió a revisión en el medio no la deja «en revisión con `appliedAt`» |
+| restoredFrom | dict? | null | doc 65: `{csId, versionLabel, appliedAt}` de la versión publicada que restaura un rollback |
+| requests | list[dict] | [] | doc 88 §6: historial de solicitudes, un registro por envío |
+| transfers | list[dict] | [] | doc 104: `{from, to, by, at, note?}` en orden; `owner` es el dueño ACTUAL y `transfers[0].from` quien la inició |
+| partialApplyAt | str? | null | doc 104: un approve falló cuando YA escribía producción (parte pudo llegar): el draft no se elimina, se re-envía; re-editar no la borra. Doc 105: la pone también `recover_interrupted_publish` (conservadora) |
+| uploadLock | dict? | null | doc 105 (X1): `{jobId, owner, at, heartbeat}` (epoch) de la carga Excel que ESTÁ escribiendo — «un apply por versión» para los dos procesos de uvicorn; transferir, eliminar y enviar a revisión lo respetan en su misma sentencia; un latido de más de 10 min = su proceso murió (se ignora) |
+| restoreIncomplete | bool? | null | doc 105: draft de restauración mientras se graban sus inversos; si queda en `true` (el proceso murió), `submit` responde 409 y se elimina y restaura de nuevo |
 
 > `deletesProject` NO se persiste: se **deriva en lectura** (existe el cambio `projects/<projectId> op=delete` en el ledger) y viaja en `version_row`, en el detalle del changeset y en `diff.impact.deletesProject` (`{projectId, name, counts}`) para el aviso crítico del aprobador (doc 75 D5/D20).
 
@@ -262,8 +279,8 @@ Un doc **por cambio**. `_id` determinista ⇒ last-write-wins por entidad.
 | op | str | — | `upsert` \| `delete` |
 | payload | dict? | null | el **doc COMPLETO** de la entidad (para `upsert`) |
 | at | str? | null | ISO: baseline de conflicto vs producción |
-| before | dict? | null | imagen PREVIA de la entidad publicada (alimenta el rollback = draft inverso) |
-| beforeAt | str? | null | `before=null` + `beforeAt` estampado = la entidad no existía (inverso = delete) |
+| before | dict? | null | imagen PREVIA de la entidad publicada (alimenta el rollback = draft inverso); el publish la estampa en lote antes de escribir (doc 105) |
+| beforeAt | str? | null | `before=null` + `beforeAt` estampado = la entidad no existía (inverso = delete). Doc 105 (H4): re-editar la entidad en el draft ARRASTRA `before`/`beforeAt` (también en deletes); un re-approve conserva las ya estampadas sólo si la cabecera tiene `partialApplyAt` y, si no, las re-captura |
 | origin | dict? | null | doc 51: procedencia del cambio (`paste`, `ctas`, `upload`…) |
 
 `payload.projectId` lo estampa el servidor con el `projectId` del changeset (guard I1): un cliente no puede colar un doc de otro proyecto.
@@ -302,6 +319,11 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | defaultDataType | str | — | tipo que heredan las columnas del dominio (sin override) |
 | namingTerm | str? | null | término de naming sugerido por el dominio |
 | description | str? | null | |
+| logicalDataType | str? | null | doc 69: tipo LÓGICO del dominio (`defaultDataType` es el físico) |
+| inheritsName | bool | false | doc 79: dominio «atributo estándar» — al asignarlo, el atributo hereda su nombre y su definición |
+| physicalName | str? | null | doc 85: faceta física; `null` = derivado del nombre lógico con el naming del scope `column` (no se persiste); texto = override |
+| physicalDescription | str? | null | doc 85: descripción física; `null` = igual a la lógica |
+| udpValues | dict[str,str]? | null | doc 85: valores POR DEFECTO de UDP de columna (`{udpDefId: value}`, ambas facetas) que hereda quien asigna el dominio; el reporting y el DDL no los leen. Doc 105 (ronda 5): `standards/apply` los valida por el tipo de su definición (422) |
 
 ### `glossary_terms` — AbbreviationDoc  *(diccionario de abreviaturas lógico↔físico)*
 | Campo | Tipo | Default | Notas |
@@ -325,9 +347,11 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | name | str | — | la KEY visible (p. ej. `"Clasificación del Dato"`) |
 | level | str | "column" | `table` \| `column` \| `canvas` \| `view` (doc 61) |
 | dataType | str | "string" | `string` \| `number` \| `boolean` \| `date` \| `list` |
-| defaultValue | str? | null | |
+| defaultValue | str? | null | doc 105 (rondas 5–6): validado por `dataType` al aplicar y grabado normalizado (ver abajo) |
 | allowedValues | list[str] | [] | enum cuando `dataType='list'` (p. ej. `[DAC, NO DAC, …]`) |
 | description | str? | null | |
+
+> **Valores de UDP por tipo (doc 105, ronda 5).** Un valor de UDP se guarda como TEXTO (`udpValues` de tablas, columnas, vistas, canvases y dominios; `defaultValue` de la definición). `standards/apply` valida el `defaultValue` de cada definición del lote y los `udpValues` de los dominios contra el `dataType` —`boolean` normalizado a `true`/`false` (grafías de `app/core/udp_values.py`: `true`, `1`, `sí`, `yes`, `verdadero` y `false`, `0`, `no`, `falso`), `number` finito y en su forma canónica (`canonical_number`: «10.50» se graba «10.5», «1e3» se graba «1000»; ronda 6), `date` ISO `YYYY-MM-DD` real (de una fecha-hora ISO, sólo la fecha; ronda 6) y `list` dentro de `allowedValues` (comparado sin bordes, con los espacios internos colapsados y sin distinguir mayúsculas —`list_key`—; se graba la grafía de la lista)— y responde 422 con el primero inválido (de un dominio, sólo los valores que cambian: ronda 6); la carga Excel aplica las mismas reglas a sus celdas y a los defaults (`invalid-udp-value`), y el motor del Reporting filtra un UDP `boolean` con esas grafías y busca un UDP `number` también por esa forma canónica. Antes se grababa cualquier texto. Los `udpValues` que escribe un cambio de changeset NO se validan por tipo.
 
 ### `naming_config` — NamingConfigDoc
 **1 doc por (proyecto, scope)**; `_id = "<projectId>:<scope>"` (`scope.naming_id`; no hay campo `id`).
@@ -337,9 +361,9 @@ Historial append-only; cada apply/rollback = una versión con snapshot completo.
 | projectId | str | — | ref `projects.id` (parte de la clave natural) |
 | separator | str | "" | separador al concatenar términos |
 | case | str | "upper" | `upper` \| `lower` \| `camel` |
-| maxLength | int | 150 | límite de caracteres del nombre físico |
+| maxLength | int | 150 | límite de caracteres del nombre físico; `0` = sin límite (doc 105) |
 
-Si falta un scope en un proyecto, el repo lo siembra con `DEFAULTS` (`separator:"", case:"upper", maxLength:150` para ambos); el kit lo siembra con `$setOnInsert` (no pisa un naming ya editado).
+Si falta un scope en un proyecto, el repo lo siembra con `DEFAULTS` (`separator:"", case:"upper", maxLength:150` para ambos); el kit lo siembra con `$setOnInsert` (no pisa un naming ya editado). Doc 105 (revisión R2): al LEER, un valor guardado que el motor no puede usar (`case` fuera de `upper`/`lower`/`camel`, `maxLength` que no es un entero ≥ 0 —un booleano tampoco—, `separator` que no es texto) cae al default del scope y se registra en el log (`invalid naming config value ignored`; regla `settings.repository._usable`, la misma que usan el rollback de estándares —`restore_naming` graba `null` lo inválido o ausente del snapshot, que al leer es el default— y el kit Erwin, que lee la colección directo); al escribir, `standards/apply` ya los rechaza con 422 y decide si hay cambio comparando contra lo guardado sin enmascarar, así que regrabar el valor visible limpia un inválido guardado.
 
 ### `ddl_rules` — DdlRuleDoc  *(DDL Export Rules, doc 30)*
 Reglas que transforman el TEXTO SQL del Export DDL según valores de UDP; nunca tocan el modelo ni la data (los artefactos que generan viven solo en el `.sql` exportado). Sin versionado propio: entran al snapshot de `standards_versions` del proyecto y mutan SOLO vía `POST /api/projects/{pid}/standards/apply` (`rulesUpsert`/`rulesDelete`); el router `/api/projects/{pid}/ddl-rules` es de lectura.
@@ -430,7 +454,7 @@ Formato Excel FIJO del Reporting guardado como dato (se exporta desde el front c
 | id | str | uuid4 | PK |
 | projectId | str | — | ref `projects.id` (alcance; índice `projectId`) |
 | name | str | — | 1–80; único (CI) entre las que ve quien escribe (las suyas + las compartidas) |
-| sheetName | str | — | nombre de la hoja: 1–31, sin `: \ / ? * [ ]` |
+| sheetName | str | — | nombre de la hoja: 1–31, sin `: \ / ? * [ ]`. Doc 105: al ESCRIBIR el tope se cuenta en unidades UTF-16, como Excel y SheetJS; al LEER no rige (una plantilla guardada antes con ≤ 31 code points —p. ej. con un emoji— no deja en 500 el listado del proyecto y se puede abrir para corregirla) |
 | description | str? | null | |
 | columns | list[{header, source}] | — | 1–200; `header` único (CI); `source` = `table.<campo>` · `column.<campo>` · `table.udp:<nombre>` · `column.udp:<nombre>` |
 | shared | bool | false | compartida con el proyecto (spec D11: «dueño + compartida, como los saved reports»); la sembrada nace compartida |
@@ -438,6 +462,28 @@ Formato Excel FIJO del Reporting guardado como dato (se exporta desde el front c
 | origin | str | "user" | `user` \| `builtin:qa-modelo` (la «QA_MODELO» sembrada por el one-shot o el botón) |
 | createdBy / updatedBy | str? | null | |
 | createdAt / updatedAt | str? | null | + `flgactive`/`deletedAt` (soft-delete) |
+
+### `upload_jobs`  *(en `bulk_upload/jobs.py`, doc 105 — sin modelo `*Doc`)*
+Estado de cada job de la carga masiva desde Excel. Vive en la BD (antes en la memoria del proceso) porque con `uvicorn --workers 2` el POST que crea el job, el polling, el apply y el descarte pueden caer en procesos distintos; sólo la task que valida o aplica es del proceso que la lanzó.
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| _id | str | `uuid4().hex` |
+| csId | str | ref `changesets.id` (la versión donde se carga) |
+| owner | str | ref `users.id` (índice `owner`: tope de 20 jobs por usuario y desalojo) |
+| fileName | str | nombre del workbook |
+| status | str | `validating` \| `validated` \| `applying` \| `applied` \| `failed` |
+| progress | dict | `{phase, done, total}`; cada escritura de avance es también su latido |
+| report / result / error | dict? / dict? / str? | reporte de validación, resultado del apply (`{affectedCanvasIds, counts}`), motivo de falla |
+| createdAt / updatedAt | float | **epoch** (segundos), no ISO — a diferencia del resto |
+
+Un job activo sin avance en 10 min es de un proceso que murió: se informa `failed` («The upload stopped unexpectedly…») y se puede descartar. Los terminados se desalojan (borrado físico, sin soft-delete) cuando pasaron 30 min desde su última actualización — el desalojo corre al crear un job nuevo. Robustez con dos procesos (doc 105, revisión R1): el desalojo y el tope por usuario borran con el predicado en la MISMA sentencia (un job que otro proceso reclamó en el medio ya no cumple y no se va); el descarte vuelve a leer si el estado cambió entre su lectura y su borrado (hasta 3 veces; si sigue cambiando, «busy»); y el alta inserta el job ANTES que su cuerpo (al revés, una caída en el medio dejaba un cuerpo que ningún desalojo encontraba; si el cuerpo falla, el job se retira). El lock de «un apply por versión» NO vive acá: es `changesets.uploadLock`.
+
+### `upload_job_bodies`  *(en `bulk_upload/jobs.py`, doc 105)*
+`{ _id (= _id del job), body (el UploadWorkbookBody: hojas crudas + profileId), createdAt (epoch) }`. Lo lee el apply —en el proceso que lo tome— para re-validar; se borra cuando ya no sirve (al terminar un job que no quedó `validated`, al descartarlo o al desalojarlo); el desalojo barre además los cuerpos sin job de más de 40 min (el job se borra antes que su cuerpo: si lo segundo fallaba, el cuerpo quedaba huérfano), a lo más una vez cada 30 min por proceso (`SWEEP_EVERY_SECONDS`, ronda 4: leer los cuerpos costaba en cada carga).
+
+### `deleted_changesets`  *(en `changesets/repository.py`, doc 105 — lápidas)*
+`{ _id (= "<csId>:<uuid>"), csId (el changeset que se elimina), at (epoch) }` — una por INTENTO de eliminación, así dos intentos en paralelo no se pisan. `delete_changeset` la escribe ANTES de borrar la cabecera y retira sólo la suya al terminar (o si la condición del borrado ya no se cumplía). Si el proceso muere entre la cabecera y sus cambios, la lápida queda. La purga del arranque (`purge_orphan_changes`) agrupa las lápidas por `csId` (una legada sin `csId` usa su `_id`): si la cabecera ya no existe, borra ya los cambios de esa versión y retira sus lápidas; si sigue viva, sólo retira las leídas de más de 10 min (`TOMBSTONE_GRACE_SECONDS`). Sin índices propios.
 
 ### `audit_log`  *(append-only, `_id` = ObjectId auto)*
 Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: str, targetType?: str, meta?: dict }`. Sin soft-delete.
@@ -478,6 +524,11 @@ Shape (de `core/audit.py`): `{ at: str(ISO), actor: str, action: str, target?: s
 | projects | deletedIn (fuera del modelo) | changesets.id | id |
 | users | role | roles.id | key |
 | saved_reports | owner | users.id | username |
+| upload_jobs | csId | changesets.id | id |
+| upload_jobs | owner | users.id | username |
+| upload_job_bodies | _id | upload_jobs._id | id |
+| changesets | uploadLock.jobId | upload_jobs._id | id |
+| deleted_changesets | csId (y el prefijo de `_id`) | changesets.id (ya eliminado) | id |
 | audit_log | actor | users.id | username |
 | ddl_rules | udpRefs[].udpId | udp_definitions.id | id |
 | ddl_ruleset_config | lookups.*.fromUdpId | udp_definitions.id | id |
@@ -510,7 +561,7 @@ Solo **descripción del estado actual** (no recomendaciones de destino):
 4. **`_id` especiales**: `changeset_changes._id` es DETERMINISTA (`{csId}::{collection}::{entityId}`); `naming_config._id = "<projectId>:<scope>"`; `users._id = username`; `roles._id = key`; `ddl_ruleset_config._id = projectId`; `audit_log._id` = ObjectId auto. El resto = `id` uuid4 (los migrados desde Erwin: `uuid5("<projectId>|<Long_Id>")`, doc 75 D11 — el mismo objeto Erwin cargado en dos proyectos tiene ids distintos).
 5. **Alias `schema`**: en `canonical_tables` y `views` el atributo Python es `sql_schema` pero el campo persistido es `schema`.
 6. **Campos legacy/aditivos fuera del modelo**: por `extra="ignore"`, los docs persistidos pueden traer `migratedFrom`, `erwinLongId`, `flgactive`, `deletedAt`, `deletedIn` (cascada de borrado de proyecto), y (relaciones pre-v2) `sourceTableId`/`targetTableId`. **Están en la BD aunque el modelo no los liste** — mirar el doc real al migrar.
-7. **Colecciones sin `*Doc`**: `saved_reports` (modelo en `reporting/query/reports.py`) y `audit_log` (shape en `core/audit.py`).
+7. **Colecciones sin `*Doc`**: `saved_reports` (modelo en `reporting/query/reports.py`), `audit_log` (shape en `core/audit.py`) y — doc 105 — `upload_jobs` / `upload_job_bodies` (shape en `bulk_upload/jobs.py`; timestamps epoch; borrado físico por TTL) y `deleted_changesets` (lápidas `{_id: "<csId>:<uuid>", csId, at}`, `changesets/repository.py`).
 8. **Retiradas**: `column_catalog` (del planteamiento inicial con agente conversacional, descartado — doc 54): ya no se pre-crea ni se preserva; el reset destructivo la elimina.
 9. **Foto de la data**: la BD vigente (cargada antes del doc 75, 2026-09-07) tiene los 4 XML de `folder_data/` en 2 proyectos y SIN `projectId` en los docs de estándares — es incompatible con este esquema y se reemplaza con el one-shot `scripts/run_migration.py --folder ../folder_data --apply --force` (destructivo), que deja **3 proyectos** según la convención del doc 77 (subcarpeta = un proyecto; `.xml` suelto = un proyecto): «MODELO DDV» (la carpeta con CPYBCA + Otros), «UDV INT FISICO» y «UDV INT LOGICO» (un archivo cada uno), cada uno con sus estándares (unión distinta de sus archivos), su ruleset DDL base y su `v1`.
 10. **Versiones vigentes (por proyecto)**: cada proyecto tiene su `v1 Base` — un changeset MARCADOR (status `approved`, `appliedAt` estampado, 0 docs en `changeset_changes`, `projectId` del proyecto) creado por `scripts/mark_base_version.py` (o por `POST /api/projects` para un proyecto nuevo); sin él la web bloquea el módulo Model para ese proyecto. Las cargas de migración Erwin escriben DIRECTO a las colecciones publicadas, sin crear changesets. Data Standards de cada proyecto tiene `v1` (baseline) + `v2` "Base — DDL export rules"; los estándares vivos DERIVARON de esos snapshots — no hacer rollback de Standards de un proyecto hasta registrar una baseline nueva en ese proyecto.

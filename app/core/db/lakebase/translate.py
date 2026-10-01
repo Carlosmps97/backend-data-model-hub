@@ -350,7 +350,9 @@ def projection_expr(projection: dict | None, s: Sql, doc: str = "doc") -> str:
     if not projection:
         return doc
     keys = {k: v for k, v in projection.items() if k != "_id"}
-    include_mode = any(bool(v) for v in keys.values())
+    # Doc 105 (P9): `{"_id": 1}` a secas es INCLUSIÓN de `_id` (Mongo devuelve
+    # sólo el id); leída como exclusión vacía traía el documento completo.
+    include_mode = any(bool(v) for v in keys.values()) or (not keys and bool(projection.get("_id", 1)))
     if include_mode and any(not v for v in keys.values()):
         raise NotImplementedError("Proyección mixta inclusión/exclusión")
     if not include_mode:

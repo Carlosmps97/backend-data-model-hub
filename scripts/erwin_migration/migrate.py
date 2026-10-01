@@ -81,6 +81,7 @@ from app.core.facets import normalize_udp_view
 from app.core.naming import physicalize
 from app.core.scope import PROJECT_SCOPED, naming_id
 from app.features.settings.models import DEFAULTS as NAMING_DEFAULTS
+from app.features.settings.repository import _usable as _naming_usable
 
 from . import erwin_parser as ep
 from . import policies as pol
@@ -115,6 +116,17 @@ def _col_type(t: str) -> str:
     return raw or "STRING"
 
 
+def _canvas_contributors(canvas: dict) -> list[str]:
+    """Doc 105 (R2): diagramas de Erwin que aportaron al canvas. Los canvases
+    escritos antes de `erwinLongIds` sólo tienen `erwinLongId` — el último
+    archivo que lo escribió: si difiere del diagrama que lo creó, hubo fusión.
+    Puro."""
+    ids = list(canvas.get("erwinLongIds") or [])
+    if not ids and canvas.get("erwinLongId"):
+        ids = [canvas["erwinLongId"]]
+    return ids
+
+
 class Migrator:
     def __init__(self, db, model: ep.ErwinModel, project_name: str | None,
                  only_sa: str | None, keep_unused_udp_defs: bool = False,
@@ -136,7 +148,10 @@ class Migrator:
             "cols_dropped": [], "partitions_reassigned": [],
             "views_discarded": [], "udp_defs_skipped": [], "glossary_conflicts": [],
             "domain_conflicts": [], "udp_values_unmatched": [],
+            "deleted_in_app": [],        # doc 105: tablas borradas en la app que el XML aún trae
+            "rels_deleted_in_app": [],   # doc 105: relaciones omitidas por una de esas tablas
         }
+        self.dead_entities: set[str] = set()   # entidades Erwin cuya tabla se borró en la app
         self._buf: dict[str, list[UpdateOne]] = defaultdict(list)
         self.ops_flushed = 0
         # Doc 75: el proyecto PRIMERO — es el namespace de ids y el alcance de
@@ -272,6 +287,7 @@ class Migrator:
         db = self.db
         active = {**_ACTIVE, "projectId": self.project_id}
         self.ex_tables: dict[tuple[str, str], dict] = {}
+        self.ex_table_ids: set[str] = set()     # doc 105 (R2): tablas vivas del proyecto
         # Política _DUPn (2026-08-22): el físico es único POR PROYECTO (doc 50 +
         # doc 75) → censo de nombres tomados + continuidad por erwinLongId para
         # que los re-runs conserven el sufijo asignado (sin ratchet _DUPn+1).
@@ -282,6 +298,7 @@ class Migrator:
             phys = t.get("physicalName") or ""
             key = ((t.get("schema") or "").upper(), phys.upper())
             self.ex_tables[key] = {"_id": t["_id"]}
+            self.ex_table_ids.add(t["_id"])
             if phys:
                 self.taken.add(phys.upper())
             if t.get("erwinLongId"):
@@ -289,9 +306,37 @@ class Migrator:
                     "_id": t["_id"], "physicalName": phys,
                     "schema": t.get("schema") or ""}
         self.ex_views: dict[tuple[str, str], str] = {}
+        self.ex_view_ids: set[str] = set()      # doc 105 (P7): vistas vivas del proyecto
         for v in db.views.find(active, {"schema": 1, "name": 1}):
             self.ex_views[((v.get("schema") or "").upper(),
                            (v.get("name") or "").upper())] = v["_id"]
+            self.ex_view_ids.add(v["_id"])
+        # Doc 105 (R5): tablas y vistas BORRADAS en la app. El kit no las revive
+        # (`flgactive` sólo al insertar: lo decide el owner) y, si el XML aún
+        # las dibuja, su id no debe volver a un canvas (colgando = 409 al guardar).
+        # Ronda 4: también por CLAVE NATURAL — en una familia, el archivo que la
+        # había adoptado trae OTRO id propio y la daba de alta nueva y viva al
+        # re-correr la carpeta. (Se consulta sólo si no hay homónima VIVA.)
+        dead = {"flgactive": False, "projectId": self.project_id}
+        self.dead_table_ids: set[str] = set()
+        self.dead_tables_by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
+        # Ronda 7 (R18b): de cada tabla borrada, el nombre con el que EXISTIÓ
+        # (clave del reporte) y la entidad de Erwin que la escribió (el fallback
+        # por clave no puede comerse la tabla de OTRA entidad del mismo XML).
+        self.dead_table_names: dict[str, str] = {}
+        self.dead_table_owner: dict[str, str | None] = {}
+        for t in db.canonical_tables.find(dead, {"schema": 1, "physicalName": 1, "erwinLongId": 1}):
+            self.dead_table_ids.add(t["_id"])
+            schema, phys = (t.get("schema") or ""), (t.get("physicalName") or "")
+            self.dead_tables_by_key[(schema.upper(), phys.upper())].append(t["_id"])
+            self.dead_table_names[t["_id"]] = f"{schema}.{phys}".upper()
+            self.dead_table_owner[t["_id"]] = t.get("erwinLongId")
+        self.dead_view_ids: set[str] = set()
+        self.dead_views_by_key: dict[tuple[str, str], str] = {}
+        for v in db.views.find(dead, {"schema": 1, "name": 1}):
+            self.dead_view_ids.add(v["_id"])
+            self.dead_views_by_key.setdefault(
+                ((v.get("schema") or "").upper(), (v.get("name") or "").upper()), v["_id"])
         self.ex_schemas: dict[str, str] = {
             (s.get("name") or "").upper(): s["_id"]
             for s in db.schemas.find(active, {"name": 1})}
@@ -320,13 +365,16 @@ class Migrator:
         # config del proyecto, si existe, manda).
         self.naming_cfg: dict[str, tuple[str, str]] = {
             sc: (cfg["separator"], cfg["case"]) for sc, cfg in NAMING_DEFAULTS.items()}
+        # Doc 105 (R5): un valor que el motor no puede usar (p. ej. un `case`
+        # que volvió por un rollback viejo) cae al default del scope, como al
+        # leer en la app (`settings.repository._usable`); antes abortaba la carga.
         for n in db.naming_config.find({"projectId": self.project_id}):
             sc = n.get("scope")
             if sc in self.naming_cfg:
                 cur = self.naming_cfg[sc]
                 self.naming_cfg[sc] = (
-                    n["separator"] if n.get("separator") is not None else cur[0],
-                    n.get("case") or cur[1])
+                    n["separator"] if _naming_usable("separator", n.get("separator")) else cur[0],
+                    n["case"] if _naming_usable("case", n.get("case")) else cur[1])
         # Doc 69: reuso por (nombre, nivel, FACETA) — las defs pre-doc 69 sin
         # `view` son físicas (normalize_udp_view).
         self.ex_udp: dict[tuple[str, str, str], dict] = {}
@@ -341,15 +389,28 @@ class Migrator:
         # R4 — sin él en la proyección, Lakebase no lo devuelve y una
         # subcategoría ya migrada nunca se reconocía (se re-escribía o entraba
         # repetida desde otro archivo de la familia).
+        # Doc 105 (R5): símbolos de subcategoría de las relaciones VIVAS del
+        # proyecto (el canvas guarda su posición en `layout[subtypeSymbolId]`;
+        # misma regla que la auditoría C9).
+        self.symbol_ids: set[str] = set()
         for r in db.relationships.find(active, {"parentTableId": 1, "childTableId": 1,
-                                                "pairs": 1, "identifying": 1, "subcategory": 1}):
+                                                "pairs": 1, "identifying": 1, "subcategory": 1,
+                                                "subtypeSymbolId": 1}):
             self.db_rel_count[r.get("parentTableId")] += 1
             self.db_rel_count[r.get("childTableId")] += 1
             self.db_rels_raw.append(r)
+            if r.get("subtypeSymbolId"):
+                self.symbol_ids.add(r["subtypeSymbolId"])
         self.db_canv_count: Counter = Counter()
         self.db_canvases: list[dict] = []
+        # Doc 105: `viewIds` (P7) y `drawings` (A2-o2) en la proyección — sin
+        # ellos, en Lakebase la fusión R8 partía de [] y el canvas perdía sus
+        # vistas y sus dibujos. R2: los aportes (`erwinLongId`/`erwinLongIds`)
+        # deciden si la re-corrida de un canvas es fusión.
         for sa in db.subject_areas.find(active, {"name": 1, "folderId": 1, "projectId": 1,
-                                                 "tableIds": 1, "layout": 1, "udpValues": 1}):
+                                                 "tableIds": 1, "viewIds": 1, "layout": 1,
+                                                 "drawings": 1, "udpValues": 1,
+                                                 "erwinLongId": 1, "erwinLongIds": 1}):
             for tid in set(sa.get("tableIds") or []):
                 self.db_canv_count[tid] += 1
             self.db_canvases.append(sa)
@@ -561,6 +622,42 @@ class Migrator:
         return out
 
     # ---------- tablas (R1/R2/_DUPn/R5/R6) ----------
+    def _dead_by_key(self, e, schema: str, eff_name: str) -> str | None:
+        """Tabla borrada en la app que corresponde a la entidad por CLAVE natural
+        —su nombre efectivo, o su físico crudo del XML (ronda 5: con una homónima
+        viva en otro esquema, `_resolve_dup_names` le da `_DUPn`)— o None.
+        Ronda 7 (R18b): no si la borrada es de OTRA entidad de este mismo XML
+        (una homónima NUEVA se omitía como «borrada en la app»), y el crudo no
+        si ese (esquema, físico) tiene una tabla VIVA."""
+        keys = [(schema.upper(), eff_name.upper())]
+        raw = (schema.upper(), (e.physical or "").upper())
+        if raw != keys[0] and raw not in self.ex_tables:
+            keys.append(raw)
+        for key in keys:
+            for dead_id in self.dead_tables_by_key.get(key, []):
+                owner = self.dead_table_owner.get(dead_id)
+                if owner is None or owner == e.id or owner not in self.m.entities:
+                    return dead_id
+        return None
+
+    def _forget_dup_rename(self, erwin_id: str) -> None:
+        """Doc 105 (ronda 6, R16/K1): una entidad que se OMITE (tabla borrada
+        en la app) no es una copia `_DUPn`: se saca del reporte y de la
+        estadística que `_resolve_dup_names` ya había anotado — la hoja «Tablas
+        homónimas» listaba una copia que no existe."""
+        stat = "tablas duplicadas → renombradas con sufijo _DUPn"
+        for group in list(self.report["renamed_dups"]):
+            kept = [r for r in group["renamed"] if r["erwinLongId"] != erwin_id]
+            if len(kept) == len(group["renamed"]):
+                continue
+            self.stats[stat] -= len(group["renamed"]) - len(kept)
+            if self.stats[stat] <= 0:
+                del self.stats[stat]
+            if kept:
+                group["renamed"] = kept
+            else:
+                self.report["renamed_dups"].remove(group)
+
     def _resolve_dup_names(self) -> dict[str, str]:
         """Nombres EFECTIVOS por entidad (política 2026-08-22, reemplaza el
         alias R3): TODAS las copias se migran como tablas reales; los
@@ -698,6 +795,27 @@ class Migrator:
             else:
                 pid = existing_id or own_pid  # re-run del mismo archivo o nueva
 
+            # Ronda 5: también por el físico CRUDO del XML — con una homónima viva
+            # en otro esquema, `_resolve_dup_names` la renombra `_DUPn` y la
+            # clave efectiva ya no era la de la borrada.
+            dead_id = pid if pid in self.dead_table_ids else (
+                None if existing_id else self._dead_by_key(e, schema, eff[e.id]))
+            if dead_id:
+                # Doc 105: borrada en la app (por su id, o por su clave sin
+                # homónima viva: otro archivo de la familia). El kit no la revive
+                # (lo decide el owner) ni la toca, y sin ella en `table_pid`
+                # tampoco le cuelga columnas, relaciones ni vistas NUEVAS del XML
+                # (quedaban ACTIVAS colgando de una tabla muerta).
+                # Ronda 6 (R16/K1): la clave es el físico con el que existió (no el
+                # `_DUPn` que le dio `_resolve_dup_names`) y no queda como copia.
+                self.dead_entities.add(e.id)
+                self._forget_dup_rename(e.id)
+                self.report["deleted_in_app"].append({
+                    "key": self.dead_table_names.get(dead_id) or f"{schema}.{e.physical}".upper(),
+                    "tableId": dead_id, "columns": len(e.attributes)})
+                self.stats["tablas borradas en la app (no se reviven; se omiten con sus columnas, "
+                           "relaciones y vistas)"] += 1
+                continue
             self.table_pid[e.id] = pid
             self.schemas_used.add(schema)
             self.schemas_tables.add(schema)
@@ -860,7 +978,13 @@ class Migrator:
             child_t = self.table_pid.get(r.child_ref)    # hijo = lado FK
             parent_t = self.table_pid.get(r.parent_ref)  # padre = lado PK
             if not child_t or not parent_t:
-                self.stats["relaciones omitidas (tabla no migrada)"] += 1
+                if {r.child_ref, r.parent_ref} & self.dead_entities:
+                    # Ronda 5: la decisión queda en el reporte (el de incongruencias
+                    # la contaba como «sin pares de columnas FK resolubles»).
+                    self.report["rels_deleted_in_app"].append({"erwinLongId": r.id, "name": r.name})
+                    self.stats["relaciones omitidas (tabla borrada en la app)"] += 1
+                else:
+                    self.stats["relaciones omitidas (tabla no migrada)"] += 1
                 continue
             rel_pairs, name_pairs = [], []
             for p_attr, c_attr in pairs.get(r.id, []):
@@ -945,16 +1069,38 @@ class Migrator:
                     self.stats["vistas duplicadas → alias de la más usada"] += 1
 
         for v in winners:
-            rels = [r for r in view_rels.get(v.id, []) if r.parent_ref in self.table_pid]
+            schema = pol.schema_or_default(self.schema_of.get(v.id))
+            own_pid = self.pid(v.id)
+            existing_id = self.ex_views.get((schema.upper(), v.name.upper()))
+            dead_id = None if existing_id else (
+                own_pid if own_pid in self.dead_view_ids
+                else self.dead_views_by_key.get((schema.upper(), v.name.upper())))
+            if dead_id:
+                # Doc 105: borrada en la app (por su id o por su clave sin homónima
+                # viva): ni se revive ni se toca.
+                self.report["deleted_in_app"].append({"key": f"{schema}.{v.name}".upper(), "viewId": dead_id})
+                self.stats["vistas borradas en la app (no se reviven)"] += 1
+                continue
+            all_rels = view_rels.get(v.id, [])
+            if any(r.parent_ref in self.dead_entities for r in all_rels) or any(
+                    (o := self.attr_idx.get(a.parent_attr_ref or "")) is not None and o.owner_id in self.dead_entities
+                    for a in v.attributes):
+                # Doc 105 (ronda 4): una fuente es una tabla borrada en la app. No
+                # se re-escribe: su columna caía a `source_pids[0]` (OTRA tabla,
+                # columna inexistente). Si la vista existe viva, queda como la dejó
+                # la app (el publish exigió sacarle esa fuente) y sigue en el canvas.
+                self.report["views_discarded"].append({"view": v.name, "reason": "source deleted in the app"})
+                self.stats["vistas omitidas (fuente borrada en la app)"] += 1
+                if existing_id:
+                    self.view_pid[v.id] = existing_id
+                continue
+            rels = [r for r in all_rels if r.parent_ref in self.table_pid]
             source_pids = list(dict.fromkeys(self.table_pid[r.parent_ref] for r in rels))
             if not source_pids:
                 # R7 (owner 2026-07-24): sin fuente física → se descarta.
                 self.report["views_discarded"].append({"view": v.name})
                 self.stats["vistas omitidas (sin fuente — política R7)"] += 1
                 continue
-            schema = pol.schema_or_default(self.schema_of.get(v.id))
-            own_pid = self.pid(v.id)
-            existing_id = self.ex_views.get((schema.upper(), v.name.upper()))
             if existing_id and existing_id != own_pid:
                 # la vista espejo sigue la suerte de su TABLA fuente (R2);
                 # sin veredicto de tabla este run → se conserva la existente.
@@ -1110,6 +1256,14 @@ class Migrator:
         canvases_by_id = {c["_id"]: c for c in self.db_canvases}
         canvases_by_key = {((c.get("folderId") or ""), (c.get("name") or "").upper()): c
                            for c in self.db_canvases}
+        # Doc 105 (P7): vistas VIVAS = activas del proyecto + las creadas o
+        # adoptadas en esta corrida. La fusión no revive una vista borrada ni
+        # deja un id colgando (el canvas quedaba sin poder editarse). R2: ídem
+        # para las tablas (la fusión sólo filtraba las vistas).
+        # R5: lo borrado en la app no entra a `table_pid`/`view_pid` (`tables()` y
+        # `views()` lo omiten): vivas = las del proyecto + las de la corrida.
+        live_views = self.ex_view_ids | set(self.view_pid.values())
+        live_tables = self.ex_table_ids | set(self.table_pid.values())
         for d in self.m.diagrams:
             if self.only_sa and d.subject_area != self.only_sa:
                 continue
@@ -1123,6 +1277,8 @@ class Migrator:
                 if pid in seen_nodes:      # copias alias → un solo nodo
                     continue
                 seen_nodes.add(pid)
+                if pid not in (live_tables if ref in self.table_pid else live_views):
+                    continue               # R5: borrada en la app — no vuelve al canvas
                 n = len(layout)
                 layout[pid] = {"x": 40 + (n % 4) * 480, "y": 40 + (n // 4) * 360}
                 if ref in self.table_pid:
@@ -1136,29 +1292,51 @@ class Migrator:
             own_cid = self.pid(d.id)
             prev = canvases_by_id.get(own_cid)
             merged = canvases_by_key.get((fid or "", d.name.upper()))
-            doc_udp = dict(model_udp)
             if prev is None and merged is not None:
-                # R8: canvas homónimo del mismo folder (otro archivo) → se
-                # FUSIONA: unión de tablas, layout existente intacto.
-                cid = merged["_id"]
-                table_ids = list(dict.fromkeys((merged.get("tableIds") or []) + table_ids))
-                view_ids = list(dict.fromkeys((merged.get("viewIds") or []) + view_ids))
-                layout = {**layout, **(merged.get("layout") or {})}
-                doc_udp = {**(merged.get("udpValues") or {}), **model_udp}
+                # R8: canvas homónimo del mismo folder (otro archivo) → se FUSIONA.
+                union_with = merged
                 self.stats["canvases fusionados (homónimos de otro archivo)"] += 1
+            elif prev is not None and set(_canvas_contributors(prev)) - {d.id}:
+                # Doc 105 (R2): el canvas fusionado conserva el id del archivo
+                # que lo creó — re-correr ese archivo también es fusión: sin
+                # esto, lo aportado por los otros archivos salía del canvas y
+                # su layout volvía a la grilla.
+                union_with = prev
+                self.stats["canvases re-corridos como fusión (tienen aportes de otros archivos)"] += 1
             else:
-                cid = own_cid
+                union_with = None
+            if union_with is not None:
+                # Unión con los miembros VIVOS previos (lo borrado en la app no
+                # revive ni queda colgando) y layout existente intacto.
+                cid, existing = union_with["_id"], union_with
+                table_ids = list(dict.fromkeys(
+                    [t for t in (existing.get("tableIds") or []) if t in live_tables] + table_ids))
+                view_ids = list(dict.fromkeys(
+                    [v for v in (existing.get("viewIds") or []) if v in live_views] + view_ids))
+                layout = {**layout, **(existing.get("layout") or {})}
+            else:
+                cid, existing = own_cid, prev or {}
                 # Re-runs NO pisan el layout ya trabajado (ELK/arreglos a mano):
                 # los nodos existentes conservan su posición; la grilla default
-                # solo aplica a nodos NUEVOS de esta corrida.
+                # solo aplica a nodos NUEVOS de esta corrida. R5: tampoco la de
+                # los símbolos de subcategoría del proyecto (no son nodos del XML).
                 if prev and prev.get("layout"):
-                    layout = {k: prev["layout"].get(k, v) for k, v in layout.items()}
+                    symbols = {k: v for k, v in prev["layout"].items() if k in self.symbol_ids}
+                    layout = {**symbols, **{k: prev["layout"].get(k, v) for k, v in layout.items()}}
+            # Doc 105 (A2-o2, decisión del owner: conservar): lo hecho en la app
+            # sobre un canvas que ya existe sobrevive a la fusión y a la
+            # re-corrida, como el layout — sus dibujos intactos (el XML no los
+            # trae) y sus UDP con los del XML encima.
+            # R2: `erwinLongId` = el diagrama que CREÓ el canvas (la fusión lo
+            # pisaba con el último archivo); `erwinLongIds` = todos sus aportes.
             self._upsert("subject_areas", cid, {
                 "projectId": proj_id,
                 "folderId": fid,
                 "name": d.name, "tableIds": table_ids, "viewIds": view_ids, "layout": layout,
-                "drawings": [], "udpValues": doc_udp,
-                "erwinLongId": d.id})
+                "drawings": existing.get("drawings") or [],
+                "udpValues": {**(existing.get("udpValues") or {}), **model_udp},
+                "erwinLongId": d.id if cid == own_cid else (existing.get("erwinLongId") or d.id),
+                "erwinLongIds": list(dict.fromkeys(_canvas_contributors(existing) + [d.id]))})
             self.stats["canvases"] += 1
 
     def run(self) -> None:

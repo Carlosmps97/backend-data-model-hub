@@ -171,16 +171,6 @@ async def canvases_of_project(project_id: str) -> list[dict]:
     return [_sa_lite(d) for d in docs]
 
 
-async def table_ids_of_project(project_id: str) -> list[str]:
-    """Todas las tablas ACTIVAS del proyecto (doc 75 §6.2: el alcance es el
-    `projectId`, no la unión de canvases — una tabla sin canvas también es del
-    proyecto). Orden por nombre físico (índice (project_id, physicalName))."""
-    db = await get_db()
-    docs = await db[TABLES].find(scoped(project_id, {"flgactive": {"$ne": False}}),
-                                 {"_id": 1}).sort("physicalName", 1).to_list(None)
-    return [str(d["_id"]) for d in docs]
-
-
 _TABLE_LITE = {"physicalName": 1, "logicalName": 1, "schema": 1, "description": 1}
 
 

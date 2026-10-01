@@ -107,7 +107,8 @@ def _apply_projection(doc: dict, projection: dict | None) -> dict:
     if not projection or doc is None:
         return doc
     keys = {k: v for k, v in projection.items() if k != "_id"}
-    include_mode = any(bool(v) for v in keys.values())
+    # Doc 105 (P9): `{"_id": 1}` a secas es inclusión de `_id` (como el traductor).
+    include_mode = any(bool(v) for v in keys.values()) or (not keys and bool(projection.get("_id", 1)))
     if include_mode:
         out = {k: doc[k] for k in keys if k in doc}
         if projection.get("_id", 1) and "_id" in doc:
@@ -475,7 +476,7 @@ class PgCollection:
         1-2 round-trips en vez de N:
         - ReplaceOne({_id}, doc, upsert) → INSERT … ON CONFLICT DO UPDATE.
         - UpdateOne({_id}, {$set[, $setOnInsert]}[, upsert]) con paths simples
-          → UPDATE … FROM unnest + INSERT faltantes.
+          → UPDATE … FROM unnest + INSERT de los upserts faltantes.
         """
         if not ops:
             return None
@@ -483,7 +484,11 @@ class PgCollection:
         def _id_only(op) -> bool:
             f = op._filter
             return isinstance(f, dict) and list(f) == ["_id"] and isinstance(f["_id"], str)
-        if kinds == {"ReplaceOne"} and all(_id_only(op) for op in ops):
+        # Doc 105 (A2-o1): una sola sentencia exige banderas `upsert` IGUALES —
+        # con un lote mezclado, `_bulk_replace_by_id` (decide con `all(...)`)
+        # perdía los upserts; el mezclado va por el camino general.
+        if (kinds == {"ReplaceOne"} and all(_id_only(op) for op in ops)
+                and len({bool(getattr(op, "_upsert", False)) for op in ops}) == 1):
             return self._bulk_replace_by_id(ops)
         if kinds == {"UpdateOne"} and all(
             _id_only(op)
@@ -518,16 +523,18 @@ class PgCollection:
         return _WriteResult(matched=_rowcount(status), modified=_rowcount(status))
 
     async def _bulk_update_by_id(self, ops: list) -> _WriteResult:
-        ids, patches, inserts = [], [], []
-        any_upsert = False
+        ids, patches, ins_ids, inserts = [], [], [], []
         for op in ops:
             _id = op._filter["_id"]
             set_fields = op._doc.get("$set") or {}
             ids.append(_id)
             patches.append(_dumps(set_fields))
-            base = {"_id": _id, **(op._doc.get("$setOnInsert") or {}), **set_fields}
-            inserts.append(_dumps(base))
-            any_upsert = any_upsert or bool(getattr(op, "_upsert", False))
+            # Doc 105 (P10): sólo los upserts insertan. Antes, con un upsert en
+            # el lote se insertaban TODOS los ids: la baja (sin upsert) de algo
+            # que producción nunca vio dejaba una fila fantasma sin projectId.
+            if getattr(op, "_upsert", False):
+                ins_ids.append(_id)
+                inserts.append(_dumps({"_id": _id, **(op._doc.get("$setOnInsert") or {}), **set_fields}))
         async with await self._conn() as conn:
             async with conn.transaction():
                 status = await conn.execute(
@@ -535,12 +542,12 @@ class PgCollection:
                     f"FROM unnest($1::text[], $2::text[]) AS u(uid, patch) WHERE t.id = u.uid",
                     ids, patches,
                 )
-                if any_upsert:
+                if ins_ids:
                     await conn.execute(
                         f"INSERT INTO {self._table} (id, doc) "
                         f"SELECT u.uid, u.udoc::jsonb FROM unnest($1::text[], $2::text[]) AS u(uid, udoc) "
                         f"ON CONFLICT (id) DO NOTHING",
-                        ids, inserts,
+                        ins_ids, inserts,
                     )
         n = _rowcount(status)
         return _WriteResult(matched=n, modified=n)

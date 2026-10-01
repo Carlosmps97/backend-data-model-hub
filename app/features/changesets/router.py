@@ -17,8 +17,9 @@ from app.features.projects.deps import alive_project
 from app.core.audit import audit
 from app.core.identity import Principal, current_principal
 from app.features.auth import repository as auth_repo
+from app.features.auth import service as auth_service
 from app.features.auth.deps import require_permission
-from app.features.changesets.access import ensure_changeset_visible
+from app.features.changesets.access import GONE_DETAIL, ensure_changeset_visible
 
 from . import service
 
@@ -32,7 +33,7 @@ _can_rollback = require_permission("rollback")
 from .repository import VERSIONED
 from .validation import (
     CrossProjectError, DuplicateEntityError, InvalidPayloadError, NameTooLongError,
-    PublishError, RelationshipKeyMismatchError, SchemaInUseError)
+    PublishError, RelationshipKeyMismatchError, SchemaInUseError, TableInUseError)
 from .schemas import (
     ChangeBody,
     ChangesBulkBody,
@@ -44,6 +45,7 @@ from .schemas import (
     SchemaRenameBody,
     SnapshotBody,
     SubmitBody,
+    TransferBody,
 )
 
 router = APIRouter(prefix="/api/changesets", tags=["changesets"])
@@ -88,7 +90,99 @@ async def entity_history(collection: str, entity_id: str,
 
 @router.get("/{cs_id}")
 async def get(cs_id: str):
-    return ok(await service.get(cs_id))
+    # Doc 104: una versión eliminada responde 404 (antes 200 con `null`): el
+    # canvas que la tenga abierta lo detecta y sale de ella con aviso.
+    cs = await service.get(cs_id)
+    if cs is None:
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)
+    return ok(cs)
+
+
+# ── Administración de versiones (doc 104): transferir / eliminar un draft ──
+
+_ADMIN_ACTION_ERRORS = {
+    "in-review": (409, "The version is in review: its owner must withdraw the request first "
+                       "(or wait for the reviewers' decision)."),
+    "uploading": (409, "An Excel upload is being written into this version right now. "
+                       "Try again when it finishes."),
+    "same-owner": (400, "That user already owns this version."),
+    "bad-target": (400, "That user can't receive the version: the user doesn't exist or is disabled."),
+    "target-cannot-edit": (400, "That user can't receive the version: their role can't edit models "
+                                "(model.edit)."),
+    "conflict": (409, "The version changed while you were doing this (it was sent to review, "
+                      "transferred or deleted). Reload and try again."),
+    "owner-cannot-edit": (403, "Your role can no longer edit models (model.edit): ask an administrator "
+                               "to transfer or delete this version."),
+    "partially-published": (409, "This version can't be deleted: an approval of it failed while it was being "
+                                 "published, and some of its changes may already be in production. Send it "
+                                 "for review again so the publish can complete."),
+}
+
+
+def _admin_action_result(res, verb: str):
+    """Sentinelas de transferir/eliminar → HTTP con mensaje legible (`verb` =
+    'transfer' | 'delete'). Devuelve el resultado OK."""
+    past = {"transfer": "transferred", "delete": "deleted"}[verb]
+    if res is None:
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)
+    if res == "forbidden":
+        raise HTTPException(status_code=403,
+                            detail=f"Only the version owner or an administrator can {verb} it.")
+    if res == "published":
+        raise HTTPException(status_code=409,
+                            detail=f"Published versions are part of the model history: they can't be {past}.")
+    if res == "not-draft":
+        raise HTTPException(status_code=409, detail=f"Only a version in draft can be {past}.")
+    if isinstance(res, str):
+        code, detail = _ADMIN_ACTION_ERRORS[res]
+        raise HTTPException(status_code=code, detail=detail)
+    return res
+
+
+async def _session_user(principal: Principal) -> dict:
+    """Usuario en sesión con permisos; 403 si no está registrado o está
+    deshabilitado (mismo criterio que `require_permission`)."""
+    user = await auth_service.resolve_session_user(principal.username)
+    if user is None:
+        raise HTTPException(status_code=403, detail="You don't have permission for this action.")
+    return user
+
+
+@router.post("/{cs_id}/transfer")
+async def transfer(cs_id: str, body: TransferBody, principal: Principal = Depends(current_principal)):
+    """Transfiere un DRAFT a otro usuario (doc 104): desde ahí ese usuario lo
+    edita, lo envía y figura como autor al publicarse; la versión recuerda
+    quién la inició (`transfers[]`). Owner (con `model.edit`) o administrador
+    (`admin.manage`, también hacia sí mismo). Destino: usuario activo cuyo rol
+    edita modelos."""
+    user = await _session_user(principal)
+    try:
+        res = await service.transfer_version(cs_id, user["username"], user["permissions"],
+                                             body.to, body.note, body.expectedOwner)
+    except ProjectDeletedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    res = _admin_action_result(res, "transfer")
+    last = (res.get("transfers") or [{}])[-1]
+    await audit(user["username"], "changeset.transfer", target=cs_id, target_type="changeset",
+                meta={"from": last.get("from"), "to": res.get("owner"), "note": last.get("note"),
+                      "projectId": res.get("projectId"), "versionLabel": res.get("versionLabel")})
+    return ok(res)
+
+
+@router.delete("/{cs_id}")
+async def delete_version(cs_id: str, expectedOwner: str | None = Query(default=None, max_length=320),
+                         principal: Principal = Depends(current_principal)):
+    """Elimina un DRAFT con todos sus cambios (doc 104). Nunca tocó
+    producción; queda en la auditoría. Owner (con `model.edit`) o
+    administrador. Una versión en revisión se retira primero; una publicada
+    no se elimina jamás. `expectedOwner` = el dueño que mostraba la pantalla:
+    si cambió en el medio, 409 (no se borra el draft de otra persona)."""
+    user = await _session_user(principal)
+    res = _admin_action_result(
+        await service.delete_version(cs_id, user["username"], user["permissions"], expectedOwner), "delete")
+    await audit(user["username"], "changeset.delete", target=cs_id, target_type="changeset",
+                meta={k: res.get(k) for k in ("owner", "versionLabel", "title", "projectId", "changes")})
+    return ok(res)
 
 
 @router.put("/{cs_id}/changes")
@@ -117,6 +211,10 @@ async def add_change(cs_id: str, body: ChangeBody, user: dict = Depends(_can_edi
         # El upsert terminaría aplicado tal cual a la colección publicada:
         # payload que no valida contra el modelo NO entra al changeset.
         raise HTTPException(status_code=422, detail=f"Invalid change — {exc}") from exc
+    if res is None:
+        # Doc 104: la versión ya no existe (eliminada). Antes respondía 200 con
+        # `null` — un «guardado» falso que el canvas daba por bueno.
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
     if res == "locked":
@@ -152,6 +250,8 @@ async def add_changes_bulk(cs_id: str, body: ChangesBulkBody, user: dict = Depen
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except InvalidPayloadError as exc:
         raise HTTPException(status_code=422, detail=f"Invalid change — {exc}") from exc
+    if res is None:
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)          # doc 104: eliminada
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can edit its working copy.")
     if res == "locked":
@@ -172,6 +272,7 @@ async def effective(
     q: str | None = Query(default=None, description="búsqueda por nombre (contains, case-insensitive)"),
     limit: int | None = Query(default=None, ge=1, le=500),
     schema: str | None = Query(default=None, description="tablas/vistas de un esquema (Database Explorer)"),
+    tableIds: str | None = Query(default=None, description="sólo views: vistas de un LOTE de tablas (coma)"),
     principal: Principal = Depends(current_principal),
 ):
     """Estado efectivo de una colección. `tableId`/`ids` acotan la respuesta a
@@ -181,15 +282,28 @@ async def effective(
     if collection not in VERSIONED:
         raise HTTPException(status_code=422, detail=f"Collection not under versioning: {collection!r}.")
     id_list = [s for s in (ids.split(",") if ids else []) if s] or None
+    # Doc 105 (P2): vistas de un LOTE de tablas en una lectura («Import existing
+    # tables» pedía una por tabla). Presente pero vacío o enorme → 422 (nunca
+    # «todo el proyecto» por un lote mal armado).
+    table_list: list[str] | None = None
+    if tableIds is not None:
+        if collection != "views":
+            raise HTTPException(status_code=422, detail="tableIds only applies to views.")
+        table_list = list(dict.fromkeys(s for s in tableIds.split(",") if s))
+        if not table_list or len(table_list) > 300:
+            raise HTTPException(status_code=422, detail="tableIds must list between 1 and 300 tables.")
     await ensure_changeset_visible(cs_id, principal)   # doc 70 §12
     return ok(await service.effective(cs_id, collection, table_id=tableId, ids=id_list,
-                                      q=q, limit=limit, schema=schema))
+                                      q=q, limit=limit, schema=schema, table_ids=table_list))
 
 
 @router.get("/{cs_id}/diff")
 async def diff(cs_id: str):
     """Diff estructurado por colección (added/edited/deleted con nombres) + impacto (p5)."""
-    return ok(await service.diff(cs_id))
+    res = await service.diff(cs_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)          # doc 104: eliminada
+    return ok(res)
 
 
 @router.post("/{cs_id}/diff/details")
@@ -223,6 +337,14 @@ async def submit(cs_id: str, body: SubmitBody | None = None,
     # podría votar → el request quedaría trabado (unanimidad imposible) y ese
     # revisor vería un 403 confuso al intentar aprobar. Se corta acá con 400.
     users_by_id = {u["id"]: u for u in await auth_repo.list_users()}
+    # Doc 105: un usuario DESHABILITADO tampoco vota nunca (misma traba).
+    disabled = [r for r in body.reviewers if (users_by_id.get(r) or {}).get("status") == "disabled"]
+    if disabled:
+        names = ", ".join((users_by_id.get(d) or {}).get("name") or d for d in disabled)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Disabled user(s) can't review: {names}. Assign active reviewers.",
+        )
     perms_by_role = {r["id"]: (r.get("permissions") or {}) for r in await auth_repo.list_roles()}
     bad = [r for r in body.reviewers
            if not perms_by_role.get((users_by_id.get(r) or {}).get("role") or "", {}).get("review.decide")]
@@ -240,6 +362,13 @@ async def submit(cs_id: str, body: SubmitBody | None = None,
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can send it to review.")
+    if res == "uploading":                                  # doc 105: carga Excel escribiendo
+        raise HTTPException(status_code=409, detail=_ADMIN_ACTION_ERRORS["uploading"][1])
+    if res == "incomplete-restore":                         # doc 105: restore a medias
+        raise HTTPException(status_code=409, detail="This restore draft wasn't fully created: "
+                                                    "delete it and restore the version again.")
+    if res is None and not await service.exists(cs_id):
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)          # doc 104: eliminada
     if res is None:
         raise HTTPException(
             status_code=409,
@@ -270,7 +399,7 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
         raise HTTPException(status_code=422, detail=str(exc)) from exc          # doc 88 §5
     except ProjectDeletedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (CrossProjectError, DuplicateEntityError, SchemaInUseError) as exc:
+    except (CrossProjectError, DuplicateEntityError, SchemaInUseError, TableInUseError) as exc:
         # Doc 84 D1: detalle ESTRUCTURADO {code, message, items, next} — el front
         # pinta el panel «Publish blocked» con la lista completa. Duplicados =
         # carrera entre changesets (spec 10 §9: otro publish ganó el nombre);
@@ -283,6 +412,16 @@ async def _decide(cs_id: str, actor: str, decision: str, note: str | None):
         raise HTTPException(status_code=422, detail=_publish_detail(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="You are not assigned as a reviewer of this request.")
+    if res == service.SENT_BACK:
+        # Doc 105 (ronda 3): la aprobación SÍ escribió producción (queda auditada),
+        # pero en el medio la devolvieron a revisión: se re-aprueba y converge.
+        await audit(actor, "changeset.decide", target=cs_id, target_type="changeset",
+                    meta={"decision": decision, "result": service.SENT_BACK})
+        raise HTTPException(
+            status_code=409,
+            detail=("This request was applied, but it was sent back to review while it was being applied: "
+                    "approve it again to finish."),
+        )
     if res is None:
         # ok(None) con 200 era un éxito FALSO (toast "approved" sobre un request
         # retirado). La carrera con withdraw ahora es un flujo de primera clase.
@@ -325,6 +464,8 @@ async def reopen(cs_id: str, user: dict = Depends(_can_edit)):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if res == "forbidden":
         raise HTTPException(status_code=403, detail="Only the version owner can reopen it.")
+    if res is None and not await service.exists(cs_id):
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)          # doc 104: eliminada
     if res is None:
         raise HTTPException(status_code=409, detail="The version is not rejected: there is nothing to reopen.")
     await audit(user["username"], "changeset.reopen", target=cs_id, target_type="changeset")
@@ -427,7 +568,10 @@ async def delete_schema_in_cs(cs_id: str, schema_id: str, user: dict = Depends(_
 
 @router.post("/{cs_id}/comments")
 async def add_comment(cs_id: str, body: CommentBody, principal: Principal = Depends(current_principal)):
-    return ok(await service.add_comment(cs_id, principal.username, body.text))
+    res = await service.add_comment(cs_id, principal.username, body.text)
+    if res is None:
+        raise HTTPException(status_code=404, detail=GONE_DETAIL)          # doc 104: eliminada
+    return ok(res)
 
 
 # ── Compat M-series: approve/reject ahora DELEGAN en la misma política de

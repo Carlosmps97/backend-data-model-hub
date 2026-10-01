@@ -6,9 +6,10 @@ para que separador y case sean configurables por tipo de objeto (columna vs
 tabla — screens 08a/08b del diseño). Defaults sembrados si el doc no existe:
 column = `{separator:'_', case:'upper'}`, table = `{separator:'', case:'upper'}`.
 
-Endpoints:
-  GET /api/settings/naming         → ambos scopes (con defaults sembrados).
-  PUT /api/settings/naming/{scope} → upsert de {separator, case} de ese scope.
+Endpoints (doc 75: por proyecto, `/api/projects/{project_id}/settings`):
+  GET …/naming         → ambos scopes (con defaults sembrados).
+  PUT …/naming/{scope} → cerrado (doc 105 D1b): 409; el naming se cambia por
+                         Data Standards (`standards/apply`, versionado).
 
 La API pública es `router`.
 """

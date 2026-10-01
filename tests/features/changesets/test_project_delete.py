@@ -13,19 +13,36 @@ from app.features.changesets import service
 CS = {"id": "cs1", "owner": "ana", "status": "submitted", "projectId": "p1", "submittedAt": "t1"}
 
 
+async def _transition(cs_id, from_status, fields, expect=None):
+    """Claim → la cabecera reclamada; el estampado final de `appliedAt` (doc 105:
+    también una transición, condicionada al claim) → la cabecera publicada."""
+    if "appliedAt" in fields:
+        return {**CS, "status": "approved", "appliedAt": "t2"}
+    return {**CS, **fields}
+
+
 def _apply_env(monkeypatch, changes):
-    monkeypatch.setattr(service.repository, "transition", AsyncMock(return_value={**CS, "status": "approved"}))
+    monkeypatch.setattr(service.repository, "transition", AsyncMock(side_effect=_transition))
     monkeypatch.setattr(service.repository, "changes_map", AsyncMock(return_value=changes))
     monkeypatch.setattr(service.validation, "validate_changes", lambda c: [])
-    monkeypatch.setattr(service, "_publish_duplicates", AsyncMock(return_value=[]))
+    # Doc 105 (H6): el publish llama `_publish_duplicate_items` (el mock viejo,
+    # `_publish_duplicates`, no existía: el gate corría de verdad y sin BD).
+    dups = AsyncMock(return_value=[])
+    monkeypatch.setattr(service, "_publish_duplicate_items", dups)
+    monkeypatch.setattr(service.repository, "project_of", AsyncMock(return_value={}))
     monkeypatch.setattr(service, "_publish_schema_deletes", AsyncMock(return_value=[]))
     monkeypatch.setattr(service, "_cross_project_check", AsyncMock())
     monkeypatch.setattr(service.repository, "capture_before_images", AsyncMock(return_value={}))
     monkeypatch.setattr(service.repository, "store_before_images", AsyncMock())
-    monkeypatch.setattr(service.repository, "apply_changes", AsyncMock(return_value={"projects": 1}))
-    monkeypatch.setattr(service.repository, "set_status", AsyncMock(return_value={**CS, "status": "approved", "appliedAt": "t2"}))
+    async def _apply(plan, progress=None):
+        if progress is not None:
+            progress["writing"] = True                  # como el real: marca antes de escribir
+        return {"projects": 1}
+
+    monkeypatch.setattr(service.repository, "apply_changes", AsyncMock(side_effect=_apply))
     cascade = AsyncMock(return_value={"canonical_tables": 5})
     monkeypatch.setattr(service.projects_repo, "cascade_delete", cascade)
+    cascade.dups = dups
     return cascade
 
 
@@ -33,6 +50,7 @@ def test_apply_con_delete_de_proyecto_cascada(monkeypatch):
     cascade = _apply_env(monkeypatch, {"projects": {"p1": {"op": "delete", "at": "t0"}}})
     out = asyncio.run(service._apply_and_finalize(CS, {"status": "approved"}, "t1"))
     cascade.assert_awaited_once_with("p1", "cs1")
+    cascade.dups.assert_awaited_once()                  # el gate de unicidad corrió (mockeado)
     assert out["appliedAt"] == "t2"
 
 
@@ -45,10 +63,12 @@ def test_apply_sin_delete_de_proyecto_no_cascada(monkeypatch):
 def test_cascada_que_falla_devuelve_la_request_a_submitted(monkeypatch):
     cascade = _apply_env(monkeypatch, {"projects": {"p1": {"op": "delete", "at": "t0"}}})
     cascade.side_effect = RuntimeError("timeout")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="timeout"):
         asyncio.run(service._apply_and_finalize(CS, {"status": "approved"}, "t1"))
+    service.repository.apply_changes.assert_awaited_once()        # llegó a escribir…
     revert = service.repository.transition.await_args_list[-1]
     assert revert.args[1] == "approved" and revert.args[2]["status"] == "submitted"
+    assert revert.args[2].get("partialApplyAt")                    # …y la marca lo dice (doc 104)
 
 
 def test_proyecto_borrado_rechaza_edicion_y_snapshot(monkeypatch):

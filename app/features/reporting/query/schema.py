@@ -20,9 +20,10 @@ OPS_BY_TYPE = {
     "string": ("eq", "ne", "in", "nin", "contains", "startsWith", "exists", "isnull"),
     "enum": ("eq", "ne", "in", "nin", "exists", "isnull"),
     "number": ("eq", "ne", "in", "gt", "gte", "lt", "lte", "between", "exists", "isnull"),
-    "boolean": ("eq", "ne", "exists"),
+    "boolean": ("eq", "ne", "exists", "isnull"),     # doc 105 (ronda 4): IS NULL también
     "date": ("eq", "gt", "gte", "lt", "lte", "between", "exists", "isnull"),
 }
+UDP_NUMBER_OPS = ("eq", "ne", "in", "exists", "isnull")
 
 
 @dataclass
@@ -41,6 +42,10 @@ class FieldDef:
 
     @property
     def ops(self) -> tuple[str, ...]:
+        if self.udpDefId and self.type == "number":
+            # Doc 105 (ronda 4): los UDP se guardan como TEXTO — un rango o un
+            # orden compararía texto («10» < «5»): sólo igualdad.
+            return UDP_NUMBER_OPS
         return OPS_BY_TYPE.get(self.type, OPS_BY_TYPE["string"])
 
     def to_public(self) -> dict:
@@ -66,7 +71,9 @@ _COLUMNS = [
     _s("physicalName", "Physical name", sortable=True, indexed=True),
     _s("logicalName", "Logical name"),
     _s("tableId", "Table id", indexed=True),
-    _s("schema", "Schema", indexed=True, entity="table", sortable=False),          # cross-entity (pre-resuelto a tableIds)
+    # cross-entity (pre-resuelto a tableIds): filtrable con = / in, NO agrupable
+    # ni agregable (vive en la tabla; doc 105, ronda 4).
+    _s("schema", "Schema", indexed=True, entity="table", sortable=False, groupable=False),
     _s("dataType", "Data type", type="string", indexed=True),
     _s("parentDomainId", "Parent domain", type="string", indexed=True, hydrate="domain"),
     _s("typeOverridden", "Type overridden", type="boolean"),

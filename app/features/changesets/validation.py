@@ -219,6 +219,12 @@ class SchemaInUseError(PublishError):
     code = "schema_in_use"
 
 
+class TableInUseError(PublishError):
+    """Doc 105: delete de una tabla que todavía tiene columnas, relaciones o
+    vistas efectivas que la referencian. El router la convierte en 409."""
+    code = "table_in_use"
+
+
 class RelationshipKeyMismatchError(PublishError):
     """Upsert de relación que NO migra la llave completa del padre (N=N,
     doc 47). El router la convierte en 409 (el mensaje ya es legible)."""

@@ -94,3 +94,23 @@ class ChangesetDoc(BaseModel):
     # appliedAt} de la versión publicada que este draft restaura. La estampa
     # `service.rollback`; el UI muestra "Restored from vN" en Home/historial.
     restoredFrom: dict | None = None
+    # Doc 104 (aditivo): transferencias de ownership del draft, en orden —
+    # {from, to, by, at, note?}. `owner` es siempre el dueño ACTUAL (edita,
+    # envía y figura como autor al publicarse); `transfers[0].from` es quien
+    # la inició. Invariante §2.6: declarado acá Y en el TS `OwnershipTransfer`.
+    transfers: list[dict] = Field(default_factory=list)
+    # Doc 104 (ronda 2): un approve cuyo apply falló DESPUÉS de empezar a
+    # escribir en producción (parte pudo llegar). Marca de la CABECERA: re-editar
+    # el draft no la borra (re-editar reemplaza el documento del cambio y pierde
+    # su imagen previa). Mientras exista, el draft no se elimina: se re-envía
+    # para completar el publish.
+    partialApplyAt: str | None = None
+    # Doc 105: una carga Excel ESCRIBIENDO en el draft — {jobId, owner, at,
+    # heartbeat} (epoch). Lock de «un apply por versión» visible para los dos
+    # procesos de uvicorn; transferir, eliminar y enviar a revisión esperan a
+    # que termine. Un latido de más de 10 min = su proceso murió (se ignora).
+    uploadLock: dict | None = None
+    # Doc 105: un draft de restauración mientras se graban sus inversos. Si el
+    # proceso muere en el medio queda en True y `submit` lo rechaza (restore
+    # parcial); se elimina y se restaura de nuevo.
+    restoreIncomplete: bool | None = None

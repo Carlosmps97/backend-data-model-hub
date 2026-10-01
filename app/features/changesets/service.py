@@ -17,6 +17,7 @@ from app.core.naming.logical import sanitize_logical_name
 from app.core.naming import apply_case
 from app.core.scope import PROJECT_SCOPED, ProjectDeletedError, scoped
 from app.core.versioning import overlay, plain, summarize_diff
+from app.features.auth import service as auth_service
 from app.features.domains import repository as dom_repo
 from app.features.domains.cascade import align_restored_column
 from app.features.glossary import service as dict_svc
@@ -27,12 +28,12 @@ from app.features.schemas import service as schemas_service
 from app.features.settings import service as settings_service
 from app.features.views.models import normalize_custom_sql, normalize_source_tables
 
-from . import diffdetail, repository, validation
+from . import access, diffdetail, repository, validation
 from . import asof
 from .repository import VERSIONED
 from .validation import (
-    CrossProjectError, DuplicateEntityError, InvalidPayloadError, NameTooLongError,
-    RelationshipKeyMismatchError, SchemaInUseError, collect_refs, cross_project_error,
+    CrossProjectError, DuplicateEntityError, InvalidPayloadError, NameTooLongError, PublishError,
+    RelationshipKeyMismatchError, SchemaInUseError, TableInUseError, collect_refs, cross_project_error,
     project_change_error, relationship_key_error)
 
 log = get_logger("app.changesets")
@@ -318,6 +319,8 @@ def version_row(cs: dict, deletes_project: bool = False) -> dict:
         "submittedAt": cs.get("submittedAt"),
         "appliedAt": cs.get("appliedAt"),
         "restoredFrom": cs.get("restoredFrom"),
+        # Doc 104: traspasos de ownership (el primero dice quién la inició).
+        "transfers": list(cs.get("transfers") or []),
         # Doc 88 §6: historial de solicitudes + último ciclo (badge de Review).
         "requests": list(cs.get("requests") or []),
         "lastRequest": (cs.get("requests") or [None])[-1],
@@ -354,6 +357,9 @@ def history_events(changes: list[dict], headers: dict[str, dict]) -> list[dict]:
             "version": hdr.get("versionLabel"),
             "versionTitle": hdr.get("title"),
             "userId": hdr.get("owner"),
+            # Doc 104: el autor es el dueño FINAL (quien la envió y publicó);
+            # si la versión cambió de manos, quién la inició.
+            "startedById": ((hdr.get("transfers") or [{}])[0] or {}).get("from"),
             "publishedById": hdr.get("reviewedBy"),
             "approvedByIds": approved,
             "restoredFrom": hdr.get("restoredFrom"),
@@ -369,10 +375,24 @@ def history_events(changes: list[dict], headers: dict[str, dict]) -> list[dict]:
 # ── Orquestación async (repository + puras) ───────────────────────────────
 
 
-async def ensure_project_alive(cs: dict) -> None:
-    """Doc 75 I11: nada se edita, envía, publica ni restaura sobre un proyecto borrado."""
-    if not await projects_repo.get_project(cs["projectId"]):
-        raise ProjectDeletedError("This project was deleted.")
+async def ensure_project_alive(cs: dict, *, finishing_own_delete: bool = False) -> None:
+    """Doc 75 I11: nada se edita, envía, publica ni restaura sobre un proyecto borrado.
+
+    Doc 105 (H3): con `finishing_own_delete` (enviar y decidir) pasa la versión
+    cuyo publish A MEDIAS borró SU propio proyecto (`partialApplyAt` + un delete
+    de `projects`): re-aprobarla es justamente lo que termina el borrado — sin
+    esto quedaba trabada (no se re-aprobaba, no se re-enviaba ni se eliminaba)."""
+    if await projects_repo.get_project(cs["projectId"]):
+        return
+    if (finishing_own_delete and cs.get("partialApplyAt")
+            and cs["id"] in await repository.changesets_deleting_project([cs["id"]])):
+        return
+    raise ProjectDeletedError("This project was deleted.")
+
+
+def _deletes_own_project(cs: dict, pending: dict[str, dict] | None) -> bool:
+    """¿El changeset borra SU proyecto (según los cambios pendientes dados)?"""
+    return (((pending or {}).get("projects") or {}).get(cs["projectId"]) or {}).get("op") == "delete"
 
 
 async def applied_versions(project_id: str) -> list[dict]:
@@ -419,7 +439,9 @@ async def get(cs_id: str) -> dict | None:
         if col_changes:
             pub = await repository.published(col, {"_id": {"$in": list(col_changes.keys())}})
             diff[col] = summarize_diff(pub, col_changes)
-    return {**cs, "diff": diff}
+    # Doc 104: TODOS los cambios del draft (el resumen `diff` sólo cuenta lo
+    # que difiere de producción) — lo que se borra al eliminarlo.
+    return {**cs, "diff": diff, "changeCount": sum(len(v) for v in changes.values())}
 
 
 async def list_all() -> list[dict]:
@@ -593,7 +615,13 @@ async def _cross_project_check(cs: dict, collection: str, entity_id: str, op: st
         return
     if pending is None:
         pending = await repository.changes_map(cs["id"], sorted(refs))
-    err = cross_project_error(cs["projectId"], refs, await _resolve_owners(cs, refs, pending))
+    owners = await _resolve_owners(cs, refs, pending)
+    if _deletes_own_project(cs, pending):
+        # Doc 105 (H3b): la versión BORRA su proyecto — la cascada del publish
+        # borra todo lo suyo al final. Una referencia que ya no existe (la borró
+        # un intento anterior a medias) no la traba; una de OTRO proyecto sí.
+        refs = {c: {i for i in ids if (owners.get(c) or {}).get(i) is not None} for c, ids in refs.items()}
+    err = cross_project_error(cs["projectId"], refs, owners)
     if err:
         raise CrossProjectError(err)
 
@@ -795,17 +823,19 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     await _cross_project_check(cs, collection, entity_id, op, payload)
     # Doc 88 §4: borrar una tabla/vista saca su membresía de los canvases que la
     # listan, en el MISMO request y antes del delete (cascada server-side).
+    cascade: list[dict] = []
     if op == "delete" and collection in _MEMBERSHIP_COLLS:
         for it in await _membership_cascade(cs, collection, entity_id):
             sa_payload = _stamp_project(cs, "subject_areas", "upsert", it["payload"])
             await _cross_project_check(cs, "subject_areas", it["entityId"], "upsert", sa_payload)
-            if await repository.set_change(cs_id, "subject_areas", it["entityId"], "upsert", sa_payload) is None:
-                return "locked" if await repository.get(cs_id) else None
+            cascade.append({"collection": "subject_areas", "entityId": it["entityId"],
+                            "op": "upsert", "payload": sa_payload})
     # Doc 92 D8: el lógico sin caracteres especiales; doc 83: reglas de naming
     # (case del físico de columnas + override, doc 68) — ambos ANTES de
     # unicidad/longitud: esos chequeos ven el nombre que se persiste.
     sanitize_logical_names([{"collection": collection, "op": op, "payload": payload}])
-    await _apply_naming_rules(cs["projectId"], [{"collection": collection, "op": op, "payload": payload}])
+    await _apply_naming_rules(cs["projectId"], [{"collection": collection, "entityId": entity_id, "op": op,
+                                                "payload": payload}], cs["id"])
     # Unicidad de nombres (spec 10 §9) POR PROYECTO: tablas por physicalName y
     # columnas por physicalName dentro de su tableId — contra publicado activo
     # + pendientes de ESTE changeset. El router lo convierte en 409.
@@ -815,10 +845,35 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     too_long = await _name_length_error(cs, collection, entity_id, op, payload)
     if too_long:
         raise NameTooLongError(too_long)
-    updated = await repository.set_change(cs_id, collection, entity_id, op, payload, origin)
+    if cascade:
+        # Doc 104 (ronda 2): canvases podados + el borrado en UNA escritura (un
+        # solo touch condicionado a draft y dueño): si la versión cambia de
+        # manos o de estado en el medio, no queda el canvas podado sin el borrado.
+        updated = await repository.set_changes_bulk(
+            cs_id, [*cascade, {"collection": collection, "entityId": entity_id, "op": op,
+                               "payload": payload, "origin": origin}], owner=actor)
+    else:
+        updated = await repository.set_change(cs_id, collection, entity_id, op, payload, origin, owner=actor)
     if updated is not None:
         return updated
-    return "locked" if await repository.get(cs_id) else None
+    return await _write_refused(cs_id, actor)
+
+
+async def _write_refused(cs_id: str, actor: str) -> str | None:
+    """Por qué el repositorio no grabó una escritura del draft: None = la
+    versión ya no existe (eliminada) · "forbidden" = cambió de dueño en el
+    medio (doc 104: transferida) · "locked" = ya no está en draft."""
+    cur = await repository.get(cs_id)
+    if not cur:
+        return None
+    return "forbidden" if cur.get("owner") != actor else "locked"
+
+
+async def _owner_changed(cs_id: str, actor: str) -> bool:
+    """Doc 104: ¿la versión existe y ya no es de `actor`? Explica por qué una
+    transición condicionada al dueño no se aplicó (403, no 409)."""
+    cur = await repository.get(cs_id)
+    return bool(cur) and cur.get("owner") != actor
 
 
 # Colecciones con chequeo de unicidad de nombres (spec 10 §9 + doc 18).
@@ -857,7 +912,43 @@ def sanitize_logical_names(items: list[dict]) -> list[dict]:
     return touched
 
 
-async def _apply_naming_rules(project_id: str, items: list[dict]) -> None:
+async def _published_column_physicals(project_id: str, ids: list[str]) -> dict[str, dict]:
+    """Estado PUBLICADO de estas columnas — `physicalName`, `logicalName` y
+    `physicalNameOverridden` (por `_id`: `id = ANY`, barato)."""
+    if not ids:
+        return {}
+    return {str(d["id"]): d
+            for d in await repository.published("canonical_columns", scoped(project_id, {"_id": {"$in": ids}}))}
+
+
+# Un estado existente de una columna: (lógico, flag de override).
+_NameState = tuple[str | None, bool]
+
+
+async def _existing_column_physicals(project_id: str, cs_id: str, ids: list[str]) -> dict[str, dict[str, list[_NameState]]]:
+    """Físicos que YA existen para estas columnas y, por cada uno, sus estados
+    (lógico + flag): el pendiente en el draft (si lo hay) y el publicado. Doc 105
+    (ronda 5): el publicado cuenta también con un borrado o un renombre
+    pendiente — el Undo del front re-graba la columna con su pre-imagen y la
+    renombraba. Lecturas por clave (no el ledger entero)."""
+    pending = await repository.column_changes_for_tables(cs_id, ids, [])
+    out: dict[str, dict[str, list[_NameState]]] = {}
+
+    def add(eid: str, doc: dict) -> None:
+        name = doc.get("physicalName")
+        if name:
+            out.setdefault(eid, {}).setdefault(str(name), []).append(
+                (doc.get("logicalName"), bool(doc.get("physicalNameOverridden"))))
+
+    for eid, doc in (await _published_column_physicals(project_id, ids)).items():
+        add(eid, doc)
+    for eid, ch in pending.items():
+        if ch.get("op") != "delete":
+            add(eid, ch.get("payload") or {})
+    return out
+
+
+async def _apply_naming_rules(project_id: str, items: list[dict], cs_id: str | None = None) -> None:
     """Aplica las reglas de naming del scope a upserts de tablas/columnas, en
     este orden y con UNA carga de reglas por scope presente en el lote:
 
@@ -875,6 +966,7 @@ async def _apply_naming_rules(project_id: str, items: list[dict]) -> None:
     persiste. Si las reglas no cargan (naming inaccesible / unit tests con
     repos mockeados), el payload pasa tal cual: JAMÁS bloquea la escritura."""
     rules: dict[str, tuple | None] = {}
+    work: list[tuple[dict, tuple]] = []
     for it in items:
         scope = _OVERRIDE_SCOPES.get(it.get("collection") or "")
         if not scope or it.get("op") != "upsert" or not it.get("payload"):
@@ -886,13 +978,52 @@ async def _apply_naming_rules(project_id: str, items: list[dict]) -> None:
                 log.warning("naming rules unavailable — physical case/override NOT applied",
                             extra={"scope": scope})
                 rules[scope] = None
-        loaded = rules[scope]
-        if loaded is None:
-            continue
-        mappings, sep, case = loaded
+        if rules[scope] is not None:
+            work.append((it, rules[scope]))
+
+    def _cased(it: dict, case: str) -> str | None:
+        name = it["payload"].get("physicalName")
+        if it["collection"] not in _CASE_NORMALIZED or not isinstance(name, str):
+            return None
+        return apply_case(name, case)
+
+    # Doc 105 (ronda 4): la regla de case rige para lo que se TIPEA o cambia. Un
+    # físico LEGADO que el cambio repite tal cual (p. ej. se editó sólo la
+    # descripción, o el Undo re-graba la pre-imagen) no se renombra en silencio:
+    # las vistas que lo referencian por nombre quedaban colgando, el override
+    # cambiaba y podía chocar con otra columna. Se leen los nombres existentes
+    # (pendiente y publicado) sólo de los que la regla cambiaría.
+    changing = [it.get("entityId") for it, (_m, _s, case) in work
+                if it.get("entityId") and (c := _cased(it, case)) is not None and c != it["payload"]["physicalName"]]
+    existing: dict[str, dict[str, list[_NameState]]] = {}
+    if changing and cs_id:
+        try:
+            existing = await _existing_column_physicals(project_id, cs_id, changing)
+        except Exception:  # noqa: BLE001 — sin los existentes se normaliza (nunca bloquea)
+            log.warning("current column names unavailable — legacy names normalized", extra={"cs_id": cs_id})
+    for it, (mappings, sep, case) in work:
         payload = it["payload"]
-        if it["collection"] in _CASE_NORMALIZED and isinstance(payload.get("physicalName"), str):
-            payload["physicalName"] = apply_case(payload["physicalName"], case)
+        cased = _cased(it, case)
+        states = existing.get(it.get("entityId") or "", {}).get(payload["physicalName"])
+        if cased is not None and cased != payload["physicalName"] and states:
+            # Doc 105 (rondas 5–6, R15/R16): el nombre existente se conserva. Con
+            # el MISMO lógico que un estado existente, también su flag (el del
+            # payload o, si no viene, el de ese estado) — recalcularlo sobre el
+            # legado lo marcaba «custom»: diff espurio y el Glosario dejaba de
+            # re-derivarlo. Con un lógico NUEVO el físico ya no es su derivado:
+            # se estampa (queda custom; si no, el Glosario lo renombraría).
+            # Ronda 7 (R18b): «mismo lógico» = el mismo texto o uno que deriva el
+            # MISMO físico (un cambio sólo de mayúsculas no es un lógico nuevo).
+            def _derived(logical) -> str:
+                return dict_svc.physicalize(str(logical or "").strip(), mappings, separator=sep, case=case)
+            same = next((st for st in states if "logicalName" not in payload or st[0] == payload["logicalName"]
+                         or (st[0] and payload["logicalName"] and _derived(st[0]) == _derived(payload["logicalName"]))), None)
+            payload["physicalNameOverridden"] = (
+                bool(payload.get("physicalNameOverridden", same[1])) if same is not None
+                else dict_svc.is_physical_override(payload, mappings, sep, case))
+            continue
+        if cased is not None:
+            payload["physicalName"] = cased
         payload["physicalNameOverridden"] = dict_svc.is_physical_override(
             payload, mappings, sep, case)
 
@@ -990,7 +1121,7 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
     # (case del físico + override) ANTES de unicidad/longitud — mismo orden que
     # add_change.
     sanitize_logical_names(ordered)
-    await _apply_naming_rules(cs["projectId"], ordered)
+    await _apply_naming_rules(cs["projectId"], ordered, cs["id"])
 
     upserts = [it for it in ordered if it["op"] == "upsert" and it["collection"] in _UNIQUE_COLLS]
     pending_all: dict[str, dict] = {}
@@ -1054,10 +1185,10 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
         # sin unicidad no cuestan nada): semántica del loop secuencial.
         pending[eid] = {"op": op} if op == "delete" else {"op": op, "payload": it.get("payload") or {}}
 
-    updated = await repository.set_changes_bulk(cs_id, ordered)
+    updated = await repository.set_changes_bulk(cs_id, ordered, owner=actor)
     if updated is not None:
         return updated
-    return "locked" if await repository.get(cs_id) else None
+    return await _write_refused(cs_id, actor)
 
 
 def _q_match(doc: dict, q: str) -> bool:
@@ -1079,7 +1210,7 @@ def _q_filter(q: str) -> dict:
 async def effective(cs_id: str, collection: str,
                     table_id: str | None = None, ids: list[str] | None = None,
                     q: str | None = None, limit: int | None = None,
-                    schema: str | None = None) -> list[dict] | None:
+                    schema: str | None = None, table_ids: list[str] | None = None) -> list[dict] | None:
     """Estado efectivo de una colección (ver `_effective_docs`). Doc 99: los
     canvases salen SIEMPRE con sus trazos (`routes`) y SANEADOS — `{}` si el
     documento no trae la llave, igual que `diagram` y `GET /subject-areas/{id}`.
@@ -1088,7 +1219,7 @@ async def effective(cs_id: str, collection: str,
     chequeo estricto de entrada y nadie podría ni mover una tabla de ese
     canvas)."""
     docs = await _effective_docs(cs_id, collection, table_id=table_id, ids=ids,
-                                 q=q, limit=limit, schema=schema)
+                                 q=q, limit=limit, schema=schema, table_ids=table_ids)
     if docs is None or collection != "subject_areas":
         return docs
     return [{**d, "routes": clean_routes(d.get("routes"))} for d in docs]
@@ -1097,7 +1228,7 @@ async def effective(cs_id: str, collection: str,
 async def _effective_docs(cs_id: str, collection: str,
                           table_id: str | None = None, ids: list[str] | None = None,
                           q: str | None = None, limit: int | None = None,
-                          schema: str | None = None) -> list[dict] | None:
+                          schema: str | None = None, table_ids: list[str] | None = None) -> list[dict] | None:
     """Estado efectivo (publicado + overlay del changeset) de una colección.
 
     `table_id`/`ids` acotan la lectura a un SLICE: sin filtro, un GET de
@@ -1182,8 +1313,13 @@ async def _effective_docs(cs_id: str, collection: str,
         return out[:limit] if limit else out
 
     flt: dict | None = None
+    lot = set(table_ids or [])
     if ids is not None:
         flt = {"_id": {"$in": ids}}
+    elif table_ids and collection == "views":
+        # Doc 105 (P2): vistas de un LOTE de tablas (fuente o base legacy) —
+        # mismo criterio que `views.repository` y que `table_id`, en una lectura.
+        flt = {"$or": [{"tableId": {"$in": list(table_ids)}}, {"sourceTableIds": {"$in": list(table_ids)}}]}
     elif table_id is not None:
         # En relationships "por tabla" significa cualquiera de los extremos.
         # (Se consultan también los campos legacy source/target por si quedara
@@ -1204,6 +1340,9 @@ async def _effective_docs(cs_id: str, collection: str,
 
         def _in_scope(ch: dict) -> bool:
             p = ch.get("payload") or {}
+            if lot and collection == "views":
+                src = p.get("sourceTableIds") or ([p.get("tableId")] if p.get("tableId") else [])
+                return bool(lot & set(src))
             if table_id is None:
                 return False
             if collection == "relationships":
@@ -1228,13 +1367,17 @@ async def submit(cs_id: str, actor: str, title: str | None = None, description: 
     un request ya en revisión pisaría título/revisores del envío anterior y podía
     resucitar a `submitted` uno decidido en paralelo — para cambiarlo, el owner lo
     retira primero (withdraw). Transición ATÓMICA draft→submitted con approvals
-    reseteado (nada heredado de un ciclo de revisión anterior)."""
+    reseteado (nada heredado de un ciclo de revisión anterior). Doc 105:
+    "uploading" si una carga Excel está escribiendo en la versión (el request
+    llevaría media carga) — condición también dentro de la transición."""
     cs = await repository.get(cs_id)
     if not cs or cs["status"] != "draft":
         return None
     if cs.get("owner") != actor:
         return "forbidden"
-    await ensure_project_alive(cs)
+    if cs.get("restoreIncomplete"):
+        return "incomplete-restore"          # doc 105: restore a medias (el proceso murió armándolo)
+    await ensure_project_alive(cs, finishing_own_delete=True)   # doc 105 (H3)
     fields: dict = {"status": "submitted", "submittedAt": _now(), "approvals": {}}
     if title is not None:
         fields["title"] = title
@@ -1244,7 +1387,17 @@ async def submit(cs_id: str, actor: str, title: str | None = None, description: 
         fields["reviewers"] = reviewers
     # Doc 88 §6: cada envío es un ciclo del historial de solicitudes.
     fields["requests"] = open_cycle(cs, actor, fields["submittedAt"], title, description, reviewers)
-    return await repository.transition(cs_id, "draft", fields)
+    # Doc 104: condicionado también al dueño leído — si en el medio la
+    # transfirieron, el envío del dueño anterior no debe caer en la versión
+    # (ni figurar como una solicitud del nuevo dueño). Doc 105: y a que ninguna
+    # carga Excel esté escribiendo (el request llevaría media carga).
+    res = await repository.transition(cs_id, "draft", fields,
+                                      expect={"owner": actor, **repository.upload_lock_free()})
+    if res is None and await _owner_changed(cs_id, actor):
+        return "forbidden"
+    if res is None and _upload_in_progress(await repository.get(cs_id) or {}):
+        return "uploading"
+    return res
 
 
 # Doc 84 D1: qué hacer ante un publish bloqueado (viaja en `next` del detail).
@@ -1448,14 +1601,83 @@ async def _publish_schema_deletes(project_id: str, changes: dict) -> list[str]:
     return errors
 
 
+def _view_sources(doc: dict) -> set[str]:
+    return set(doc.get("sourceTableIds") or ([doc["tableId"]] if doc.get("tableId") else []))
+
+
+_GATE_LOT = 300
+_REL_TABLE_FIELDS = ("parentTableId", "childTableId", "sourceTableId", "targetTableId")
+
+
+def _rel_tables(doc: dict) -> set[str]:
+    """Tablas de una relación, en su forma v2 o legacy v1."""
+    return {doc[f] for f in _REL_TABLE_FIELDS if doc.get(f)}
+
+
+async def _publish_table_deletes(project_id: str, changes: dict) -> list[dict]:
+    """Guard del publish (doc 105, A5 del doc 102): un delete de tabla sólo
+    publica si en el estado EFECTIVO (publicado + este request) no le quedan
+    columnas, relaciones ni vistas vivas que la referencien. El front las borra
+    en la misma operación; un draft armado por API, o una cascada que se cortó,
+    publicaba referencias huérfanas. Mismo criterio de «efectivo» que el
+    esquema en uso: el request puede borrarlas o mudarlas en el mismo envío."""
+    gone = {eid for eid, ch in (changes.get("canonical_tables") or {}).items() if ch.get("op") == "delete"}
+    if not gone:
+        return []
+    ids = sorted(gone)
+    # Doc 105 (R1): lecturas en lotes acotados — un restore o un borrado de
+    # miles de tablas armaba un `$in` sin tope (en Lakebase, un jsonpath con
+    # N alternativas).
+    lots = [ids[i:i + _GATE_LOT] for i in range(0, len(ids), _GATE_LOT)]
+
+    async def _published(coll: str, flt_of) -> list[dict]:
+        by_id: dict[str, dict] = {}
+        for lot in lots:
+            for d in await repository.published(coll, scoped(project_id, flt_of(lot))):
+                by_id[d["id"]] = d            # una relación entre dos lotes llega dos veces
+        return list(by_id.values())
+
+    async def _alive(coll: str, flt_of, refs) -> list[dict]:
+        pub = await _published(coll, flt_of)
+        in_slice = {d["id"] for d in pub}
+        per = {eid: ch for eid, ch in (changes.get(coll) or {}).items()
+               if eid in in_slice or refs(ch.get("payload") or {})}
+        return [d for d in overlay(pub, per) if refs(d)]
+
+    cols = await _alive("canonical_columns", lambda lot: {"tableId": {"$in": lot}},
+                        lambda d: d.get("tableId") in gone)
+    # Relaciones v2 (parent/child) y legacy v1 (source/target, doc 105 R1: el
+    # effective y el Reporting las siguen contemplando).
+    rels = await _alive("relationships",
+                        lambda lot: {"$or": [{f: {"$in": lot}} for f in _REL_TABLE_FIELDS]},
+                        lambda d: bool(_rel_tables(d) & gone))
+    views = await _alive("views", lambda lot: {"$or": [{"tableId": {"$in": lot}}, {"sourceTableIds": {"$in": lot}}]},
+                         lambda d: bool(_view_sources(d) & gone))
+    names = {d["id"]: d.get("physicalName") or d["id"]
+             for d in await _published("canonical_tables", lambda lot: {"_id": {"$in": lot}})}
+    items: list[dict] = []
+    for tid in ids:
+        n_cols = sum(1 for c in cols if c.get("tableId") == tid)
+        n_rels = sum(1 for r in rels if tid in _rel_tables(r))
+        n_views = sum(1 for v in views if tid in _view_sources(v))
+        if n_cols or n_rels or n_views:
+            parts = [f"{n} {what}" for n, what in ((n_cols, "column(s)"), (n_rels, "relationship(s)"),
+                                                   (n_views, "view(s)")) if n]
+            items.append({"kind": "table", "collection": "canonical_tables", "entityId": tid,
+                          "message": f"Table {names.get(tid, tid)} is deleted but still has {', '.join(parts)}"})
+    return items
+
+
 async def rename_schema(cs_id: str, actor: str, schema_id: str, new_name: str) -> dict | str | None:
     """Renombra un esquema DENTRO del draft: upsert del schema con el nombre
     nuevo + un upsert (doc COMPLETO, schema reemplazado) por cada tabla/vista
     EFECTIVA que lo usa. Server-side a propósito: el effective de tablas es
-    potencialmente enorme para el cliente, y reusar `add_change` hereda los
-    guards de owner/draft/validación/unicidad. Pre-flight de duplicados ANTES
-    de grabar nada (no deja un draft renombrado a medias). Devuelve
-    {tables, views} o la semántica de add_change (None/"forbidden"/"locked")."""
+    potencialmente enorme para el cliente. Doc 105 (H1): TODO en un solo
+    `add_changes_bulk` — valida owner/draft/payloads/unicidad de todo el lote
+    ANTES de grabar y lo escribe en una escritura condicionada al dueño (antes
+    eran N+1 `add_change`: una transferencia, un envío o un timeout en el medio
+    lo dejaban a medias). Devuelve {tables, views} o la semántica de
+    add_change (None/"forbidden"/"locked")."""
     err = schemas_service.name_error(new_name)
     if err:
         raise InvalidPayloadError(err)
@@ -1472,7 +1694,6 @@ async def rename_schema(cs_id: str, actor: str, schema_id: str, new_name: str) -
         return None
     old_name = str(cur.get("name") or "").strip()
 
-    counts = {"tables": 0, "views": 0}
     tables: list[dict] = []
     views: list[dict] = []
     if old_name and old_name != new_name:
@@ -1483,26 +1704,18 @@ async def rename_schema(cs_id: str, actor: str, schema_id: str, new_name: str) -
         views = _overlay_by_schema(
             await repository.published("views", scoped(pid, {"schema": old_name})),
             changes.get("views"), old_name)
-        # Pre-flight: si alguna tabla renombrada chocara con una homónima ya
-        # existente en el esquema destino, se rechaza ENTERO con 409.
-        for doc in tables:
-            payload = {**{k: v for k, v in doc.items() if k != "id"}, "schema": new_name}
-            dup = await _duplicate_error(cs, "canonical_tables", doc["id"], "upsert", payload)
-            if dup:
-                raise DuplicateEntityError(dup)
 
-    res = await add_change(cs_id, actor, "schemas", schema_id, "upsert",
-                           {**{k: v for k, v in cur.items() if k != "id"}, "name": new_name})
+    def _upsert(coll: str, eid: str, doc: dict, **patch) -> dict:
+        return {"collection": coll, "entityId": eid, "op": "upsert",
+                "payload": {**{k: v for k, v in doc.items() if k != "id"}, **patch}}
+
+    items = [_upsert("schemas", schema_id, cur, name=new_name)]
+    items += [_upsert("canonical_tables", d["id"], d, schema=new_name) for d in tables]
+    items += [_upsert("views", d["id"], d, schema=new_name) for d in views]
+    res = await add_changes_bulk(cs_id, actor, items)
     if res is None or isinstance(res, str):
         return res
-    for coll, key, docs in (("canonical_tables", "tables", tables), ("views", "views", views)):
-        for doc in docs:
-            payload = {**{k: v for k, v in doc.items() if k != "id"}, "schema": new_name}
-            r = await add_change(cs_id, actor, coll, doc["id"], "upsert", payload)
-            if r is None or isinstance(r, str):
-                return r
-            counts[key] += 1
-    return counts
+    return {"tables": len(tables), "views": len(views)}
 
 
 async def schema_impact(cs_id: str, schema_id: str) -> dict | None:
@@ -1565,7 +1778,7 @@ async def delete_schema_in_changeset(cs_id: str, actor: str, schema_id: str):
     return await add_change(cs_id, actor, "schemas", schema_id, "delete", None)
 
 
-async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) -> dict | None:
+async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) -> dict | str | None:
     """Cierra el request y aplica el changeset a las colecciones publicadas
     (doc 75: todo dentro del proyecto del changeset). Orden y garantías:
 
@@ -1585,7 +1798,8 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
        request a `submitted` y re-lanza: el apply es idempotente (upserts por
        _id), re-aprobar reintenta y converge. Si el PROCESO muere a mitad, el
        doc queda `approved` sin `appliedAt` — detectable, y recuperable con
-       `scripts/reapply_changeset.py`.
+       `scripts/reapply_changeset.py` (doc 105: lo devuelve a revisión,
+       `recover_interrupted_publish`, y se re-aprueba por el camino normal).
     5. `appliedAt` se estampa recién con el apply completo: es el marcador de
        "esta versión SÍ está en producción" (lo usa current_production).
     """
@@ -1596,11 +1810,69 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
     )
     if final is None:
         return None
-    changes = changes_in_cycle(await repository.changes_map(cs_id), submitted_at)
     # Doc 88 §6: al revertir el claim, el ciclo vuelve a `pending` (el cierre
     # `approved` del historial se deshace junto con el estado).
     _revert = {"status": "submitted", "reviewedBy": None, "reviewedAt": None, "approvals": {},
                "requests": list(cs.get("requests") or [])}
+    try:
+        changes = await _publish_gates(cs, fields, submitted_at, _revert)
+    except PublishError:
+        raise                          # su gate ya devolvió el request a revisión
+    except Exception:
+        # Doc 105 (H5): una falla que NO es de negocio en los gates (timeout de
+        # BD, red) dejaba la versión `approved` sin `appliedAt`, fuera de la
+        # bandeja y sin salida. Nada se escribió todavía: vuelve a revisión.
+        log.exception("publish gate FAILED — request devuelto a revisión", extra={"cs_id": cs_id})
+        await repository.transition(cs_id, fields.get("status", "approved"), _revert)
+        raise
+    progress: dict = {"writing": False}   # doc 104: lo marca `apply_changes` al empezar a ESCRIBIR
+    try:
+        plan = apply_plan(changes)
+        # Rollback (doc 16 §5d): capturar y estampar la imagen PREVIA de cada
+        # entidad ANTES de aplicar — después del apply ya no existe el "antes".
+        # Doc 105 (H4b): sólo se CONSERVA una marca previa si un publish a
+        # medias ya escribió producción (`partialApplyAt`); si no, se re-captura.
+        await repository.store_before_images(
+            cs_id, await repository.capture_before_images(plan), keep_existing=bool(cs.get("partialApplyAt")))
+        counts = await repository.apply_changes(plan, progress=progress)
+        if any(coll == "projects" and op == "delete" for coll, _eid, op, _p in plan):
+            # Doc 75 D5: el proyecto se borró en esta versión → cascada soft-delete
+            # de todo lo suyo. Idempotente; si falla, la request vuelve a
+            # `submitted` (except de abajo) y re-aprobar converge.
+            counts["cascade"] = await projects_repo.cascade_delete(pid, cs_id)
+            log.warning("project deleted by changeset", extra={"cs_id": cs_id, "project": pid})
+    except Exception:
+        log.exception("changeset apply FAILED — request devuelto a revisión",
+                      extra={"cs_id": cs_id})
+        # Doc 104: si ya empezó a escribir, parte pudo llegar a producción —
+        # marca durable en la cabecera (ese draft no se elimina).
+        await repository.transition(cs_id, fields.get("status", "approved"),
+                                    {**_revert, "partialApplyAt": _now()} if progress["writing"] else _revert)
+        raise
+    # Doc 105 (R1): `appliedAt` va condicionado al claim de ESTE publish. Si
+    # en el medio un operador lo devolvió a revisión (`reapply_changeset.py
+    # --force` con el apply todavía vivo), no queda «en revisión con
+    # appliedAt»: queda en revisión (con `partialApplyAt`) y re-aprobar converge.
+    stamped = await repository.transition(
+        cs_id, fields.get("status", "approved"), {"appliedAt": _now()},
+        expect={"appliedAt": None, "reviewedAt": final.get("reviewedAt")})
+    if stamped is None:
+        log.warning("changeset applied, but it was sent back to review meanwhile — re-approve it",
+                    extra={"cs_id": cs_id, "applied": counts})
+        return SENT_BACK        # ronda 3: el router lo dice tal cual y audita la decisión
+    # El publish es LA operación de escritura crítica: sin este log no hay forma
+    # de diagnosticar en producción qué aplicó (o dejó de aplicar) una versión.
+    log.info("changeset applied", extra={"cs_id": cs_id, "applied": counts})
+    return stamped
+
+
+async def _publish_gates(cs: dict, fields: dict, submitted_at: str | None, _revert: dict) -> dict:
+    """Gates del publish (pasos 2-3 de `_apply_and_finalize`): lee los cambios
+    del ciclo y los valida. Cada gate de NEGOCIO revierte el claim y levanta su
+    `PublishError`; devuelve los cambios listos para el apply."""
+    cs_id = cs["id"]
+    pid = cs["projectId"]
+    changes = changes_in_cycle(await repository.changes_map(cs_id), submitted_at)
     invalid = validation.validate_changes(changes)
     if invalid:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
@@ -1627,6 +1899,14 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
             "Publish blocked: the request deletes schemas that are still in use — "
             + " | ".join(in_use[:5]) + (f" | +{len(in_use) - 5} more" if len(in_use) > 5 else ""),
             items=[{"kind": "schema", "message": m} for m in in_use], next_step=PUBLISH_NEXT_STEP)
+    # Doc 105: una tabla borrada no deja columnas, relaciones ni vistas vivas.
+    orphans = await _publish_table_deletes(pid, changes)
+    if orphans:
+        await repository.transition(cs_id, fields.get("status", "approved"), _revert)
+        raise TableInUseError(
+            "Publish blocked: the request deletes tables that are still referenced — "
+            + " | ".join(i["message"] for i in orphans[:5]) + (f" | +{len(orphans) - 5} more" if len(orphans) > 5 else ""),
+            items=orphans, next_step=PUBLISH_NEXT_STEP)
     # Doc 75 I2 (gate autoritativo): ninguna referencia del plan cruza proyectos.
     # Doc 88 §4: los canvases se publican PODADOS de los miembros que el mismo
     # request borra (la poda muta el plan en memoria antes del apply).
@@ -1635,33 +1915,89 @@ async def _apply_and_finalize(cs: dict, fields: dict, submitted_at: str | None) 
             for eid, ch in per.items():
                 ch["payload"] = await _pruned_payload(cs, coll, ch.get("op"), ch.get("payload"), changes)
                 await _cross_project_check(cs, coll, eid, ch.get("op"), ch.get("payload"), changes)
+        await _foreign_entities_check(cs, changes)
     except CrossProjectError:
         await repository.transition(cs_id, fields.get("status", "approved"), _revert)
         raise
+    return changes
+
+
+async def _foreign_entities_check(cs: dict, changes: dict) -> None:
+    """Doc 105 (H7, doc 100 P11): el publish escribe por `_id`. Si ese id ya es
+    de una entidad de OTRO proyecto (viva o borrada), un draft la mudaría a su
+    proyecto o la borraría: se bloquea. Un doc sin `projectId` (legacy) no
+    bloquea; `projects` tiene su propio gate (`project_change_error`)."""
+    items: list[dict] = []
+    for coll, per in changes.items():
+        if coll == "projects" or not per:
+            continue
+        owners = await repository.project_of(coll, sorted(per))
+        for eid, owner in owners.items():
+            if owner and owner != cs["projectId"]:
+                items.append({"kind": "entity", "collection": coll, "entityId": eid,
+                              "message": f"{coll} {eid} belongs to another project"})
+    if items:
+        raise CrossProjectError(
+            "Publish blocked: the request writes entities of another project — "
+            + " | ".join(i["message"] for i in items[:5]) + (f" | +{len(items) - 5} more" if len(items) > 5 else ""),
+            items=items, next_step=PUBLISH_NEXT_STEP)
+
+
+# `_apply_and_finalize`: aplicó, pero en el medio la devolvieron a revisión
+# (`reapply_changeset.py --force` con el apply vivo) — hay que re-aprobarla.
+SENT_BACK = "sent-back"
+
+# Un publish vivo (el claim y su apply, en el OTRO proceso) nunca dura tanto:
+# un claim más viejo sin `appliedAt` es de un proceso que murió.
+RECOVER_MIN_AGE_SECONDS = 30 * 60
+
+
+def _age_seconds(iso: str | None) -> float | None:
+    """Segundos desde `iso`; None si no hay fecha legible."""
     try:
-        plan = apply_plan(changes)
-        # Rollback (doc 16 §5d): capturar y estampar la imagen PREVIA de cada
-        # entidad ANTES de aplicar — después del apply ya no existe el "antes".
-        # `store_before_images` es no-op sobre cambios ya estampados (re-apply).
-        await repository.store_before_images(
-            cs_id, await repository.capture_before_images(plan))
-        counts = await repository.apply_changes(plan)
-        if any(coll == "projects" and op == "delete" for coll, _eid, op, _p in plan):
-            # Doc 75 D5: el proyecto se borró en esta versión → cascada soft-delete
-            # de todo lo suyo. Idempotente; si falla, la request vuelve a
-            # `submitted` (except de abajo) y re-aprobar converge.
-            counts["cascade"] = await projects_repo.cascade_delete(pid, cs_id)
-            log.warning("project deleted by changeset", extra={"cs_id": cs_id, "project": pid})
-    except Exception:
-        log.exception("changeset apply FAILED — request devuelto a revisión",
-                      extra={"cs_id": cs_id})
-        await repository.transition(cs_id, fields.get("status", "approved"), _revert)
-        raise
-    final = await repository.set_status(cs_id, {"appliedAt": _now()}) or final
-    # El publish es LA operación de escritura crítica: sin este log no hay forma
-    # de diagnosticar en producción qué aplicó (o dejó de aplicar) una versión.
-    log.info("changeset applied", extra={"cs_id": cs_id, "applied": counts})
-    return final
+        at = datetime.fromisoformat(str(iso))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - at).total_seconds()
+
+
+async def recover_interrupted_publish(cs_id: str, *, min_age_seconds: int = RECOVER_MIN_AGE_SECONDS
+                                      ) -> dict | str | None:
+    """Doc 105 (A1-o1): un publish cuyo PROCESO murió después del claim deja la
+    versión `approved` sin `appliedAt`. Antes se re-aplicaba a ciegas (sin
+    gates, sin imágenes previas, sin poda ni cascada); ahora vuelve a revisión
+    igual que el revert del publish: el revisor re-aprueba y corre el publish
+    COMPLETO. `partialApplyAt` es conservador (no se sabe si alcanzó a
+    escribir): el draft no se elimina y el re-approve conserva las imágenes
+    previas ya estampadas (se capturan ANTES de cualquier escritura).
+
+    Revisión R1: un claim de hace menos de `min_age_seconds` puede ser un
+    publish VIVO en el otro proceso — no se toca ("recent"; el script lo
+    fuerza con `--force` = 0). Sin fecha de aprobación legible (cabeceras
+    legadas) no se puede probar que murió: "undated" (reintentar no sirve; se
+    verifica a mano y se fuerza). Devuelve la cabecera revertida, "recent",
+    "undated", o None si no estaba trabada."""
+    cs = await repository.get(cs_id)
+    if not cs or cs.get("status") != "approved" or cs.get("appliedAt"):
+        return None
+    if min_age_seconds > 0:
+        age = _age_seconds(cs.get("reviewedAt"))
+        if age is None:
+            return "undated"
+        if age < min_age_seconds:
+            return "recent"
+    history = [dict(r) for r in (cs.get("requests") or [])]
+    if history and history[-1].get("outcome") == "approved":
+        for key in ("decidedAt", "decidedBy", "note", "decisions"):
+            history[-1].pop(key, None)
+        history[-1]["outcome"] = "pending"
+    return await repository.transition(
+        cs_id, "approved",
+        {"status": "submitted", "reviewedBy": None, "reviewedAt": None, "approvals": {},
+         "requests": history, "partialApplyAt": cs.get("partialApplyAt") or _now()},
+        expect={"appliedAt": None, "reviewedAt": cs.get("reviewedAt")})
 
 
 def rollback_plan(changes: dict) -> tuple[list[dict], list[str]]:
@@ -1764,10 +2100,17 @@ async def rollback(cs_id: str, actor: str) -> dict | str | None:
                "versionLabel": next_version_label(existing),
                "projectId": cs["projectId"],
                "restoredFrom": {"csId": cs["id"], "versionLabel": cs.get("versionLabel"),
-                                "appliedAt": cs.get("appliedAt")}})
-    for ch in inverse:
-        await repository.set_change(draft["id"], ch["collection"], ch["entityId"],
-                                    ch["op"], ch["payload"])
+                                "appliedAt": cs.get("appliedAt")},
+               # Doc 105: hasta que estén TODOS los inversos, no se puede enviar.
+               "restoreIncomplete": True})
+    # Doc 105 (A1-o2): todos los inversos en lotes (antes un `set_change` por
+    # entidad: ~4 sentencias por entidad y una caída en el medio dejaba un
+    # restore PARCIAL que se podía enviar y aprobar). La marca se quita recién
+    # con todo grabado: si el proceso muere antes, el draft queda marcado y
+    # `submit` lo rechaza (se elimina y se restaura de nuevo).
+    if await repository.set_changes_bulk(draft["id"], inverse, owner=actor) is None:
+        raise RuntimeError("The restore draft couldn't be written: delete it and restore the version again.")
+    await repository.set_status(draft["id"], {"restoreIncomplete": None})
     return await repository.get(draft["id"])
 
 
@@ -1787,7 +2130,7 @@ async def review(cs_id: str, actor: str, decision: str, note: str | None) -> dic
     # Doc 88 §5: rechazar exige motivo (antes de registrar nada).
     if decision == "reject" and not (note or "").strip():
         raise RejectionReasonRequired("A rejection must include the reason: tell the owner what to fix.")
-    await ensure_project_alive(cs)
+    await ensure_project_alive(cs, finishing_own_delete=True)   # doc 105 (H3)
 
     # Decisión con $set atómico en `approvals.<actor>`: decisiones concurrentes
     # de otros revisores no se pisan. El outcome se computa sobre el documento
@@ -1833,11 +2176,17 @@ async def withdraw(cs_id: str, actor: str) -> dict | str | None:
         return None
     if cs.get("owner") != actor:
         return "forbidden"
-    return await repository.transition(
+    # Doc 104: condicionado al dueño leído (rechazo → transferencia → re-envío
+    # del nuevo dueño en el medio repetiría el estado `submitted`: ABA).
+    res = await repository.transition(
         cs_id, "submitted",
         {"status": "draft", "approvals": {}, "submittedAt": None,
          "requests": close_cycle(cs, "withdrawn", actor)},          # doc 88 §6
+        expect={"owner": actor},
     )
+    if res is None and await _owner_changed(cs_id, actor):
+        return "forbidden"
+    return res
 
 
 async def reopen(cs_id: str, actor: str) -> dict | str | None:
@@ -1860,7 +2209,149 @@ async def reopen(cs_id: str, actor: str) -> dict | str | None:
         # para que la solicitud (y su motivo) no se pierdan al reabrir.
         fields["requests"] = close_cycle(cs, "rejected", cs.get("reviewedBy"), cs.get("reviewNote"),
                                          decisions=cs.get("approvals"))
-    return await repository.transition(cs_id, "rejected", fields)
+    res = await repository.transition(cs_id, "rejected", fields, expect={"owner": actor})   # doc 104
+    if res is None and await _owner_changed(cs_id, actor):
+        return "forbidden"
+    return res
+
+
+# ── Administración de versiones: transferir y eliminar drafts (doc 104) ────
+
+# Sólo un draft se transfiere; se elimina un draft o un `rejected` legacy
+# (antes del doc 88 el rechazo no volvía a draft). Una versión en revisión se
+# retira primero; una publicada es historia (rollback, `asof:`, compare,
+# historial) y NUNCA se toca.
+TRANSFERABLE = ("draft",)
+DELETABLE = ("draft", "rejected")
+
+
+def transfer_entry(from_owner: str, to: str, by: str, note: str | None) -> dict:
+    """Registro de UNA transferencia para `transfers[]`; la nota vacía no se
+    guarda. Puro."""
+    entry = {"from": from_owner, "to": to, "by": by, "at": _now()}
+    note = (note or "").strip()
+    if note:
+        entry["note"] = note
+    return entry
+
+
+def _state_block(cs: dict, allowed: tuple[str, ...]) -> str | None:
+    """None si el estado de `cs` admite la acción; si no, el sentinela que el
+    router traduce a un 409 legible. Puro."""
+    status = cs.get("status")
+    if status in allowed:
+        return None
+    if status == "submitted":
+        return "in-review"
+    if status == "approved":
+        return "published"
+    return "not-draft"
+
+
+def _manage_refusal(cs: dict, actor: str) -> str:
+    """Sentinela de «no puede administrarla»: su dueño cuyo rol ya no edita
+    modelos recibe un motivo propio (el genérico diría «sólo el dueño»)."""
+    return "owner-cannot-edit" if actor == cs.get("owner") else "forbidden"
+
+
+def _upload_in_progress(cs: dict) -> bool:
+    """¿Una carga Excel está ESCRIBIENDO en la versión, en cualquier proceso?
+    Doc 105: lock `uploadLock` de la cabecera (con latido)."""
+    return repository.upload_lock_active(cs)
+
+
+async def transfer_version(cs_id: str, actor: str, perms: dict | None, to: str,
+                           note: str | None, expected_owner: str | None = None) -> dict | str | None:
+    """Pasa un DRAFT a otro usuario (doc 104): desde ahí ese usuario lo edita,
+    lo envía y figura como autor al publicarse; `transfers[]` recuerda quién lo
+    inició y cada traspaso. Lo hace el owner (si su rol edita modelos) o un
+    administrador, también hacia sí mismo — administrar no es editar.
+
+    Devuelve el changeset actualizado, o: None (no existe) · "forbidden" /
+    "owner-cannot-edit" (su dueño, pero su rol ya no edita modelos) ·
+    "in-review" / "published" / "not-draft" (sólo drafts) · "uploading" (una
+    carga Excel está escribiendo en él) · "same-owner" · "bad-target" (no
+    existe o está deshabilitado) · "target-cannot-edit" (su rol no edita
+    modelos: recibiría una versión que no puede tocar ni enviar) · "conflict"
+    (entre la lectura y la escritura la enviaron a revisión, la transfirieron
+    o la eliminaron: la escritura está condicionada a estado + dueño leídos;
+    y también si `expected_owner` — el dueño que mostraba la pantalla — ya no
+    lo es: un admin no mueve el draft de otra persona creyendo que es el que vio)."""
+    cs = await repository.get(cs_id)
+    if not cs:
+        return None
+    if not access.can_manage(cs, actor, perms):
+        return _manage_refusal(cs, actor)
+    if expected_owner and expected_owner != cs.get("owner"):
+        return "conflict"
+    blocked = _state_block(cs, TRANSFERABLE)
+    if blocked:
+        return blocked
+    if _upload_in_progress(cs):
+        return "uploading"
+    # Doc 105 (R1): misma salvedad de H3 que enviar y decidir — el draft cuyo
+    # publish a medias borró SU proyecto se puede pasar a quien lo termine.
+    await ensure_project_alive(cs, finishing_own_delete=True)
+    to = (to or "").strip()
+    if to == cs.get("owner"):
+        return "same-owner"
+    target = await auth_service.resolve_session_user(to)
+    if target is None:
+        return "bad-target"
+    if not target["permissions"].get("model.edit"):
+        return "target-cannot-edit"
+    entry = transfer_entry(cs["owner"], to, actor, note)
+    updated = await repository.transfer_owner(cs_id, cs["owner"], to, entry)
+    return updated or await _refusal_after_race(cs_id)
+
+
+async def delete_version(cs_id: str, actor: str, perms: dict | None,
+                         expected_owner: str | None = None) -> dict | str | None:
+    """Elimina un DRAFT con todos sus cambios (doc 104). Nunca tocó
+    producción, así que no hay nada que deshacer; queda en la auditoría.
+    Mismos permisos que transferir. Devuelve un resumen de lo eliminado, o los
+    sentinelas de `transfer_version` que apliquen (None · "forbidden" ·
+    "owner-cannot-edit" · "in-review" · "published" · "not-draft" · "uploading"
+    · "conflict") o "partially-published" (un approve falló a mitad del apply:
+    parte llegó a producción y el ledger es su único rastro).
+    Un proyecto borrado no bloquea: eliminar sus drafts es limpieza."""
+    cs = await repository.get(cs_id)
+    if not cs:
+        return None
+    if not access.can_manage(cs, actor, perms):
+        return _manage_refusal(cs, actor)
+    if expected_owner and expected_owner != cs.get("owner"):
+        return "conflict"                            # la pantalla mostraba otro dueño
+    blocked = _state_block(cs, DELETABLE)
+    if blocked:
+        return blocked
+    if _upload_in_progress(cs):
+        return "uploading"
+    # Un approve que falló cuando ya escribía en producción: parte pudo llegar y
+    # su ledger es el único rastro — no se borra (marca de la cabecera, que
+    # re-editar no borra). Un draft no entra a un apply sin salir de draft y el
+    # borrado va condicionado a draft: chequear antes no deja carrera.
+    if cs.get("partialApplyAt"):
+        return "partially-published"
+    removed = await repository.delete_changeset(cs_id, cs["owner"], DELETABLE)
+    if removed is None:
+        return await _refusal_after_race(cs_id)
+    return {"id": cs_id, "deleted": True, "versionLabel": cs.get("versionLabel"),
+            "title": cs.get("title"), "owner": cs.get("owner"),
+            "projectId": cs.get("projectId"), "changes": removed}
+
+
+async def _refusal_after_race(cs_id: str) -> str:
+    """La escritura condicionada no se dio: entre leer y escribir otra sesión
+    cambió la versión. Doc 105: si fue una carga Excel que empezó a escribir
+    (en cualquier proceso), se dice eso; si no, «cambió mientras tanto»."""
+    return "uploading" if _upload_in_progress(await repository.get(cs_id) or {}) else "conflict"
+
+
+async def exists(cs_id: str) -> bool:
+    """¿La cabecera existe? Para distinguir «eliminada» (404) de «estado
+    equivocado» (409) en los caminos de error del router."""
+    return await repository.get(cs_id) is not None
 
 
 async def add_comment(cs_id: str, actor: str, text: str) -> dict | None:
@@ -2307,6 +2798,7 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
                              or d["id"] for d in docs}
     users: dict[str, dict] = {}
     ids = {e["userId"] for e in events} | {e["publishedById"] for e in events} \
+        | {e["startedById"] for e in events} \
         | {uid for e in events for uid in e["approvedByIds"]}
     if ids - {None}:
         from app.features.auth import repository as auth_repo
@@ -2319,6 +2811,7 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
             "action": e["action"], "at": e["at"], "editedAt": e["editedAt"],
             "csId": e["csId"], "version": e["version"], "versionTitle": e["versionTitle"],
             "user": _user_ref(e["userId"], users),
+            "startedBy": _user_ref(e["startedById"], users),
             "publishedBy": _user_ref(e["publishedById"], users),
             "approvedBy": [u for uid in e["approvedByIds"] if (u := _user_ref(uid, users))],
             "origin": e["origin"], "name": detail.get("name"),
@@ -2335,7 +2828,7 @@ async def entity_history(collection: str, entity_id: str, limit: int = 50) -> di
                     "action": "created", "at": (doc or {}).get("createdAt") or first.get("appliedAt"),
                     "editedAt": None, "csId": first.get("id"),
                     "version": first.get("versionLabel"), "versionTitle": first.get("title"),
-                    "user": None, "publishedBy": None, "approvedBy": [],
+                    "user": None, "startedBy": None, "publishedBy": None, "approvedBy": [],
                     "origin": {"kind": "migration"},
                     "name": None, "fields": [], "synthetic": True,
                 })

@@ -88,10 +88,13 @@ def test_artifact_catalog_raices_mas_generadores():
 
 # ── apply (mockeado) ──────────────────────────────────────────────────────
 
-def _mock_apply(monkeypatch, *, before_rules=None, config=None):
+def _mock_apply(monkeypatch, *, before_rules=None, config=None, udp_ids=()):
     monkeypatch.setattr(service.dom_repo, "list_domains", AsyncMock(return_value=[]))
     monkeypatch.setattr(service.dict_repo, "list_entries", AsyncMock(return_value=[]))
-    monkeypatch.setattr(service.udp_repo, "list_udp", AsyncMock(return_value=[]))
+    # Doc 105: sólo se borra lo que existe en el proyecto — las defs que un
+    # test borra tienen que estar en el catálogo mockeado.
+    monkeypatch.setattr(service.udp_repo, "list_udp", AsyncMock(return_value=[
+        {"id": uid, "name": uid, "level": "column", "dataType": "string", "allowedValues": []} for uid in udp_ids]))
     monkeypatch.setattr(service.udp_repo, "delete_udp", AsyncMock())
     monkeypatch.setattr(service.rules_repo, "list_rules", AsyncMock(return_value=before_rules or []))
     monkeypatch.setattr(service.rules_repo, "get_config",
@@ -133,7 +136,7 @@ def test_apply_reglas_crea_version_y_muta(monkeypatch):
 
 
 def test_apply_udp_delete_referenciado_por_regla_409(monkeypatch):
-    _, created, _, deleted, _ = _mock_apply(monkeypatch, before_rules=[RULE])
+    _, created, _, deleted, _ = _mock_apply(monkeypatch, before_rules=[RULE], udp_ids=["u-dac-col"])
     with pytest.raises(HTTPException) as e:
         asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-dac-col"])))
     assert e.value.status_code == 409 and "enmascarar_dac" in e.value.detail
@@ -144,7 +147,7 @@ def test_apply_udp_delete_referenciado_por_regla_409(monkeypatch):
 def test_apply_udp_delete_referenciado_por_lookup_409(monkeypatch):
     _mock_apply(monkeypatch, config={"id": "global",
                                      "lookups": {"vacuum_map": {"fromUdpId": "u-vac"}},
-                                     "functions": []})
+                                     "functions": []}, udp_ids=["u-vac"])
     with pytest.raises(HTTPException) as e:
         asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-vac"])))
     assert e.value.status_code == 409 and "vacuum_map" in e.value.detail
@@ -153,7 +156,7 @@ def test_apply_udp_delete_referenciado_por_lookup_409(monkeypatch):
 def test_apply_udp_delete_ok_si_la_regla_cae_en_el_mismo_batch(monkeypatch):
     """El guard evalúa el estado POST-batch: si el batch borra también la regla
     que referenciaba el UDP, no hay nada que proteger."""
-    inserted, *_ = _mock_apply(monkeypatch, before_rules=[RULE])
+    inserted, *_ = _mock_apply(monkeypatch, before_rules=[RULE], udp_ids=["u-dac-col"])
     v = asyncio.run(service.apply("mr", "p1", ApplyBody(udpDelete=["u-dac-col"], rulesDelete=["r1"])))
     assert v["seq"] == 9
     service.udp_repo.delete_udp.assert_awaited_once_with("u-dac-col")

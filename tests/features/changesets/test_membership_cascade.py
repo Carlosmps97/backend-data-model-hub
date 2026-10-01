@@ -71,15 +71,20 @@ def test_borrar_una_vista_cascadea_a_los_canvases_publicados_y_pendientes(monkey
         return [{"id": "t1", "projectId": "p1"}] if collection == "canonical_tables" else \
                ([{"id": "v2", "projectId": "p1"}] if collection == "views" else [])
     monkeypatch.setattr(service.repository, "published", _pub)
-    set_change = AsyncMock(return_value={"id": "cs1"})
-    monkeypatch.setattr(service.repository, "set_change", set_change)
+    bulk = AsyncMock(return_value={"id": "cs1"})
+    monkeypatch.setattr(service.repository, "set_changes_bulk", bulk)
 
     asyncio.run(service.add_change("cs1", "ana", "views", "v1", "delete", None))
 
     assert ("subject_areas", {"projectId": "p1", "viewIds": "v1"}) in calls
-    written = [(c.args[1], c.args[2], c.args[3]) for c in set_change.await_args_list]
+    # Doc 104 (ronda 2): canvases podados y el borrado van en UNA escritura
+    # condicionada al dueño (todo o nada); el borrado, al final.
+    bulk.assert_awaited_once()
+    assert bulk.await_args.kwargs["owner"] == "ana"
+    items = bulk.await_args.args[1]
+    written = [(it["collection"], it["entityId"], it["op"]) for it in items]
     assert written[-1] == ("views", "v1", "delete")
-    canvases = {c.args[2]: c.args[4] for c in set_change.await_args_list if c.args[1] == "subject_areas"}
+    canvases = {it["entityId"]: it["payload"] for it in items if it["collection"] == "subject_areas"}
     assert set(canvases) == {"sa1", "sa2"}                     # sa3: el pendiente ya no la lista → nada que sanear
     assert canvases["sa1"]["viewIds"] == ["v2"] and set(canvases["sa1"]["layout"]) == {"t1", "v2"}
     assert canvases["sa2"]["viewIds"] == [] and set(canvases["sa2"]["layout"]) == {"t1"}

@@ -8,14 +8,13 @@ resolución de cabeceras por nombre ya no existe (es explícita en el perfil).
 from __future__ import annotations
 
 from app.core.naming import physicalize
+from app.core.udp_values import canonical_number, is_finite_number, iso_date, normalize_boolean
 
 from .context import UploadContext
 from .datatypes import canonical_type
 from .normalize import clean_text, norm_enum, norm_name
 from .report import ReportBuilder
 
-_BOOL_TRUE = frozenset({"true", "si", "sí", "yes", "1", "verdadero"})
-_BOOL_FALSE = frozenset({"false", "no", "0", "falso"})
 
 
 class Standards:
@@ -57,8 +56,10 @@ class Standards:
 
 def udp_value(defn: dict, raw: str) -> tuple[str | None, str | None]:
     """Valor a persistir (grafía canónica) o mensaje de error. Listas: contra
-    `allowedValues` con la regla del kit (`norm_enum`); number/boolean se
-    validan; string/date van tal cual."""
+    `allowedValues` con la regla del kit (`norm_enum`); number: finito y en su
+    forma canónica (la del motor del Reporting, ronda 6); date: ISO
+    `YYYY-MM-DD` real (de una fecha-hora ISO, sólo la fecha — ronda 6);
+    boolean se normaliza; string va tal cual."""
     kind = defn.get("dataType") or "string"
     name = defn.get("name") or "UDP"
     if kind == "list":
@@ -70,19 +71,46 @@ def udp_value(defn: dict, raw: str) -> tuple[str | None, str | None]:
         return None, (f"'{raw}' is not an allowed value for UDP '{name}' "
                       f"(allowed: {', '.join(allowed) if allowed else 'none defined'}).")
     if kind == "number":
-        try:
-            float(raw)
-        except ValueError:
-            return None, f"'{raw}' is not a number (UDP '{name}')."
-        return raw, None
+        # Doc 105: finito — `float()` aceptaba «nan»/«inf» (ronda 5) — y en su
+        # forma canónica: «10.50» y «10.5» son el mismo valor (ronda 6).
+        if not is_finite_number(raw):
+            return None, f"'{raw}' is not a finite number (UDP '{name}')."
+        return canonical_number(raw), None
+    if kind == "date":
+        # Doc 105: el front manda las celdas de fecha en ISO; otra forma de
+        # texto es un error de la fila (ronda 5). Con hora, sólo la fecha (ronda 6).
+        day = iso_date(raw)
+        if day is None:
+            return None, f"'{raw}' is not a valid date for UDP '{name}' (use YYYY-MM-DD)."
+        return day, None
     if kind == "boolean":
-        low = raw.strip().lower()
-        if low in _BOOL_TRUE:
-            return "true", None
-        if low in _BOOL_FALSE:
-            return "false", None
-        return None, f"'{raw}' is not a boolean value for UDP '{name}' (use true/false or Si/No)."
+        # Doc 105 (ronda 5): las grafías del motor del Reporting (módulo compartido).
+        value = normalize_boolean(raw)
+        if value is None:
+            return None, f"'{raw}' is not a boolean value for UDP '{name}' (use true/false or Si/No)."
+        return value, None
     return raw, None
+
+
+def profile_default_error(defn: dict, default: str, err: str) -> str:
+    """Doc 105 (ronda 6): el error de un default del PERFIL de carga dice de
+    dónde viene (la celda estaba vacía) — en la fila y al guardar el perfil."""
+    return (f"The default value '{default}' of UDP '{defn.get('name') or 'UDP'}' in the upload profile "
+            f"is invalid: {err}")
+
+
+def definition_default(defn: dict) -> tuple[str | None, str | None]:
+    """Default de la DEFINICIÓN a escribir en una entidad sin valor (o error).
+    Doc 105 (ronda 5): Data Standards lo guardaba como texto libre; pasa por
+    la misma regla que la celda — booleano normalizado («Sí» → «true»), número
+    finito y fecha ISO real — y uno inválido es un error de la fila. Texto y
+    lista, tal cual."""
+    default = clean_text(defn.get("defaultValue"))
+    if not default or (defn.get("dataType") or "string") not in ("boolean", "number", "date"):
+        return default or None, None
+    value, err = udp_value(defn, default)
+    return value, (f"The default value of UDP '{defn.get('name') or 'UDP'}' in Data Standards is invalid: {err}"
+                   if err else None)
 
 
 def apply_udps(udp_map: dict[str, list[dict]], row_udp: dict[str, str], existing: dict | None,
@@ -95,15 +123,22 @@ def apply_udps(udp_map: dict[str, list[dict]], row_udp: dict[str, str], existing
     values = {k: str(v) for k, v in (existing or {}).items() if v is not None}
     for header, defs in udp_map.items():
         raw = clean_text(row_udp.get(header))
+        from_profile = False
         if not raw and is_new:
             raw = clean_text((udp_defaults or {}).get(header))
+            from_profile = bool(raw)
         for d in defs:
             if raw:
                 val, err = udp_value(d, raw)
                 if err:
+                    rb.error(sheet, "invalid-udp-value",
+                             profile_default_error(d, raw, err) if from_profile else err, row=row, column=header)
+                elif val is not None:
+                    values[d["id"]] = val
+            elif d["id"] not in values:
+                val, err = definition_default(d)
+                if err:
                     rb.error(sheet, "invalid-udp-value", err, row=row, column=header)
                 elif val is not None:
                     values[d["id"]] = val
-            elif d["id"] not in values and clean_text(d.get("defaultValue")):
-                values[d["id"]] = clean_text(d.get("defaultValue"))
     return values

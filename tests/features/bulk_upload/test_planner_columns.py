@@ -119,7 +119,10 @@ def test_columna_existente_por_fisico_actualiza_con_doc_completo():
     assert col["payload"]["description"] == "d" and col["payload"]["ordinal"] == 0
     assert col["payload"]["isForeignKey"] is True and col["payload"]["udpValues"] == {"u9": "keep"}
     assert col["payload"]["dataType"] == "STRING"          # tipo vacío en update = conserva
-    assert codes(plan, "warning") == ["rename", "existing-column"]   # grafía del físico cambia
+    # Doc 105: «cod» se graba «COD» (case del scope, como el changeset): no es
+    # renombre — el update es sólo por la descripción.
+    assert col["payload"]["physicalName"] == "COD"
+    assert codes(plan, "warning") == ["existing-column"]
 
 
 def test_columna_existente_sin_cambios_queda_unchanged():

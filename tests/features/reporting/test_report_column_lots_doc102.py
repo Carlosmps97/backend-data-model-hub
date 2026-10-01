@@ -11,7 +11,7 @@ import pytest
 from app.core.db import client as db_client
 from app.features.changesets import repository as cs_repo
 from app.features.reporting import draft, repository, service
-from tests.support.fakedb import FakeDb
+from tests.support.fakedb import FakeCollection, FakeDb
 
 P = "p1"
 AT = "2026-09-29T00:00:00+00:00"
@@ -80,11 +80,26 @@ def test_sin_lote_es_toda_la_version(db):
     assert set(_rows(None)) == {"a1", "a3", "b1", "b2", "n1", "r1", "x1"}
 
 
+def _bounded(flt: dict) -> bool:
+    """¿La lectura del ledger va acotada por ids (`_id $in`) o por el lote
+    (`payload.tableId $in`)? Puro."""
+    return any(isinstance(flt.get(k), dict) and "$in" in flt[k] for k in ("_id", "payload.tableId"))
+
+
 def test_post_de_un_lote_no_lee_el_ledger_entero_de_la_version(db, client, monkeypatch):
-    async def _full_read(*_a, **_k):
-        raise AssertionError("leyó el ledger ENTERO de la versión para un lote")
-    monkeypatch.setattr(cs_repo, "changes_map", _full_read)
+    """Doc 105 (R2-A2): el espía mira la PUERTA real — cada `find` sobre el
+    ledger. Antes sólo se parchaba `changes_map` y un lector que leyera el
+    ledger entero por otra vía (`_ledger_map`, un `find` por `csId`) pasaba."""
+    unbounded: list[dict] = []
+    real_find = FakeCollection.find
+
+    def spy(self, flt=None, projection=None):
+        if self.name == cs_repo.CHANGES_COLL and not _bounded(flt or {}):
+            unbounded.append(flt)
+        return real_find(self, flt, projection)
+    monkeypatch.setattr(FakeCollection, "find", spy)
     res = client.post("/api/reporting/columns/query", headers=ANA,
                       json={"projectId": P, "tableIds": ["t1", "t2"], "changesetId": "cs1"})
     assert res.status_code == 200
     assert sorted(c["id"] for c in res.json()["data"]) == ["a1", "b1", "b2", "n1", "r1"]
+    assert unbounded == [], f"leyó el ledger de la versión SIN acotar al lote: {unbounded}"

@@ -64,5 +64,8 @@ def test_orden_por_campo_indexado_ok():
 def test_group_by_con_count():
     c = compile_spec(_spec(groupBy=["dataType"], aggregations=[{"fn": "count", "as": "n"}]), CAT)
     assert c.grouped
-    assert c.group["_id"]["dataType"] == {"$ifNull": ["$dataType", None]}
-    assert c.group["n"] == {"$sum": 1}
+    # Doc 105 (ronda 3): claves INTERNAS en el pipeline; el executor las
+    # devuelve con su nombre público (`output`).
+    assert c.group["_id"] == {"g0": {"$ifNull": ["$dataType", None]}}
+    assert c.group["a0"] == {"$sum": 1}
+    assert c.output == {"g0": "dataType", "a0": "n"}

@@ -7,7 +7,7 @@ impact #8 listaría contra columnas muertas, vistas con fuentes rotas, keys
 UDP muertas en reportes, etc. Este script deja la base en un estado que las
 reglas actuales aceptarían.
 
-Chequeos (C1–C9) y su fix:
+Chequeos (C1–C11; C5 retirado) y su fix:
   C1 tablas duplicadas (proyecto+physicalName, case-insens, activas — doc 75)
        → renombra los duplicados (sufijo " 2"/"_2"; conserva el primero).
   C2 columnas duplicadas dentro de una tabla (physicalName case-insens)
@@ -25,19 +25,22 @@ Chequeos (C1–C9) y su fix:
   C7 columnas con parentDomainId muerto → unset del campo.
   C8 udpValues con keys muertas (tablas/columnas/canvases) → unset de esas
      keys; valores fuera de allowedValues (defs tipo list) → REPORTE.
-  C9 subject_areas: tableIds muertos → pull; layout con nodos que no son ni
-     tabla activa ni vista activa → poda de entradas.
+  C9 subject_areas: tableIds y viewIds muertos → pull (doc 105: una vista
+     colgando dejaba el canvas sin poder editarse; `viewIds` None = canvas
+     legacy, no se toca); layout con nodos que no son ni tabla activa ni
+     vista activa → poda de entradas. C9d (doc 105, R2): tablas/vistas VIVAS
+     de OTRO proyecto (la app rechaza el guardado con 409) → pull igual.
   C11 campos retirados (doc 94): `glossary_terms.wordType` (D12) y
       `canonical_columns.pkPosition` (D1) → unset.
 
 Uso:
     .venv/bin/python -m scripts.audit_data_consistency            # reporte
     .venv/bin/python -m scripts.audit_data_consistency --fix      # aplica
-Idempotente: tras --fix, el reporte queda en 0 (salvo C5/C8b, informativos).
+Idempotente: tras --fix, el reporte queda en 0 (salvo los informativos, que no
+se corrigen solos: C6b, C6c, C8b, C10 y C10b).
 """
 from __future__ import annotations
 
-import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -89,6 +92,62 @@ def unset_retired_fields(database, fix: bool) -> dict[str, int]:
             database[coll].update_many(flt, {"$unset": {field: ""}})
         out[f"{coll}.{field}"] = n
     return out
+
+
+def _foreign(owner: str | None, project_id: str | None) -> bool:
+    """¿El miembro vivo es de OTRO proyecto? Sólo si ambos `projectId` se
+    conocen: sin el dato (anterior al doc 75) no se poda por proyecto. Puro."""
+    return owner is not None and project_id is not None and owner != project_id
+
+
+def canvas_member_fixes(canvases, active_tids: dict[str, str | None], active_vids: dict[str, str | None],
+                        active_symbols: dict[str, str | None] | None = None,
+                        ) -> tuple[list[tuple[str, dict]], dict[str, int]]:
+    """C9 · por canvas: `tableIds` y `viewIds` muertos (pull) y layout con nodos
+    que no son tabla, vista ni símbolo de subcategoría vivos del proyecto
+    (poda). `viewIds` None = canvas legacy (sus vistas salen por
+    `showOnCanvas`): no se toca. `active_*` = {id activo: projectId};
+    `active_symbols` = {subtypeSymbolId de relación activa: projectId} — doc 105
+    (R5): el canvas guarda ahí la posición de los símbolos (doc 53) y la poda
+    las borraba. Doc 105 (R2): un miembro vivo de OTRO proyecto se poda igual
+    (`otherProject`) — pasaba como sano con los activos globales y la app
+    rechaza todo guardado del canvas (409 cross_project).
+    Devuelve los `$set` por canvas y cuántos canvases tocó cada chequeo. Puro."""
+    nodes = (active_tids, active_vids, active_symbols or {})
+    updates: list[tuple[str, dict]] = []
+    counts = {"tableIds": 0, "viewIds": 0, "layout": 0, "otherProject": 0}
+    for sa in canvases:
+        upd = {}
+        pid = sa.get("projectId")
+        foreign = False
+        tids = sa.get("tableIds") or []
+        live = [t for t in tids if t in active_tids]
+        alive = [t for t in live if not _foreign(active_tids[t], pid)]
+        if len(live) != len(tids):
+            counts["tableIds"] += 1
+        foreign |= len(alive) != len(live)
+        if len(alive) != len(tids):
+            upd["tableIds"] = alive
+        vids = sa.get("viewIds")
+        if vids is not None:
+            live_v = [v for v in vids if v in active_vids]
+            alive_v = [v for v in live_v if not _foreign(active_vids[v], pid)]
+            if len(live_v) != len(vids):
+                counts["viewIds"] += 1
+            foreign |= len(alive_v) != len(live_v)
+            if len(alive_v) != len(vids):
+                upd["viewIds"] = alive_v
+        if foreign:
+            counts["otherProject"] += 1
+        layout = sa.get("layout") or {}
+        pruned = {k: v for k, v in layout.items()
+                  if any(k in live and not _foreign(live[k], pid) for live in nodes)}
+        if len(pruned) != len(layout):
+            counts["layout"] += 1
+            upd["layout"] = pruned
+        if upd:
+            updates.append((sa["_id"], upd))
+    return updates, counts
 
 
 def main():
@@ -304,27 +363,24 @@ def main():
         bulk(coll, ops)
     report("C8b valores UDP fuera de allowedValues (INFORME)", len(bad_enum), f"{bad_enum[:5]}")
 
-    # ── C9 · subject_areas: tableIds muertos + layout huérfano ──────────────
-    active_vids = {v["_id"] for v in db.views.find(ACTIVE, {"_id": 1})}
-    valid_nodes = active_tids | active_vids
-    ops, n_tids, n_layout = [], 0, 0
-    for sa in db.subject_areas.find({}, {"_id": 1, "tableIds": 1, "layout": 1}):
-        upd = {}
-        tids = sa.get("tableIds") or []
-        alive = [t for t in tids if t in active_tids]
-        if len(alive) != len(tids):
-            n_tids += 1
-            upd["tableIds"] = alive
-        layout = sa.get("layout") or {}
-        pruned = {k: v for k, v in layout.items() if k in valid_nodes}
-        if len(pruned) != len(layout):
-            n_layout += 1
-            upd["layout"] = pruned
-        if upd:
-            ops.append(UpdateOne({"_id": sa["_id"]}, {"$set": upd}))
-    report("C9a canvases con tableIds muertos", n_tids)
-    report("C9b canvases con layout de nodos inexistentes", n_layout)
-    bulk("subject_areas", ops)
+    # ── C9 · subject_areas: tableIds/viewIds muertos o ajenos + layout huérfano ──
+    # Doc 105 (R2): activos POR PROYECTO — con conjuntos globales un miembro
+    # vivo de otro proyecto pasaba como sano (y el canvas no se podía guardar).
+    table_project = {t["_id"]: t.get("projectId") for t in tables}
+    view_project = {v["_id"]: v.get("projectId") for v in db.views.find(ACTIVE, {"_id": 1, "projectId": 1})}
+    # R5: posiciones de los símbolos de subcategoría (relaciones activas) y
+    # sólo canvases ACTIVOS (un canvas borrado no se guarda: nada que destrabar).
+    symbol_project = {r["subtypeSymbolId"]: r.get("projectId")
+                      for r in db.relationships.find(ACTIVE, {"subtypeSymbolId": 1, "projectId": 1})
+                      if r.get("subtypeSymbolId")}
+    updates, counts = canvas_member_fixes(
+        db.subject_areas.find(ACTIVE, {"_id": 1, "projectId": 1, "tableIds": 1, "viewIds": 1, "layout": 1}),
+        table_project, view_project, symbol_project)
+    report("C9a canvases con tableIds muertos", counts["tableIds"])
+    report("C9b canvases con layout de nodos inexistentes o de otro proyecto", counts["layout"])
+    report("C9c canvases con viewIds muertos (vista borrada o inexistente)", counts["viewIds"])
+    report("C9d canvases con tablas/vistas vivas de OTRO proyecto (409 al guardar)", counts["otherProject"])
+    bulk("subject_areas", [UpdateOne({"_id": sid}, {"$set": upd}) for sid, upd in updates])
 
     # ── C11 · campos retirados del modelo (doc 94) ──────────────────────────
     for key, n in unset_retired_fields(db, FIX).items():

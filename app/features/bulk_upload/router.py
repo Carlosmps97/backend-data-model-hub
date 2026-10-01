@@ -13,7 +13,9 @@ el backend aplica el perfil; los topes se cortan acá (413).
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.api.envelope import ok
 from app.features.auth.deps import require_permission
@@ -85,10 +87,17 @@ async def start_apply(cs_id: str, job_id: str, user: dict = Depends(_can_edit)):
 
 
 @router.delete("/{job_id}")
-async def discard(cs_id: str, job_id: str, user: dict = Depends(_can_edit)):
-    res = await service.discard(cs_id, user["username"], job_id)
+async def discard(cs_id: str, job_id: str, user: dict = Depends(_can_edit),
+                  only_status: Literal["validated"] | None = Query(None, alias="status")):
+    """Doc 105 (ronda 8): `?status=validated` sólo borra un job que sigue validado
+    (409 si ya empezó o terminó) — con él, el front confirma que un POST del
+    apply sin respuesta no llegó."""
+    res = await service.discard(cs_id, user["username"], job_id, only_status=only_status)
     if res == "forbidden":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_GUARD_DETAIL["forbidden"][1])
+    if res == "changed":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="The upload already started; it can't be discarded.")
     if res == "busy":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="The upload is being applied; it can't be discarded until it finishes.")

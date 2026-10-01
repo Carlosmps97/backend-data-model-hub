@@ -115,6 +115,23 @@ def test_delete_409_mientras_aplica(client, monkeypatch):
     assert client.delete("/api/changesets/c1/uploads/j1").status_code == 409
 
 
+def test_delete_condicionado_a_validated_doc105(client, monkeypatch):
+    """Doc 105 (ronda 8): `?status=validated` sólo borra un job que sigue validado;
+    si ya empezó (o terminó) → 409, y el front sigue su polling."""
+    discard = AsyncMock(return_value="changed")
+    monkeypatch.setattr(service, "discard", discard)
+    r = client.delete("/api/changesets/c1/uploads/j1?status=validated")
+    assert r.status_code == 409 and r.json()["detail"]
+    assert discard.await_args.kwargs.get("only_status") == "validated"
+    monkeypatch.setattr(service, "discard", AsyncMock(return_value=True))
+    assert client.delete("/api/changesets/c1/uploads/j1?status=validated").status_code == 200
+    assert client.delete("/api/changesets/c1/uploads/j1?status=applied").status_code == 422   # sólo «validated»
+    plain = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "discard", plain)
+    assert client.delete("/api/changesets/c1/uploads/j1").status_code == 200
+    assert plain.await_args.kwargs.get("only_status") is None                                 # sin el parámetro: como siempre
+
+
 # ── Doc 87 §3.5: GET …/uploads/targets ────────────────────────────────────
 def test_get_targets_no_se_confunde_con_un_job(client, monkeypatch):
     targets = AsyncMock(return_value={"mode": "choose", "candidates": [{"id": "c", "name": "CPYBCA", "folders": 4, "canvases": 0}]})

@@ -1,6 +1,6 @@
 # Políticas de seguridad del backend — Data Model Hub
 
-Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador estilo pymongo en `app/core/db/lakebase/`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**: las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
+Este documento describe la postura de seguridad del backend de plataforma (`backend-data-model-hub`), construido con FastAPI sobre **Databricks Lakebase Postgres** (adaptador estilo pymongo en `app/core/db/lakebase/`). Cubre lo implementado desde el hardening del 2026-07-06 hasta el estado del **2026-07-31**, más los cierres del doc 105 (2026-09-30: escrituras directas del modelo y de los estándares, cursor y valores del WHERE del reporting, topes del editor SQL —largo del texto y anidamiento del WHERE, rondas 4–5—, NUL y cuerpos que no son UTF-8 rechazados en la entrada y visibilidad de drafts en `/relationships/impact`): las capas de autenticación en Databricks Apps, autenticación con contraseña propia, firma de sesión con JWT, defensas contra fuerza bruta, cabeceras de seguridad, CORS y host allowlist, control de acceso basado en roles (RBAC), endurecimiento del motor de reporting frente a inyección, auditoría y cadena de suministro. Cierra con la tabla resumen de mitigaciones, el estado de lo pendiente y las consideraciones de despliegue.
 
 La audiencia es doble: desarrolladores que mantienen el servicio y stakeholders técnicos que necesitan entender la postura de riesgo. Todo lo que sigue está verificado contra el código real; cuando el texto afirma "falla-cerrado" o "tiempo constante" es porque el código lo hace, no porque suene bien.
 
@@ -315,7 +315,7 @@ X-RateLimit-Limit: 5
 X-RateLimit-Remaining: 0
 ```
 
-**Limitación conocida:** el estado del limiter es en memoria por proceso. En un despliegue multi-réplica, cada instancia cuenta por separado y el límite efectivo se multiplica por el número de réplicas. Ver la sección de pendientes (Redis).
+**Limitación conocida:** el estado del limiter es en memoria POR PROCESO. El `app.yaml` corre `uvicorn --workers 2`, así que ya en una sola instancia cada proceso cuenta por separado (un cliente puede llegar a 5/min en cada uno: hasta el doble del límite nominal) y, con varias réplicas, se multiplica además por su número. La defensa principal contra fuerza bruta es el lockout por cuenta (sección 4), que vive en la BD y lo comparten todos los procesos. Ver la sección de pendientes (Redis).
 
 ---
 
@@ -337,7 +337,7 @@ Comportamiento:
 - Se auditan las tres situaciones: `login`, `login_failed`, `login_locked`.
 - **Sin oráculo de existencia:** solo se registran fallos para cuentas existentes y no deshabilitadas. Un atacante no puede distinguir "usuario no existe" de "contraseña incorrecta" ni por temporización (dummy hash) ni por comportamiento de lockout.
 
-Los campos de lockout (`failedAttempts`, `lockedUntil`) son internos: se leen con proyección explícita en `get_login_record` y **no** pasan por el modelo `UserDoc`, por lo que nunca se exponen al frontend.
+El contador y el bloqueo viven en el documento del usuario, en la BD: a diferencia del rate limit (en memoria por proceso), los comparten los dos workers de uvicorn y cualquier réplica. Los campos de lockout (`failedAttempts`, `lockedUntil`) son internos: se leen con proyección explícita en `get_login_record` y **no** pasan por el modelo `UserDoc`, por lo que nunca se exponen al frontend.
 
 ---
 
@@ -431,9 +431,11 @@ Nota sobre errores: el handler global de `Exception` corre en el middleware más
 Si `ALLOWED_HOSTS` está definido (producción), se monta `TrustedHostMiddleware`, que rechaza requests cuyo header `Host` no esté en la lista, mitigando ataques de Host header:
 
 ```python
-allowed_hosts = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
-if allowed_hosts:
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+# app/core/config.py
+ALLOWED_HOSTS: list[str] = _csv("ALLOWED_HOSTS")      # lista por comas; vacía → deshabilitado
+# app/main.py (create_app)
+if settings.ALLOWED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
 ```
 
 En desarrollo, sin la variable, no se monta (no molesta al trabajo local).
@@ -470,6 +472,7 @@ PERMISSIONS = (
     "review.decide",    # Aprobar / rechazar solicitudes
     "publish",          # Publicar a producción
     "rollback",         # Revertir a una versión publicada (Model + Data Standards)
+    "versions.view_all",  # Abrir en el canvas drafts/requests de OTROS usuarios (doc 70 §12)
     "export",           # Exportar DDL / metadata
     "standards.edit",   # Editar Data Standards (UDP / Parent Domains)
     "admin.manage",     # Administrar usuarios y permisos
@@ -478,31 +481,38 @@ PERMISSIONS = (
 
 Los permisos efectivos de un usuario se derivan de su rol de forma pura y **filtrando keys desconocidas** (`effective_permissions`): cualquier permiso que el rol no declare queda en `False`, y cualquier key fuera del catálogo se descarta. Un usuario sin rol (o con rol vacío) no tiene ningún permiso.
 
-Dos permisos tienen gates puntuales que conviene conocer:
+Tres permisos tienen gates puntuales que conviene conocer:
 
-- **`rollback`** (permiso propio desde el doc 27, 2026-07-19; separado de `review.decide` y de `standards.edit`): gatea `POST /api/changesets/{cs_id}/rollback` (crea un draft inverso que restaura el modelo a esa versión, deshaciendo las posteriores) y `POST /api/standards/rollback` (restaura una versión de Data Standards por `targetSeq`). Revertir producción es una acción distinta de aprobar o de editar estándares, y su blast radius amerita asignación separada en la matriz.
-- **`export`**: gatea `POST /api/ddl-rules/render` (el motor de reglas del Export DDL, doc 30) — el único endpoint del router `ddl_rules` que no es de lectura/cómputo con sesión.
+- **`rollback`** (permiso propio desde el doc 27, 2026-07-19; separado de `review.decide` y de `standards.edit`): gatea `POST /api/changesets/{cs_id}/rollback` (crea un draft inverso que restaura el modelo a esa versión, deshaciendo las posteriores) y `POST /api/projects/{pid}/standards/rollback` (restaura una versión de Data Standards del proyecto por `targetSeq`; doc 75: las rutas de estándares cuelgan del proyecto). Revertir producción es una acción distinta de aprobar o de editar estándares, y su blast radius amerita asignación separada en la matriz.
+- **`export`**: gatea `POST /api/projects/{pid}/ddl-rules/render` (el motor de reglas del Export DDL, doc 30) — el único endpoint del router `ddl_rules` que no es de lectura/cómputo con sesión.
+- **`versions.view_all`** (doc 70 §12; `admin.manage` lo implica): leer el contenido de una versión NO publicada de otro usuario. Los lectores changeset-aware lo exigen con `changesets/access.ensure_changeset_visible` — 403 si el actor no es el dueño, un revisor asignado ni tiene el permiso; 404 si la versión ya no existe (doc 104). Doc 105 (H8): `GET /api/relationships/impact?changesetId=` también lo aplica (igual que `/links`); antes leía el overlay de un draft ajeno sin verificarlo.
 
 ### 9.2 Dos dependencias de autorización
 
 En `app/features/auth/deps.py`:
 
-- **`require_permission(perm)`** — exige el permiso siempre, sin importar el método. Se usa para endpoints que en su totalidad requieren un permiso: todo el módulo Admin usa `require_permission("admin.manage")`, y las acciones de governance van por-endpoint (`model.edit` para crear/editar changesets, `review.decide` para decidir, `rollback` para revertir, `standards.edit` para `POST /api/standards/apply`, `export` para `POST /api/ddl-rules/render`).
-- **`write_guard(perm)`** — dependency de router que gatea por método: lecturas (`GET`/`HEAD`/`OPTIONS`) solo exigen sesión válida; escrituras (`POST`/`PUT`/`PATCH`/`DELETE`) exigen el permiso **y auditan la acción**. Se monta con `dependencies=[Depends(write_guard(...))]` para cerrar de una todos los endpoints directos de un router (catalog, projects, folders, schemas, relationships y views con `model.edit`; domains y settings con `standards.edit`). Esto cerró un hueco: antes había routers cuyos endpoints directos no tenían ninguna dependencia de auth y aceptaban requests anónimos.
+- **`require_permission(perm)`** — exige el permiso siempre, sin importar el método. Se usa para endpoints que en su totalidad requieren un permiso: todo el módulo Admin usa `require_permission("admin.manage")`, y las acciones de governance van por-endpoint (`model.edit` para crear/editar changesets, `review.decide` para decidir, `rollback` para revertir, `standards.edit` para `POST /api/projects/{pid}/standards/apply`, `export` para `POST /api/projects/{pid}/ddl-rules/render`).
+- **`write_guard(perm)`** — dependency de router que gatea por método: lecturas (`GET`/`HEAD`/`OPTIONS`) solo exigen sesión válida; escrituras (`POST`/`PUT`/`PATCH`/`DELETE`) exigen el permiso **y auditan la acción**. Se monta con `dependencies=[Depends(write_guard(...))]` para cerrar de una todos los endpoints directos de un router (catalog, projects, folders, schemas, relationships y views, con `model.edit`). Esto cerró un hueco: antes había routers cuyos endpoints directos no tenían ninguna dependencia de auth y aceptaban requests anónimos.
+- **Escrituras directas del modelo cerradas (doc 105, D1)** — esos seis routers escriben colecciones del MODELO y montan `write_guard("model.edit", versioned=True)`: con el permiso, una escritura directa a producción (las 21 de carpetas, canvases, esquemas, vistas, relaciones y tablas/columnas del catálogo) responde **409** «This change requires a version in edit mode.» sin tocar nada. El modelo se edita SIEMPRE por una versión (changeset → revisión → publish): la escritura directa saltaba la revisión y la unicidad del changeset, podía cruzar proyectos y dejaba canvases imposibles de editar. El 409 va después del permiso (sin él sigue siendo 403) y antes de la auditoría (un intento rechazado no es una acción). `direct_ok` lista las rutas que siguen directas por diseño: sólo `POST /api/projects` (doc 75 D5).
+- **Estándares sólo por Data Standards (doc 105, D1b)** — `app/features/data_standards/deps.py`. Los routers de dominios y de naming (`settings`), que antes montaban `write_guard("standards.edit")`, montan `standards_read_only`: leer exige sesión; toda escritura (alta/edición/baja de dominios, `propagate`, `PUT settings/naming/{scope}`) exige `standards.edit` (403 sin él) y responde **409** «Standards changes go through Data Standards (Save & apply) so they keep a version and can be rolled back.» antes de cualquier efecto y sin auditar. En el glosario, el CRUD directo y `/rephysicalize` llevan `standards_direct_write` por ruta (el mismo 403 → 409); siguen abiertos los cómputos que no mutan (`physicalize`, `validate`, `impact`) y el lock/unlock (`admin.manage`). Los cambios de estándares van por `POST /api/projects/{pid}/standards/apply` (y las restauraciones por `…/standards/rollback`), con versión e historial.
 
-Esa es la convención del backend: **`write_guard` a nivel router para los CRUD de entidades (GET = sesión, escritura = permiso + auditoría); `require_permission` por endpoint para las acciones que siempre exigen permiso**.
+Esa es la convención del backend: **`write_guard` a nivel router para los CRUD de entidades (GET = sesión, escritura = permiso + auditoría; en los del modelo, además, 409 fuera de una versión); `require_permission` por endpoint para las acciones que siempre exigen permiso**.
 
 ```python
-def write_guard(perm: str):
+def write_guard(perm: str, *, versioned: bool = False, direct_ok: frozenset[tuple[str, str]] = frozenset()):
     async def _dep(request: Request, principal: Principal = Depends(current_principal)):
         if request.method in ("GET", "HEAD", "OPTIONS"):
             return None
         user = await service.resolve_session_user(principal.username)
         if user is None or not user["permissions"].get(perm):
             raise HTTPException(403, f"You don't have permission for this action ({perm}).")
+        # Doc 105: el modelo se escribe por versiones — 409 después del permiso y antes de auditar
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        if versioned and (request.method, route) not in direct_ok:
+            raise HTTPException(409, VERSION_REQUIRED)   # "This change requires a version in edit mode."
         # Auditoría de la acción (best-effort, salta los guardados ruidosos)
         path = request.url.path
-        if not any(path.endswith(sfx) for sfx in _NO_AUDIT):   # /layout, /drawings, /tables, /udp
+        if not any(path.endswith(sfx) for sfx in _NO_AUDIT):   # /layout, /drawings, /tables
             await audit(user["username"], f"{request.method.lower()} {path}", target_type="api")
         return user
     return _dep
@@ -517,7 +527,9 @@ flowchart TD
     B -->|POST PUT PATCH DELETE| D[resolve_session_user por username]
     D --> E{Usuario existe y tiene el permiso?}
     E -->|No o deshabilitado| F[403 sin permiso]
-    E -->|Si| G[Auditar accion y continuar al endpoint]
+    E -->|Si| H{Router del modelo versioned y ruta fuera de direct_ok?}
+    H -->|Si doc 105| I[409 version en edicion requerida sin auditar]
+    H -->|No| G[Auditar accion y continuar al endpoint]
 ```
 
 ### 9.3 Nadie se auto-otorga admin
@@ -548,7 +560,8 @@ El motor de reporting traduce consultas del cliente (`QuerySpec` o SQL de texto)
 - El cliente **nunca** manda paths de Mongo: cada `field` pasa por el allowlist del Field Catalog.
 - Las operaciones son un enum cerrado, forzado doblemente (Pydantic `Literal` + `OPS_BY_TYPE`).
 - El `QuerySpec` usa `extra="forbid"` (rechaza campos desconocidos).
-- El parser de SQL es un allowlist sobre sqlglot: rechaza `JOIN`, subqueries y DDL.
+- El parser de SQL es un allowlist sobre sqlglot: rechaza `JOIN`, subqueries y DDL, y —doc 105, ronda 3— toda cláusula del SELECT que no traduce: sólo pasan `SELECT`, `FROM <vista>`, `WHERE`, `GROUP BY`, `ORDER BY` y `LIMIT n`; `DISTINCT`, `OFFSET`, `HAVING`, `WITH`, `FETCH`… son 400 con motivo (p. ej. `OFFSET isn't supported.`, `FETCH isn't supported: use LIMIT n.`) en lugar de ignorarse en silencio y devolver otro resultado. Detalle y literales en `consideraciones-y-limites.md` §3.8.
+- Doc 105 (rondas 4–5): topes contra el costo del parseo. El texto del editor SQL admite hasta 100 000 caracteres (`SQL_TEXT_MAX` en `query/router.py`; sqlglot parsea de forma síncrona —~0,85 s por MB— y un texto enorme frenaba el event loop): más es **422** `The SQL text is too long: up to 100,000 characters.` en `/query/sql` y en `/query/validate`, validado en el router para que el `detail` sea texto (la lista de pydantic el front la mostraba como «Unexpected response shape»); el texto se parsea una sola vez por request. En el WHERE, una cadena plana de `AND`/`OR` es UN grupo de N condiciones (`flatten`, sin recursión: 300 `OR` congelaban el event loop y 1 000 daban 500) y el anidamiento real —paréntesis, `NOT`— tiene tope de 50 niveles (`MAX_WHERE_DEPTH`): por SQL, **400** `The WHERE is nested too deeply (more than 50 levels).` (también si armar el spec agotara la pila: nunca un 500); por el constructor, **422** con `The filter is nested too deeply (more than 50 levels).`, medido sin recursión antes de construir los modelos anidados. Tests: `test_query_round4_doc105.py` y `test_query_round5_doc105.py`.
 - Los operadores `contains`/`startsWith` ya usaban `re.escape`.
 
 ### 10.2 `/facets`: `re.escape` + cap de longitud
@@ -556,7 +569,8 @@ El motor de reporting traduce consultas del cliente (`QuerySpec` o SQL de texto)
 El endpoint `/api/reporting/facets` alimenta el typeahead de filtros y no requiere autenticación (como el resto del reporting de solo lectura). Un `q` sin escapar iría directo a un `$regex`, habilitando ReDoS o inyección de regex. La corrección (`app/features/reporting/query/router.py`):
 
 ```python
-async def facets(field: str, from_: str = Query(default="columns", alias="from"),
+async def facets(field: str, projectId: str = Query(min_length=1),
+                 from_: str = Query(default="columns", alias="from"),
                  q: str | None = Query(default=None, max_length=80),
                  limit: int = Query(default=50, ge=1, le=200)):
     ...
@@ -571,22 +585,53 @@ async def facets(field: str, from_: str = Query(default="columns", alias="from")
 
 ### 10.3 Cursor keyset validado contra inyección de operadores NoSQL
 
-La paginación keyset codifica el cursor como base64 de un JSON que el cliente devuelve y que va **directo al `$match`**. Si el valor de orden fuese un dict o una lista, un atacante inyectaría operadores de Mongo: `{"$ne": null}` bypassearía el keyset, `{"$regex": "(a+)+$"}` provocaría ReDoS. La validación (`app/features/reporting/query/executor.py`):
+La paginación keyset codifica el cursor como base64 de un JSON que el cliente devuelve y que va **directo al `$match`**. Si el valor de orden fuese un dict o una lista, un atacante inyectaría operadores de Mongo: `{"$ne": null}` bypassearía el keyset, `{"$regex": "(a+)+$"}` provocaría ReDoS. La validación (`app/features/reporting/query/executor.py`) acepta sólo `[valor, _id]` —o `[valor, _id, entregadas]` cuando hay tope total `maxRows` (doc 105), con un entero de 0 a 10 000 000— con `_id` de texto que Postgres acepte (sin NUL ni surrogate UTF-16 suelto) y un valor que el keyset pueda comparar:
 
 ```python
+def _cursor_text_ok(v) -> bool:
+    # Doc 105 (revisión): un NUL (\u0000) pasaba y Postgres rechaza 0x00 en `text` (500);
+    # ronda 3: un surrogate UTF-16 suelto tampoco — asyncpg no lo codifica (500).
+    if not isinstance(v, str) or "\x00" in v:
+        return False
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _delivered_ok(v) -> bool:
+    # Filas ya entregadas (3.er elemento del cursor, doc 105): entero ≥ 0.
+    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= MAX_ROWS
+
+
+def _cursor_value_ok(v) -> bool:
+    # None, texto (sin NUL) o número FINITO. Doc 105 (P12): un booleano (en Python
+    # es `int`) o NaN/±Infinity pasaban y el traductor de Lakebase reventaba (500).
+    if v is None:
+        return True
+    if isinstance(v, str):
+        return _cursor_text_ok(v)
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, int) or (isinstance(v, float) and math.isfinite(v))
+
+
 def _decode_cursor(cur: str):
     try:
         v = json.loads(base64.urlsafe_b64decode(cur.encode()).decode())
     except Exception:
-        raise QueryError("Cursor inválido", code=400)
-    # Solo escalares para el valor y string para el _id
-    if (not isinstance(v, list) or len(v) != 2
-            or isinstance(v[0], (dict, list)) or not isinstance(v[1], str)):
-        raise QueryError("Cursor inválido", code=400)
+        raise QueryError("Invalid cursor", code=400)
+    if (not isinstance(v, list) or len(v) not in (2, 3)
+            or not _cursor_value_ok(v[0]) or not _cursor_text_ok(v[1])
+            or (len(v) == 3 and not _delivered_ok(v[2]))):
+        raise QueryError("Invalid cursor", code=400)
     return v
 ```
 
-Cubierto por `tests/features/reporting/test_query_security.py`, que verifica explícitamente el rechazo de `[{"$ne": None}, "id"]` y `[{"$regex": "(a+)+$"}, "id"]`, además de cursores malformados.
+Cubierto por `tests/features/reporting/test_query_security.py`, que verifica explícitamente el rechazo de `[{"$ne": None}, "id"]` y `[{"$regex": "(a+)+$"}, "id"]`, además de cursores malformados, y por `tests/features/reporting/test_cursor_limits_doc105.py` (doc 105, P12: booleano, NaN, ±Infinity y `1e400` → 400 —el booleano también por HTTP—; los cursores legítimos, incluido un entero enorme, siguen pasando). El mismo archivo cubre los topes numéricos del doc 105 (A2-o4): `GET /api/reporting/tables` con `limit` fuera de 0–100 000 u `offset` fuera de 0–1 000 000 → 422, y el offset del cursor de `view_columns` por encima de 1 000 000 → 400 «Invalid cursor» (un entero fuera de int8 llegaba a Lakebase y salía como 500). El cursor viaja en base64, así que un NUL o un surrogate suelto dentro de su JSON no los ve el guard general de la sección 10.6: los rechaza `_cursor_text_ok` (el surrogate, doc 105 ronda 3: `test_query_round3_doc105.py`, también por HTTP). El tercer elemento —lo ya entregado, con el que las páginas siguientes no pasan del `LIMIT n` del editor SQL— sólo acepta un entero de 0 a 10 000 000: un negativo, un booleano, un decimal, un texto, un entero desmedido o un cuarto elemento son 400, el cursor de dos elementos sigue valiendo y uno armado a mano que ya está en el tope da una página vacía (`test_sql_limit_total_doc105.py`).
+
+**Valores del WHERE (doc 105, P12, revisión).** El mismo criterio vale para lo que el cliente filtra: el compiler (`query/compiler.py`) exige que un campo `number` sea FINITO y quepa en un float —400 `Invalid number for <campo>: it must be a finite number.`; `NaN`, `Infinity`, `1e999` o un entero desmedido llegaban al traductor como literal que Postgres rechaza— y que una comparación (`gt`…`between`) traiga valor (400 `The <op> filter on <campo> needs a value.`) y —ronda 3— que un campo booleano reciba un valor reconocible (`true`/`false`, `1`/`0`; otro es 400 `Invalid boolean for <campo>: '<valor>' (use true or false).` —antes se volvía `false` y el filtro devolvía los registros contrarios—); el parser SQL (`query/parser.py`) responde 400 ante `Number out of range: …`, `LIMIT must be a whole number.`, `Expected a field name: …` y `LIKE needs a text pattern: …` (todos eran 500). Y el export pide su primera página ANTES de abrir el stream, así un spec inválido es un 4xx con `detail`. Tests: `tests/features/reporting/test_query_values_doc105.py` (el booleano, `test_query_round3_doc105.py`). Rondas 4–5: en un UDP `number` el filtro busca el texto tal como se escribió, pero el valor se sigue validando como número finito (400 `Invalid number for udp."Num": 'abc'`); en un UDP booleano sólo pasan sus grafías (`true`/`1`/`sí`/`si`/`yes`/`verdadero` y `false`/`0`/`no`/`falso`; otra, 400); `resultColumns` sólo acepta dimensiones y nombres de agregación del propio spec (422); y los mensajes nombran un UDP por su nombre (`udp."Flag"`), no por su key interna —en producción, un UUID—. Detalle en `consideraciones-y-limites.md` §3.9.
 
 ### 10.4 `re.escape` del abbrev del glosario (ReDoS de segundo orden)
 
@@ -598,17 +643,32 @@ En `glossary_usage` (`app/features/reporting/views.py`), la abreviatura del glos
 
 ### 10.5 Spec guardado validado como `QuerySpec`
 
-Al persistir un reporte guardado, el spec se valida como `QuerySpec` antes de escribirlo, para no almacenar blobs arbitrarios (defensa en profundidad, aunque `/query` re-valide al ejecutar):
+Al persistir un reporte guardado (`POST` y `PUT /api/reporting/reports`), el spec se estampa con el proyecto del reporte y se valida como `QuerySpec` antes de escribirlo, para no almacenar blobs arbitrarios (defensa en profundidad, aunque `/query` re-valide al ejecutar; `app/features/reporting/query/router.py`):
 
 ```python
-def _validate_report_spec(spec: dict) -> None:
+def _stamped_body(body: reports.SavedReportBody) -> reports.SavedReportBody:
+    spec_pid = body.spec.get("projectId")
+    if spec_pid is not None and spec_pid != body.projectId:
+        raise HTTPException(422, "The report spec belongs to another project.")
+    spec = {**body.spec, "projectId": body.projectId}
     try:
         QuerySpec.model_validate(spec)
     except ValidationError as e:
-        raise HTTPException(422, "El spec del reporte no es una consulta válida.") from e
+        raise HTTPException(422, "The report spec isn't a valid query.") from e
+    return body.model_copy(update={"spec": spec})
 ```
 
-**Nota de superficie:** las lecturas de reporting (`/query`, `/facets`, `/export`, `/insights`) siguen sin dependencia de `current_principal` (abiertas a nivel de la app). En el despliegue corporativo quedan detrás del muro SSO del proxy de Databricks Apps (sección 1b: solo identidades del workspace con `CAN_USE` llegan a la app), pero reforzarlas con `current_principal` explícito sigue listado en pendientes para reducir la superficie de DoS.
+**Nota de superficie:** las lecturas de reporting (`/query`, `/facets`, `/export`, `/insights`) siguen sin dependencia de `current_principal` (abiertas a nivel de la app), salvo las de relaciones —`GET /insights/relationships` (doc 102) y `POST /insights/relationships/query` (doc 105, A3-o1)—, que la exigen porque con `changesetId` leen una versión propia. En el despliegue corporativo quedan detrás del muro SSO del proxy de Databricks Apps (sección 1b: solo identidades del workspace con `CAN_USE` llegan a la app), pero reforzarlas con `current_principal` explícito sigue listado en pendientes para reducir la superficie de DoS.
+
+### 10.6 NUL (U+0000) y surrogates sueltos rechazados en la puerta (doc 105)
+
+Postgres —Lakebase— no acepta el carácter NUL en `text` ni en `jsonb`, y asyncpg no puede codificar un surrogate UTF-16 SIN pareja (`\ud800`): cualquier dato así que llegara a una consulta o a una escritura daba un 500 (en la BD en memoria de los tests pasaba sin error, por eso nadie lo veía). No hay datos legítimos así en la plataforma (el front quita los NUL de las celdas de un Excel: SheetJS decodifica `_x0000_` a U+0000), de modo que `app/core/nul_guard.py` (`RejectNulMiddleware`, middleware ASGI puro) los rechaza para TODA la API antes de tocar la base:
+
+- una ruta con NUL, una query con `%00` o un cuerpo con un NUL real —un byte 0x00 crudo, o el escape `\u0000` que no sea texto literal (se descartan antes los pares `\\`: `\\u0000` es el texto «\u0000»)— → **400** `Text can't contain the NUL character (U+0000).`;
+- un cuerpo JSON con un surrogate suelto → **400** `Text contains an invalid character (an unpaired UTF-16 surrogate).` (por la URL no puede llegar: su UTF-8 es inválido y el decodificado lo reemplaza);
+- un cuerpo que no es UTF-8 válido → **400** `The request body isn't valid UTF-8 text.` (ronda 4: `json.loads(bytes)` —el de FastAPI— decodifica con `surrogatepass`, así que un surrogate en bytes CRUDOS, sin escape, llegaba igual al handler y salía como 500; la decodificación UTF-8 estricta, en C, lo corta, igual que a cualquier cuerpo que no sea UTF-8).
+
+La detección corre en C (`bytes.replace`, `in` y una regex); sólo un escape de surrogate —raro: los navegadores mandan los emoji en UTF-8, no escapados— lleva a parsear el JSON para ver si está suelto. El cuerpo se lee entero (los endpoints lo leen entero igual) y se entrega a la app en UN solo mensaje, sin retener otra copia durante el request (el buffer de lectura se libera apenas se arma el cuerpo: una sola copia viva). Un JSON demasiado anidado no rompe el guard (ronda 4: su parseo levantaba `RecursionError` → 500): pasa, y FastAPI lo rechaza con 400. Se registra en `create_app()` antes que el allowlist de hosts y que CORS para quedar DENTRO de ambos: un `Host` inválido se corta antes de leer el cuerpo, y el 400 lleva los headers CORS (el front lee el `detail`). Tests: `tests/integration/test_nul_guard_doc105.py`.
 
 ---
 
@@ -629,14 +689,14 @@ async def audit(actor, action, *, target=None, target_type=None, meta=None) -> N
 
 Qué se audita:
 
-- **Eventos de sesión:** `login`, `login_failed`, `login_locked`, `logout`.
-- **Acciones de escritura** vía `write_guard`: `POST/PUT/PATCH/DELETE <ruta>` con actor. Se saltan los guardados de alta frecuencia del canvas (`/layout`, `/drawings`, `/tables`) para no inundar el log, y `/udp` porque su service ya audita con verbo específico (`canvas.udp.update`).
-- **Eventos de negocio con verbo propio** (todos verificados en código al 2026-07-31):
-  - Ciclo de vida de versiones: `changeset.submit`, `changeset.decide`, `changeset.withdraw`, `changeset.reopen`, `changeset.rollback_draft`, `changeset.schema_rename`, `changeset.schema_delete`.
-  - Data Standards: `standards.apply`, `standards.rollback`.
-  - Export DDL con reglas (doc 30): `ddl.export_render` — cada `POST /api/ddl-rules/render` deja actor, versión del ruleset aplicada y conteos.
+- **Eventos de sesión:** `login`, `login_failed`, `login_locked`, `logout` y, por el SSO (doc 38), `login_sso` (con `meta.userId` si el relay lo trae) y `login_sso_denied` (`meta.reason`: `not_whitelisted` si el correo no está en `users`, `disabled` si está deshabilitado) — el SSO nunca registra `login_failed`: no hay credenciales que fallen.
+- **Acciones de escritura** vía `write_guard`: `POST/PUT/PATCH/DELETE <ruta>` con actor. Se saltan los guardados de alta frecuencia del canvas (`/layout`, `/drawings`, `/tables`) para no inundar el log. Desde el doc 105 (D1/D1b) las escrituras directas del modelo y de los estándares responden 409 ANTES de auditar (un intento rechazado no es una acción), así que por esta vía sólo queda `post /api/projects` (el alta directa de un proyecto, que además audita `project.create`): los cambios del modelo quedan en el ledger de su versión y en los verbos de su ciclo de vida, y los de estándares en `standards.apply`/`standards.rollback`.
+- **Eventos de negocio con verbo propio** (todos verificados en código al 2026-09-30):
+  - Ciclo de vida de versiones: `changeset.submit`, `changeset.decide` (`meta.decision` y `meta.result`: el estado resultante o, doc 105, `sent-back` — la aprobación escribió producción pero la versión volvió a revisión mientras se aplicaba; el revisor recibe 409 «This request was applied, but it was sent back to review while it was being applied: approve it again to finish.»), `changeset.withdraw`, `changeset.reopen`, `changeset.rollback_draft`, `changeset.schema_rename`, `changeset.schema_delete`, `changeset.transfer` y `changeset.delete` (doc 104: owner o administrador).
+  - Data Standards: `standards.apply`, `standards.rollback` y `standards.copy` (doc 75 D15: bloques copiados de otro proyecto al crearlo — `meta.from`, `meta.blocks`).
+  - Export DDL con reglas (doc 30): `ddl.export_render` — cada `POST /api/projects/{pid}/ddl-rules/render` deja actor, versión del ruleset aplicada y conteos.
   - Glosario: `glossary.lock` / `glossary.unlock`.
-  - Canvas: `canvas.udp.update`.
+  - Proyectos: `project.create` (doc 75; el UDP de un canvas ya no tiene endpoint propio — se cambia por versión —, así que `canvas.udp.update` dejó de existir).
 - **Operaciones de Admin:** `admin.user.create`, `admin.user.update`, `admin.user.delete`, `admin.role.update`, `admin.role.delete`.
 
 La lectura del log está protegida: `GET /api/admin/audit` exige `admin.manage`. Además de auditoría, todas las requests llevan un `X-Request-ID` correlacionado en los logs estructurados de entrada y salida, útil para el diagnóstico ("Check the logs using the X-Request-ID" es lo que devuelve el envelope de error 500).
@@ -659,14 +719,16 @@ La lectura del log está protegida: `GET /api/admin/audit` exige `admin.manage`.
 | 10 | CORS estricto (allowlist + regex por variable, sin comodines; `allow_credentials=True` solo por la cookie del proxy SSO de Apps) | `main.py` | Siempre |
 | 11 | TrustedHost (host allowlist) | `main.py` | `ALLOWED_HOSTS` |
 | 12 | `/docs`, `/redoc`, `/openapi.json` ocultos en producción | `main.py` | `REQUIRE_AUTH` |
-| 13 | RBAC: `require_permission` + `write_guard` (gateo por método) | `features/auth/deps.py` | Siempre |
+| 13 | RBAC: `require_permission` + `write_guard` (gateo por método); escrituras directas del modelo → 409 fuera de una versión y estándares sólo por Data Standards (doc 105) | `features/auth/deps.py`, `features/data_standards/deps.py` | Siempre |
 | 14 | Nadie se auto-otorga admin + invariante "nunca sin administrador" | `features/admin/router.py`, `service.py` | Siempre |
 | 15 | `/facets` con `re.escape` + cap de longitud (ReDoS/regex-injection) | `features/reporting/query/router.py` | Siempre |
-| 16 | Validación del cursor keyset (anti operator-injection NoSQL) | `features/reporting/query/executor.py` | Siempre |
+| 16 | Validación del cursor keyset (anti operator-injection NoSQL; valor comparable y offsets con tope, doc 105) | `features/reporting/query/executor.py`, `features/reporting/router.py` | Siempre |
 | 17 | `re.escape` del abbrev del glosario (ReDoS de 2° orden) | `features/reporting/views.py` | Siempre |
 | 18 | Spec guardado validado como `QuerySpec` | `features/reporting/query/router.py` | Siempre |
 | 19 | Envelope de error genérico (sin stack trace al cliente) | `main.py` | Siempre |
 | 20 | Auditoría append-only best-effort | `core/audit.py` | Siempre |
+| 21 | NUL (U+0000) en ruta, query o cuerpo JSON, surrogates UTF-16 sueltos y cuerpos que no son UTF-8 válido (ronda 4) → 400 antes de tocar la base; valores del WHERE finitos y con valor (doc 105) | `core/nul_guard.py`, `features/reporting/query/compiler.py`, `parser.py` | Siempre |
+| 22 | Topes del editor SQL: texto de hasta 100 000 caracteres (422) y WHERE con `AND`/`OR` planos como un solo grupo y a lo más 50 niveles de anidamiento (400 por SQL, 422 por el constructor) — doc 105, rondas 4–5 | `features/reporting/query/router.py`, `parser.py`, `spec.py` | Siempre |
 
 ---
 
@@ -677,12 +739,12 @@ Los siguientes puntos están identificados pero **no** implementados todavía:
 | Pendiente | Severidad | Descripción |
 |---|---|---|
 | **Revocación de JWT** | Alta | El TTL de 12 h sin denylist implica que deshabilitar un usuario no corta su sesión hasta 12 h en endpoints que solo dependen de `current_principal` (los que usan `resolve_session_user`, como Admin y `write_guard`, sí lo cortan de inmediato). Opciones: bajar el TTL a 15-30 min con refresh revocable, agregar `tokenVersion` por usuario, o revalidar `status != disabled` contra la DB en cada request. |
-| **Rate limiting con Redis** | Media | El estado del limiter es en memoria por proceso. Para multi-réplica (Databricks Apps con varias instancias) migrar a un backend Redis (`Limiter(storage_uri="redis://…")` o `fastapi-limiter`); si no, cada réplica cuenta por separado y el límite efectivo se multiplica por el número de réplicas. La key por IP real (1ª de `X-Forwarded-For`, 2026-07-31) ya quedó resuelta. |
+| **Rate limiting con Redis** | Media | El estado del limiter es en memoria por proceso: con los 2 workers de uvicorn del `app.yaml` cada proceso ya cuenta por separado (hasta el doble del límite nominal) y con varias réplicas se multiplica además por su número. Para un enforcement estricto, migrar a un backend compartido (`Limiter(storage_uri="redis://…")` o `fastapi-limiter`). La key por IP real (1ª de `X-Forwarded-For`, 2026-07-31) ya quedó resuelta. |
 | **Retiro del rol `databricks_superuser` al SP del front en Lakebase** | Media | El server del front jamás toca la base de datos (solo proxya `/api` al backend); su service principal no necesita ningún rol de Postgres. Revocárselo (mínimo privilegio). El SP del backend sí lo requiere — o, mejor, GRANTs granulares sobre el schema `dmh` (doc 35). |
 | **Contraseñas filtradas** | Media | Sumar verificación contra brechas conocidas (HIBP con k-anonymity) o fuerza (zxcvbn) además del mínimo de longitud. |
 | **Claims `iss` / `aud` en el JWT** | Baja | Agregar emisor y audiencia acota el uso del token a este servicio. |
 | **Migrar bcrypt → argon2id** | Baja | Elimina el clip a 72 bytes y moderniza el algoritmo de derivación. |
-| **Auth explícita en lecturas de reporting** | Media | `/query`, `/facets`, `/export` e `/insights` siguen sin `current_principal`; gatearlas reduce la superficie de DoS sobre las colecciones de gran volumen (hoy quedan protegidas solo por el muro SSO del proxy de Databricks Apps en producción). |
+| **Auth explícita en lecturas de reporting** | Media | `/query`, `/facets`, `/export` e `/insights` siguen sin `current_principal` (salvo las relaciones: `GET /insights/relationships`, doc 102, y su lote `POST /insights/relationships/query`, doc 105, la exigen porque pueden leer una versión propia); gatearlas reduce la superficie de DoS sobre las colecciones de gran volumen (hoy quedan protegidas solo por el muro SSO del proxy de Databricks Apps en producción). |
 
 ---
 
@@ -690,9 +752,9 @@ Los siguientes puntos están identificados pero **no** implementados todavía:
 
 ### 14.1 Dónde corre
 
-El backend es una app FastAPI (ASGI) desplegada como **Databricks App** (`bknd-data-model-hub`) vía asset bundle (`databricks.yml` + GitHub Actions); el comando de la app es `uvicorn app.main:app` (host/puerto los inyecta el runtime de Apps). Corre detrás del proxy OAuth de la plataforma (capa 1 de la sección 1b), que termina TLS y reenvía `X-Forwarded-Proto` (el middleware lo usa para decidir HSTS) y `X-Forwarded-For` (key del rate limiting). El navegador no le habla directo: el tráfico de usuarios entra por el server del front, que proxya `/api` servidor-a-servidor.
+El backend es una app FastAPI (ASGI) desplegada como **Databricks App** (`bknd-data-model-hub`) vía asset bundle (`databricks.yml` + GitHub Actions); el comando de la app es `uvicorn app.main:app --workers 2` (dos procesos, cada uno con su pool de Lakebase y su estado en memoria; host/puerto los inyecta el runtime de Apps). Corre detrás del proxy OAuth de la plataforma (capa 1 de la sección 1b), que termina TLS y reenvía `X-Forwarded-Proto` (el middleware lo usa para decidir HSTS) y `X-Forwarded-For` (key del rate limiting). El navegador no le habla directo: el tráfico de usuarios entra por el server del front, que proxya `/api` servidor-a-servidor.
 
-La postura de producción se activa con `REQUIRE_AUTH=true` en el env del bundle: login propio obligatorio, `/docs`, `/redoc` y `/openapi.json` ocultos, rate limiting activo, y **fail-closed de `assert_secure_config`** — si el `SECRET_KEY` sigue siendo el default de desarrollo, la app no arranca. El `if __name__ == "__main__"` de `main.py` es solo para desarrollo local.
+La postura de producción se activa con `REQUIRE_AUTH=true` en el env de `app.yaml`: login propio obligatorio, `/docs`, `/redoc` y `/openapi.json` ocultos, rate limiting activo, y **fail-closed de `assert_secure_config`** — si el `SECRET_KEY` sigue siendo el default de desarrollo, la app no arranca. El `if __name__ == "__main__"` de `main.py` es solo para desarrollo local.
 
 ### 14.2 Base de datos
 
@@ -700,20 +762,20 @@ La persistencia productiva y única es **Databricks Lakebase Postgres**, accedid
 
 - **Sin secretos de base de datos estáticos.** El bundle no lleva PAT ni cadena de conexión: el pool se autentica con un **token OAuth de ~1 h que la app acuña sola** con el service principal que Apps inyecta (`DATABRICKS_CLIENT_ID/SECRET`, OAuth M2M) y renueva con caché thread-safe de 50 minutos. El rol de Postgres es el client-id del SP (alta one-time por workspace, doc 35).
 - **Los usuarios finales jamás tocan la base** (capa 3 de la sección 1b): toda operación pasa por el RBAC de la app.
-- **Índices**: `ensure_indexes()` corre en el `lifespan` al arrancar (idempotente, ~35 índices sobre los campos de filtro y orden del reporting y la governance).
+- **Índices**: `ensure_indexes()` corre en el `lifespan` al arrancar (idempotente: declara 52 índices sobre los campos de filtro y orden del reporting y la governance, y retira 6 obsoletos).
 - **Borrado lógico.** Los documentos usan `flgactive`; los filtros incluyen `{"flgactive": {"$ne": False}}` para excluir los borrados. La conexión se abre y cierra en el `lifespan` de FastAPI (con reintento en background si la BD no estaba disponible al arrancar).
 - **Única BD, sin conmutador de backend.** El acceso a datos vive solo en el adaptador `app/core/db/lakebase/` (el guard `test_store_boundary.py` prohíbe importar `motor`/`pymongo` fuera de él); no existe un switch de backend ni un driver alternativo. Lakebase es la única base de datos.
 
-### 14.3 Variables de entorno (estado corporativo 2026-07-31)
+### 14.3 Variables de entorno
 
 | Variable | Propósito | Producción (`app.yaml`) |
 |---|---|---|
-| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria. El host físico se resuelve solo vía SDK. | `app.yaml` (default `projects/dmh-proj/branches/production/endpoints/primary`) |
-| `LAKEBASE_PGSCHEMA` | Schema PG de las colecciones. | `dmh` |
-| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | Secreto `session-secret-key` del scope `kv-scope-datacraft`, inyectado con `valueFrom` (nunca en texto plano en el bundle ni en GitHub) |
-| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (`x-dmh-sso-*`, doc 38). Sin él y con `REQUIRE_AUTH=true`, el login SSO responde 503 (fail-closed). | Secreto `dmh-proxy-secret` del MISMO scope, inyectado con `valueFrom` en ambas apps; se crea a mano UNA vez (igual que `session-secret-key`) y el workflow verifica que exista antes del deploy |
-| `REQUIRE_AUTH` | `true` activa la postura de producción (login obligatorio, docs ocultos, rate limit, falla-cerrado). | `true` |
-| `CORS_ORIGIN_REGEX` | Regex de orígenes del front. | Variable del bundle (default `https://frnt-data-model-hub-.*\.databricksapps\.com`) |
+| `LAKEBASE_ENDPOINT` | Ruta lógica del endpoint (`projects/…/branches/…/endpoints/…`); obligatoria. El host físico se resuelve solo vía SDK. | `app.yaml`: `value` vacío que el workflow llena con la GitHub Variable homónima del environment (p. ej. `projects/dmh-proj/branches/production/endpoints/primary`) |
+| `LAKEBASE_PGSCHEMA` | Schema PG de las colecciones. | GitHub Variable homónima (p. ej. `dmh`) |
+| `SECRET_KEY` | Clave HMAC para firmar el JWT de sesión. **La app no arranca con el default si `REQUIRE_AUTH=true`.** | `valueFrom: session_secret` en `app.yaml`: recurso `secret` del bundle cuyo scope y key salen de las GitHub Variables `SECRET_SCOPE` y `SESSION_SECRET_KEY` (p. ej. `kv-scope-datacraft` / `session-secret-key`); nunca en texto plano en el bundle ni en GitHub |
+| `PROXY_SHARED_SECRET` | Secreto compartido con el server del front que autentica el relay de identidad SSO (`x-dmh-sso-*`, doc 38). Sin él y con `REQUIRE_AUTH=true`, el login SSO responde 503 (fail-closed). | `valueFrom: proxy_secret`: MISMO scope, key de la GitHub Variable `PROXY_SECRET_KEY` (p. ej. `dmh-proxy-secret`, la misma en ambas apps); se crea a mano UNA vez. Si el scope o la key no existen, el `bundle deploy` falla al resolver el recurso |
+| `REQUIRE_AUTH` | `true` activa la postura de producción (login obligatorio, docs ocultos, rate limit, falla-cerrado). | GitHub Variable homónima: `true` |
+| `CORS_ORIGIN_REGEX` | Regex de orígenes del front. | GitHub Variable homónima (p. ej. `https://frnt-data-model-hub-.*\.databricksapps\.com`) |
 | `CORS_ORIGINS` | Orígenes exactos adicionales (el default localhost SOLO aplica sin regex). | No se define |
 | `ALLOWED_HOSTS` | Lista de hosts para `TrustedHostMiddleware` (vacío = deshabilitado). | Opcional |
 | `ACCESS_TOKEN_TTL_MIN` | Vida del token en minutos (default 720). Bajarlo mitiga la falta de revocación. | Opcional |
@@ -722,15 +784,17 @@ La persistencia productiva y única es **Databricks Lakebase Postgres**, accedid
 | `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | Solo dev local (PAT u OAuth U2M del SDK). En Apps el runtime inyecta `DATABRICKS_HOST` y `DATABRICKS_CLIENT_ID/SECRET`; **no hay PAT en el bundle**. | No se setean |
 
 Extracto real (los secretos nunca viajan en claro): el `command`+`env` viven en
-`app.yaml` (bug CLI #4901 — el bloque `config:` del bundle se ignora) y los
-bindings de secretos en `databricks.yml`:
+`app.yaml` (bug CLI #4901 — el bloque `config:` del bundle se ignora; los `value`
+vacíos los llena el workflow con la GitHub Variable homónima del environment y
+además estampa `BUILD_SHA`/`BUILD_TIME`) y los bindings de secretos en
+`databricks.yml` (sus variables no llevan `default:`: salen de GitHub Variables):
 
 ```yaml
 # app.yaml (raíz del repo)
-command: ["uvicorn", "app.main:app"]
+command: ["uvicorn", "app.main:app", "--workers", "2"]
 env:
   - name: REQUIRE_AUTH
-    value: "true"
+    value: ""                       # lo llena el workflow (GitHub Variable REQUIRE_AUTH=true)
   - name: SECRET_KEY
     valueFrom: session_secret
   - name: PROXY_SHARED_SECRET      # relay de identidad SSO (doc 38)
@@ -757,16 +821,16 @@ Las versiones pineadas son las del entorno validado (pytest verde + suite viva L
 
 ## 15. Checklist de verificación antes de desplegar
 
-- [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default), vía el secreto `session-secret-key` del scope `kv-scope-datacraft` con `value_from` en el bundle. Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
+- [ ] `SECRET_KEY` definido con un valor aleatorio largo (no el default), vía el secreto del scope y la key que dicen las GitHub Variables `SECRET_SCOPE`/`SESSION_SECRET_KEY` (p. ej. `kv-scope-datacraft` / `session-secret-key`), con `valueFrom` en `app.yaml`. Con `REQUIRE_AUTH=true` la app se niega a arrancar si no.
 - [ ] `REQUIRE_AUTH=true` para activar login obligatorio, docs ocultos y rate limiting.
-- [ ] Secreto `dmh-proxy-secret` presente en el scope — se crea a mano UNA vez, igual que `session-secret-key` (el paso "Verificar el secreto del proxy" del workflow solo comprueba que exista y aborta el deploy con la instrucción si falta) y `PROXY_SHARED_SECRET` inyectado en AMBAS apps — sin él, el botón "Continue with Databricks" responde 503 (el carril admin sigue vivo). Si se rota, redeploy/restart de las dos apps.
+- [ ] Secreto del proxy (key de la GitHub Variable `PROXY_SECRET_KEY`, p. ej. `dmh-proxy-secret`) presente en el scope — se crea a mano UNA vez, igual que el de sesión (si falta, el `bundle deploy` falla al resolver el recurso `secret`) y `PROXY_SHARED_SECRET` inyectado en AMBAS apps — sin él, el botón "Continue with Databricks" responde 503 (el carril admin sigue vivo). Si se rota, redeploy/restart de las dos apps.
 - [ ] Al menos un correo whitelisteado en Admin (o la cuenta `admin` a mano) para poder entrar tras el deploy.
 - [ ] `CORS_ORIGIN_REGEX` (y/o `CORS_ORIGINS`) apuntando solo al frontend real (sin comodines).
 - [ ] `ALLOWED_HOSTS` con los hosts públicos del servicio, si se usa TrustedHost.
 - [ ] `LAKEBASE_ENDPOINT` apuntando al endpoint del workspace; sin PAT ni cadenas de conexión en el bundle (el token de BD lo acuña la app con su service principal).
 - [ ] TLS terminado en el proxy y `X-Forwarded-Proto` / `X-Forwarded-For` reenviados (HSTS y key del rate limiting).
 - [ ] `GET /api/health` responde `db_connected: true` tras el deploy (los índices los crea `ensure_indexes()` solo, en el arranque).
-- [ ] El workflow re-aplicó el grant `CAN_USE` del SP del front sobre la app backend (paso automático de CI, doc 36 §6.3 — un grant manual no sobrevive al siguiente deploy).
+- [ ] El workflow re-aplicó el grant `CAN_USE` del SP del front sobre la app backend (paso «Autorizar a la app consumidora sobre esta app», `consumer_app: frnt-data-model-hub` en `deploy-databricks.yml` — un grant manual no sobrevive al siguiente deploy).
 - [ ] Al menos un usuario con rol que incluya `admin.manage` (el invariante impide quedarse sin administrador, pero hay que crear el primero — `scripts/create_admin.py`).
 
 Verificado en vivo durante el hardening del 2026-07-06: las cabeceras de seguridad aparecen en toda respuesta; el sexto intento de login dentro del minuto devuelve 429; un regex malicioso en `/facets` responde escapado en 0.36 s sin ReDoS. La suite de tests (543 casos al 2026-07-31) cubre, entre otros, el lockout de login, la inyección del cursor keyset y la key por IP real del limiter.

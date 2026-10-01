@@ -4,15 +4,18 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, status
 
 from app.core.api.envelope import ok
-from app.features.auth.deps import write_guard
+from app.features.data_standards.deps import standards_read_only
 from app.features.projects.deps import alive_project
 
 from . import service
 from .schemas import ParentDomainBody
 
 # Doc 75 D3/D4: dominios POR PROYECTO — prefijo `/api/projects/{project_id}/domains`.
+# Doc 105 (D1b): el router sólo LEE. Sus escrituras (alta, edición, baja y
+# `propagate`) siguen declaradas pero responden 409 en `standards_read_only`:
+# los dominios se cambian por Data Standards (`standards/apply`, versionado).
 router = APIRouter(prefix="/api/projects/{project_id}/domains", tags=["domains"],
-                   dependencies=[Depends(write_guard("standards.edit")), Depends(alive_project)])
+                   dependencies=[Depends(standards_read_only), Depends(alive_project)])
 
 
 @router.get("")
@@ -20,6 +23,7 @@ async def list_domains(project_id: str):
     return ok(await service.list_domains(project_id))
 
 
+# ── Cerradas (doc 105 D1b): 409 antes de cualquier efecto ──────────────────
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_domain(project_id: str, body: ParentDomainBody):
     return ok(await service.create_domain(project_id, body))
@@ -35,6 +39,14 @@ async def delete_domain(domain_id: str):
     return ok(await service.delete_domain(domain_id))
 
 
+@router.post("/{domain_id}/propagate")
+async def domain_propagate(domain_id: str):
+    """Aplicaba el `defaultDataType` actual del dominio a sus columnas sin
+    override, directo sobre canonical_columns (cerrada, doc 105 D1b)."""
+    return ok(await service.propagate(domain_id))
+
+
+# ── Lecturas ────────────────────────────────────────────────────────────────
 @router.get("/{domain_id}/impact")
 async def domain_impact(
     domain_id: str,
@@ -62,10 +74,3 @@ async def domain_column_impact(
     server-side, paginadas. `limit=0` = solo totales (panel del dominio)."""
     return ok(await service.column_impact(domain_id, physicalTo, logicalTo, q=q, status=status,
                                           offset=offset, limit=limit))
-
-
-@router.post("/{domain_id}/propagate")
-async def domain_propagate(domain_id: str):
-    """Aplica el `defaultDataType` actual del dominio a sus columnas sin
-    override (retroactivo, directo sobre canonical_columns)."""
-    return ok(await service.propagate(domain_id))

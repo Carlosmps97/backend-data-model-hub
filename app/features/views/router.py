@@ -13,7 +13,7 @@ from . import service
 from .schemas import ViewBody
 
 router = APIRouter(prefix="/api/views", tags=["views"],
-                   dependencies=[Depends(write_guard("model.edit"))])
+                   dependencies=[Depends(write_guard("model.edit", versioned=True))])
 
 
 @router.get("")

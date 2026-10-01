@@ -34,6 +34,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, Response
 
 from app.core.config import settings
+from app.core.nul_guard import RejectNulMiddleware
 from app.core.db import client as db_client
 from app.core.logging import configure_logging, get_logger
 from app.core.ratelimit import limiter
@@ -74,14 +75,34 @@ log = get_logger("app.main")
 # ─── Lifespan ───────────────────────────────────────────────────────────
 
 
+async def _purge_orphan_changes() -> None:
+    """Doc 105 (H2): limpieza idempotente de cambios de versiones eliminadas a
+    medias. En segundo plano (no demora el arranque) y best-effort."""
+    from app.features.changesets.repository import purge_orphan_changes
+    try:
+        n = await purge_orphan_changes()
+        if n:
+            log.warning("orphan changes purged", extra={"count": n})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("orphan changes purge failed", extra={"error": str(exc)})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicializa los singletons del proceso al arrancar."""
     retry_task: asyncio.Task | None = None
+    app.state.background = set()          # referencias fuertes de tasks de arranque
+
+    def _after_connect() -> None:
+        task = asyncio.create_task(_purge_orphan_changes())
+        app.state.background.add(task)
+        task.add_done_callback(app.state.background.discard)
+
     try:
         await db_client.connect()
         app.state.db_connected = True
         log.info("db connected")
+        _after_connect()
     except Exception as e:  # noqa: BLE001
         app.state.db_connected = False
         log.error("db connection failed", extra={"error": str(e)})
@@ -99,6 +120,7 @@ async def lifespan(app: FastAPI):
                     await db_client.connect()
                     app.state.db_connected = True
                     log.info("db connected after retry")
+                    _after_connect()
                     return
                 except Exception as exc:  # noqa: BLE001
                     log.warning("db reconnect failed", extra={"error": str(exc)})
@@ -158,6 +180,13 @@ def create_app() -> FastAPI:
     # el error sube desde cualquier endpoint changeset-aware → mismo shape
     # `{detail}` de HTTPException que el front ya propaga al toast.
     app.add_exception_handler(AsOfUnavailable, _asof_unavailable_handler)
+
+    # ─── Doc 105: NUL / surrogate suelto en la entrada → 400 antes de tocar la
+    # base (Postgres/asyncpg no los aceptan: era un 500). Agregado ANTES que el
+    # allowlist de hosts y que CORS para quedar DENTRO de ambos: un Host
+    # inválido se corta antes de leer el cuerpo, y el 400 lleva los headers de
+    # CORS (el front lee el detail).
+    app.add_middleware(RejectNulMiddleware)
 
     # ─── Host allowlist (solo si ALLOWED_HOSTS está definido: producción) ──
     if settings.ALLOWED_HOSTS:
