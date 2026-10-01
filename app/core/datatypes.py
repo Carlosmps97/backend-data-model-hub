@@ -16,6 +16,12 @@ se aceptan tal cual los `defaultDataType` de los parent domains vivos
 `canonical_type` devuelve la forma canónica (base en MAYÚSCULAS, argumentos
 compactos) o None si el texto no es un tipo válido.
 
+Doc 106: el catálogo trae los tipos de Databricks SQL / Hive, Oracle y SQL
+Server, sin validar por motor (un tipo que el motor no acepta es del modelador).
+Los argumentos aceptan texto (`MAX`, `30 CHAR`, `*`, `-2`); solo se rechaza lo
+que rompería el texto del tipo. Los tipos de varias palabras (`TIMESTAMP WITH
+TIME ZONE`) van sin argumentos.
+
 `canonicalize_default_type` (doc 62) homologa el default de un PARENT DOMAIN a
 la grafía de la plataforma: `Array` → `ARRAY<>` (como elegir ARRAY en el
 combobox), `BIG INTEGER` → `BIGINT`, `DECIMAL (22,4)` → `DECIMAL(22,4)`. Lo
@@ -29,6 +35,7 @@ from collections.abc import Iterable
 # Mismo catálogo que `COLUMN_DATA_TYPES` del front (src/types/model.ts).
 # Doc 62 suma: VARIANT (JSON libre, semiestructurado) + NUMBER/VARCHAR2 (tipos
 # Oracle presentes en los dominios de la data real: NUMBER(22,3), VARCHAR2(10)).
+# Doc 106 suma los tipos de los cuatro motores (lista única, sin separar por motor).
 CATALOG: frozenset[str] = frozenset({
     "INTEGER", "BIGINT", "SMALLINT", "TINYINT",
     "FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC", "NUMBER", "MONEY",
@@ -38,24 +45,42 @@ CATALOG: frozenset[str] = frozenset({
     "BINARY", "VARBINARY", "BLOB", "BYTES",
     "JSON", "JSONB", "XML", "UUID", "VARIANT",
     "ARRAY", "MAP", "STRUCT",
+    # Doc 106 · Databricks SQL / Hive
+    "INT", "TIMESTAMP_NTZ", "DOUBLE PRECISION", "GEOGRAPHY", "GEOMETRY",
+    # Doc 106 · Oracle
+    "NVARCHAR2", "NCHAR", "BINARY_FLOAT", "BINARY_DOUBLE", "LONG", "LONG RAW", "RAW", "ROWID",
+    "UROWID", "CLOB", "NCLOB", "BFILE", "XMLTYPE", "VECTOR",
+    "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE",
+    "INTERVAL YEAR TO MONTH", "INTERVAL DAY TO SECOND",
+    # Doc 106 · SQL Server
+    "BIT", "SMALLMONEY", "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME", "NTEXT", "IMAGE",
+    "UNIQUEIDENTIFIER", "SQL_VARIANT", "HIERARCHYID", "ROWVERSION",
 })
 
-# Cantidad MÁXIMA de argumentos por tipo (typePick.ts ARG_SPECS).
+# Cantidad MÁXIMA de argumentos por tipo (typePick.ts ARG_SPECS); todos opcionales.
 ARG_SPECS: dict[str, int] = {
     "DECIMAL": 2, "NUMERIC": 2, "NUMBER": 2,
     "VARCHAR": 1, "CHAR": 1, "NVARCHAR": 1, "VARBINARY": 1, "VARCHAR2": 1,
+    # Doc 106
+    "NVARCHAR2": 1, "NCHAR": 1, "RAW": 1, "UROWID": 1, "BINARY": 1,
+    "FLOAT": 1, "TIMESTAMP": 1, "TIME": 1, "DATETIME2": 1, "DATETIMEOFFSET": 1,
+    "VECTOR": 2, "GEOGRAPHY": 1, "GEOMETRY": 1,
 }
 
 # Sinónimos entre dialectos → base del catálogo (solo para HOMOLOGAR defaults
 # de dominio; la carga masiva NO los acepta — su gramática queda intacta).
+# Doc 106: `INT` y `DOUBLE PRECISION` dejan de ser sinónimos (son del catálogo).
 _BASE_ALIASES: dict[str, str] = {
     "BIGINTEGER": "BIGINT",         # «BIG INTEGER» (dominio BigInt del DDV)
-    "INT": "INTEGER",
     "BOOL": "BOOLEAN",
-    "DOUBLEPRECISION": "DOUBLE",
 }
 
-_SIMPLE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\s*(?:\(([^()]*)\))?$")
+# Base de una o más palabras (`TIMESTAMP WITH TIME ZONE`) + argumentos opcionales.
+_SIMPLE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*(?:\s+[A-Za-z][A-Za-z0-9_]*)*)\s*(?:\(([^()]*)\))?$")
+# Doc 106: un argumento es un número o una palabra (`MAX`, `*`, `-2`, `FLOAT32`),
+# con una unidad opcional que es una PALABRA (`30 CHAR`; `18 2` no). Nada que
+# rompa el texto del tipo. Solo ASCII (se valida ANTES de pasar a MAYÚSCULA).
+_ARG_RE = re.compile(r"^-?[A-Za-z0-9_*]+(?: [A-Za-z][A-Za-z0-9_]*)?$")
 _COMPLEX_RE = re.compile(r"^(STRUCT|ARRAY|MAP)\s*<(.*)>$", re.IGNORECASE | re.DOTALL)
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Complejo "recién iniciado": la base sola o con <> vacío (`Array`, `MAP <>`).
@@ -116,17 +141,17 @@ def _simple(text: str) -> str | None:
     m = _SIMPLE_RE.match(text)
     if not m:
         return None
-    base = m.group(1).upper()
+    base = " ".join(m.group(1).split()).upper()
     if base not in CATALOG:
         return None
     raw_args = m.group(2)
     if raw_args is None:
         return base
-    args = [a.strip() for a in raw_args.split(",")]
+    args = [" ".join(a.split()) for a in raw_args.split(",")]
     max_args = ARG_SPECS.get(base, 0)
-    if not args or len(args) > max_args or any(not a.isdigit() for a in args):
+    if not args or len(args) > max_args or any(not _ARG_RE.match(a) for a in args):
         return None
-    return f"{base}({','.join(args)})"
+    return f"{base}({','.join(a.upper() for a in args)})"
 
 
 def _complex(text: str, extra_norm: dict[str, str], aliases: bool = False) -> str | None:
@@ -158,8 +183,8 @@ def _complex(text: str, extra_norm: dict[str, str], aliases: bool = False) -> st
 
 
 def _simple_alias(text: str) -> str | None:
-    """`_simple` tras mapear la base por sinónimo de dialecto (`int` →
-    `INTEGER`, `bool` → `BOOLEAN`). Sólo para HOMOLOGAR (aliases=True)."""
+    """`_simple` tras mapear la base por sinónimo de dialecto (`BIG INTEGER` →
+    `BIGINT`, `bool` → `BOOLEAN`). Sólo para HOMOLOGAR (aliases=True)."""
     base_part, sep, rest = text.partition("(")
     alias = _BASE_ALIASES.get(norm_type(base_part))
     return _simple(alias + (sep + rest if sep else "")) if alias else None
@@ -174,7 +199,7 @@ def _canonical(text: str, extra_norm: dict[str, str], aliases: bool = False) -> 
     hit = _simple(t)
     if hit is None and aliases:
         # Doc 92 D6: los sinónimos también valen DENTRO de un tipo complejo
-        # (`struct<numorden:int, fecha:date>` de Erwin) — antes sólo en la base.
+        # (`struct<activo:bool, fecha:date>` de Erwin) — antes sólo en la base.
         hit = _simple_alias(t)
     return hit or extra_norm.get(norm_type(t))
 
@@ -197,7 +222,7 @@ def canonicalize_default_type(text) -> str:
        MISMO que emite el combobox al elegirlos (abre el builder del elemento).
     2) `canonical_type` (case/espacios: `decimal (22,4)` → `DECIMAL(22,4)`;
        complejos completos válidos pasan intactos).
-    3) Sinónimos de dialecto (`BIG INTEGER` → `BIGINT`, `INT` → `INTEGER`) y
+    3) Sinónimos de dialecto (`BIG INTEGER` → `BIGINT`, `bool` → `BOOLEAN`) y
        nuevo intento canónico.
     4) Sin reconocer → VERBATIM (recortado): jamás se inventa un tipo.
     """
@@ -232,7 +257,7 @@ def mirror_complex(source, target):
 
 
 def is_complete_simple_type(value) -> bool:
-    """¿Un tipo SIMPLE completo (`STRING`, `VARCHAR(20)`, alias como `INT`)? Los
+    """¿Un tipo SIMPLE completo (`STRING`, `VARCHAR(20)`, alias como `BOOL`)? Los
     complejos, el genérico `Array` y los textos a medio tipear (`S`) no. Puro."""
     t = clean_text(value)
     if not t or "<" in t or _BARE_COMPLEX_RE.match(t):

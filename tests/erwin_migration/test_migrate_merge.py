@@ -333,14 +333,15 @@ def test_columna_con_tipo_complejo_multilinea_se_persiste_canonica_en_una_linea(
     (sinónimos anidados incluidos); un simple queda tal cual."""
     db = base_db()
     m = modelo_archivo_2()
-    erwin = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30),\n\tnumorden: int\n\t>\n>"
+    erwin = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30),\n\tnumorden: int,\n\tactivo: bool\n\t>\n>"
     # E2 (TAB_B) se CREA en esta corrida (E1 es la tabla adoptada, que no re-escribe columnas).
     m.entities["E2"].attributes.append(attr("A9", "E2", "PAYLOAD", 9, dtype=erwin))
     mig = Migrator(db, m, "Familia DDV", None)
     mig.run()
     tb = mig.pid("E2")
     cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values() if c.get("tableId") == tb}
-    assert cols["PAYLOAD"]["dataType"] == "ARRAY<STRUCT<codcampania:VARCHAR(30),numorden:INTEGER>>"
+    # doc 106: INT es del catálogo (queda INT); `bool` sigue siendo un sinónimo → BOOLEAN
+    assert cols["PAYLOAD"]["dataType"] == "ARRAY<STRUCT<codcampania:VARCHAR(30),numorden:INT,activo:BOOLEAN>>"
     assert cols["CODA"]["dataType"] == "STRING"
 
 

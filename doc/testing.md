@@ -1,6 +1,6 @@
 # Testing del backend — Data Model Hub
 
-> **Actualizado: 2026-09-30** (doc 105: la suite E2E vuelve a estar al día y corre también en memoria dentro del `pytest` normal, más los tests de los hallazgos previos y de las revisiones independientes de sus arreglos (entre ellos, las rondas 3 a 7 del motor de consulta del Reporting, los valores de UDP por tipo —con su forma canónica y el default del perfil de carga—, los nombres legados y las tablas borradas en la app del kit Erwin) — §3.7, §5 y §6; conteo final del 2026-09-30: suite normal **2 904 tests**, verde, más los **48** de la suite viva, skipped sin `LAKEBASE_TESTS`; `tests/architecture`, 19 passed). Antes, 2026-09-09 (doc 82): suite de integración en proceso sobre una BD en memoria + guardas de arquitectura — suite normal **1 294 tests**, verde.
+> **Actualizado: 2026-09-30** (doc 105: la suite E2E vuelve a estar al día y corre también en memoria dentro del `pytest` normal, más los tests de los hallazgos previos y de las revisiones independientes de sus arreglos (entre ellos, las rondas 3 a 7 del motor de consulta del Reporting, los valores de UDP por tipo —con su forma canónica y el default del perfil de carga—, los nombres legados y las tablas borradas en la app del kit Erwin) — §3.7, §5 y §6; conteo final del 2026-09-30, con el doc 106 (catálogo de tipos multimotor y export Oracle tal cual): suite normal **2 990 tests**, verde, más los **48** de la suite viva, skipped sin `LAKEBASE_TESTS`; `tests/architecture`, 19 passed). Antes, 2026-09-09 (doc 82): suite de integración en proceso sobre una BD en memoria + guardas de arquitectura — suite normal **1 294 tests**, verde.
 >
 > **Nota (2026-07-20):** los seeds y la prueba de estrés que se citan más abajo
 > (`seed_modeler.py`, `seed_stress.py`, `seed_ddv_synthetic.py` y sus tests) se
@@ -25,7 +25,7 @@ flowchart TD
     L["Integracion real · tests/lakebase (LAKEBASE_TESTS=1)<br/>48 tests contra el Postgres real en schema efimero"]
     I["Integracion en proceso · tests/integration (doc 82) · 223 tests<br/>app REAL sobre BD en memoria (mongomock): flujos por HTTP, merge, aislamiento, barrido anti-500"]
     C["Arquitectura · tests/architecture · 19 tests<br/>invariantes de capas, alcance por proyecto, firmas reales, funciones truncadas, contrato de rutas front↔back"]
-    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros) + smoke/lifespan<br/>2 662 tests · services/models/schemas sin BD real (suite normal completa: 2 904, verde 2026-09-30)"]
+    D["Unit puros · tests/core + tests/features + tests/erwin_migration + tests/scripts + tests/lakebase (puros) + smoke/lifespan<br/>2 748 tests · services/models/schemas sin BD real (suite normal completa: 2 990, verde 2026-09-30)"]
 
     D --> C --> I --> L --> B --> A
 
@@ -48,21 +48,21 @@ Principios de diseño de las pruebas:
 - **E2E contra el backend real.** El harness loguea usuarios canónicos por rol, obtiene un JWT y ejercita el stack completo (RBAC → servicio → repositorio → Lakebase → auditoría), limpiando lo que crea. Desde el doc 105 (A2-o6) los mismos escenarios corren también EN MEMORIA —la app real sobre la BD falsa, con login real por rol— en cada `pytest` (`tests/scripts/test_e2e_inprocess.py`), y un barrido estático verifica que toda ruta que nombra la suite exista (`tests/scripts/test_e2e_routes.py`): la suite ya no puede volver a quedar desactualizada en silencio.
 - **Estrés reproducible (histórico).** Un seed sintético insertaba cientos de miles de documentos en streaming para medir el comportamiento del reporting y del canvas a escala (retirado 2026-07-20; ver la nota de cabecera y la sección 7).
 
-**Conteo confirmado (2026-09-30, doc 105):** `pytest tests/ --collect-only -q` (sin `LAKEBASE_TESTS`) recolecta **2 952** tests en 293 archivos; la suite normal corre **2 904** (verde: 2 904 passed en ~48 s; `tests/architecture` sola, 19 passed) y los **48** restantes son la suite viva del adaptador Lakebase, que sin `LAKEBASE_TESTS=1` sale como skipped. Desglose por área (conteo de pytest: cada caso parametrizado cuenta):
+**Conteo confirmado (2026-09-30, doc 106):** `pytest tests/ --collect-only -q` (sin `LAKEBASE_TESTS`) recolecta **3 038** tests en 294 archivos; la suite normal corre **2 990** (verde: 2 990 passed en ~41 s; `tests/architecture` sola, 19 passed) y los **48** restantes son la suite viva del adaptador Lakebase, que sin `LAKEBASE_TESTS=1` sale como skipped. Desglose por área (conteo de pytest: cada caso parametrizado cuenta):
 
 | Área | Archivos | Tests |
 |------|---------:|------:|
-| `tests/core` (config, ratelimit, índices, db, identidad, naming y nombres lógicos, versioning, facetas, **scope**, orden de display de columnas, tipos complejos, valores de UDP por tipo — doc 105) | 16 | 218 |
+| `tests/core` (config, ratelimit, índices, db, identidad, naming y nombres lógicos, versioning, facetas, **scope**, orden de display de columnas, tipos complejos, valores de UDP por tipo — doc 105; catálogo de tipos multimotor — doc 106) | 17 | 299 |
 | `tests/architecture` (invariantes de capas, legado retirado, alcance, firmas, funciones truncadas, fakes, rutas front↔back, mensajes en inglés) | 8 | 19 |
 | `tests/integration` (app real sobre BD en memoria: flujos por HTTP, merge, aislamiento, barrido anti-500, escrituras directas — doc 82; los hallazgos del doc 105 y sus revisiones: lápidas, guard de NUL y de surrogates sueltos, validación del naming, valores de UDP por tipo, nombres legados y el Undo) | 27 | 223 |
-| `tests/features` (todas las features; incluye `bulk_upload`, docs 55/78/87/105, `health`, el repositorio de changesets contra la BD falsa y, doc 88, la cascada de membresía y el historial de solicitudes) | 206 | 2 160 |
+| `tests/features` (todas las features; incluye `bulk_upload`, docs 55/78/87/105, `health`, el repositorio de changesets contra la BD falsa y, doc 88, la cascada de membresía y el historial de solicitudes) | 206 | 2 165 |
 | `tests/erwin_migration` (kit de migración multi-archivo, facetas, orden único, built-ins, frases de relación, fusión de canvases y, doc 105, lectura del naming y tablas borradas en la app) | 15 | 154 |
 | `tests/scripts` (orquestadores: `run_migration` con convención + carriles, `create_admin`, `databricks/workdir`, semillas por proyecto —reglas DDL, perfiles de carga, plantillas—, `reset_for_migration`, `arrange_all`, la auditoría y, doc 105, la suite E2E en memoria + su barrido de rutas + su limpieza, y el reporte de incongruencias) | 15 | 108 |
 | `tests/test_smoke.py` (app + health) + `tests/test_lifespan_doc105.py` (arranque real, doc 105) | 2 | 3 |
 | `tests/lakebase` puros: `test_translate.py` + `test_project_column.py` + `test_adapter_bulk_doc105.py` (corren en la suite normal) | 3 | 19 |
-| **Subtotal — suite normal** | **292** | **2 904** |
+| **Subtotal — suite normal** | **293** | **2 990** |
 | `tests/lakebase/test_adapter_live.py` (suite viva, solo con `LAKEBASE_TESTS=1`) | 1 | 48 |
-| **Total recolectado** | **293** | **2 952** |
+| **Total recolectado** | **294** | **3 038** |
 
 La carga masiva desde Excel (`tests/features/bulk_upload/`, 33 archivos) sigue el patrón de la casa: `normalize`/`datatypes`/`parser`/`report`/`planner_*`/`policies`/`udp_facets` son puros (workbook YA interpretado por un perfil, armado a mano con `helpers.py`); doc 87 suma `planner_views` (vistas `_vu` normal + DAC, esquema `_vu`, columnas efectivas en orden de display, vista existente intacta, canvas) y `planner_upsert` (invariante: nunca `delete`, lo no mencionado no aparece), más el proyecto destino en `planner_structure` (`upload_targets` / `resolve_base_folder`), `service` y `router` (`GET …/uploads/targets`); los perfiles de carga (doc 78) prueban puro el modelo (`profiles_model`: catálogo + `validate_profile`), el built-in (`builtin_profile` contra el catálogo fijo de UDPs), `suggest`, `rules` y `profile_apply` (hojas, fila de cabecera, cabeceras, políticas), y con mocks el repositorio scoped (`profiles_repository`), el service (`profiles_service`: nombre único, 422, default único) y el router (`profiles_router`, con `project_client`); `loader`/`service` mockean los repositories y el `changesets.service` con `AsyncMock`, y `router` sobreescribe el permiso `model.edit` con `dependency_overrides`. Doc 105 (X1, `--workers 2`): `test_jobs.py` se reescribió porque los jobs pasaron a la BD (`upload_jobs` + `upload_job_bodies`) — cada `JobStore` del test es «un worker» que sólo comparte la BD: otro worker ve el job, su avance y su cuerpo; un job activo sin avance se informa fallido; el claim del apply es atómico y sólo desde `validated`; el descarte no corta un apply vivo pero sí uno muerto; desalojo y tope por usuario —; `test_service.py` suma el lock `uploadLock` de la versión con los jobs y la cabecera en una BD en memoria («otro worker» = sin las tasks locales): otro worker consulta y aplica y el lock se suelta (también si el apply falla), dos cargas a la vez en la misma versión → una espera, el mismo job aplicado dos veces a la vez escribe una sola, cada tanda es un latido, la carga cuyo proceso murió se informa y no traba la versión, y la carrera de otra carga que toma la versión entre la lectura y el claim; `test_planner_override_doc105.py` (11) fija que la re-carga idéntica de un físico que no sigue el naming quede «unchanged» y, desde la revisión R2, que el plan conserve el `physicalNameOverridden` del existente mientras el físico no cambie (`keep_override`; un update real con el físico igual al derivado ya no baja el override en silencio, y si el físico cambia se re-evalúa) sin que `changed_fields` esconda el flag. Revisión R1: `test_jobs_races_doc105.py` (11) intercala «el otro proceso» en la ventana leer → escribir del `JobStore` — el desalojo y el tope por usuario no borran un job que otro proceso reclamó en el medio (borran con el predicado en la misma sentencia; en un mismo desalojo se va el vencido y el reclamado conserva su cuerpo), descartar una validación que termina en el medio la borra y uno que otro proceso empieza a aplicar responde ocupado, y crear no deja un cuerpo ni un job huérfano si una de las dos escrituras falla (el job va antes que su cuerpo); ronda 3: un cuerpo cuyo borrado falló lo barre un desalojo posterior (`evict` barre los cuerpos sin job más viejos que STALE + TTL) y esa falla no tumba el POST de otro usuario —al crear, el desalojo es best-effort—, y el barrido no toca el cuerpo de un job vivo aunque sea viejo; ronda 4 (R8): el barrido se espacia —como mucho uno por intervalo en cada proceso, no en cada carga—. `test_planner_case_doc105.py` (23) fija la normalización del físico TIPEADO de columnas con el `case` del scope (`persisted_physical` / `requested_physical`, los mismos scopes que el changeset): un cambio sólo de mayúsculas queda «unchanged» y no toca el override, una columna nueva tipeada en minúsculas nace con la regla, la vista `_vu` referencia el físico que se graba, dos filas que se grabarían igual son duplicado en el archivo, camel con separadores calza con la columna ya normalizada (y la longitud se mide sobre el nombre que se graba), la re-carga idéntica —también de un nombre legado fuera de la regla— queda «unchanged» y las tablas conservan la grafía tipeada; desde la ronda 4 —como el changeset, que aplica la regla de case sólo a lo que se TIPEA o cambia—, un legado fuera de la regla que la fila repite tal cual (tipeado idéntico o calzado por lógico) queda tal cual aunque la fila traiga OTRO cambio: el payload lleva el nombre grabado, sin aviso de renombre, y conserva su override; un nombre tipeado que al grabarse chocaría sin mirar mayúsculas con otra columna es `duplicate-name` y el duplicado en el archivo se mide por el nombre que se graba; ronda 5 (R13): una fila SIN físico declarado no pide un nombre —la columna o la tabla legada conserva su grafía, como la misma edición desde la app—; el tope de longitud usa el mismo «grandfather» del changeset (`too_long` en `plan_tables.py`: compara casefold con el físico actual, para columnas y tablas) — un legado que sólo cambia de mayúsculas no se penaliza, una tabla legada larga renombrada así se graba y el reporte avisa el renombre, y una tabla nueva larga sigue siendo `name-too-long`. `test_planner_legacy_case_doc105.py` (10) lo recorre por el camino real (loader → `build_plan` → changeset → publish): desde la ronda 4, el legado que la fila repite tal cual —tipeado idéntico o calzado por lógico— se graba igual hasta publicar, sin aviso de renombre; un camel legado largo con otro cambio valida y se graba igual (el tope no penaliza lo heredado y el apply acepta lo que la validación aceptó); la vista `_vu` nueva referencia el físico grabado y las existentes siguen apuntando al legado; dos legadas que chocarían sin mirar mayúsculas, repetidas tal cual, se graban, mientras un nombre tipeado que al grabarse chocaría lo marca la validación (`duplicate-name`; el changeset daría 409); la carga Excel y la app dejan el mismo físico y el mismo override en el legado; ronda 5 (R13): sin físico declarado, el legado que difiere sólo en mayúsculas queda hasta publicar, y una fila cuya columna tiene un borrado pendiente en el draft se planea nueva y se graba como se planeó; `test_override_e2e_doc105.py` (6) recorre el camino real (loader con sus proyecciones → `build_plan` → changeset → publish): el override de tabla y columna y las facetas de la tabla sobreviven a una carga con un cambio real, la re-carga idéntica de una tabla existente queda «unchanged», la proyección de tablas del loader trae todos los campos de `CanonicalTableDoc`, y una columna que sólo difiere en mayúsculas no cambia nada de punta a punta. Ronda 5 (valores de UDP por tipo, `app/core/udp_values.py`): `test_udp_boolean_doc105.py` (4) —el default booleano de la definición (texto libre en Data Standards: «Sí», «yes»…) se escribe normalizado a «true»/«false», uno desconocido es `invalid-udp-value` como un valor fuera de la lista, la celda y el default del perfil siguen normalizándose y los defaults válidos de texto, número y fecha no cambian— y `test_udp_number_date_doc105.py` (29) —un número no finito («nan», «inf») o una fecha que no es ISO real son `invalid-udp-value` y el default inválido de la definición es un error de la fila; ronda 6: el número válido se graba en su forma canónica («10.50» → «10.5»), una fecha o fecha-hora ISO graba la fecha, el default válido del perfil se normaliza y el inválido da un error que dice que viene del perfil (una celda inválida no se le atribuye)—. Ronda 6: `test_profile_udp_default_doc105.py` (11, puro) fija que el perfil valida al guardarse el default de un mapeo a UDP por el tipo de ese UDP —uno inválido (booleano, número, fecha o lista) es el problema `default-invalid` en `….defaultValue`, con un mensaje que dice que viene del perfil de carga; uno válido o vacío no es problema—. Ronda 7: `test_profile_default_warning_doc105.py` (2) —un default del perfil que QUEDÓ inválido (Data Standards sacó el valor de la lista después de guardar el perfil) y ninguna fila usa no frena la carga: sale la advertencia `profile-default-invalid`; la fila nueva que deja la celda vacía y lo usaría da su propio error—.
 
@@ -119,6 +119,7 @@ tests/
 │   ├── versioning/test_overlay.py   # overlay(publicado + cambios) + summarize_diff
 │   ├── test_column_order.py         # orden único de display: PK primero y cada bloque por ordinal (docs 81/94)
 │   ├── test_config.py               # defaults del seam de identidad
+│   ├── test_datatypes_catalog_doc106.py # catálogo de los cuatro motores, argumentos de texto, INT tal cual (doc 106)
 │   ├── test_datatypes_complex.py    # tipos complejos de Erwin: plegado y homologación (docs 92/96)
 │   ├── test_facets.py               # contrato de facetas logico/fisico (doc 69)
 │   ├── test_indexes.py              # ensure_indexes idempotente
@@ -196,7 +197,7 @@ tests/
 
 ### 3.1 Unit puros con repositorios mockeados
 
-Los 2 904 tests de la suite normal no tocan una base de datos real (los de `tests/integration`, el del lifespan y algunos de `tests/features` usan la BD en memoria de `tests/support/fakedb.py`). Hay dos patrones dominantes.
+Los 2 990 tests de la suite normal no tocan una base de datos real (los de `tests/integration`, el del lifespan y algunos de `tests/features` usan la BD en memoria de `tests/support/fakedb.py`). Hay dos patrones dominantes.
 
 **Patrón A — función pura.** Se prueba directamente el algoritmo, sin `async` ni mocks. Ejemplo del motor de naming (`tests/core/naming/test_engine.py`):
 
@@ -290,7 +291,7 @@ flowchart LR
 
 ### 3.4 Suite viva del adaptador Lakebase (integración real)
 
-`tests/lakebase/test_adapter_live.py` (**48 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Doc 105 (revisión del Reporting): suma el pipeline de relaciones del scorecard —extremos v2 con respaldo en los legacy, en un solo `$group` con `$addToSet`/`$ifNull`— contra el Postgres real (2), y (ronda 4) el de columnas por tabla —las métricas de columnas de cada tabla, entre ellas cuántas PK, en un solo `$group` sobre las columnas activas; de ahí salen las tablas sin PK— (1). Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 48 tests se saltan, por eso el `pytest` normal reporta 2 904 passed + 48 skipped (2026-09-30).
+`tests/lakebase/test_adapter_live.py` (**48 tests**) es la única capa de pytest que toca una base de datos real: pega al Postgres de Lakebase en un **schema efímero `dmh_test_<rand>`** que se dropea al final, así que no ensucia el schema productivo `dmh`. Cubre la superficie estilo pymongo del adaptador (find/update/bulk_write/aggregate/…) y los shapes de pipeline reales del reporting con fixtures sintéticas. Doc 105 (revisión del Reporting): suma el pipeline de relaciones del scorecard —extremos v2 con respaldo en los legacy, en un solo `$group` con `$addToSet`/`$ifNull`— contra el Postgres real (2), y (ronda 4) el de columnas por tabla —las métricas de columnas de cada tabla, entre ellas cuántas PK, en un solo `$group` sobre las columnas activas; de ahí salen las tablas sin PK— (1). Está gateada con `pytest.mark.skipif`: sin `LAKEBASE_TESTS=1` los 48 tests se saltan, por eso el `pytest` normal reporta 2 990 passed + 48 skipped (2026-09-30).
 
 ```bash
 LAKEBASE_TESTS=1 .venv/bin/python -m pytest tests/lakebase -q   # 48 vivos contra el Postgres real + 19 puros
@@ -352,10 +353,10 @@ Todas las dependencias de test están en `requirements-dev.txt` (`pytest>=8.0`, 
 No requieren base de datos ni variables de entorno. Ejemplos:
 
 ```bash
-# Toda la suite normal (2 904 passed en ~48 s; los 48 vivos salen como skipped sin LAKEBASE_TESTS)
+# Toda la suite normal (2 990 passed en ~48 s; los 48 vivos salen como skipped sin LAKEBASE_TESTS)
 .venv/bin/python -m pytest -q
 
-# Solo recolectar (verificar el conteo: 2 952 = 2 904 + 48 vivos, ~0.6 s)
+# Solo recolectar (verificar el conteo: 3 038 = 2 990 + 48 vivos, ~0.6 s)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (48 vivos + 19 puros; requiere el Postgres real alcanzable)
@@ -542,6 +543,7 @@ El motor de reporting traduce un `QuerySpec` a un pipeline de Mongo con whitelis
 | `core` índices | 4 | `ensure_indexes` idempotente (`core/test_indexes.py`, 2) + índices del adaptador (`core/db/test_indexes.py`, 2). |
 | `core/test_column_order` | 4 | Orden único de display (docs 81/94): PK primero y cada bloque por `ordinal`; un `pkPosition` viejo no manda. |
 | `core/test_datatypes_complex` | 7 | Tipos complejos de Erwin (docs 92/96): plegado a una línea, homologación de sinónimos anidados y el complejo igual en las dos facetas. |
+| `core/test_datatypes_catalog_doc106` | 70 | Catálogo de tipos de Databricks SQL / Hive, Oracle y SQL Server (doc 106): la carga Excel los acepta, los argumentos aceptan texto (`MAX`, `30 CHAR`, `*`, `-2`) y rechazan lo que rompería el tipo, los de varias palabras van sin argumentos, e `INT` / `DOUBLE PRECISION` ya no se homologan (quedan tal cual). |
 
 ### 5.10 Tests del kit de migración Erwin (`tests/erwin_migration`, 154 tests en 15 archivos · `tests/scripts`, 108 en 15)
 
@@ -781,12 +783,12 @@ Las relevantes para correr y probar el backend (inventario completo en [desplieg
 ## 9. Resumen de comandos
 
 ```bash
-# Suite normal (2 904 tests, sin BD real; los 48 vivos salen skipped)
+# Suite normal (2 990 tests, sin BD real; los 48 vivos salen skipped)
 .venv/bin/python -m pytest -q
 .venv/bin/python -m pytest tests/architecture -v
 .venv/bin/python -m pytest tests/features/changesets -k versioning
 
-# Verificar el conteo total (2 952 = 2 904 + 48 vivos)
+# Verificar el conteo total (3 038 = 2 990 + 48 vivos)
 .venv/bin/python -m pytest tests/ --collect-only -q
 
 # Suite viva del adaptador Lakebase (48, contra el Postgres real)

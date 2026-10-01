@@ -3,8 +3,8 @@ renombra el tipo BASE de las columnas que matchean al exportar — en el CREATE
 físico del front (reescritura por TOKEN: comentarios, literales e
 identificadores intactos, el resto byte-idéntico) y en las tablas generadas
 (la `_rej` conserva el tipo de sus particiones → también mapean). Los
-argumentos `(n)`/`(p,s)` se conservan si el tipo destino los admite (gramática
-del catálogo, `ARG_SPECS`); si no, se descartan (`CHAR(10)` → `STRING`).
+argumentos `(n)`/`(p,s)` se conservan si el tipo destino los admite (tabla
+propia del motor, `_RULE_TYPE_ARGS` — doc 106); si no, se descartan (`CHAR(10)` → `STRING`).
 Semilla `char_a_varchar` + plantilla del picker + bench (Test/Impact)."""
 from __future__ import annotations
 
@@ -99,6 +99,53 @@ def test_map_type_text_descarta_los_argumentos_si_el_destino_no_los_admite():
     assert _txt("CHAR(10)", [("r", {"CHAR": "STRING"})]) == "STRING"
     assert _txt("DECIMAL(18,2)", [("r", {"DECIMAL": "DOUBLE"})]) == "DOUBLE"
     assert _txt("CHAR(10)", [("r", {"CHAR": "DECIMAL"})]) == "DECIMAL(10)"   # el destino sí admite
+
+
+def test_doc106_el_catalogo_multimotor_no_cambia_que_destino_conserva_argumentos():
+    # Doc 106: el catálogo suma argumentos para Oracle / SQL Server (TIMESTAMP(6),
+    # FLOAT(53), BINARY(16), NCHAR(10)…), pero el motor de reglas es de Databricks:
+    # esos destinos siguen descartando los argumentos, como antes.
+    assert _txt("CHAR(10)", [("r", {"CHAR": "TIMESTAMP"})]) == "TIMESTAMP"
+    assert _txt("DECIMAL(18,2)", [("r", {"DECIMAL": "FLOAT"})]) == "FLOAT"
+    assert _txt("CHAR(16)", [("r", {"CHAR": "BINARY"})]) == "BINARY"
+    assert _txt("CHAR(10)", [("r", {"CHAR": "NCHAR"})]) == "NCHAR"
+    assert _txt("CHAR(10)", [("r", {"CHAR": "VARCHAR2"})]) == "VARCHAR2(10)"   # este ya los conservaba
+
+
+def test_doc106_revision_la_regla_no_entra_en_los_argumentos_ni_parte_un_tipo_de_varias_palabras():
+    # Revisión: `char_a_varchar` reescribía la unidad de un largo (`30 CHAR` → `30 VARCHAR`)
+    # y una regla de TIME/LONG partía `TIMESTAMP WITH TIME ZONE` / `LONG RAW`.
+    for tipo in ("VARCHAR2(30 CHAR)", "VARCHAR(30 CHAR)", "NCHAR(10 CHAR)", "STRUCT<a: VARCHAR2(5 CHAR)>"):
+        assert render.map_type_text(tipo, M) == (tipo, [])
+    assert render.map_type_text("TIMESTAMP WITH TIME ZONE", [("r", {"TIME": "STRING"})]) == ("TIMESTAMP WITH TIME ZONE", [])
+    assert render.map_type_text("timestamp with local time zone", [("r", {"TIME": "STRING"})])[1] == []
+    assert render.map_type_text("LONG RAW", [("r", {"LONG": "BIGINT"})]) == ("LONG RAW", [])
+    assert render.map_type_text("INTERVAL DAY TO SECOND", [("r", {"DAY": "X"})]) == ("INTERVAL DAY TO SECOND", [])
+    # el motor aplica una regla que nombra el tipo COMPLETO (con el casing del original); hoy una regla
+    # guardada no puede nombrarlo: la validación de reglas exige una sola palabra (`validate.py`)
+    assert _txt("TIMESTAMP WITH TIME ZONE", [("r", {"timestamp with time zone": "timestamp"})]) == "TIMESTAMP"
+    assert _txt("long raw", [("r", {"LONG RAW": "BLOB"})]) == "blob"
+    # lo de siempre no cambia: la base que matchea, con sus argumentos, y CHAR dentro de un complejo
+    assert _txt("CHAR(10)") == "VARCHAR(10)"
+    assert _txt("STRUCT<a: CHAR(3), b: ARRAY<char(2)>>") == "STRUCT<a: VARCHAR(3), b: ARRAY<varchar(2)>>"
+
+
+def test_doc106_revision2_paréntesis_sin_cerrar_no_es_cuadrático():
+    # Ronda 2: cada palabra buscaba el cierre de su `(` hasta el final → 10 000 `X(`
+    # sin cerrar tardaban ~6 s. Ahora los cierres se calculan una vez por rango.
+    import time
+    texto = "STRUCT<a: " + "X(" * 20000 + ">"
+    t0 = time.perf_counter()
+    assert render.map_type_text(texto, M) == (texto, [])
+    assert time.perf_counter() - t0 < 3
+
+
+def test_doc106_revision_el_create_con_un_largo_en_char_no_se_toca():
+    sql = "CREATE TABLE s.t (\n  `nom` VARCHAR2(30 CHAR),\n  `cod` CHAR(3)\n)"
+    ctx = {**CTX, "nom": {"udp": {}, "column": {"name": "nom"}}, "cod": {"udp": {}, "column": {"name": "cod"}}}
+    out, log = render.apply_column_types_sql(sql, [CHAR_VARCHAR], "ddl.tabla_fisica", BASE, ctx, CONFIG)
+    assert "`nom` VARCHAR2(30 CHAR)," in out and "`cod` VARCHAR(3)" in out
+    assert [(e["column"], e["object"]) for e in log if e["status"] == "applied"] == [("cod", "CHAR(3) → VARCHAR(3)")]
 
 
 def test_map_type_text_encadena_las_reglas_en_orden():

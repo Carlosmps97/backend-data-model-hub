@@ -60,6 +60,20 @@ def test_tipo_invalido_y_dominio_desconocido_son_errores():
     assert sorted((e["code"], e["row"]) for e in plan.report["errors"]) == [("invalid-type", 3), ("missing-required", 4), ("unknown-domain", 4)]
 
 
+def test_doc106_la_carga_acepta_los_tipos_de_los_cuatro_motores():
+    """Doc 106: VARCHAR(MAX) / NVARCHAR(MAX) del RDV, INT, VARCHAR2(30 CHAR) y los tipos
+    de varias palabras se cargan (antes: «not a valid type»), canónicos en MAYÚSCULA."""
+    tipos = ["varchar(max)", "nvarchar(max)", "int", "varchar2(30 char)", "timestamp with time zone",
+             "number(*,2)", "uniqueidentifier"]
+    p = parsed(tables=[trow(3, "Cliente", schema="ddv")],
+               columns=[crow(3 + i, "Cliente", f"Campo {chr(65 + i)}", data_type=t) for i, t in enumerate(tipos)])
+    plan = build_plan(p, ctx(schemas=_SCHEMAS, domains=_DOMAINS), new_id=seq_ids())
+    assert plan.report["errors"] == []
+    assert [c["payload"]["dataType"] for c in _cols(plan)] == [
+        "VARCHAR(MAX)", "NVARCHAR(MAX)", "INT", "VARCHAR2(30 CHAR)", "TIMESTAMP WITH TIME ZONE", "NUMBER(*,2)",
+        "UNIQUEIDENTIFIER"]
+
+
 def test_tipo_distinto_al_default_del_dominio_es_override_y_el_igual_no():
     p = parsed(tables=[trow(3, "Cliente", schema="ddv")],
                columns=[crow(3, "Cliente", "A", domain="Codigo", data_type="bigint"),

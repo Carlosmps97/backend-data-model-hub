@@ -126,8 +126,8 @@ def test_column_impact_homologa_el_tipo_nuevo_y_cuenta_modelos(monkeypatch):
 
 def test_column_impact_tipo_igual_al_actual_no_es_cambio(monkeypatch):
     _svc(monkeypatch)
-    out = asyncio.run(service.column_impact("pd", physical_to="int", logical_to=""))
-    assert out["targets"] == {}          # INT = INTEGER; '' en lógico = sin tipo → no cascadea
+    out = asyncio.run(service.column_impact("pd", physical_to="integer", logical_to=""))
+    assert out["targets"] == {}          # integer = INTEGER; '' en lógico = sin tipo → no cascadea
 
 
 def test_column_impact_solo_totales_no_resuelve_nombres(monkeypatch):

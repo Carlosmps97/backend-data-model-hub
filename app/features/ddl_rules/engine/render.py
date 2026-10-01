@@ -28,7 +28,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.tokens import TokenType
 
-from app.core.datatypes import ARG_SPECS
+from app.core.datatypes import CATALOG
 
 from . import conditions as cond
 from .expressions import RenderError, build_expression, expand_template
@@ -713,9 +713,23 @@ def decorate_view_sql(sql: str, artifact: str, rules: list[dict], config: dict,
 # (COMMENT 'CHAR(3)'), los identificadores (`char`) y los comentarios no son
 # tokens de tipo, así que quedan intactos y el resto del texto sale
 # byte-idéntico. Los argumentos `(n)`/`(p,s)` se conservan si el tipo destino
-# los admite según la gramática del catálogo (`ARG_SPECS`); si no, se
-# descartan (`CHAR(10)` → `STRING`). Las tablas generadas pasan por el mismo
-# mapeador tipo por tipo. Las vistas no declaran tipos: no aplica.
+# los admite según `_RULE_TYPE_ARGS`; si no, se descartan (`CHAR(10)` →
+# `STRING`). Las tablas generadas pasan por el mismo mapeador tipo por tipo.
+# Las vistas no declaran tipos: no aplica.
+
+# Tipos destino que conservan los argumentos. Copia CONGELADA de la gramática del
+# catálogo antes del doc 106: el catálogo ahora es multimotor (TIMESTAMP(6),
+# FLOAT(53), BINARY(16)… de Oracle / SQL Server), pero este motor es de Databricks
+# y una regla `CHAR → TIMESTAMP` sigue descartando el largo.
+_RULE_TYPE_ARGS: frozenset[str] = frozenset({
+    "DECIMAL", "NUMERIC", "NUMBER", "VARCHAR", "CHAR", "NVARCHAR", "VARBINARY", "VARCHAR2",
+})
+
+# Doc 106: un tipo de varias palabras del catálogo (`TIMESTAMP WITH TIME ZONE`,
+# `LONG RAW`) es UNA unidad — el tokenizer lo parte en palabras sueltas y una
+# regla de `TIME` o `LONG` no debe tocar una de ellas. Los más largos primero.
+_MULTIWORD_TYPES: tuple[tuple[str, ...], ...] = tuple(sorted(
+    (tuple(t.split()) for t in CATALOG if " " in t), key=len, reverse=True))
 
 _TYPE_WORD_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -764,50 +778,67 @@ def _retype_tokens(text: str, toks: list, i0: int, i1: int,
     argumentos `( … )` que le siguen se conservan o se descartan según el
     destino FINAL."""
     out: list[dict] = []
-    maps = [(name, {str(k).upper(): v for k, v in m.items()}) for name, m in maps]   # match case-insensitive
+    maps = [(name, {" ".join(str(k).split()).upper(): v for k, v in m.items()}) for name, m in maps]   # case-insensitive
+    close_of = _paren_pairs(toks, i0, i1)
     i = i0
     while i < i1:
         t = toks[i]
-        span = text[t.start:t.end + 1]
-        if not _TYPE_WORD_RX.match(span):
+        if not _TYPE_WORD_RX.match(text[t.start:t.end + 1]):
             i += 1
             continue
-        cur, applied = span, []
+        last = _type_unit_end(text, toks, i, i1)   # doc 106: varias palabras = una unidad
+        span = text[t.start:toks[last].end + 1]
+        cur, applied = " ".join(span.split()), []
         for name, m in maps:
             to = m.get(cur.upper())
             if to is not None:
                 cur, applied = to, applied + [name]
+        args_end = close_of.get(last + 1)          # índice del ')' que cierra los argumentos
         if not applied:
-            i += 1
+            # doc 106: los argumentos de un tipo no se recorren (`VARCHAR2(30 CHAR)`)
+            i = (args_end if args_end is not None else last) + 1
             continue
         new_base = _match_case(cur, span)
-        args_end = None                      # índice del ')' que cierra los argumentos
-        if i + 1 < i1 and toks[i + 1].token_type == TokenType.L_PAREN:
-            depth, k = 0, i + 1
-            while k < i1:
-                tt = toks[k].token_type
-                if tt == TokenType.L_PAREN:
-                    depth += 1
-                elif tt == TokenType.R_PAREN:
-                    depth -= 1
-                    if depth == 0:
-                        args_end = k
-                        break
-                k += 1
         if args_end is None:
-            out.append({"start": t.start, "end": t.end + 1, "new": new_base,
+            out.append({"start": t.start, "end": toks[last].end + 1, "new": new_base,
                         "old_disp": span, "new_disp": new_base, "rules": applied})
-            i += 1
+            i = last + 1
             continue
-        args = text[t.end + 1:toks[args_end].end + 1]
-        if ARG_SPECS.get(cur.upper(), 0) > 0:      # el destino admite argumentos: verbatim
-            out.append({"start": t.start, "end": t.end + 1, "new": new_base,
+        args = text[toks[last].end + 1:toks[args_end].end + 1]
+        if cur.upper() in _RULE_TYPE_ARGS:         # el destino admite argumentos: verbatim
+            out.append({"start": t.start, "end": toks[last].end + 1, "new": new_base,
                         "old_disp": span + args, "new_disp": new_base + args, "rules": applied})
         else:                                       # no los admite: `CHAR(10)` → `STRING`
             out.append({"start": t.start, "end": toks[args_end].end + 1, "new": new_base,
                         "old_disp": span + args, "new_disp": new_base, "rules": applied})
         i = args_end + 1
     return out
+
+
+def _type_unit_end(text: str, toks: list, i: int, i1: int) -> int:
+    """Índice del ÚLTIMO token del tipo que empieza en toks[i]: el de un tipo de
+    varias palabras del catálogo si sus palabras siguen tal cual, si no `i`."""
+    for words in _MULTIWORD_TYPES:
+        j = i + len(words)
+        if j <= i1 and all(text[toks[k].start:toks[k].end + 1].upper() == w
+                           for k, w in zip(range(i, j), words)):
+            return j - 1
+    return i
+
+
+def _paren_pairs(toks: list, i0: int, i1: int) -> dict[int, int]:
+    """{índice de cada `(` de toks[i0:i1]: índice del `)` que lo cierra} — una sola
+    pasada (doc 106 · revisión 2: buscar el cierre palabra por palabra era cuadrático
+    con paréntesis sin cerrar). Un `(` sin cierre no figura."""
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    for k in range(i0, i1):
+        tt = toks[k].token_type
+        if tt == TokenType.L_PAREN:
+            stack.append(k)
+        elif tt == TokenType.R_PAREN and stack:
+            pairs[stack.pop()] = k
+    return pairs
 
 
 def _splice(text: str, repl: list[dict]) -> str:

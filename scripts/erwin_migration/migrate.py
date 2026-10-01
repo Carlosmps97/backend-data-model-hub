@@ -871,7 +871,8 @@ class Migrator:
                 dom_pid = self.domain_pid.get(a.domain_ref or "")
                 dom = self.m.domains.get(a.domain_ref or "")
                 # Doc 69: override POR FACETA — físico de la columna vs físico del
-                # dominio, lógico vs lógico (canonizados: INT ≡ INTEGER). Antes se
+                # dominio, lógico vs lógico (canonizados: `decimal (22,4)` ≡ `DECIMAL(22,4)`; desde el doc 106
+                # `INT` e `INTEGER` son tipos distintos del catálogo). Antes se
                 # comparaba el FÍSICO de la columna con el LÓGICO del dominio
                 # (VARCHAR(30) vs VARCHAR(20)) ⇒ miles de falsos overrides.
                 dom_phys = canonicalize_default_type(dom.physical_type or dom.data_type) if dom else ""

@@ -277,8 +277,8 @@ def test_builtins_con_nombre_se_siembran_y_los_placeholders_no():
     doms = {d["name"]: d for d in db.data["parent_domains"].values()}
     assert set(doms) == {"Number", "Codigo"}
     num = doms["Number"]
-    # INT se homologa a INTEGER (doc 62) en ambas facetas
-    assert (num["defaultDataType"], num["logicalDataType"], num["inheritsName"]) == ("INTEGER", "INTEGER", False)
+    # Doc 106: cada faceta tal cual Erwin — físico INT, lógico INTEGER (antes el INT se homologaba a INTEGER)
+    assert (num["defaultDataType"], num["logicalDataType"], num["inheritsName"]) == ("INT", "INTEGER", False)
     assert num["physicalName"] == "Number"        # físico de Erwin «Number» ≠ derivado NUMBER ⇒ override (D1)
     cols = {c["physicalName"]: c for c in db.data["canonical_columns"].values()}
     assert cols["EDAD"]["parentDomainId"] == num["_id"] and cols["EDAD"]["typeOverridden"] is False

@@ -21,7 +21,7 @@ from app.features.bulk_upload.datatypes import (
 
 def test_catalogo_es_el_del_front_en_mayusculas():
     assert {"STRING", "BIGINT", "DECIMAL", "TIMESTAMP", "STRUCT", "ARRAY", "MAP"} <= CATALOG
-    assert "INT" not in CATALOG
+    assert all(t == t.upper() for t in CATALOG)
 
 
 def test_catalogo_incluye_variant_y_tipos_oracle():
@@ -57,16 +57,16 @@ def test_decimal_solo_precision():
     assert canonical_type("DECIMAL(10)") == "DECIMAL(10)"
 
 
-@pytest.mark.parametrize("bad", ["VARCHAR(1,2)", "DECIMAL(a)", "STRING(10)", "DECIMAL()",
+@pytest.mark.parametrize("bad", ["VARCHAR(1,2)", "STRING(10)", "DECIMAL()",
                                  "DECIMAL(1,2,3)", "NUMBER(1,2,3)", "VARCHAR2(1,2)",
-                                 "INT", "", None, "STRING extra"])
+                                 "", None, "STRING extra"])
 def test_rechazos(bad):
     assert canonical_type(bad) is None
 
 
 def test_acepta_tipo_extra_de_dominio_con_su_grafia():
     # Un default de dominio fuera de catálogo sigue valiendo como extra.
-    assert canonical_type("raw (16)", extra=["RAW(16)"]) == "RAW(16)"
+    assert canonical_type("mi_tipo (16)", extra=["MI_TIPO(16)"]) == "MI_TIPO(16)"
 
 
 def test_complejos_basicos():
@@ -79,14 +79,14 @@ def test_complejo_anidado():
     assert canonical_type("ARRAY<STRUCT<x:STRING,y:ARRAY<BIGINT>>>") == "ARRAY<STRUCT<x:STRING,y:ARRAY<BIGINT>>>"
 
 
-@pytest.mark.parametrize("bad", ["STRUCT<a:INT>", "STRUCT<a:INT", "STRUCT<>", "MAP<STRING>",
+@pytest.mark.parametrize("bad", ["STRUCT<a:BOOL>", "STRUCT<a:INT", "STRUCT<>", "MAP<STRING>",
                                  "STRUCT<1a:STRING>", "ARRAY<STRING>>", "STRUCT<a>"])
 def test_complejos_malformados(bad):
     assert canonical_type(bad) is None
 
 
 def test_extra_tambien_vale_dentro_de_un_complejo():
-    assert canonical_type("ARRAY<RAW(16)>", extra=["RAW(16)"]) == "ARRAY<RAW(16)>"
+    assert canonical_type("ARRAY<MI_TIPO(16)>", extra=["MI_TIPO(16)"]) == "ARRAY<MI_TIPO(16)>"
 
 
 # ── canonicalize_default_type (doc 62): homologación de defaults de dominio ──
@@ -99,9 +99,9 @@ def test_extra_tambien_vale_dentro_de_un_complejo():
     ("Struct", "STRUCT<>"),
     ("map", "MAP<>"),
     ("BIG INTEGER", "BIGINT"),       # alias con espacio (dominio BigInt)
-    ("int", "INTEGER"),
+    ("int", "INT"),                  # doc 106: INT es del catálogo (antes → INTEGER)
     ("bool", "BOOLEAN"),
-    ("DOUBLE PRECISION", "DOUBLE"),
+    ("DOUBLE PRECISION", "DOUBLE PRECISION"),   # doc 106: tipo del catálogo
     ("DECIMAL (22,4)", "DECIMAL(22,4)"),   # espacio antes del paréntesis
     ("decimal (19, 8)", "DECIMAL(19,8)"),
     ("NUMBER(10,6)", "NUMBER(10,6)"),      # ya canónico tras entrar al catálogo
@@ -109,14 +109,14 @@ def test_extra_tambien_vale_dentro_de_un_complejo():
     ("variant", "VARIANT"),
     ("  string  ", "STRING"),
     ("ARRAY<STRING>", "ARRAY<STRING>"),    # complejo válido pasa intacto
-    ("STRUCT<a:INT>", "STRUCT<a:INTEGER>"),  # doc 92 D6: sinónimo ANIDADO también homologa
+    ("STRUCT<a:bool>", "STRUCT<a:BOOLEAN>"),  # doc 92 D6: sinónimo ANIDADO también homologa
     ("VARCHAR(120)", "VARCHAR(120)"),
 ])
 def test_canonicalize_homologa(raw, expected):
     assert canonicalize_default_type(raw) == expected
 
 
-@pytest.mark.parametrize("verbatim", ["Tipo Raro", "RAW(16)", "STRUCT<@p:STRING>"])
+@pytest.mark.parametrize("verbatim", ["Tipo Raro", "MI_TIPO(16)", "STRUCT<@p:STRING>"])
 def test_canonicalize_lo_desconocido_queda_verbatim(verbatim):
     # Jamás se inventa: si no se reconoce, se conserva la grafía original.
     assert canonicalize_default_type(verbatim) == verbatim

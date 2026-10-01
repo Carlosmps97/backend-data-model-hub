@@ -4,19 +4,21 @@ from __future__ import annotations
 
 from app.core.datatypes import canonical_type, canonicalize_default_type, fold_type_whitespace
 
-ERWIN = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30),\n\tnumorden: int,\n\tfecsolicitud: date\n\t>\n>"
+ERWIN = "Array \n<\n\tstruct <\n\tcodcampania: varchar(30),\n\tnumorden: int,\n\tactivo: bool,\n\tfecsolicitud: date\n\t>\n>"
 
 
 def test_canonicalize_pliega_y_homologa_sinonimos_anidados():
-    assert canonicalize_default_type(ERWIN) == "ARRAY<STRUCT<codcampania:VARCHAR(30),numorden:INTEGER,fecsolicitud:DATE>>"
+    # doc 106: INT es del catálogo (queda INT); `bool` sigue siendo un sinónimo
+    assert canonicalize_default_type(ERWIN) == (
+        "ARRAY<STRUCT<codcampania:VARCHAR(30),numorden:INT,activo:BOOLEAN,fecsolicitud:DATE>>")
     assert canonicalize_default_type("Array\n< struct <\n\tv:map<varchar(120), string> > >") == "ARRAY<STRUCT<v:MAP<VARCHAR(120),STRING>>>"
 
 
 def test_canonical_type_estricto_sigue_rechazando_sinonimos_anidados():
-    # La carga masiva no acepta `int` (ni arriba ni adentro) — doc 62.
-    assert canonical_type("int") is None
-    assert canonical_type("array<struct<a:int>>") is None
-    assert canonical_type("array<struct<a:int>>", aliases=True) == "ARRAY<STRUCT<a:INTEGER>>"
+    # La carga masiva no acepta un sinónimo como `bool` (ni arriba ni adentro) — doc 62.
+    assert canonical_type("bool") is None
+    assert canonical_type("array<struct<a:bool>>") is None
+    assert canonical_type("array<struct<a:bool>>", aliases=True) == "ARRAY<STRUCT<a:BOOLEAN>>"
 
 
 def test_complejo_que_no_parsea_sale_verbatim_en_una_linea():
@@ -62,6 +64,6 @@ def test_synced_other_facet_espejo_del_front_final_review():
     assert synced_other_facet("ARRAY<STRING>", full, full) == "ARRAY<STRING>"   # complejo nuevo: la otra igual
     assert synced_other_facet("STRING", full, full) == "STRING"                 # salen juntas del complejo
     assert synced_other_facet("STRING", "S", "S") == "STRING"                   # estado intermedio: siguen enlazadas
-    assert synced_other_facet("BIGINT", "INT", "INT") == "INT"                  # simples (con alias): independientes
+    assert synced_other_facet("BIGINT", "INT", "INT") == "INT"                  # simples: independientes
     assert synced_other_facet("STRING", full, "CHAR(18)") == "CHAR(18)"         # no estaban enlazadas
     assert synced_other_facet("STRING", "", "") == ""                           # vacías: no se arrastra
