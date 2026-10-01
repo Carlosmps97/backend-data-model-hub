@@ -870,29 +870,63 @@ _CONSTRAINT_HEADS = {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "KEY
 
 
 def _column_regions(toks: list) -> list[tuple[str, int, int]]:
-    """[(nombre, i0, i1)] de las definiciones de columna del PRIMER grupo
-    `( … )` de los tokens (la lista de columnas del CREATE): toks[i0:i1] son
-    los tokens DESPUÉS del nombre hasta la coma de nivel 1 (o el cierre). Las
-    comas dentro de `< … >` (STRUCT/MAP) y de `( … )` anidados no cortan; una
-    entrada que no empieza por un nombre (CONSTRAINT …, PRIMARY KEY …) no es
-    columna."""
-    depth, angle, started = 0, 0, False
-    start = 0
-    raw: list[tuple[int, int]] = []
-    for i, t in enumerate(toks):
-        tt = t.token_type
+    """[(nombre, i0, i1)] de las definiciones de columna del CREATE: las del
+    PRIMER grupo `( … )` de los tokens (la lista de columnas) y, desde el doc
+    107, las del grupo del `PARTITIONED BY` (ahí una partición puede declararse
+    con su tipo). toks[i0:i1] son los tokens DESPUÉS del nombre hasta la coma de
+    nivel 1 (o el cierre)."""
+    first = next((i for i, t in enumerate(toks) if t.token_type == TokenType.L_PAREN), None)
+    if first is None:
+        return []
+    out, close = _group_regions(toks, first)
+    part = _partitioned_by_open(toks, close + 1) if close is not None else None
+    if part is not None:
+        out += _group_regions(toks, part)[0]
+    return out
+
+
+def _partitioned_by_open(toks: list, i0: int) -> int | None:
+    """Índice del `(` del `PARTITIONED BY (` del statement, buscado DESPUÉS de la
+    lista de columnas y a nivel 0 (revisión doc 107: sin comillas, una columna
+    llamada `partitioned_by` también es ese token). Corta en el `;`."""
+    depth = 0
+    for i in range(i0, len(toks)):
+        tt = toks[i].token_type
         if tt == TokenType.L_PAREN:
             depth += 1
-            if depth == 1 and not started:
-                started, start = True, i + 1
+        elif tt == TokenType.R_PAREN:
+            depth -= 1
+        elif depth == 0 and tt == TokenType.SEMICOLON:
+            return None
+        elif (depth == 0 and tt == TokenType.PARTITION_BY and i + 1 < len(toks)
+              and toks[i + 1].token_type == TokenType.L_PAREN):
+            return i + 1
+    return None
+
+
+def _group_regions(toks: list, open_at: int) -> tuple[list[tuple[str, int, int]], int | None]:
+    """Definiciones de columna del grupo `( … )` que abre en toks[open_at] y el
+    índice del `)` que lo cierra (None si no cierra). Las comas dentro de
+    `< … >` (STRUCT/MAP) y de `( … )` anidados no cortan; una entrada que no
+    empieza por un nombre (CONSTRAINT …, PRIMARY KEY …) no es columna, y una
+    que es solo un nombre (`PARTITIONED BY (codmes)`) tampoco."""
+    depth, angle = 0, 0
+    start = open_at + 1
+    close: int | None = None
+    raw: list[tuple[int, int]] = []
+    for i in range(open_at, len(toks)):
+        tt = toks[i].token_type
+        if tt == TokenType.L_PAREN:
+            depth += 1
             continue
         if tt == TokenType.R_PAREN:
             depth -= 1
-            if started and depth == 0:
+            if depth == 0:
                 raw.append((start, i))
+                close = i
                 break
             continue
-        if not started or depth != 1:
+        if depth != 1:
             continue
         if tt == TokenType.LT:
             angle += 1
@@ -909,7 +943,7 @@ def _column_regions(toks: list) -> list[tuple[str, int, int]]:
         if head.token_type in (TokenType.IDENTIFIER, TokenType.VAR) or (
                 _TYPE_WORD_RX.match(head.text or "") and head.text.upper() not in _CONSTRAINT_HEADS):
             out.append((head.text, a + 1, b))
-    return out
+    return out, close
 
 
 def _applicable_maps(ordered: list[dict], ctx: dict, parsed: dict,

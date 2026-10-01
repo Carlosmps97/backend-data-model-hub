@@ -66,10 +66,11 @@ def test_partition_udp_of_acepta_la_clave_nueva_y_el_alias_legado():
 
 
 def test_layout_from_rules_solo_reglas_de_tabla_sobre_la_fisica():
-    assert g.layout_from_rules([LAYOUT]) == {"partitionsLast": True, "partitionUdp": None}
-    assert g.layout_from_rules([LAYOUT_UDP]) == {"partitionsLast": True, "partitionUdp": "Particion"}
-    assert g.layout_from_rules([LEGACY_UDP]) == {"partitionsLast": True, "partitionUdp": "Particion"}
-    off = {"partitionsLast": False, "partitionUdp": None}
+    last = {"partitionsLast": True, "partitionsInClause": False}
+    assert g.layout_from_rules([LAYOUT]) == {**last, "partitionUdp": None}
+    assert g.layout_from_rules([LAYOUT_UDP]) == {**last, "partitionUdp": "Particion"}
+    assert g.layout_from_rules([LEGACY_UDP]) == {**last, "partitionUdp": "Particion"}
+    off = {"partitionsLast": False, "partitionsInClause": False, "partitionUdp": None}
     assert g.layout_from_rules([{**LAYOUT, "appliesTo": ["ddl.tabla_rej"]}]) == off
     assert g.layout_from_rules([{**LAYOUT, "action": {"layout": {"partitionColumns": "keep"}}}]) == off
     assert g.layout_from_rules([REJ]) == off
@@ -176,7 +177,7 @@ def test_validate_layout_ok_y_errores_estructurales():
                            "appliesTo": ["ddl.tabla_fisica", "ddl.tabla_rej"]}, [], {}, ARTS, {})
     msgs = " | ".join(e["message"] for e in bad["errors"])
     assert bad["state"] == "invalid"
-    assert "must be one of: keep, last" in msgs and "Unknown column layout setting 'zzz'" in msgs
+    assert "must be one of: keep, last, partitioned-by" in msgs and "Unknown column layout setting 'zzz'" in msgs
     assert "table rule" in msgs and "leave the condition empty" in msgs and "can't be combined" in msgs
     assert any("only applies to the physical table" in w for w in bad["warnings"])
     empty = v.validate_rule({**LAYOUT, "action": {"layout": {}}}, [], {}, ARTS, {})
@@ -198,12 +199,13 @@ def test_validate_partition_udp_y_alias_enlazan_el_udp_o_fallan():
 
 
 def test_semilla_y_plantilla_de_layout():
-    seed = next(r for r in SEED_RULES if r["name"] == "particiones_al_final")
+    # Doc 107: la semilla declara las particiones solo en el PARTITIONED BY.
+    seed = next(r for r in SEED_RULES if r["name"] == "particiones_en_partitioned_by")
     assert g.partition_udp_of(seed["action"]["layout"]) == "Particion"
-    assert seed["action"]["layout"]["partitionColumns"] == "last"
+    assert seed["action"]["layout"]["partitionColumns"] == "partitioned-by"
     assert seed["condition"] == ""
     assert v.validate_rule({**seed, "id": None, "udpRefs": []}, DEFS, {}, ARTS, {})["state"] == "valid"
-    assert any(t["id"] == "partitions-last" for t in TEMPLATES)
+    assert any(t["id"] == "partitions-in-partitioned-by" for t in TEMPLATES)
 
 
 def test_service_test_rule_layout(monkeypatch):

@@ -30,7 +30,8 @@ def test_isdac_por_tipo_de_objeto():
 
 
 def test_layout_declara_partition_udp():
-    assert BY["particiones_al_final"]["action"] == {"layout": {"partitionColumns": "last", "partitionUdp": "Particion"}}
+    assert BY["particiones_en_partitioned_by"]["action"] == {
+        "layout": {"partitionColumns": "partitioned-by", "partitionUdp": "Particion"}}    # doc 107
 
 
 DEFS = [

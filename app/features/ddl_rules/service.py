@@ -165,7 +165,8 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     # Doc 76 D5: el fragmento respeta el TIPO del artefacto destino (ALTER
     # TABLE | ALTER VIEW). El bench muestra el objeto con el nombre de la tabla
     # elegida (la vista generada real nace recién en el export).
-    obj_kind = artifact_kinds(await repository.list_rules(project_id)).get(artifact) \
+    saved_rules = await repository.list_rules(project_id)
+    obj_kind = artifact_kinds(saved_rules).get(artifact) \
         or ("view" if "vista" in artifact else "table")
     base_ctx = {"tabla": t_ctx, "modelo": {"nombre": "", "udp": {}},
                 "columnas": list(cols_ctx.values()),                  # doc 93 D8: ANY_COLUMN
@@ -179,8 +180,12 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
     try:
         cond_ast = engine_cond.parse_condition(rule.get("condition") or "")
         if rule.get("kind") == "generator":
+            # Revisión doc 107: la tabla generada sale con el layout de las
+            # reglas del PROYECTO (dónde van las particiones y su UDP), como en
+            # el export — el generador solo no lo declara.
+            layout, _ = engine_pipeline.effective_layout(engine_render.runnable(saved_rules)[0], defs)
             stmts, _ = engine_generators.run_generators(
-                [rule], table, cols_sorted, base_ctx, cols_ctx, config, bench)
+                [rule], table, cols_sorted, base_ctx, cols_ctx, config, bench, layout)
             matched = 1 if stmts else 0
             fragments = [{"label": s["artifact"], "sql": s["sql"]} for s in stmts]
             total = 1
@@ -215,19 +220,36 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                 if action.get("layout"):
                     # Doc 73/76/93: orden de EMISIÓN resultante (particiones al
                     # final); con UDP, las particiones salen de sus PART_nn.
+                    # Doc 107: con `partitioned-by` la lista no las lleva — van
+                    # con su tipo en el PARTITIONED BY.
                     lay = action["layout"]
                     part_udp = engine_generators.partition_udp_of(lay)
                     cols_light = engine_generators.physical_columns(cols_sorted, cols_ctx, part_udp)
-                    emitted = engine_generators.layout_columns(
-                        cols_light, {"partitionsLast": lay.get("partitionColumns") == "last"})
-                    moved = [c["name"] for c in engine_generators.ordered_partitions(cols_light)]
-                    detail = ("partition columns last: " + ", ".join(moved)) if moved \
-                        else "no partition columns in this table"
+                    lay_opts = {**bench, "partitionsLast": lay.get("partitionColumns") == "last",
+                                "partitionsInClause": lay.get("partitionColumns") == "partitioned-by"}
+                    emitted = engine_generators.layout_columns(cols_light, lay_opts)
+                    parts = engine_generators.ordered_partitions(cols_light)
+                    in_clause = engine_generators.partitions_in_clause(cols_light, lay_opts)
+                    moved = [c["name"] for c in parts]
+                    # Sin PARTITIONED BY (Output setting «Partitions» apagada) se dice.
+                    no_pb = "" if bench.get("includePartitions", True) else " (this export has no PARTITIONED BY)"
+                    if not moved:
+                        detail = "no partition columns in this table"
+                    elif in_clause:
+                        detail = "partition columns only in PARTITIONED BY: " + ", ".join(moved)
+                    elif lay_opts["partitionsLast"] or lay_opts["partitionsInClause"]:
+                        detail = f"partition columns last{no_pb}: " + ", ".join(moved)
+                    elif no_pb:
+                        detail = f"partition columns in physical order{no_pb}: " + ", ".join(moved)
+                    else:
+                        detail = "partition columns in physical order; PARTITIONED BY: " + ", ".join(moved)
                     if moved and part_udp:
                         detail += f" · from UDP '{part_udp}'"
-                    fragments.append({"label": full,
-                                      "sql": "-- column order: " + ", ".join(c["name"] for c in emitted),
-                                      "why": detail})
+                    sql = "-- column order: " + ", ".join(c["name"] for c in emitted)
+                    if in_clause:
+                        sql += "\n-- PARTITIONED BY (" + ", ".join(
+                            f"{c['name']} {engine_render.type_text(c['type'], bench)}" for c in parts) + ")"
+                    fragments.append({"label": full, "sql": sql, "why": detail})
         else:  # regla de columna
             total = len(cols_sorted)
             action = rule.get("action") or {}

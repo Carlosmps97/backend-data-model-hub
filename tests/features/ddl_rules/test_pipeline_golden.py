@@ -51,10 +51,11 @@ COLS = [
     {"physicalName": "fec_alta", "dataType": "DATE", "ordinal": 3, "isPartition": True,
      "udpValues": {"u-dac-col": "No DAC", "u-part": "PART_01"}},
 ]
-# Base emitida por el FRONT (doc 93: sin comillas, tipos en minúscula, OR REPLACE).
+# Base emitida por el FRONT (doc 93: sin comillas, tipos en minúscula, OR REPLACE;
+# doc 107: la partición solo en el PARTITIONED BY, con su tipo).
 BASE_SQL = ("CREATE OR REPLACE TABLE core.tbl_cliente (\n"
             "  cod_cliente string,\n  nom_cliente string,\n"
-            "  num_documento string,\n  fec_alta date\n)\nUSING DELTA\nPARTITIONED BY (fec_alta);")
+            "  num_documento string\n)\nUSING DELTA\nPARTITIONED BY (fec_alta date);")
 VIEW_SQL = ("CREATE OR REPLACE VIEW negocio.clientes AS\n"
             "SELECT\n  cod_cliente AS cod_cliente,\n  nom_cliente AS nom_cliente,\n"
             "  fec_alta AS fec_alta\nFROM core.tbl_cliente;")
@@ -116,9 +117,10 @@ def test_golden_fragmentos_clave():
     assert tags[2] == "ALTER TABLE core.tbl_cliente ALTER COLUMN nom_cliente SET TAGS ('DAC' = 'NOMBRE');"
     rej = out["ddl.tabla_rej"]["sql"]
     assert "core.tbl_cliente_rej" in rej and rej.startswith("-- DROP TABLE IF EXISTS core.tbl_cliente_rej;")
-    assert "  fec_alta date" in rej                           # partición: conserva su tipo (keep_partition_type)
-    assert "  nom_cliente string," in rej and "NOT NULL" not in rej
-    assert rej.index("  tiporeject string") < rej.index("  fec_alta date")   # añadida antes de las particiones
+    # partición: conserva su tipo (keep_partition_type) y, como en la física, va
+    # solo en el PARTITIONED BY (doc 107); la añadida cierra la lista
+    assert "  tiporeject string\n)\nUSING DELTA\nPARTITIONED BY (fec_alta date)\n" in rej
+    assert "  nom_cliente string," in rej and "NOT NULL" not in rej and "  fec_alta" not in rej
     assert "'delta.logRetentionDuration' = '90 days'" in rej
     vista_rej = out["ddl.vista_rej"]["sql"]
     assert "core_v.tbl_cliente_rej" in vista_rej and "decrypt_column_view" not in vista_rej   # §7.4

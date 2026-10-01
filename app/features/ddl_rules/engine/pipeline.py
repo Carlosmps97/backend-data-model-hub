@@ -42,22 +42,57 @@ def _dedup_log(entries: list[dict]) -> list[dict]:
     return out
 
 
-def _layout_log(run: list[dict], layout: dict) -> list[dict]:
+def effective_layout(run: list[dict], udp_defs: list[dict] | None) -> tuple[dict, list[dict]]:
+    """Layout de columnas del export: el de las reglas que corren. Doc 93 D10: el
+    UDP de particiones debe existir en el proyecto como def de COLUMNA física —
+    la MISMA regla que el front (`withUdpPartitions`), así la física y la _rej
+    nunca eligen particiones distintas (final review #7); si no, las particiones
+    vuelven al flag de la plataforma y queda en el log. Lo usan el export y el
+    «Test» de un generador (revisión doc 107). Devuelve (layout, log)."""
+    layout = gen.layout_from_rules(run)
+    part_udp = layout.get("partitionUdp")
+    if part_udp and not any(d.get("name") == part_udp and (d.get("level") or "column") == "column"
+                            and not is_logical_udp(d) for d in udp_defs or []):
+        return {**layout, "partitionUdp": None}, [{
+            "rule": None, "status": "skipped", "artifact": PHYSICAL,
+            "reason": f"Partition UDP '{part_udp}' doesn't exist in this project — partitions "
+                      "come from the platform's partition flag"}]
+    return layout, []
+
+
+def _layout_log(run: list[dict], layout: dict, include_partitions: bool = True) -> list[dict]:
     """Doc 73/76: la regla de layout la aplica el FRONT al CREATE base (`baseSql`
     ya llega con ese orden); acá queda registrada como aplicada para el sello/
     log del export. Las tablas generadas emiten sus particiones al final siempre
-    (`artifact_sql`) y ordenadas por el UDP cuando la regla lo declara."""
+    (`artifact_sql`) — o, con `partitioned-by` (doc 107), solo en el PARTITIONED
+    BY con su tipo — y ordenadas por el UDP cuando la regla lo declara. Con dos
+    reglas de layout manda `partitioned-by` (front y motor): la `last` queda
+    como saltada, o anotada si su UDP es el vigente (una entrada por regla). Sin
+    PARTITIONED BY en el export las dos dejan las particiones al final."""
     out: list[dict] = []
     for r in run:
         lay = (r.get("action") or {}).get("layout") or {}
         if not lay or "ddl.tabla_fisica" not in (r.get("appliesTo") or []):
             continue
         parts: list[str] = []
+        overridden = False
         if lay.get("partitionColumns") == "last":
-            parts.append("partition columns last")
+            if layout.get("partitionsInClause") and include_partitions:
+                overridden = True
+            else:
+                parts.append("partition columns last")
+        elif lay.get("partitionColumns") == "partitioned-by":
+            parts.append("partition columns only in PARTITIONED BY" if include_partitions
+                         else "partition columns last (this export has no PARTITIONED BY)")
         udp = gen.partition_udp_of(lay)
         if udp and udp == layout.get("partitionUdp"):
             parts.append(f"partitions from UDP '{udp}'")
+        if overridden and not parts:
+            out.append({"rule": r.get("name"), "status": "skipped", "artifact": PHYSICAL,
+                        "reason": "another layout rule declares partition columns only in PARTITIONED BY"})
+            continue
+        if overridden:
+            parts.append("partition columns: another layout rule puts them only in PARTITIONED BY")
         if parts:
             out.append({"rule": r.get("name"), "status": "applied", "artifact": PHYSICAL,
                         "object": "column layout: " + " · ".join(parts)})
@@ -91,19 +126,10 @@ def render_export(payload: dict, rules: list[dict], config: dict,
     # Opciones del export del canvas: los artefactos generados salen ESPEJO del
     # físico (casing/USING/particiones/LOCATION — pedido owner 07-20).
     export_options = payload.get("options") or {}
-    # Doc 93 D10: el UDP de particiones debe existir en el proyecto como def de
-    # COLUMNA física — la MISMA regla que el front (`withUdpPartitions`), así la
-    # física y la _rej nunca eligen particiones distintas (final review #7); si
-    # no, las particiones vuelven al flag de la plataforma y queda en el log.
-    layout = gen.layout_from_rules(run)
-    part_udp = layout.get("partitionUdp")
-    if part_udp and not any(d.get("name") == part_udp and (d.get("level") or "column") == "column"
-                            and not is_logical_udp(d) for d in udp_defs or []):
-        log.append({"rule": None, "status": "skipped", "artifact": PHYSICAL,
-                    "reason": f"Partition UDP '{part_udp}' doesn't exist in this project — partitions "
-                              "come from the platform's partition flag"})
-        layout = {**layout, "partitionUdp": None}
-    log += _layout_log(run, layout)
+    # Doc 93 D10: el UDP de particiones debe existir en el proyecto (effective_layout).
+    layout, l = effective_layout(run, udp_defs)
+    log += l
+    log += _layout_log(run, layout, bool(export_options.get("includePartitions", True)))
 
     statements: list[dict] = []
     cols_ctx_by_table: dict[str, dict[str, dict]] = {}

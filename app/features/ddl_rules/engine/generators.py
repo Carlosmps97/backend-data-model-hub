@@ -17,6 +17,9 @@ Doc 76 (macro BCP): las columnas de un artefacto se guardan en ORDEN FÍSICO
 particiones por UDP (`layout.partitionUdp`, doc 93 D10: qué columnas y en qué
 orden) se aplican SOLO al emitir un CREATE TABLE. Las vistas listan
 `col AS col` en orden físico.
+
+Doc 107: con `partitionColumns: 'partitioned-by'` las particiones no van en la
+lista del CREATE TABLE — se declaran con su tipo dentro del PARTITIONED BY.
 """
 from __future__ import annotations
 
@@ -35,6 +38,9 @@ ROOTS = ("ddl.tabla_fisica", "ddl.vista_negocio")
 # Decisión del owner (2026-09-06): las particiones se DISTRIBUYEN desde las
 # reglas del DDL, no cambiando el orden físico del modelo. `layout` admite:
 #   partitionColumns: 'last' | 'keep'   → las de partición al final del CREATE
+#                     | 'partitioned-by' → doc 107: fuera de la lista; se declaran
+#                                          con su tipo DENTRO del PARTITIONED BY
+#                                          (`PARTITIONED BY (fecdia date, codmes int)`)
 #   partitionUdp: 'Particion'           → doc 93 D10: las columnas de partición
 #                                          SON las que tienen PART_nn en ese UDP
 #                                          de columna (el flag `isPartition` de la
@@ -62,10 +68,11 @@ def partition_udp_of(layout: dict | None) -> str | None:
 
 
 def layout_from_rules(rules: list[dict]) -> dict:
-    """{'partitionsLast': bool, 'partitionUdp': str|None} a partir de las reglas
-    que CORREN (kind='rule', target='table', `action.layout`, appliesTo ∋
-    ddl.tabla_fisica). La primera en run_order que declare el UDP gana."""
-    out: dict = {"partitionsLast": False, "partitionUdp": None}
+    """{'partitionsLast': bool, 'partitionsInClause': bool, 'partitionUdp':
+    str|None} a partir de las reglas que CORREN (kind='rule', target='table',
+    `action.layout`, appliesTo ∋ ddl.tabla_fisica). La primera en run_order que
+    declare el UDP gana. Espejo de `layoutFromRules` del front."""
+    out: dict = {"partitionsLast": False, "partitionsInClause": False, "partitionUdp": None}
     for r in render.run_order(rules):
         if (r.get("kind") or "rule") != "rule" or r.get("target") != "table":
             continue
@@ -74,6 +81,8 @@ def layout_from_rules(rules: list[dict]) -> dict:
             continue
         if lay.get("partitionColumns") == "last":
             out["partitionsLast"] = True
+        elif lay.get("partitionColumns") == "partitioned-by":
+            out["partitionsInClause"] = True
         udp = partition_udp_of(lay)
         if udp and not out["partitionUdp"]:
             out["partitionUdp"] = udp
@@ -93,13 +102,28 @@ def ordered_partitions(cols: list[dict]) -> list[dict]:
     return sorted([c for c in cols if c.get("partition")], key=_partition_key)
 
 
+def partitions_in_clause(cols: list[dict], options: dict | None = None) -> bool:
+    """Doc 107: ¿las particiones se declaran con su tipo DENTRO del PARTITIONED
+    BY (y no en la lista)? Sí con `partitionsInClause`, si el export emite el
+    PARTITIONED BY y la tabla tiene particiones — sin PARTITIONED BY no pueden
+    desaparecer del CREATE. Espejo de `tableDDL` en el front."""
+    o = options or {}
+    return (bool(o.get("partitionsInClause")) and bool(o.get("includePartitions", True))
+            and any(c.get("partition") for c in cols))
+
+
 def layout_columns(cols: list[dict], options: dict | None = None) -> list[dict]:
-    """Orden de EMISIÓN de las columnas de un CREATE ({name, partition,
-    partitionOrder?, …}): con `partitionsLast` las de partición van al final,
-    ordenadas por su correlativo — espejo exacto de `tableDDL` en el front
-    (src/features/ddl/generators.ts), que es quien emite el CREATE físico.
-    Puro; sin la opción, copia en el mismo orden."""
-    if not (options or {}).get("partitionsLast"):
+    """Columnas de la LISTA de un CREATE en su orden de emisión ({name,
+    partition, partitionOrder?, …}): con `partitionsLast` las de partición van
+    al final, ordenadas por su correlativo; con `partitionsInClause` (doc 107) no
+    van — se declaran en el PARTITIONED BY — salvo que el export no lo emita:
+    entonces van al final, como con `partitionsLast`. Espejo exacto de
+    `tableDDL` en el front (src/features/ddl/generators.ts), que es quien emite
+    el CREATE físico. Puro; sin opciones, copia en el mismo orden."""
+    o = options or {}
+    if partitions_in_clause(cols, o):
+        return [c for c in cols if not c.get("partition")]
+    if not (o.get("partitionsLast") or o.get("partitionsInClause")):
         return list(cols)
     return [c for c in cols if not c.get("partition")] + ordered_partitions(cols)
 
@@ -233,7 +257,9 @@ def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
     (doc 93 D4): identificadores según `quoteIdentifiers`, tipos con `typeCase`,
     CREATE según `createTable`, `USING` en mayúscula, `NOT NULL` solo con
     `includeKeys` (y sin `strip: not_null`), particiones al final ordenadas por su
-    correlativo y `PARTITIONED BY` solo con nombres; LOCATION = base + carpeta
+    correlativo y `PARTITIONED BY` solo con nombres — o, con `partitionsInClause`
+    (doc 107), particiones fuera de la lista y declaradas con su tipo dentro del
+    PARTITIONED BY; LOCATION = base + carpeta
     con el casing de carpeta (nombre final con su sufijo, p.ej. `…/TBL_X_REJ`).
     Vistas: `col AS col` en el orden guardado (físico + añadidas al final).
     Determinista (spec §7.6)."""
@@ -243,17 +269,20 @@ def artifact_sql(art: dict, source_cols_meta: dict[str, dict] | None = None,
     if art.get("kind") == "table":
         meta = source_cols_meta or {}
         keep_not_null = bool(o.get("includeKeys")) and "not_null" not in (art.get("strip") or set())
-        lines = []
-        for c in layout_columns(cols, {"partitionsLast": True}):
-            line = f"  {render.ident(c['name'], o)} {render.type_text(c['type'], o)}"
+
+        def col_def(c: dict) -> str:
+            line = f"{render.ident(c['name'], o)} {render.type_text(c['type'], o)}"
             src = meta.get(c["name"]) or {}
             if keep_not_null and (src.get("nullable") is False or src.get("pk")):
                 line += " NOT NULL"
-            lines.append(line)
+            return line
+
+        in_clause = partitions_in_clause(cols, o)
+        lines = [f"  {col_def(c)}" for c in layout_columns(cols, {**o, "partitionsLast": True})]
         out = f"{render.create_table_sql(o)} {full} (\n" + ",\n".join(lines) + "\n)"
         out += f"\nUSING {str(o.get('tableFormat') or 'delta').upper()}"
         if o.get("includePartitions", True):
-            parts = [render.ident(c["name"], o) for c in ordered_partitions(cols)]
+            parts = [col_def(c) if in_clause else render.ident(c["name"], o) for c in ordered_partitions(cols)]
             if parts:
                 out += f"\nPARTITIONED BY ({', '.join(parts)})"
         if o.get("external"):
@@ -363,7 +392,10 @@ def run_generators(rules: list[dict], table: dict, table_cols: list[dict],
             art["columns"], l_ty = render.apply_column_types(
                 art["columns"], runnable_rules, art["artifact"], ctx, art_ctx, config)
             log.extend(l_ty)
-        sql = artifact_sql(art, meta, options)
+        # Doc 107: el formato de las particiones lo dicta el layout de las
+        # reglas (no las opciones que manda el front, que son informativas).
+        sql = artifact_sql(art, meta, {**(options or {}),
+                                       "partitionsInClause": bool(layout.get("partitionsInClause"))})
         if art["kind"] == "view":
             # Las reglas de COLUMNA decoran con `columnas` = las de la fuente.
             sql, sub_log = render.decorate_view_sql(

@@ -15,7 +15,8 @@ Qué crea (12 reglas + 5 generadores + 4 lookups — `templates.py` es la fuente
   - tags_isdac_vista_negocio(_sin_dac) isDAC de las vistas de negocio según las columnas que
                                proyectan (condición ANY_COLUMN, doc 93)
   - tblproperties_vacuum       delta.logRetentionDuration + deletedFileRetentionDuration [lookup vacuum_map]
-  - particiones_al_final       particiones = columnas con PART_nn en el UDP «Particion», al final del CREATE
+  - particiones_en_partitioned_by  particiones = columnas con PART_nn en el UDP «Particion»; fuera de la
+                               lista del CREATE, con su tipo en el PARTITIONED BY (doc 107)
   - tabla_rechazos             generador: _rej todo STRING (particiones conservan tipo) + tiporeject
   - vista_tecnica / vista_tecnica_dac / vista_rechazos / vista_rechazos_dac   generadores de vistas _v
   Lookups: vacuum_map · update_frequency_map · dac_flag_map · dac_map.

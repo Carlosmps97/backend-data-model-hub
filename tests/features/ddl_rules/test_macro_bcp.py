@@ -47,12 +47,13 @@ COLS = [
 ]
 OPTIONS = {"identifierCase": "lower", "tableFormat": "delta", "external": True,
            "location": "abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>",
-           "locationFolderCase": "upper", "includePartitions": True, "partitionsLast": True}
+           "locationFolderCase": "upper", "includePartitions": True, "partitionsLast": False}
 # El CREATE físico lo emite el FRONT (doc 93: sin comillas, tipos en minúscula,
-# CREATE OR REPLACE, particiones al final ordenadas por el UDP, carpeta MAYÚSCULA).
+# CREATE OR REPLACE, carpeta MAYÚSCULA; doc 107: las particiones solo en el
+# PARTITIONED BY, con su tipo y ordenadas por el UDP).
 BASE_SQL = ("CREATE OR REPLACE TABLE bcp_ddv.hd_venta (\n"
-            "  codclavecic string,\n  nomcliente string,\n  mtosaldo decimal(18,2),\n"
-            "  fecdia date,\n  codmes int\n)\nUSING DELTA\nPARTITIONED BY (fecdia, codmes)\n"
+            "  codclavecic string,\n  nomcliente string,\n  mtosaldo decimal(18,2)\n"
+            ")\nUSING DELTA\nPARTITIONED BY (fecdia date, codmes int)\n"
             "LOCATION 'abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>/HD_VENTA';")
 # Vista de negocio modelada (con alias y una fuente DAC).
 VU_SQL = ("CREATE OR REPLACE VIEW bcp_udv_v.venta_vu AS\nSELECT\n  codclavecic AS codclavecic,\n"
@@ -112,10 +113,8 @@ def test_2_tabla_rejectados():
         "  codclavecic string,\n"
         "  nomcliente string,\n"
         "  mtosaldo string,\n"
-        "  tiporeject string,\n"
-        "  fecdia date,\n"
-        "  codmes int\n"
-        ")\nUSING DELTA\nPARTITIONED BY (fecdia, codmes)\n"
+        "  tiporeject string\n"
+        ")\nUSING DELTA\nPARTITIONED BY (fecdia date, codmes int)\n"
         "LOCATION 'abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>/HD_VENTA_REJ'\n"
         "TBLPROPERTIES (\n  'delta.deletedFileRetentionDuration' = '15 days',\n"
         "  'delta.logRetentionDuration' = '15 days'\n);"
