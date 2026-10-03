@@ -5,9 +5,8 @@ front (misma cadena en `generators.test.ts`); el motor corre la semilla real.
 Cada objeto se compara byte a byte como queda en su archivo del zip
 (statement + anexos unidos por salto de línea).
 
-Doc 107: la semilla declara las particiones solo en el PARTITIONED BY (con su
-tipo); con la regla de layout en `last` (lo de antes) el resultado es el del
-Anexo A original, byte a byte."""
+Doc 107: con PARTITIONED BY las particiones no van en la lista del CREATE — se
+declaran ahí con su tipo (formato fijo del DDL, la física y la `_rej`)."""
 from __future__ import annotations
 
 from app.features.ddl_rules.engine import pipeline
@@ -71,7 +70,7 @@ LOC = "abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<pat
 OPTIONS = {"identifierCase": "lower", "quoteIdentifiers": "when-needed", "typeCase": "lower",
            "createTable": "or-replace", "viewTagsAs": "table", "includeKeys": False, "tableFormat": "delta",
            "external": True, "location": LOC, "locationFolderCase": "upper", "includePartitions": True,
-           "partitionsLast": False}
+           "partitionsLast": True}
 
 # ── Base emitida por el FRONT (misma cadena en generators.test.ts) ─────────
 _LIST = ",\n".join(f"  {r[0].lower()} {r[2]}" for r in ROWS if not r[4].startswith("PART_"))
@@ -79,11 +78,6 @@ SPEC_BASE_SQL = (                       # doc 107: particiones solo en el PARTIT
     "CREATE OR REPLACE TABLE bcp_udv_int.h_saldocierreprocesobancaminorista (\n"
     + _LIST + "\n)\nUSING DELTA\n"
     "PARTITIONED BY (codmes int, nbrgrupoprocesobcaminorista varchar(120))\n"
-    f"LOCATION '{LOC}/H_SALDOCIERREPROCESOBANCAMINORISTA';")
-SPEC_BASE_SQL_LAST = (                  # layout `last`: el Anexo A original
-    "CREATE OR REPLACE TABLE bcp_udv_int.h_saldocierreprocesobancaminorista (\n"
-    + _LIST + ",\n  codmes int,\n  nbrgrupoprocesobcaminorista varchar(120)\n)\nUSING DELTA\n"
-    "PARTITIONED BY (codmes, nbrgrupoprocesobcaminorista)\n"
     f"LOCATION '{LOC}/H_SALDOCIERREPROCESOBANCAMINORISTA';")
 NON_DAC = [n for n in NAMES if n not in DAC_SUFFIX]
 
@@ -150,8 +144,6 @@ def _rej(body_and_partitions: str) -> str:
 
 REJ = _rej(",\n  tiporeject string\n)\nUSING DELTA\n"
            "PARTITIONED BY (codmes int, nbrgrupoprocesobcaminorista varchar(120))\n")
-REJ_LAST = _rej(",\n  tiporeject string,\n  codmes int,\n  nbrgrupoprocesobcaminorista varchar(120)\n)\n"
-                "USING DELTA\nPARTITIONED BY (codmes, nbrgrupoprocesobcaminorista)\n")
 V = "bcp_udv_int_v.h_saldocierreprocesobancaminorista"
 VU_DAC_FULL = "bcp_udv_int_vu.h_saldocierreprocesobancaminoristadac"
 EXPECTED = {
@@ -183,19 +175,6 @@ def test_anexo_a_tabla_dac_byte_a_byte():
     assert set(files) == set(EXPECTED)
     for key, expected in EXPECTED.items():
         assert files[key] == expected, key
-
-
-def test_doc107_con_layout_last_sale_el_anexo_a_original_byte_a_byte():
-    rules = [{**r, "action": {"layout": {"partitionColumns": "last", "partitionUdp": "Particion"}}}
-             if r["name"] == "particiones_en_partitioned_by" else r for r in RULES]
-    payload = {**PAYLOAD, "options": {**OPTIONS, "partitionsLast": True},
-               "tables": [{"table": TABLE, "columns": COLS, "baseSql": SPEC_BASE_SQL_LAST}]}
-    files = _files(pipeline.render_export(payload, rules, CONFIG, DEFS, {}))
-    expected = {**EXPECTED, ("bcp_udv_int", PHYS): _fisica(SPEC_BASE_SQL_LAST),
-                ("bcp_udv_int", f"{PHYS}_rej"): REJ_LAST}
-    assert set(files) == set(expected)
-    for key, exp_sql in expected.items():
-        assert files[key] == exp_sql, key
 
 
 def test_tabla_no_dac_sin_objetos_dac():

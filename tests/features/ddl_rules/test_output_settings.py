@@ -165,6 +165,24 @@ def test_effective_doc101_oracle_clave_a_clave_y_proyecto_viejo():
     assert out_mod.effective_output({"oracle": "x"})["oracle"] == out_mod.ORACLE_DEFAULTS
 
 
+def test_doc108_oracle_not_null_aparte_y_esquema():
+    """Doc 108 (como Erwin): NOT NULL es un interruptor aparte de las llaves y
+    apagado; el esquema de los nombres: ninguno (default), el del modelo o uno
+    elegido. Espejo de DEFAULT_ORACLE_OPTS del front."""
+    o = out_mod.ORACLE_DEFAULTS
+    assert o["includeNotNull"] is False and o["schemaMode"] == "none" and o["includeKeys"] is True
+    clean = out_mod.normalize_output({"oracle": {"includeNotNull": True, "schemaMode": "custom", "defaultSchema": "bcp"}})
+    assert clean == {"oracle": {"includeNotNull": True, "schemaMode": "custom", "defaultSchema": "bcp"}}
+    with pytest.raises(ValueError, match="schemaMode"):
+        out_mod.normalize_output({"oracle": {"schemaMode": "raro"}})
+    with pytest.raises(ValueError, match="includeNotNull"):
+        out_mod.normalize_output({"oracle": {"includeNotNull": "si"}})
+    eff = out_mod.effective_output({"dialect": "oracle", "oracle": {"schemaMode": "raro", "typeCase": "lower"}})
+    assert eff["oracle"]["schemaMode"] == "none" and eff["oracle"]["typeCase"] == "lower"
+    # un proyecto guardado antes del doc 108 toma los defaults nuevos
+    assert out_mod.effective_output({"oracle": {"includeKeys": True}})["oracle"]["schemaMode"] == "none"
+
+
 def test_apply_doc101_guarda_oracle_y_rechaza_invalidos(monkeypatch):
     set_cfg = _mock_apply(monkeypatch)
     asyncio.run(std.apply("ana", "p1", ApplyBody(kind="ddl", ddlConfigPatch=DdlConfigPatch(
@@ -187,9 +205,8 @@ def test_doc106_oracle_lo_guardado_por_una_version_anterior_se_ignora():
              "typeMap": [{"from": "DATETIME", "to": "DATE"}, {"from": "DATETIME"}]}
     assert out_mod.normalize_output({"oracle": viejo}) == {"oracle": {"typeCase": "lower"}}
     eff = out_mod.effective_output({"dialect": "oracle", "oracle": viejo})["oracle"]
-    assert eff == {"includeViews": True, "includeKeys": True, "includeComments": False,
-                   "identifierCase": "upper", "quoteIdentifiers": "when-needed", "typeCase": "lower",
-                   "defaultSchema": ""}
+    assert eff == {**out_mod.ORACLE_DEFAULTS, "typeCase": "lower"}
+    assert not {"typeMap", "maxStringSize"} & set(eff)
 
 
 def test_doc106_apply_con_settings_de_una_version_anterior_no_da_422(monkeypatch):

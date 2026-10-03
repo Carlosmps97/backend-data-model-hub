@@ -49,8 +49,9 @@ def _body_names(sql: str) -> list[str]:
 
 
 def _partitioned_by(sql: str) -> list[str]:
+    """Nombres del PARTITIONED BY (doc 107: cada uno con su tipo)."""
     m = re.search(r"PARTITIONED BY \(([^)]*)\)", sql)
-    return [p.strip().strip("`") for p in m.group(1).split(",")] if m else []
+    return [p.strip().split()[0].strip("`") for p in m.group(1).split(",")] if m else []
 
 
 def test_partition_correlative():
@@ -66,11 +67,10 @@ def test_partition_udp_of_acepta_la_clave_nueva_y_el_alias_legado():
 
 
 def test_layout_from_rules_solo_reglas_de_tabla_sobre_la_fisica():
-    last = {"partitionsLast": True, "partitionsInClause": False}
-    assert g.layout_from_rules([LAYOUT]) == {**last, "partitionUdp": None}
-    assert g.layout_from_rules([LAYOUT_UDP]) == {**last, "partitionUdp": "Particion"}
-    assert g.layout_from_rules([LEGACY_UDP]) == {**last, "partitionUdp": "Particion"}
-    off = {"partitionsLast": False, "partitionsInClause": False, "partitionUdp": None}
+    assert g.layout_from_rules([LAYOUT]) == {"partitionsLast": True, "partitionUdp": None}
+    assert g.layout_from_rules([LAYOUT_UDP]) == {"partitionsLast": True, "partitionUdp": "Particion"}
+    assert g.layout_from_rules([LEGACY_UDP]) == {"partitionsLast": True, "partitionUdp": "Particion"}
+    off = {"partitionsLast": False, "partitionUdp": None}
     assert g.layout_from_rules([{**LAYOUT, "appliesTo": ["ddl.tabla_rej"]}]) == off
     assert g.layout_from_rules([{**LAYOUT, "action": {"layout": {"partitionColumns": "keep"}}}]) == off
     assert g.layout_from_rules([REJ]) == off
@@ -90,15 +90,19 @@ def test_sin_udp_rige_el_flag_y_el_orden_fisico():
     shuffled = [COLS[2], COLS[0], COLS[3], COLS[1]]         # entrada desordenada: se ordena por `ordinal`
     stmts, _ = g.run_generators([REJ], TABLE, shuffled, BASE, CTX, CONFIG, {})
     sql = stmts[0]["sql"]
-    assert _body_names(sql) == ["cod_cli", "monto", "codmes", "fecdia"]
+    assert _body_names(sql) == ["cod_cli", "monto"]                  # doc 107: particiones fuera de la lista
     assert _partitioned_by(sql) == ["codmes", "fecdia"]
+    off, _ = g.run_generators([REJ], TABLE, shuffled, BASE, CTX, CONFIG, {"includePartitions": False})
+    assert _body_names(off[0]["sql"]) == ["cod_cli", "monto", "codmes", "fecdia"]   # sin PARTITIONED BY, al final
 
 
 def test_con_udp_las_particiones_se_ordenan_por_part_nn():
     stmts, _ = g.run_generators([REJ, LAYOUT_UDP], TABLE, COLS, BASE, CTX, CONFIG, {})
     sql = stmts[0]["sql"]
-    assert _body_names(sql) == ["cod_cli", "monto", "fecdia", "codmes"]
+    assert _body_names(sql) == ["cod_cli", "monto"]
     assert _partitioned_by(sql) == ["fecdia", "codmes"]
+    off, _ = g.run_generators([REJ, LAYOUT_UDP], TABLE, COLS, BASE, CTX, CONFIG, {"includePartitions": False})
+    assert _body_names(off[0]["sql"]) == ["cod_cli", "monto", "fecdia", "codmes"]
 
 
 def test_con_udp_las_particiones_salen_del_udp_y_no_del_flag():
@@ -132,8 +136,12 @@ def test_pipeline_deriva_el_layout_de_las_reglas_que_corren():
                "views": []}
     out = pipeline.render_export(payload, [LAYOUT, REJ], CONFIG, [], {})
     assert [s["artifact"] for s in out["statements"]] == ["ddl.tabla_fisica", "ddl.tabla_rej"]
+    # doc 107: con PARTITIONED BY las particiones van ahí; `last` solo cuenta sin él
     applied = [e for e in out["log"] if e.get("rule") == "particiones_al_final"]
-    assert applied and applied[0]["status"] == "applied" and "partition columns last" in applied[0]["object"]
+    assert applied and applied[0]["status"] == "skipped" and "PARTITIONED BY" in applied[0]["reason"]
+    out_off = pipeline.render_export({**payload, "options": {"includePartitions": False}}, [LAYOUT, REJ], CONFIG, [], {})
+    off = [e for e in out_off["log"] if e.get("rule") == "particiones_al_final"]
+    assert off and off[0]["status"] == "applied" and "partition columns last" in off[0]["object"]
     out_udp = pipeline.render_export(payload, [LAYOUT_UDP, REJ], CONFIG, DEFS, {})
     applied_udp = [e for e in out_udp["log"] if e.get("rule") == "particiones_al_final"]
     assert "partitions from UDP 'Particion'" in applied_udp[0]["object"]
@@ -177,7 +185,7 @@ def test_validate_layout_ok_y_errores_estructurales():
                            "appliesTo": ["ddl.tabla_fisica", "ddl.tabla_rej"]}, [], {}, ARTS, {})
     msgs = " | ".join(e["message"] for e in bad["errors"])
     assert bad["state"] == "invalid"
-    assert "must be one of: keep, last, partitioned-by" in msgs and "Unknown column layout setting 'zzz'" in msgs
+    assert "must be one of: keep, last" in msgs and "Unknown column layout setting 'zzz'" in msgs
     assert "table rule" in msgs and "leave the condition empty" in msgs and "can't be combined" in msgs
     assert any("only applies to the physical table" in w for w in bad["warnings"])
     empty = v.validate_rule({**LAYOUT, "action": {"layout": {}}}, [], {}, ARTS, {})
@@ -199,13 +207,12 @@ def test_validate_partition_udp_y_alias_enlazan_el_udp_o_fallan():
 
 
 def test_semilla_y_plantilla_de_layout():
-    # Doc 107: la semilla declara las particiones solo en el PARTITIONED BY.
-    seed = next(r for r in SEED_RULES if r["name"] == "particiones_en_partitioned_by")
+    seed = next(r for r in SEED_RULES if r["name"] == "particiones_al_final")
     assert g.partition_udp_of(seed["action"]["layout"]) == "Particion"
-    assert seed["action"]["layout"]["partitionColumns"] == "partitioned-by"
+    assert seed["action"]["layout"]["partitionColumns"] == "last"
     assert seed["condition"] == ""
     assert v.validate_rule({**seed, "id": None, "udpRefs": []}, DEFS, {}, ARTS, {})["state"] == "valid"
-    assert any(t["id"] == "partitions-in-partitioned-by" for t in TEMPLATES)
+    assert any(t["id"] == "partitions-last" for t in TEMPLATES)
 
 
 def test_service_test_rule_layout(monkeypatch):
@@ -219,12 +226,12 @@ def test_service_test_rule_layout(monkeypatch):
     out = asyncio.run(svc.test_rule("p1", LAYOUT, "t1"))
     assert out["matched"] == 1
     frag = out["fragments"][0]
-    assert frag["sql"] == "-- column order: cod_cli, monto, codmes, fecdia"
-    assert frag["why"] == "partition columns last: codmes, fecdia"
+    assert frag["sql"] == "-- column order: cod_cli, monto\n-- PARTITIONED BY (codmes int, fecdia date)"
+    assert frag["why"] == "partition columns only in PARTITIONED BY: codmes, fecdia"
     out_udp = asyncio.run(svc.test_rule("p1", LAYOUT_UDP, "t1"))
     frag_udp = out_udp["fragments"][0]
-    assert frag_udp["sql"] == "-- column order: cod_cli, monto, fecdia, codmes"
-    assert frag_udp["why"] == "partition columns last: fecdia, codmes · from UDP 'Particion'"
+    assert frag_udp["sql"] == "-- column order: cod_cli, monto\n-- PARTITIONED BY (fecdia date, codmes int)"
+    assert frag_udp["why"] == "partition columns only in PARTITIONED BY: fecdia, codmes · from UDP 'Particion'"
 
 
 def test_doc94_orden_unico_pk_primero_aunque_el_ordinal_este_desordenado():

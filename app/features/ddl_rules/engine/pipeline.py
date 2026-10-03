@@ -63,39 +63,29 @@ def effective_layout(run: list[dict], udp_defs: list[dict] | None) -> tuple[dict
 def _layout_log(run: list[dict], layout: dict, include_partitions: bool = True) -> list[dict]:
     """Doc 73/76: la regla de layout la aplica el FRONT al CREATE base (`baseSql`
     ya llega con ese orden); acá queda registrada como aplicada para el sello/
-    log del export. Las tablas generadas emiten sus particiones al final siempre
-    (`artifact_sql`) — o, con `partitioned-by` (doc 107), solo en el PARTITIONED
-    BY con su tipo — y ordenadas por el UDP cuando la regla lo declara. Con dos
-    reglas de layout manda `partitioned-by` (front y motor): la `last` queda
-    como saltada, o anotada si su UDP es el vigente (una entrada por regla). Sin
-    PARTITIONED BY en el export las dos dejan las particiones al final."""
+    log del export. Doc 107: con PARTITIONED BY las particiones van siempre ahí,
+    con su tipo (formato fijo): `last` solo cuenta cuando el export no lo
+    escribe; una regla que entonces no cambia nada queda como saltada, con el
+    porqué. El UDP (qué columnas y en qué orden) aplica siempre."""
     out: list[dict] = []
     for r in run:
         lay = (r.get("action") or {}).get("layout") or {}
         if not lay or "ddl.tabla_fisica" not in (r.get("appliesTo") or []):
             continue
         parts: list[str] = []
-        overridden = False
-        if lay.get("partitionColumns") == "last":
-            if layout.get("partitionsInClause") and include_partitions:
-                overridden = True
-            else:
-                parts.append("partition columns last")
-        elif lay.get("partitionColumns") == "partitioned-by":
-            parts.append("partition columns only in PARTITIONED BY" if include_partitions
-                         else "partition columns last (this export has no PARTITIONED BY)")
+        last = lay.get("partitionColumns") == "last"
+        if last and not include_partitions:
+            parts.append("partition columns last")
         udp = gen.partition_udp_of(lay)
         if udp and udp == layout.get("partitionUdp"):
             parts.append(f"partitions from UDP '{udp}'")
-        if overridden and not parts:
-            out.append({"rule": r.get("name"), "status": "skipped", "artifact": PHYSICAL,
-                        "reason": "another layout rule declares partition columns only in PARTITIONED BY"})
-            continue
-        if overridden:
-            parts.append("partition columns: another layout rule puts them only in PARTITIONED BY")
         if parts:
             out.append({"rule": r.get("name"), "status": "applied", "artifact": PHYSICAL,
                         "object": "column layout: " + " · ".join(parts)})
+        elif last:
+            out.append({"rule": r.get("name"), "status": "skipped", "artifact": PHYSICAL,
+                        "reason": "the partition columns go in PARTITIONED BY; 'last' only applies "
+                                  "when the export doesn't write it"})
     return out
 
 

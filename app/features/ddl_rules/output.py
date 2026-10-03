@@ -20,11 +20,14 @@ DIALECTS: tuple[str, ...] = ("databricks", "oracle")
 
 # Doc 101 §4.1: defaults de Oracle = lo pedido por el owner para el proyecto RDV
 # (comentarios OFF, PK/FK ON, tipos en MAYÚSCULA) + identificadores en
-# MAYÚSCULA (convención de Oracle). Sin esquema por default = nombre sin calificar.
+# MAYÚSCULA (convención de Oracle). Doc 108 (como Erwin): NOT NULL aparte de las
+# llaves y apagado; sin esquema (`schemaMode` none | model | custom — con custom,
+# `defaultSchema` es el esquema de todos los objetos). Espejo de
+# DEFAULT_ORACLE_OPTS (front, src/features/ddl/oracle.ts).
 ORACLE_DEFAULTS: dict = {
-    "includeViews": True, "includeKeys": True, "includeComments": False,
+    "includeViews": True, "includeKeys": True, "includeNotNull": False, "includeComments": False,
     "identifierCase": "upper", "quoteIdentifiers": "when-needed", "typeCase": "upper",
-    "defaultSchema": "",
+    "schemaMode": "none", "defaultSchema": "",
 }
 
 # Defaults = semilla = convenciones de la macro BCP (doc 93 §4 D1).
@@ -66,8 +69,9 @@ _ORACLE_ENUMS: dict[str, tuple[str, ...]] = {
     "identifierCase": ("as-is", "lower", "upper"),
     "quoteIdentifiers": ("when-needed", "always"),
     "typeCase": ("lower", "upper"),
+    "schemaMode": ("none", "model", "custom"),
 }
-_ORACLE_BOOLS = ("includeViews", "includeKeys", "includeComments")
+_ORACLE_BOOLS = ("includeViews", "includeKeys", "includeNotNull", "includeComments")
 _ORACLE_TEXTS = ("defaultSchema",)
 
 

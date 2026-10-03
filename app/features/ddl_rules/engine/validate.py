@@ -265,7 +265,7 @@ def validate_rule(rule: dict, udp_defs: list[dict], config: dict,
     # particiones — qué columnas y en qué orden (doc 93 D10).
     layout = action.get("layout")
     if layout is not None:
-        allowed = {"partitionColumns": ("keep", "last", "partitioned-by")}   # doc 107
+        allowed = {"partitionColumns": ("keep", "last")}
         if not isinstance(layout, dict) or not layout:
             _bad("Column layout needs at least one setting (partitionColumns: last).")
         else:

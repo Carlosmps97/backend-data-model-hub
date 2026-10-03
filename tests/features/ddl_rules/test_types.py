@@ -232,16 +232,16 @@ def test_apply_column_types_sql_texto_no_tokenizable_queda_intacto():
 def test_generador_mapea_los_tipos_que_conserva_la_rej():
     stmts, log = g.run_generators([REJ, CHAR_VARCHAR], TABLE, COLS, BASE, CTX, CONFIG, {"identifierCase": "lower"})
     sql = stmts[0]["sql"]
-    assert re.search(r"\n  codmes varchar\(6\)\n", sql)          # partición: conserva el tipo → mapeado
+    assert "PARTITIONED BY (codmes varchar(6))" in sql            # partición: conserva el tipo → mapeado (doc 107: en el PARTITIONED BY)
     assert re.search(r"\n  codclavecic string,", sql)            # force_type manda en las demás
-    assert re.search(r"\n  tiporeject string,", sql)
+    assert re.search(r"\n  tiporeject string\n\)", sql)
     assert [e for e in log if e.get("rule") == "char_a_varchar"] == [
         {"rule": "char_a_varchar", "column": "CODMES", "status": "applied", "artifact": "ddl.tabla_rej",
          "object": "CHAR(6) → VARCHAR(6)"}]
     # sin la regla sobre la _rej (appliesTo solo física) la partición sale tal cual
     solo_fisica = {**CHAR_VARCHAR, "appliesTo": ["ddl.tabla_fisica"]}
     stmts2, _ = g.run_generators([REJ, solo_fisica], TABLE, COLS, BASE, CTX, CONFIG, {"identifierCase": "lower"})
-    assert re.search(r"\n  codmes char\(6\)\n", stmts2[0]["sql"])
+    assert "PARTITIONED BY (codmes char(6))" in stmts2[0]["sql"]
 
 
 def test_pipeline_fisica_y_rej_e_idempotencia():

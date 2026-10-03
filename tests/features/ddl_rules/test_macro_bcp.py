@@ -47,10 +47,10 @@ COLS = [
 ]
 OPTIONS = {"identifierCase": "lower", "tableFormat": "delta", "external": True,
            "location": "abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<path>",
-           "locationFolderCase": "upper", "includePartitions": True, "partitionsLast": False}
+           "locationFolderCase": "upper", "includePartitions": True, "partitionsLast": True}
 # El CREATE físico lo emite el FRONT (doc 93: sin comillas, tipos en minúscula,
 # CREATE OR REPLACE, carpeta MAYÚSCULA; doc 107: las particiones solo en el
-# PARTITIONED BY, con su tipo y ordenadas por el UDP).
+# PARTITIONED BY, con su tipo y ordenadas por el UDP — formato fijo).
 BASE_SQL = ("CREATE OR REPLACE TABLE bcp_ddv.hd_venta (\n"
             "  codclavecic string,\n  nomcliente string,\n  mtosaldo decimal(18,2)\n"
             ")\nUSING DELTA\nPARTITIONED BY (fecdia date, codmes int)\n"

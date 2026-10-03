@@ -119,17 +119,21 @@ def test_rej_espejo_del_fisico_casing_location_particiones():
     sql = stmts[0]["sql"]
     assert "CREATE OR REPLACE TABLE CORE.TBL_CLIENTE_REJ (" in sql
     assert "  COD_CLIENTE string," in sql                  # casing + force_type (tipo en minúscula)
-    assert "PARTITIONED BY (FEC_ALTA)" in sql              # partición heredada
+    assert "PARTITIONED BY (FEC_ALTA string)" in sql       # partición heredada (doc 107: con su tipo)
+    assert "  FEC_ALTA " not in sql                         # doc 107: y fuera de la lista
     # Doc 76 D9: carpeta del LOCATION = nombre final con el casing de carpeta
     # del export (default MAYÚSCULA, convención ADLS de la macro).
     assert "LOCATION 's3://dl/warehouse/TBL_CLIENTE_REJ'" in sql
-    # Orden (pedido owner): heredadas → añadidas → columnas de PARTICIÓN al final.
-    order = [sql.index(f"  {n} ") for n in ("COD_CLIENTE", "REJ_MOTIVO", "FEC_ALTA")]
+    # Orden (pedido owner): heredadas → añadidas.
+    order = [sql.index(f"  {n} ") for n in ("COD_CLIENTE", "REJ_MOTIVO")]
     assert order == sorted(order)
-    # sin includePartitions no se emite la cláusula (igual que la física)
+    # sin includePartitions no se emite la cláusula (igual que la física) y la
+    # partición vuelve a la lista, al final
     stmts2, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
                                  {**opts, "includePartitions": False})
     assert "PARTITIONED BY" not in stmts2[0]["sql"]
+    order2 = [stmts2[0]["sql"].index(f"  {n} ") for n in ("COD_CLIENTE", "REJ_MOTIVO", "FEC_ALTA")]
+    assert order2 == sorted(order2)
     # `locationFolderCase` explícito: as-is conserva el nombre crudo
     stmts3, _ = g.run_generators([TABLA_REJ], TABLE, cols, BASE, COLS_CTX, {},
                                  {**opts, "locationFolderCase": "as-is"})

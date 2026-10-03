@@ -131,17 +131,16 @@ SEED_RULES: list[dict] = [
                                      "delta.deletedFileRetentionDuration": "{lookup:vacuum_map}"}},
         "appliesTo": list(TABLE_ARTIFACTS), "priority": 40, "enabled": True,
     },
-    {   # doc 73/76/93/107 · layout: las columnas de partición SON las que
-        # tienen PART_nn en el UDP «Particion» (el flag de partición no se usa).
-        # Doc 107 (pedido owner 2026-10-01): NO se declaran en la lista del
-        # CREATE — van con su tipo dentro del PARTITIONED BY, en orden PART_01,
-        # PART_02… (antes: al final de la lista y el PARTITIONED BY solo con
-        # nombres, `partitionColumns: last`). El orden físico del modelo no
+    {   # doc 73/76/93 · layout: las columnas de partición SON las que tienen
+        # PART_nn en el UDP «Particion» (el flag de partición no se usa), en
+        # orden PART_01, PART_02… Doc 107: el DDL las declara siempre en el
+        # PARTITIONED BY con su tipo (formato fijo); `last` solo cuenta si el
+        # export no escribe PARTITIONED BY. El orden físico del modelo no
         # cambia. Sin condición.
-        "name": "particiones_en_partitioned_by", "kind": "rule", "target": "table",
-        "description": "Particiones = columnas con PART_nn en el UDP Particion; fuera de la lista del CREATE TABLE, declaradas con su tipo en el PARTITIONED BY en orden PART_01, PART_02…",
+        "name": "particiones_al_final", "kind": "rule", "target": "table",
+        "description": "Particiones = columnas con PART_nn en el UDP Particion, en orden PART_01, PART_02… (van en el PARTITIONED BY con su tipo; sin PARTITIONED BY, al final del CREATE TABLE)",
         "condition": "",
-        "action": {"layout": {"partitionColumns": "partitioned-by", "partitionUdp": "Particion"}},
+        "action": {"layout": {"partitionColumns": "last", "partitionUdp": "Particion"}},
         "appliesTo": ["ddl.tabla_fisica"], "priority": 30, "enabled": True,
     },
     # ── Generadores (cascada) ──────────────────────────────────────────────
@@ -268,9 +267,9 @@ TEMPLATES: list[dict] = [
     {"id": "free-statements", "title": "Free statements",
      "summary": "-- DROP TABLE IF EXISTS … before the CREATE (any SQL text with placeholders)",
      "rule": _SEED_BY_NAME["drop_comentado"]},
-    {"id": "partitions-in-partitioned-by", "title": "Partition columns in PARTITIONED BY",
-     "summary": "Partition columns from the UDP 'Particion' (PART_nn), only in PARTITIONED BY (codmes int, …)",
-     "rule": _SEED_BY_NAME["particiones_en_partitioned_by"]},
+    {"id": "partitions-last", "title": "Partition columns from a UDP",
+     "summary": "Partition columns = PART_nn in the UDP 'Particion', in that order — declared in PARTITIONED BY with their type",
+     "rule": _SEED_BY_NAME["particiones_al_final"]},
     {"id": "map-types", "title": "Map data types",
      "summary": "CHAR(10) → VARCHAR(10): rename a base type on export, keeping each column's length",
      "rule": _SEED_BY_NAME["char_a_varchar"]},

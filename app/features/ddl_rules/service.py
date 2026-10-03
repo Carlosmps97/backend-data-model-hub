@@ -218,31 +218,25 @@ async def test_rule(project_id: str, rule: dict, table_id: str) -> dict:
                                           "sql": "TBLPROPERTIES (" + ", ".join(pairs) + ")",
                                           "why": why})
                 if action.get("layout"):
-                    # Doc 73/76/93: orden de EMISIÓN resultante (particiones al
-                    # final); con UDP, las particiones salen de sus PART_nn.
-                    # Doc 107: con `partitioned-by` la lista no las lleva — van
-                    # con su tipo en el PARTITIONED BY.
+                    # Doc 73/76/93: con UDP, las particiones salen de sus PART_nn.
+                    # Doc 107: con PARTITIONED BY la lista no las lleva — van ahí
+                    # con su tipo —; sin él, al final (`last`) o en orden físico.
                     lay = action["layout"]
                     part_udp = engine_generators.partition_udp_of(lay)
                     cols_light = engine_generators.physical_columns(cols_sorted, cols_ctx, part_udp)
-                    lay_opts = {**bench, "partitionsLast": lay.get("partitionColumns") == "last",
-                                "partitionsInClause": lay.get("partitionColumns") == "partitioned-by"}
-                    emitted = engine_generators.layout_columns(cols_light, lay_opts)
+                    last = lay.get("partitionColumns") == "last"
                     parts = engine_generators.ordered_partitions(cols_light)
-                    in_clause = engine_generators.partitions_in_clause(cols_light, lay_opts)
+                    in_clause = engine_generators.partitions_in_clause(cols_light, bench)
+                    emitted = ([c for c in cols_light if not c.get("partition")] if in_clause
+                               else engine_generators.layout_columns(cols_light, {"partitionsLast": last}))
                     moved = [c["name"] for c in parts]
-                    # Sin PARTITIONED BY (Output setting «Partitions» apagada) se dice.
-                    no_pb = "" if bench.get("includePartitions", True) else " (this export has no PARTITIONED BY)"
                     if not moved:
                         detail = "no partition columns in this table"
                     elif in_clause:
                         detail = "partition columns only in PARTITIONED BY: " + ", ".join(moved)
-                    elif lay_opts["partitionsLast"] or lay_opts["partitionsInClause"]:
-                        detail = f"partition columns last{no_pb}: " + ", ".join(moved)
-                    elif no_pb:
-                        detail = f"partition columns in physical order{no_pb}: " + ", ".join(moved)
                     else:
-                        detail = "partition columns in physical order; PARTITIONED BY: " + ", ".join(moved)
+                        where = "last" if last else "in physical order"
+                        detail = f"partition columns {where} (this export has no PARTITIONED BY): " + ", ".join(moved)
                     if moved and part_udp:
                         detail += f" · from UDP '{part_udp}'"
                     sql = "-- column order: " + ", ".join(c["name"] for c in emitted)
