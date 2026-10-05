@@ -22,6 +22,7 @@ from app.features.domains import repository as dom_repo
 from app.features.domains.cascade import align_restored_column
 from app.features.glossary import service as dict_svc
 from app.features.projects import repository as projects_repo
+from app.core.colors import clean_colors, clean_object_color, with_clean_color
 from app.features.projects.models import clean_routes
 from app.features.relationships.models import PHRASE_FIELDS, RelationshipDoc
 from app.features.schemas import service as schemas_service
@@ -88,7 +89,14 @@ def apply_plan(changes: dict) -> list[tuple]:
                 # rollback no quitaría un trazo agregado después: la llave va
                 # SIEMPRE. Y va saneada: lo que arma el backend (cascada de
                 # membresía, rollback) parte del documento tal cual está.
-                payload = {**payload, "routes": clean_routes(payload.get("routes"))}
+                # Doc 109: `colors` igual (excepciones de color del canvas).
+                payload = {**payload, "routes": clean_routes(payload.get("routes")),
+                           "colors": clean_colors(payload.get("colors"))}
+            if collection in ("canonical_tables", "views") and payload:
+                # Doc 109: el color propio de la tabla/vista va SIEMPRE (null =
+                # sin color) — una imagen previa anterior al doc 109 no lo trae y
+                # sin esto un rollback no quitaría un color agregado después.
+                payload = {**payload, "color": clean_object_color(payload.get("color"))}
             plan.append((collection, eid, ch.get("op"), payload))
     return plan
 
@@ -805,6 +813,7 @@ async def add_change(cs_id: str, actor: str, collection: str, entity_id: str, op
     payload = _stamp_project(cs, collection, op, payload)          # doc 75 I1
     err = (validation.payload_error(collection, entity_id, op, payload)
            or validation.client_routes_error(collection, entity_id, op, payload)    # doc 99
+           or validation.client_colors_error(collection, entity_id, op, payload)    # doc 109
            or validation.client_keys_error(collection, entity_id, op, payload))     # doc 100
     if err:
         raise InvalidPayloadError(err)
@@ -1062,6 +1071,7 @@ async def add_changes_bulk(cs_id: str, actor: str, items: list[dict]) -> dict | 
     # Doc 100: y las llaves reservadas (`a.b`, `$x`, `_id`), igual que add_change.
     client_errors = [e for it in ordered
                      if (e := validation.client_routes_error(it["collection"], it["entityId"], it["op"], it.get("payload"))
+                         or validation.client_colors_error(it["collection"], it["entityId"], it["op"], it.get("payload"))
                          or validation.client_keys_error(it["collection"], it["entityId"], it["op"], it.get("payload")))]
     if client_errors:
         raise InvalidPayloadError(" | ".join(client_errors[:5]))
@@ -1220,9 +1230,14 @@ async def effective(cs_id: str, collection: str,
     canvas)."""
     docs = await _effective_docs(cs_id, collection, table_id=table_id, ids=ids,
                                  q=q, limit=limit, schema=schema, table_ids=table_ids)
-    if docs is None or collection != "subject_areas":
+    if docs is None:
         return docs
-    return [{**d, "routes": clean_routes(d.get("routes"))} for d in docs]
+    if collection in ("canonical_tables", "views"):          # doc 109: ídem el color
+        return [with_clean_color(d) for d in docs]
+    if collection != "subject_areas":
+        return docs
+    return [{**d, "routes": clean_routes(d.get("routes")), "colors": clean_colors(d.get("colors"))}
+            for d in docs]
 
 
 async def _effective_docs(cs_id: str, collection: str,
@@ -2638,6 +2653,8 @@ async def _detail_resolvers(wanted: list[tuple[str, str]], changes: dict,
         res["udp"] = udp_display_names(await udp_repo.list_udp(project_id))
     if "canonical_columns" in cols:
         res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
+    if cols & {"canonical_tables", "views"}:
+        res["themes"] = await _theme_names(project_id)   # doc 109: el color por su nombre
 
     entries = []
     for c, e in wanted:
@@ -2749,7 +2766,17 @@ async def _history_resolvers(collection: str, project_id: str | None) -> dict:
     res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp(project_id)}
     if collection == "canonical_columns":
         res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
+    if collection in ("canonical_tables", "views"):
+        res["themes"] = await _theme_names(project_id)   # doc 109
     return res
+
+
+async def _theme_names(project_id: str) -> dict[str, str]:
+    """Doc 109: id → nombre de los themes del proyecto (el diff muestra «Color:
+    Entidad Principal», no la referencia cruda)."""
+    from app.features.themes import repository as themes_repo
+
+    return {t["id"]: t["name"] for t in await themes_repo.list_themes(project_id)}
 
 
 def _user_ref(uid: str | None, users: dict[str, dict]) -> dict | None:
@@ -2929,6 +2956,8 @@ async def _compare_resolvers(composed: dict, project_id: str) -> dict:
         res["udp"] = {d["id"]: d["name"] for d in await udp_repo.list_udp(project_id)}
     if "canonical_columns" in cols:
         res["domains"] = {d["id"]: d["name"] for d in await dom_repo.list_domains(project_id)}
+    if cols & {"canonical_tables", "views"}:
+        res["themes"] = await _theme_names(project_id)   # doc 109
     entries = [(coll, entry.get("before"), entry.get("after"))
                for (coll, _eid), entry in composed.items()]
     tids, cids = diffdetail.collect_ref_ids(entries)

@@ -26,7 +26,7 @@ NOISE_BY_COLLECTION: dict[str, set[str]] = {
     # layout/drawings = posiciones y shapes del canvas: mover cajitas no es un
     # cambio de MODELO revisable campo a campo. Doc 99: `routes` = trazos
     # manuales de los wires — dibujo, igual que las posiciones.
-    "subject_areas": {"layout", "drawings", "routes"},
+    "subject_areas": {"layout", "drawings", "routes", "colors"},
     # tableId: el árbol ya da el contexto; typeOverridden: flag interno del naming.
     # pkPosition: retirado (doc 94 D1) — un doc viejo que aún lo trae no es revisable.
     "canonical_columns": {"tableId", "typeOverridden", "pkPosition"},
@@ -144,6 +144,9 @@ def _resolve(key: str, v, res: dict):
         return res.get("projects", {}).get(v, v)
     if key == "folderId":
         return res.get("folders", {}).get(v, v)
+    if key == "color" and isinstance(v, str) and v.startswith("theme:"):
+        # Doc 109: el theme por su nombre (uno borrado sale como tal).
+        return res.get("themes", {}).get(v[6:], "Removed theme")
     if isinstance(v, list) and all(not isinstance(x, (dict, list)) for x in v):
         return ", ".join(str(x) for x in v)
     if isinstance(v, (dict, list)):

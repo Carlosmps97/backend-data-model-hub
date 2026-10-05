@@ -102,6 +102,12 @@ class _Recorder:
                 ids = max((p for p in params if isinstance(p, list)), key=len)
                 return [{"doc": json.dumps({"_id": i, "flgactive": False})} for i in ids if i in rec.deleted]
 
+            async def fetchrow(self, sql, *params, timeout=None):
+                # doc 109: el upsert por lote es UNA sentencia que devuelve conteos
+                rec.sql.append(sql)
+                rec.params.append(params)
+                return {"updated": 0, "inserted": len(params[0])}
+
             def transaction(self):
                 class T:
                     async def __aenter__(s):

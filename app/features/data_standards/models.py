@@ -20,7 +20,8 @@ from app.core.models import DOC_CONFIG
 # 'glossary' = ex-'udp' (glosario de términos/abreviaturas que cascadea nombres
 # físicos). 'udp' se reserva para el NUEVO User Defined Properties (etiquetas).
 # 'ddl' = DDL Export Rules (doc 30).
-KINDS = ("glossary", "udp", "domain", "naming", "ddl", "batch", "baseline", "rollback", "copy")
+# 'themes' = themes de color de las tablas (doc 109).
+KINDS = ("glossary", "udp", "domain", "naming", "ddl", "themes", "batch", "baseline", "rollback", "copy")
 
 
 class StandardsVersionDoc(BaseModel):

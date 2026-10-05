@@ -96,6 +96,26 @@ class DdlRuleEdit(BaseModel):
     validationReport: dict = {}
 
 
+class ThemeEdit(BaseModel):
+    """Doc 109: alta/edición de un theme de color (id ausente = alta)."""
+    id: str | None = None
+    name: str
+    color: str                       # '#RRGGBB'
+    order: int | None = None         # posición en el selector (None = al final)
+
+    @field_validator("name", "color", mode="before")
+    @classmethod
+    def _strip(cls, v: object) -> object:
+        # Se graba como se compara: sin espacios a los costados (y el hex en
+        # mayúsculas) — si no, « #c0c0c0 » salía como cambio.
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("color")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        return v.upper()
+
+
 class DdlConfigPatch(BaseModel):
     """Patch del ruleset config: cada bloque que venga no-None REEMPLAZA el set
     completo (payload chico; sin deltas). `output` = Output settings (doc 93)."""
@@ -106,7 +126,7 @@ class DdlConfigPatch(BaseModel):
 
 class ApplyBody(BaseModel):
     """Batch de cambios de estándares que se aplican como UNA versión (15d/15e)."""
-    kind: str = "batch"               # glossary | udp | domain | naming | ddl | batch
+    kind: str = "batch"               # glossary | udp | domain | naming | ddl | themes | batch
     title: str | None = None
     description: str | None = None
     termsUpsert: list[TermEdit] = []
@@ -119,6 +139,8 @@ class ApplyBody(BaseModel):
     rulesUpsert: list[DdlRuleEdit] = []   # reglas de DDL Export a crear/editar
     rulesDelete: list[str] = []           # ids de reglas a borrar
     ddlConfigPatch: DdlConfigPatch | None = None  # lookups/functions/output del ruleset
+    themesUpsert: list[ThemeEdit] = []    # doc 109: themes de color a crear/editar
+    themesDelete: list[str] = []          # doc 109: ids de themes a borrar
 
     # Doc 105 (R2): un scope desconocido se grababa como un doc más de
     # `naming_config` (y versionaba). Misma regla que el PUT cerrado.
@@ -139,4 +161,4 @@ class RollbackBody(BaseModel):
 class CopyFromBody(BaseModel):
     """Doc 75 D15: bloques de estándares que un proyecto NUEVO copia de otro."""
     projectId: str
-    blocks: list[Literal["glossary", "domains", "udp", "naming", "ddl"]] = Field(min_length=1)
+    blocks: list[Literal["glossary", "domains", "udp", "naming", "ddl", "themes"]] = Field(min_length=1)

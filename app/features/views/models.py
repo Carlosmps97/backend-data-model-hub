@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.colors import clean_object_color
 from app.core.models import DOC_CONFIG
 
 
@@ -82,6 +83,10 @@ class ViewDoc(BaseModel):
     # Valores UDP de la vista ({defId: value}) — mismo contrato que tablas/
     # columnas/canvas (doc 06); aplican las keys con level='view'.
     udpValues: dict[str, str] = {}
+    # Doc 109: color de la vista en todos sus canvases (igual que las tablas).
+    color: str | None = None
+
+    _clean_color = field_validator("color", mode="before")(clean_object_color)
 
     @model_validator(mode="before")
     @classmethod

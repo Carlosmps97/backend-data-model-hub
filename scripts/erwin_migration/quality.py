@@ -173,9 +173,13 @@ def analyze(m: ep.ErwinModel) -> list[dict]:
         if not pairs:
             no_pairs.append(f"{r.name} ({m.entities[r.parent_ref].physical} → "
                             f"{m.entities[r.child_ref].physical})")
-    _finding(f, "E-REL-BROKEN", "ERROR",
+    # Doc 109: advertencia, no error — migrate ya las omitía (política fija,
+    # como W-REL-NO-PAIRS). En los XML del BCP son residuos de Erwin: el extremo
+    # es un símbolo de subcategoría, una Cached View o la vista misma. Como
+    # ERROR obligaban a correr el one-shot con --force.
+    _finding(f, "W-REL-BROKEN", "WARN",
              "Relaciones con tabla/vista inexistente",
-             "la migración las OMITE — confirmar", broken_rels)
+             "la migración las OMITE (un extremo no es una tabla ni una vista del XML)", broken_rels)
     _finding(f, "W-REL-NO-PAIRS", "WARN",
              "Relaciones tabla-tabla sin pares de columnas FK resolubles",
              "se OMITEN (la plataforma exige columna origen y destino)",
@@ -376,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Gate de calidad sobre exports .xml de Erwin (solo lectura)")
     ap.add_argument("xml", nargs="+", help="ruta(s) al .xml exportado de Erwin")
     ap.add_argument("--json", dest="json_out", help="volcar reporte completo a JSON")
+    ap.add_argument("--parse-cache", dest="parse_cache",
+                    help="doc 109: carpeta donde dejar el modelo parseado (migrate lo reusa)")
     ap.add_argument("--brief", action="store_true",
                     help="vista compacta (8 muestras por finding). Por DEFECTO "
                          "se imprime TODO lo encontrado (política 2026-08-22: "
@@ -387,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     worst = 0
     for path in args.xml:
         print(f"\n{'=' * 72}\nARCHIVO: {path}")
-        m = ep.parse(path)
+        m = ep.parse_cached(path, args.parse_cache)
         glossaries.append((path, m.glossary))
         s = summarize(m)
         print(f"Modelo: {s['modelo']}")

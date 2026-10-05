@@ -7,6 +7,7 @@ import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.colors import clean_colors
 from app.core.models import DOC_CONFIG
 
 # Doc 99 — trazos manuales de wires (`SubjectAreaDoc.routes`).
@@ -136,5 +137,11 @@ class SubjectAreaDoc(BaseModel):
     # sola para todos) y se versionan con el documento, como `layout`. Aditivo
     # (invariante §2.6): declarado acá Y en el TS SubjectArea.
     routes: dict[str, list[NodePosDoc]] = Field(default_factory=dict)
+    # Doc 109 — color de las cajas EN ESTE canvas: {id de tabla o vista:
+    # ColorRef}. Excepción sobre el color propio de la tabla/vista (`color`);
+    # 'none' = sin color aquí. Se versiona con el documento, como `layout`.
+    # Aditivo (invariante §2.6): declarado acá Y en el TS SubjectArea.
+    colors: dict[str, str] = Field(default_factory=dict)
 
     _clean_routes = field_validator("routes", mode="before")(clean_routes)
+    _clean_colors = field_validator("colors", mode="before")(clean_colors)

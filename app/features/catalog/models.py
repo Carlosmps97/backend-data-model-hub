@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.colors import clean_object_color
 from app.core.models import DOC_CONFIG
 
 
@@ -29,6 +30,12 @@ class CanonicalTableDoc(BaseModel):
     # ({udpDefId: value}). Aditivo (invariante §2.6): las keys se definen en Data
     # Standards; acá viven los valores elegidos para clasificar el dato.
     udpValues: dict[str, str] = Field(default_factory=dict)
+    # Doc 109: color de la tabla en TODOS sus canvases ('theme:<id>' o
+    # '#RRGGBB'; None = sin color). Un canvas puede pintarla distinto
+    # (`subject_areas.colors`). Lectura tolerante: un valor inválido = sin color.
+    color: str | None = None
+
+    _clean_color = field_validator("color", mode="before")(clean_object_color)
 
 
 class CanonicalColumnDoc(BaseModel):

@@ -39,7 +39,8 @@ def test_apply_plan_normaliza_payloads_de_views():
     _, multi = plan[("views", "v-multi")]
     assert multi["tableId"] == "t2"                # compat: primera fuente
     assert plan[("views", "v-del")] == ("delete", None)
-    assert plan[("canonical_tables", "ct-1")] == ("upsert", {"physicalName": "TBL"})
+    # doc 109: el color propio va siempre (null = sin color)
+    assert plan[("canonical_tables", "ct-1")] == ("upsert", {"physicalName": "TBL", "color": None})
 
 
 def test_doc_models_sin_estandares_y_projects_sigue_versionado():
@@ -81,7 +82,7 @@ def test_apply_plan_fija_las_llaves_de_frase_de_una_relacion():
 
 def test_apply_plan_no_agrega_frases_a_otras_colecciones():
     changes = {"canonical_tables": {"t1": {"op": "upsert", "payload": {"physicalName": "M_X"}}}}
-    assert apply_plan(changes)[0][3] == {"physicalName": "M_X"}
+    assert apply_plan(changes)[0][3] == {"physicalName": "M_X", "color": None}   # doc 109: sólo el color
 
 
 
@@ -98,8 +99,8 @@ def test_apply_plan_fija_routes_en_un_canvas_que_no_lo_trae():
     y un rollback no podría quitar un trazo agregado después."""
     changes = {"subject_areas": {"sa1": {"op": "upsert", "payload": dict(_CANVAS)}}}
     payload = apply_plan(changes)[0][3]
-    assert payload["routes"] == {}
-    assert {k: v for k, v in payload.items() if k != "routes"} == _CANVAS    # lo demás, intacto
+    assert payload["routes"] == {} and payload["colors"] == {}               # doc 109: colors también
+    assert {k: v for k, v in payload.items() if k not in ("routes", "colors")} == _CANVAS   # lo demás, intacto
     assert "routes" not in _CANVAS                                          # puro: no muta la entrada
 
 
@@ -146,6 +147,37 @@ def test_apply_plan_no_lleva_llaves_reservadas_al_set():
         "canonical_columns": {"c1": {"op": "delete"}},
     }
     plan = {(c, e): (op, p) for c, e, op, p in apply_plan(changes)}
-    assert plan[("subject_areas", "sa1")] == ("upsert", {"name": "C", "layout": {"t1": {"x": 1, "y": 2}}, "routes": {}})
-    assert plan[("canonical_tables", "t1")] == ("upsert", {"physicalName": "T"})
+    assert plan[("subject_areas", "sa1")] == ("upsert", {"name": "C", "layout": {"t1": {"x": 1, "y": 2}},
+                                                         "routes": {}, "colors": {}})
+    assert plan[("canonical_tables", "t1")] == ("upsert", {"physicalName": "T", "color": None})
     assert plan[("canonical_columns", "c1")] == ("delete", None)
+
+
+
+# ── Doc 109: colores de tablas, vistas y canvases ───────────────────────────
+
+
+def test_apply_plan_lleva_siempre_el_color_de_tabla_y_vista():
+    """El apply es un $set: una imagen previa SIN `color` (anterior al doc 109)
+    no quitaría un color agregado después — la llave va siempre, saneada."""
+    changes = {
+        "canonical_tables": {
+            "t-viejo": {"op": "upsert", "payload": {"physicalName": "T"}},
+            "t-theme": {"op": "upsert", "payload": {"physicalName": "T2", "color": "theme:abc"}},
+            "t-hex": {"op": "upsert", "payload": {"physicalName": "T3", "color": "#92d050"}},
+            "t-roto": {"op": "upsert", "payload": {"physicalName": "T4", "color": "verde"}},
+        },
+        "views": {"v1": {"op": "upsert", "payload": {"name": "V", "sourceTableIds": ["t"], "color": "#FFFF80"}}},
+    }
+    plan = {eid: payload for _c, eid, _op, payload in apply_plan(changes)}
+    assert plan["t-viejo"]["color"] is None
+    assert plan["t-theme"]["color"] == "theme:abc"
+    assert plan["t-hex"]["color"] == "#92D050"
+    assert plan["t-roto"]["color"] is None
+    assert plan["v1"]["color"] == "#FFFF80"
+
+
+def test_apply_plan_sanea_los_colores_del_canvas():
+    changes = {"subject_areas": {"sa1": {"op": "upsert", "payload": {**_CANVAS, "colors": {
+        "t1": "theme:t-pri", "t2": "#ff0000", "t3": "none", "t4": "rojo", "": "#000000"}}}}}
+    assert apply_plan(changes)[0][3]["colors"] == {"t1": "theme:t-pri", "t2": "#FF0000", "t3": "none"}

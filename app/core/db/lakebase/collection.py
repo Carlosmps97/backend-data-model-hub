@@ -42,7 +42,9 @@ log = logging.getLogger(__name__)
 def _dumps(value: Any) -> str:
     import json
 
-    return json.dumps(value, ensure_ascii=False, default=_json_default)
+    # Doc 109: JSON compacto (sin espacios tras `,`/`:`): jsonb lo normaliza
+    # igual y viajan ~7 % menos bytes a la BD.
+    return json.dumps(value, ensure_ascii=False, default=_json_default, separators=(",", ":"))
 
 
 def _loads(value: Any) -> Any:
@@ -61,14 +63,20 @@ PROJECT_COLUMN = "project_id"
 PROJECT_COLUMN_DDL = f"{PROJECT_COLUMN} text GENERATED ALWAYS AS (doc ->> 'projectId') STORED"
 _TABLE_DDL = f"(id text PRIMARY KEY, doc jsonb NOT NULL, {PROJECT_COLUMN_DDL})"
 
-# Las 19 colecciones propias. Se pre-crean al conectar; cualquier otra se
-# crea on-demand.
+# Las colecciones propias. Se pre-crean al conectar; cualquier otra se crea
+# on-demand. Doc 109: también las que antes nacían on-demand y hoy usan pasos
+# del one-shot que corren EN PARALELO (migrate por proyecto, seeds del cierre):
+# dos procesos creando la misma tabla a la vez chocan en Postgres (`CREATE …
+# IF NOT EXISTS` no es atómico entre sesiones). Creadas por create_admin, ya
+# existen cuando arrancan los carriles.
 KNOWN_COLLECTIONS = [
     "projects", "folders", "subject_areas", "schemas",
     "canonical_tables", "canonical_columns", "relationships", "views",
     "changesets", "changeset_changes", "standards_versions",
     "parent_domains", "glossary_terms", "udp_definitions", "naming_config",
     "users", "roles", "saved_reports", "audit_log",
+    "ddl_rules", "ddl_ruleset_config", "upload_profiles", "upload_jobs",
+    "sheet_templates", "diagram_themes", "deleted_changesets",
 ]
 
 
@@ -523,33 +531,38 @@ class PgCollection:
         return _WriteResult(matched=_rowcount(status), modified=_rowcount(status))
 
     async def _bulk_update_by_id(self, ops: list) -> _WriteResult:
-        ids, patches, ins_ids, inserts = [], [], [], []
+        """`UpdateOne({_id}, {$set[, $setOnInsert]}[, upsert])` del lote en UNA
+        sentencia: actualiza las filas que existen (merge del `$set`) e inserta,
+        de los upserts, las que faltan (`{_id} ∪ $setOnInsert ∪ $set`).
+
+        Doc 109: antes eran BEGIN + UPDATE + INSERT + COMMIT (4 viajes a la BD
+        por lote) y cada documento viajaba DOS veces (parche y documento
+        completo). Con la latencia de Lakebase eso era casi todo el tiempo del
+        one-shot. Ahora: un viaje y el documento una vez (`$setOnInsert` es
+        chico y va aparte). Una sola sentencia ya es atómica.
+
+        Doc 105 (P10): sólo los upserts insertan — la baja (sin upsert) de algo
+        que producción nunca vio no deja una fila fantasma sin projectId."""
+        ids, patches, on_insert, upserts = [], [], [], []
         for op in ops:
-            _id = op._filter["_id"]
-            set_fields = op._doc.get("$set") or {}
-            ids.append(_id)
-            patches.append(_dumps(set_fields))
-            # Doc 105 (P10): sólo los upserts insertan. Antes, con un upsert en
-            # el lote se insertaban TODOS los ids: la baja (sin upsert) de algo
-            # que producción nunca vio dejaba una fila fantasma sin projectId.
-            if getattr(op, "_upsert", False):
-                ins_ids.append(_id)
-                inserts.append(_dumps({"_id": _id, **(op._doc.get("$setOnInsert") or {}), **set_fields}))
+            ids.append(op._filter["_id"])
+            patches.append(_dumps(op._doc.get("$set") or {}))
+            on_insert.append(_dumps(op._doc.get("$setOnInsert") or {}))
+            upserts.append(bool(getattr(op, "_upsert", False)))
+        sql = (
+            f"WITH u AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::bool[]) "
+            f"AS u(uid, patch, soi, ups)), "
+            f"upd AS (UPDATE {self._table} AS t SET doc = t.doc || u.patch::jsonb "
+            f"FROM u WHERE t.id = u.uid RETURNING t.id), "
+            f"ins AS (INSERT INTO {self._table} (id, doc) "
+            f"SELECT u.uid, jsonb_build_object('_id', u.uid) || u.soi::jsonb || u.patch::jsonb "
+            f"FROM u WHERE u.ups AND NOT EXISTS (SELECT 1 FROM upd WHERE upd.id = u.uid) "
+            f"ON CONFLICT (id) DO NOTHING RETURNING id) "
+            f"SELECT (SELECT count(*) FROM upd) AS updated, (SELECT count(*) FROM ins) AS inserted"
+        )
         async with await self._conn() as conn:
-            async with conn.transaction():
-                status = await conn.execute(
-                    f"UPDATE {self._table} AS t SET doc = t.doc || u.patch::jsonb "
-                    f"FROM unnest($1::text[], $2::text[]) AS u(uid, patch) WHERE t.id = u.uid",
-                    ids, patches,
-                )
-                if ins_ids:
-                    await conn.execute(
-                        f"INSERT INTO {self._table} (id, doc) "
-                        f"SELECT u.uid, u.udoc::jsonb FROM unnest($1::text[], $2::text[]) AS u(uid, udoc) "
-                        f"ON CONFLICT (id) DO NOTHING",
-                        ins_ids, inserts,
-                    )
-        n = _rowcount(status)
+            row = await conn.fetchrow(sql, ids, patches, on_insert, upserts)
+        n = int(row["updated"]) if row else 0
         return _WriteResult(matched=n, modified=n)
 
     # ─── DDL ────────────────────────────────────────────────────────
@@ -599,6 +612,18 @@ class LakebaseDatabase:
                 "SELECT tablename FROM pg_tables WHERE schemaname = $1", self.schema
             )
         return [r["tablename"] for r in rows]
+
+    async def assume_base(self) -> bool:
+        """Doc 109: da por creadas las colecciones propias con UNA consulta
+        (otro proceso del mismo one-shot acaba de crearlas) en vez del censo +
+        DDL de arranque. False si falta alguna: entonces el llamador corre el
+        arranque completo."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = $1", self.schema)
+        if set(KNOWN_COLLECTIONS) - {r["tablename"] for r in rows}:
+            return False
+        self._ensured.update(KNOWN_COLLECTIONS)
+        return True
 
     async def ensure_base(self) -> None:
         """Censa el schema y emite SOLO el DDL faltante, en UN round-trip

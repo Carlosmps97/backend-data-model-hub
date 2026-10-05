@@ -30,7 +30,8 @@ from .profiles import repository as profiles_repo
 # con su default (override y facetas se pisaban con False). Guarda:
 # test_la_proyeccion_de_tablas_del_loader_trae_todos_los_campos_del_modelo.
 TABLE_PROJECTION = {"projectId": 1, "physicalName": 1, "logicalName": 1, "schema": 1, "description": 1,
-                    "udpValues": 1, "physicalNameOverridden": 1, "logicalOnly": 1, "physicalOnly": 1}
+                    "udpValues": 1, "physicalNameOverridden": 1, "logicalOnly": 1, "physicalOnly": 1,
+                    "color": 1}     # doc 109: la carga no le borra el color a la tabla
 VIEW_PROJECTION = {"name": 1, "schema": 1, "sourceTableIds": 1}
 _SCOPES = ("table", "column")
 _ID_BATCH = 500

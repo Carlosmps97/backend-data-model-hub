@@ -261,3 +261,16 @@ def test_canvas_nuevo_o_borrado_con_trazos_no_los_lista():
     deleted = entity_detail("subject_areas", "sa1", {"op": "delete"}, doc, RES)
     assert "routes" not in _fields_by_key(created)
     assert "routes" not in _fields_by_key(deleted)
+
+
+def test_doc109_color_de_tabla_por_nombre_del_theme():
+    res = {**RES, "themes": {"th1": "Entidad Principal"}}
+    before = {"physicalName": "HD_VTA", "color": None}
+    change = {"op": "upsert", "payload": {"physicalName": "HD_VTA", "color": "theme:th1"}}
+    by = _fields_by_key(entity_detail("canonical_tables", "t9", change, before, res))
+    assert by["color"]["before"] is None and by["color"]["after"] == "Entidad Principal"
+    # un hex sale tal cual; un theme que ya no existe, como tal
+    change = {"op": "upsert", "payload": {"physicalName": "HD_VTA", "color": "#FF0000"}}
+    before = {"physicalName": "HD_VTA", "color": "theme:borrado"}
+    by = _fields_by_key(entity_detail("canonical_tables", "t9", change, before, res))
+    assert (by["color"]["before"], by["color"]["after"]) == ("Removed theme", "#FF0000")

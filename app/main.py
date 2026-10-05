@@ -49,6 +49,7 @@ from app.features.ddl_rules.router import router as ddl_rules_router
 from app.features.glossary.router import router as glossary_router
 from app.features.domains.router import router as domains_router
 from app.features.udp.router import router as udp_router
+from app.features.themes.router import router as themes_router
 from app.features.folders.router import router as folders_router
 from app.features.health.router import router as health_router
 from app.features.identity.router import router as identity_router
@@ -318,6 +319,7 @@ def create_app() -> FastAPI:
     app.include_router(identity_router)
     app.include_router(domains_router)
     app.include_router(udp_router)
+    app.include_router(themes_router)              # doc 109: themes de color del proyecto
     app.include_router(glossary_router)
     app.include_router(data_standards_router)
     app.include_router(ddl_rules_router)

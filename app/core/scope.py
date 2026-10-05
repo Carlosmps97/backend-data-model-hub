@@ -16,6 +16,7 @@ PROJECT_SCOPED: frozenset[str] = frozenset({
     "ddl_rules", "ddl_ruleset_config",
     "upload_profiles",                     # doc 78: perfiles de carga por proyecto
     "sheet_templates",                     # doc 95 D11: plantillas Excel por proyecto
+    "diagram_themes",                      # doc 109: themes de color por proyecto
     "changesets", "standards_versions", "saved_reports",
 })
 

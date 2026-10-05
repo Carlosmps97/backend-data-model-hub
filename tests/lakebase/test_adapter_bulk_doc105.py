@@ -38,6 +38,12 @@ class _Recorder:
                 rec.calls.append((sql, params))
                 return []
 
+            async def fetchrow(self, sql, *params, timeout=None):
+                # Doc 109: el upsert por lote es UNA sentencia (WITH … UPDATE …
+                # INSERT …); sin filas previas, inserta todos los upserts.
+                rec.calls.append((sql, params))
+                return {"updated": 0, "inserted": sum(1 for u in params[3] if u)}
+
             def transaction(self):
                 class T:
                     async def __aenter__(s):
@@ -62,6 +68,13 @@ class _Recorder:
         """{id: doc} de TODOS los INSERT (lote por unnest o de a uno)."""
         out: dict[str, dict] = {}
         for sql, params in self.calls:
+            if sql.lstrip().startswith("WITH") and "AS u(uid, patch, soi, ups)" in sql:
+                # Doc 109: (ids, $set, $setOnInsert, upsert?) — inserta los upserts
+                ids, patches, soi, ups = params
+                for i, p, o, u in zip(ids, patches, soi, ups):
+                    if u:
+                        out[i] = {"_id": i, **json.loads(o), **json.loads(p)}
+                continue
             if not sql.lstrip().startswith("INSERT"):
                 continue
             if isinstance(params[0], list):                       # unnest($1::text[], $2::text[])
@@ -92,7 +105,7 @@ def test_p10_solo_los_upserts_insertan_filas():
                                        "$setOnInsert": {"createdAt": "T"}}, upsert=True),
         UpdateOne({"_id": "c-creada-y-borrada"}, {"$set": {"flgactive": False, "deletedAt": "T"}}),
     ], ordered=False))
-    assert rec.statements() == ["UPDATE", "INSERT"]               # sigue en el camino rápido
+    assert rec.statements() == ["WITH"]          # camino rápido: UNA sentencia (doc 109)
     assert rec.inserted() == {"c-nueva": {"_id": "c-nueva", "createdAt": "T", "projectId": "p1",
                                           "tableId": "t1", "flgactive": True}}
 
@@ -101,7 +114,8 @@ def test_p10_lote_sin_upserts_no_inserta_nada():
     rec = _Recorder()
     asyncio.run(_coll(rec).bulk_write([UpdateOne({"_id": "x"}, {"$set": {"flgactive": False}}),
                                        UpdateOne({"_id": "y"}, {"$set": {"flgactive": False}})]))
-    assert rec.statements() == ["UPDATE"]
+    assert rec.statements() == ["WITH"]
+    assert rec.inserted() == {}
 
 
 # ── A2-o1 ───────────────────────────────────────────────────────────────────

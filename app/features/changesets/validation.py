@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from app.core.versioning import reserved_key
 from app.features.catalog.models import CanonicalColumnDoc, CanonicalTableDoc
 from app.features.folders.models import FolderDoc
+from app.core.colors import colors_error, object_color_error
 from app.features.projects.models import ProjectDoc, SubjectAreaDoc, routes_error
 from app.features.relationships.models import RelationshipDoc
 from app.features.schemas.models import SchemaDoc
@@ -163,6 +164,23 @@ def client_routes_error(collection: str, entity_id: str, op: str | None, payload
         return (f"{collection}/{entity_id}: routes: '{dotted[0]}' is not a field — "
                 "send the whole routes object")
     err = routes_error((payload or {}).get("routes"))
+    return f"{collection}/{entity_id}: {err}" if err else None
+
+
+def client_colors_error(collection: str, entity_id: str, op: str | None, payload: dict | None) -> str | None:
+    """Doc 109 — chequeo ESTRICTO de los colores que manda un CLIENTE: el
+    `color` de una tabla/vista y las excepciones `colors` de un canvas. Los
+    modelos los LEEN tolerantes (un valor inválido = sin color), así que sin
+    este chequeo un cliente con bug grabaría basura sin enterarse. Sólo en la
+    ENTRADA (`add_change` / lote), como los trazos (doc 99). Puro."""
+    if op == "delete" or not payload:
+        return None
+    if collection in ("canonical_tables", "views"):
+        err = object_color_error(payload.get("color"))
+    elif collection == "subject_areas":
+        err = colors_error(payload.get("colors"))
+    else:
+        return None
     return f"{collection}/{entity_id}: {err}" if err else None
 
 

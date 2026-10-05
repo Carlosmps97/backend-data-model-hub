@@ -13,11 +13,13 @@ ONE-SHOT (destructivo) — deja la plataforma como un primer deployment:
   `ORACLE_PROJECTS` quedan sin reglas y con Oracle por default — doc 101) →
   seed_upload_profiles (perfil de carga «Plantilla BCP», doc 78) →
   seed_sheet_templates (plantilla Excel «QA_MODELO», doc 95) →
-  arrange_all → mark_base_version (v1 de cada proyecto, título parametrizable).
+  mark_base_version (v1 de cada proyecto, título parametrizable).
+  Doc 109: sin auto-arrange (el layout viene de Erwin); el gate deja el modelo
+  parseado en caché para migrate; audit y seeds corren en paralelo.
 
 APPEND (no destructivo) — suma UN archivo sobre la base viva:
   .venv/bin/python -m scripts.run_migration --append "ruta/modelo.xml" --apply
-  quality → crosscheck (vs BD) → migrate → audit → arrange del proyecto.
+  quality → crosscheck (vs BD) → migrate → audit.
   Sin reset, sin admin, sin seeds, sin marcador (v1 ya existe).
 
 Proyecto destino por archivo (doc 77, deroga el manifiesto de la D9 del doc 75):
@@ -49,7 +51,7 @@ Manejo de fallas por paso:
   - reset / create_admin  → detienen el resto (base a medio wipe: no seguir)
   - migrate / audit / seeds / mark_base → la falla se registra, se continúa
     con el resto y el exit code final es 1 (falla VISIBLE, nunca silenciosa)
-  - crosscheck / arrange  → informativos: warning, no afectan el exit code
+  - crosscheck            → informativo: warning, no afecta el exit code
 
 Los pasos invocan los MISMOS scripts del repo (cero lógica duplicada), cada
 uno como subproceso propio (memoria liberada entre parses de cientos de MB)
@@ -65,8 +67,10 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -192,15 +196,26 @@ def group_by_project(plans: list[dict]) -> list[tuple[str, list[dict]]]:
 # {"kind": "par", "lanes": [{"lane", "weight", "steps"}]} (carriles a la vez,
 # los pasos DE UN carril siempre en orden).
 
-def _quality_cmd(xmls: list[str], quality_json: str | None) -> list[str]:
-    """`--json` va ANTES de los archivos: los .xml siguen siendo los últimos args."""
-    extra = ["--json", quality_json] if quality_json else []
+# Doc 109: los pasos del one-shot que corren DESPUÉS de create_admin no
+# repiten el DDL de arranque (create_admin acaba de crear tablas e índices);
+# con la latencia de Lakebase eran ~7 s por proceso. Ver app/core/db/client.py.
+_AFTER_ADMIN_ENV = {"DMH_SKIP_STARTUP_DDL": "1"}
+
+
+def _quality_cmd(xmls: list[str], quality_json: str | None,
+                 parse_cache: str | None = None) -> list[str]:
+    """`--json` va ANTES de los archivos: los .xml siguen siendo los últimos args.
+    Doc 109: con `parse_cache`, el gate deja cada modelo parseado para migrate."""
+    extra = (["--parse-cache", parse_cache] if parse_cache else []) + (
+        ["--json", quality_json] if quality_json else [])
     return [_PY, "-m", "scripts.erwin_migration.quality", *extra, *xmls]
 
 
-def _migrate_cmd(p: dict, force: bool) -> list[str]:
-    cmd = [_PY, "-m", "scripts.erwin_migration.migrate", str(p["path"]),
-           "--project", p["project"], "--apply"]
+def _migrate_cmd(p: dict, force: bool, parse_cache: str | None = None) -> list[str]:
+    cmd = [_PY, "-m", "scripts.erwin_migration.migrate", str(p["path"])]
+    if parse_cache:
+        cmd += ["--parse-cache", parse_cache]      # doc 109: reusa el parse del gate
+    cmd += ["--project", p["project"], "--apply"]
     if force:
         cmd.append("--force")
     return cmd
@@ -216,7 +231,10 @@ def _lane(project: str, steps: list[dict], weight: int) -> dict:
 
 
 def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
-                   quality_json: str | None = None) -> list[dict]:
+                   quality_json: str | None = None, parse_cache: str | None = None) -> list[dict]:
+    """Doc 109: sin auto-arrange (las posiciones vienen de Erwin, escaladas y
+    separadas por migrate — `erwin_migration/layout.py`); el cierre corre sus
+    pasos independientes en paralelo y recién después marca la versión base."""
     gates, migrates = [], []
     for n, (project, group) in enumerate(group_by_project(plans), start=1):
         weight = sum(p.get("size") or 0 for p in group)
@@ -224,11 +242,22 @@ def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
             "name": f"quality «{project}» (gate + glosario cruzado del proyecto)",
             "klass": "gate",
             "cmd": _quality_cmd([str(p["path"]) for p in group],
-                                _quality_json_of(quality_json, n))}], weight))
+                                _quality_json_of(quality_json, n), parse_cache)}], weight))
         migrates.append(_lane(project, [{
             "name": f"migrate {p['rel']} → «{project}»",
-            "klass": "core",
-            "cmd": _migrate_cmd(p, force)} for p in group], weight))
+            "klass": "core", "env": _AFTER_ADMIN_ENV,
+            "cmd": _migrate_cmd(p, force, parse_cache)} for p in group], weight))
+    closing = [
+        ("audit", 4, {"name": "audit_data_consistency", "klass": "check",
+                      "cmd": [_PY, "-m", "scripts.audit_data_consistency"]}),
+        ("ddl", 3, {"name": "seed_ddl_export_rules (data functions, por proyecto)", "klass": "core",
+                    "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]}),
+        ("uploads", 2, {"name": "seed_upload_profiles (perfil «Plantilla BCP», por proyecto)", "klass": "core",
+                        "cmd": [_PY, "-m", "scripts.seed_upload_profiles", "--all-projects", "--apply"]}),
+        ("sheets", 1, {"name": "seed_sheet_templates (plantilla Excel «QA_MODELO», por proyecto)",
+                       "klass": "core",
+                       "cmd": [_PY, "-m", "scripts.seed_sheet_templates", "--all-projects", "--apply"]}),
+    ]
     return [
         {"kind": "par", "title": "gates de calidad (un carril por proyecto)",
          "lanes": gates},
@@ -240,18 +269,14 @@ def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
         ]},
         {"kind": "par", "title": "migrate (un carril por proyecto)",
          "lanes": migrates},
-        {"kind": "seq", "title": "cierre (validación, seeds, layout, v1)", "steps": [
-            {"name": "audit_data_consistency", "klass": "check",
-             "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
-            {"name": "seed_ddl_export_rules (data functions, por proyecto)", "klass": "core",
-             "cmd": [_PY, "-m", "scripts.seed_ddl_export_rules", "--all-projects", "--apply"]},
-            {"name": "seed_upload_profiles (perfil «Plantilla BCP», por proyecto)", "klass": "core",
-             "cmd": [_PY, "-m", "scripts.seed_upload_profiles", "--all-projects", "--apply"]},
-            {"name": "seed_sheet_templates (plantilla Excel «QA_MODELO», por proyecto)", "klass": "core",
-             "cmd": [_PY, "-m", "scripts.seed_sheet_templates", "--all-projects", "--apply"]},
-            {"name": "arrange_all (layout ELK, todos los canvases)", "klass": "info",
-             "cmd": [_PY, "scripts/arrange_all.py"]},
+        # Doc 109: independientes entre sí (el audit sólo lee; cada seed escribe
+        # su propia colección) — en paralelo.
+        {"kind": "par", "title": "cierre (validación y seeds, en paralelo)",
+         "lanes": [_lane(name, [{**step, "env": _AFTER_ADMIN_ENV}], weight)
+                   for name, weight, step in closing]},
+        {"kind": "seq", "title": "versión base (v1)", "steps": [
             {"name": "mark_base_version (v1 de cada proyecto)", "klass": "core",
+             "env": _AFTER_ADMIN_ENV,
              "cmd": [_PY, "-m", "scripts.mark_base_version", "--apply",
                      "--title", base_title]},
         ]},
@@ -259,20 +284,20 @@ def oneshot_stages(plans: list[dict], *, force: bool, base_title: str,
 
 
 def append_stages(plan: dict, *, force: bool,
-                  quality_json: str | None = None) -> list[dict]:
+                  quality_json: str | None = None, parse_cache: str | None = None) -> list[dict]:
+    """Doc 109: sin auto-arrange — re-armaría TODOS los canvases del proyecto
+    (también los ya migrados) y borraría el layout de Erwin."""
     xml = str(plan["path"])
     return [{"kind": "seq", "title": f"append → «{plan['project']}»", "steps": [
         {"name": "quality (gate)", "klass": "gate",
-         "cmd": _quality_cmd([xml], quality_json)},
+         "cmd": _quality_cmd([xml], quality_json, parse_cache)},
         {"name": f"crosscheck vs BD viva del proyecto «{plan['project']}»", "klass": "info",
          "cmd": [_PY, "-m", "scripts.erwin_migration.crosscheck",
                  "--project", plan["project"], xml]},
         {"name": f"migrate {plan['rel']} → «{plan['project']}»", "klass": "core",
-         "cmd": _migrate_cmd(plan, force)},
+         "cmd": _migrate_cmd(plan, force, parse_cache)},
         {"name": "audit_data_consistency", "klass": "check",
          "cmd": [_PY, "-m", "scripts.audit_data_consistency"]},
-        {"name": f"arrange_all del proyecto «{plan['project']}»", "klass": "info",
-         "cmd": [_PY, "scripts/arrange_all.py", "--project", plan["project"]]},
     ]}]
 
 
@@ -305,17 +330,18 @@ def _run_step(step: dict, lane: str | None = None) -> tuple[int, float]:
     bajo lock) — nada se resume ni se oculta."""
     head = f"▶ {step['name']}" if lane is None else f"▶ [{lane}] {step['name']}"
     cmd = shlex.join(step["cmd"])
+    env = {**os.environ, **step["env"]} if step.get("env") else None
     if lane is None:
         print(f"\n{'━' * 72}\n{head}\n  $ {cmd}\n", flush=True)
         t0 = time.perf_counter()
-        p = subprocess.run(step["cmd"], cwd=ROOT)
+        p = subprocess.run(step["cmd"], cwd=ROOT, env=env)
         return p.returncode, time.perf_counter() - t0
 
     with _PRINT:
         print(f"\n{'┄' * 72}\n{head}\n  $ {cmd}\n  (en paralelo: su salida "
               f"completa se imprime cuando termine)", flush=True)
     t0 = time.perf_counter()
-    p = subprocess.run(step["cmd"], cwd=ROOT, stdout=subprocess.PIPE,
+    p = subprocess.run(step["cmd"], cwd=ROOT, env=env, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                        errors="replace")
     secs = time.perf_counter() - t0
@@ -545,6 +571,9 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(ROOT / ".env")   # los subprocesos heredan os.environ
 
     started = datetime.now(timezone.utc).isoformat()
+    # Doc 109: el gate parsea cada XML una vez y deja el modelo acá; migrate lo
+    # reusa. Carpeta temporal del run, se borra al terminar.
+    parse_cache = tempfile.mkdtemp(prefix="erwin-parse-") if args.apply else None
     # Reporte JSON del gate: con él, un run detenido explica al final QUÉ lo detuvo.
     os.makedirs(os.path.join(str(ROOT), "migration-reports"), exist_ok=True)
     quality_json = os.path.join(str(ROOT), "migration-reports",
@@ -568,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"⛔ Descubrimiento: {exc}")
             return 2
         stages = oneshot_stages(plans, force=args.force, base_title=args.base_title,
-                                quality_json=quality_json)
+                                quality_json=quality_json, parse_cache=parse_cache)
         _print_plan("ONE-SHOT (DESTRUCTIVO) — plan", plans, stages, args.jobs)
         if not args.apply:
             print("\nConteos actuales de la BD (esto es lo que se borraría):")
@@ -586,14 +615,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.project:
             plans[0]["project"] = args.project.strip()
             plans[0]["source"] = "--project"
-        stages = append_stages(plans[0], force=args.force, quality_json=quality_json)
+        stages = append_stages(plans[0], force=args.force, quality_json=quality_json,
+                               parse_cache=parse_cache)
         _print_plan("APPEND (no destructivo) — plan", plans, stages, args.jobs)
         if not args.apply:
             print("\nDRY-RUN — nada ejecutado. Repite con --apply.")
             return 0
 
     t0 = time.perf_counter()
-    results = execute(stages, force=args.force, jobs=args.jobs)
+    try:
+        results = execute(stages, force=args.force, jobs=args.jobs)
+    finally:
+        if parse_cache:
+            shutil.rmtree(parse_cache, ignore_errors=True)
     _print_summary(results, time.perf_counter() - t0, args.jobs)
     gate_failed = any(r["klass"] == "gate" and r.get("rc") not in (0, None) for r in results)
     if gate_failed and not args.force:

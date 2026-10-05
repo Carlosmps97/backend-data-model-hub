@@ -69,18 +69,22 @@ resolvió por estructura, no por nombres.
 
 **Flujo recomendado: el orquestador `run_migration` (doc 54 + doc 77).**
 El one-shot por carpeta es DESTRUCTIVO (dropea el schema `dmh` completo) y
-encadena, en 4 ETAPAS: `quality` por proyecto (gate + glosario cruzado entre
-los archivos del proyecto) → reset + `create_admin` → `migrate` archivo por
-archivo → `audit_data_consistency` + `seed_ddl_export_rules --all-projects` +
-`seed_upload_profiles --all-projects` + `seed_sheet_templates --all-projects` + `arrange_all` + `mark_base_version` (v1 de
-cada proyecto):
+encadena, en 5 ETAPAS: `quality` por proyecto (gate + glosario cruzado entre
+los archivos del proyecto; deja cada XML parseado en caché) → reset +
+`create_admin` → `migrate` archivo por archivo (reusa el parse del gate) →
+`audit_data_consistency` + `seed_ddl_export_rules --all-projects` +
+`seed_upload_profiles --all-projects` + `seed_sheet_templates --all-projects`
+EN PARALELO → `mark_base_version` (v1 de cada proyecto). Doc 109: ya no corre
+`arrange_all`: cada canvas toma las posiciones de Erwin (escala 28/16.4 +
+separación mínima, `erwin_migration/layout.py`), con sus textos, cuadros y
+colores:
 ```
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                  # plan (dry-run)
-.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force  # ejecuta
+.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply          # ejecuta
 .venv/bin/python -m scripts.run_migration --append "ruta/otro.xml" [--project "…"] --apply   # suma UN xml
 ```
-`--force` sigue haciendo falta para `folder_data/` (E-REL-BROKEN ×2 en UDV
-Físico: el gate lo explica al final).
+Doc 109: las relaciones rotas de Erwin (`W-REL-BROKEN`) son advertencia —
+migrate las omite—, así que `folder_data/` ya no necesita `--force`.
 
 **Proyecto destino por CONVENCIÓN (doc 77 §3; deroga el manifiesto
 `projects.json` de la D9 del doc 75).** Lo decide dónde está el archivo, y se

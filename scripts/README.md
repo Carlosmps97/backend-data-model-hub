@@ -56,7 +56,7 @@ horas. Cada `--apply` deja su reporte en `migration-reports/`.
 
 | Script | ¿Qué hace? | ¿Cuándo? |
 |---|---|---|
-| `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros). Doc 99: cada canvas que arregla pierde sus trazos manuales de wires (`routes`) — con las posiciones nuevas ya no calzan | Siempre tras `migrate --apply` |
+| `arrange_all` | Auto-arrange ELK de canvases (tablas + vistas). **`--project "X"` limita al proyecto recién cargado** (no pisa layouts de otros). Doc 99: cada canvas que arregla pierde sus trazos manuales de wires (`routes`) — con las posiciones nuevas ya no calzan. Doc 109: la migración ya deja el layout de Erwin (escalado y sin solapes); este script lo REEMPLAZA | Sólo a pedido (ya no tras `migrate`) |
 | `audit_data_consistency` | **Calidad de la data en BD**: chequeos C1–C11 contra las reglas de la plataforma (duplicados, huérfanos, fuentes rotas, particiones incongruentes, campos retirados `wordType`/`pkPosition` — doc 94…). Doc 105 (A2-o3): C9 revisa (y con `--fix` poda) en cada canvas también los `viewIds` colgando (C9c: vista borrada o inexistente — ese canvas no se podía editar) y, desde su revisión R2, los miembros vivos de OTRO proyecto (C9d: el guardado del canvas daba 409; C9b cuenta también el layout de nodos de otro proyecto); sólo se juzga el proyecto si canvas y miembro traen `projectId`; un `viewIds` nulo (canvas legacy) no se toca. Ronda 3: C9 sólo mira canvases ACTIVOS y conserva en el layout las posiciones de los símbolos de subcategoría (`subtypeSymbolId`) de relaciones activas del proyecto — no son tabla ni vista, pero tampoco nodos inexistentes | Siempre tras migrar (esperado: 0 fixables) |
 | `create_admin` | Cuenta local `admin` (contraseña en el script) + 4 roles + whitelist SSO de Modeladores (idempotente) | BD nueva, para poder entrar |
 | `mark_base_version` | **Marca lo cargado como versión base DE CADA PROYECTO**: changeset marcador `v1` (approved, 0 cambios — sin él la web bloquea Model), baseline de Data Standards del proyecto si su stream está vacío y permiso `rollback`. Idempotente; un proyecto con versiones aplicadas no recibe marcador | UNA vez, al FINAL de la carga completa (después del último XML) |
@@ -135,12 +135,11 @@ usuarios/roles, audit_log y los demás proyectos.
 ```bash
 # Recomendado: el orquestador, que deduce los proyectos de la estructura de la carpeta (doc 54 + doc 77)
 .venv/bin/python -m scripts.run_migration --folder ../folder_data                 # plan
-.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply --force
+.venv/bin/python -m scripts.run_migration --folder ../folder_data --apply   # doc 109: ya sin --force
 
 # Paso a paso (lo mismo que encadena el orquestador):
 .venv/bin/python -m scripts.erwin_migration.quality "modelo.xml"        # gate OK
 .venv/bin/python -m scripts.erwin_migration.migrate "modelo.xml" --project "Mi proyecto" --apply
-.venv/bin/python scripts/arrange_all.py
 .venv/bin/python scripts/create_admin.py
 .venv/bin/python -m scripts.seed_ddl_export_rules --all-projects --apply   # ruleset base por proyecto
 .venv/bin/python -m scripts.seed_upload_profiles --all-projects --apply   # perfil de carga «Plantilla BCP» por proyecto

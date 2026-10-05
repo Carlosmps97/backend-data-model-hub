@@ -13,14 +13,15 @@ def test_plan_lines_nombra_la_hoja_y_cada_columna_con_su_dato():
     assert any("UDP_DOMINIO_PRINCIPAL" in ln and "table.udp:Dominio Principal" in ln for ln in lines)
 
 
-def test_oneshot_siembra_plantillas_tras_los_perfiles():
+def test_oneshot_siembra_plantillas_en_el_cierre_antes_de_la_version_base():
+    """Doc 109: en paralelo con los otros seeds, antes de la versión base."""
     plans = [{"project": "P", "path": "a.xml", "rel": "a.xml", "size": 1}]
-    cierre = oneshot_stages(plans, force=False, base_title="v1")[-1]["steps"]
-    names = [s["name"] for s in cierre]
-    i_pf = next(i for i, n in enumerate(names) if "seed_upload_profiles" in n)
-    i_st = next(i for i, n in enumerate(names) if "seed_sheet_templates" in n)
-    assert i_st == i_pf + 1 and cierre[i_st]["klass"] == "core"
-    assert cierre[i_st]["cmd"][-3:] == ["scripts.seed_sheet_templates", "--all-projects", "--apply"]
+    stages = oneshot_stages(plans, force=False, base_title="v1")
+    cierre = [st for lane in stages[-2]["lanes"] for st in lane["steps"]]
+    st = next(s for s in cierre if "seed_sheet_templates" in s["name"])
+    assert st["klass"] == "core"
+    assert st["cmd"][-3:] == ["scripts.seed_sheet_templates", "--all-projects", "--apply"]
+    assert "mark_base_version" in stages[-1]["steps"][0]["name"]
 
 
 def test_seed_one_siembra_la_qa_modelo_compartida_y_no_repite(monkeypatch, capsys):

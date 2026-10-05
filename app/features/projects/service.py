@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from app.core.audit import audit
+from app.core.colors import clean_colors, with_clean_color
 from app.features.changesets import service as cs_service
 from app.features.data_standards import service as std_service
 
@@ -201,6 +202,8 @@ async def diagram(sa_id: str, changeset_id: str | None = None) -> dict | None:
     # Doc 100: sin llaves reservadas (el canvas del draft es el payload crudo;
     # el cliente arma su próximo guardado sobre este documento).
     sa_out = {**plain(sa), "viewIds": list(explicit) if explicit is not None else [v["id"] for v in views],
-              "routes": clean_routes(sa.get("routes"))}
-    return {"subjectArea": sa_out, "tables": tables, "columns": columns,
-            "relationships": visible, "views": views}
+              "routes": clean_routes(sa.get("routes")),
+              "colors": clean_colors(sa.get("colors"))}          # doc 109
+    # Doc 109: el color de cada tabla/vista, saneado (el draft es el payload crudo).
+    return {"subjectArea": sa_out, "tables": [with_clean_color(t) for t in tables], "columns": columns,
+            "relationships": visible, "views": [with_clean_color(v) for v in views]}

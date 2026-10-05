@@ -45,7 +45,8 @@ def test_identidad_por_fisico_ci_actualiza_con_doc_completo():
     assert ch["payload"] == {"id": "t1", "projectId": "p1", "physicalName": "cliente", "logicalName": "Cliente", "schema": "ddv",
                              "physicalNameOverridden": False,
                              "logicalOnly": False, "physicalOnly": False,   # doc 69 (facetas)
-                             "description": "Def", "udpValues": {}}
+                             "description": "Def", "udpValues": {},
+                             "color": None}                                 # doc 109
     assert codes(plan, "warning") == ["rename", "existing-table", "view-no-columns"]   # físico cambia de grafía
     assert plan.report["summary"]["tables"] == {"create": 0, "update": 1, "unchanged": 0}
 
@@ -203,3 +204,15 @@ def test_desglose_por_tabla_en_el_reporte():
     assert rows[0]["issues"] == 2 and rows[1]["issues"] == 2    # existing-table + view-no-columns / view-no-columns + no-canvas
     assert rows[0]["views"] == {"create": 0, "update": 0, "unchanged": 0}   # doc 87: desglose de vistas por tabla
     assert rows[0]["columns"] == {"create": 0, "update": 0, "unchanged": 0}
+
+
+def test_la_carga_no_le_borra_el_color_a_la_tabla():
+    """Doc 109: la hoja no trae color; actualizar la tabla lo conserva (y no
+    cuenta como cambio)."""
+    existing = {**_existing(description="Def"), "color": "theme:t-pri"}
+    plan = build_plan(parsed(tables=[trow(3, "Cliente", physical="CLIENTE", description="Otra")]),
+                      ctx(schemas=_schemas(), tables=[existing]))
+    assert _table_change(plan)["payload"]["color"] == "theme:t-pri"
+    same = build_plan(parsed(tables=[trow(3, "Cliente", physical="CLIENTE", description="Def")]),
+                      ctx(schemas=_schemas(), tables=[existing]))
+    assert same.report["summary"]["tables"]["unchanged"] == 1

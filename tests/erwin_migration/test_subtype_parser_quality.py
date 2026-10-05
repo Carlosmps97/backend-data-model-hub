@@ -173,7 +173,7 @@ def test_findings_de_subcategoria_y_duplicados(model):
     assert by_code["W-DUP-LOGICAL-NAME"]["items"] == ["Party ×2"]
 
     # las Type 9 entran al chequeo de integridad: acá están sanas
-    assert "E-REL-BROKEN" not in by_code
+    assert "W-REL-BROKEN" not in by_code
     assert "W-REL-NO-PAIRS" not in by_code
 
     # el shape del símbolo ya NO es "muerto"; el fantasma sí
@@ -194,5 +194,6 @@ def test_relacion_tipo_9_rota_si_falta_extremo(tmp_path):
     p = tmp_path / "roto.xml"
     p.write_text(roto, encoding="utf-8")
     by_code = {x["code"]: x for x in analyze(ep.parse(str(p)))}
-    assert by_code["E-REL-BROKEN"]["count"] == 1
-    assert "R/9" in by_code["E-REL-BROKEN"]["items"][0]
+    assert by_code["W-REL-BROKEN"]["count"] == 1          # doc 109: advertencia (se omite)
+    assert by_code["W-REL-BROKEN"]["severity"] == "WARN"
+    assert "R/9" in by_code["W-REL-BROKEN"]["items"][0]

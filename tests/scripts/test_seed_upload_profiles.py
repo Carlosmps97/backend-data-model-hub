@@ -19,12 +19,14 @@ def test_plan_lines_nombra_cabeceras_y_udp_resueltos():
     assert any("TABLA_LOGICO" in ln and "required, maxLength=80" in ln for ln in lines)
 
 
-def test_oneshot_siembra_perfiles_tras_las_reglas_ddl():
+def test_oneshot_siembra_perfiles_en_el_cierre_antes_de_la_version_base():
+    """Doc 109: los seeds del cierre corren en paralelo (no dependen entre sí:
+    el perfil resuelve UDP del catálogo que siembra migrate) y la versión base
+    va DESPUÉS de todos."""
     plans = [{"project": "P", "path": "a.xml", "rel": "a.xml", "size": 1}]
     stages = oneshot_stages(plans, force=False, base_title="v1")
-    cierre = stages[-1]["steps"]
-    names = [s["name"] for s in cierre]
-    i_ddl = next(i for i, n in enumerate(names) if "seed_ddl_export_rules" in n)
-    i_pf = next(i for i, n in enumerate(names) if "seed_upload_profiles" in n)
-    assert i_pf == i_ddl + 1 and cierre[i_pf]["klass"] == "core"
-    assert cierre[i_pf]["cmd"][-3:] == ["scripts.seed_upload_profiles", "--all-projects", "--apply"]
+    cierre = [st for lane in stages[-2]["lanes"] for st in lane["steps"]]
+    pf = next(st for st in cierre if "seed_upload_profiles" in st["name"])
+    assert pf["klass"] == "core"
+    assert pf["cmd"][-3:] == ["scripts.seed_upload_profiles", "--all-projects", "--apply"]
+    assert "mark_base_version" in stages[-1]["steps"][0]["name"]

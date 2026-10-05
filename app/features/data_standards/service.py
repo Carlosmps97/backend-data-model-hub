@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.core.audit import audit
+from app.core.colors import theme_id_ok
 from app.core.logging import get_logger
 from app.core.udp_values import canonical_number, is_finite_number, iso_date, list_key, normalize_boolean
 from app.features.ddl_rules import repository as rules_repo
@@ -27,6 +28,8 @@ from app.features.glossary import repository as dict_repo, service as dict_svc
 from app.features.domains import repository as dom_repo, service as dom_svc
 from app.features.domains.models import ParentDomainDoc
 from app.features.settings import repository as set_repo, service as set_svc
+from app.features.themes import repository as themes_repo
+from app.features.themes.models import ThemeDoc, theme_color_error, theme_name_error
 from app.features.udp import repository as udp_repo
 from app.features.udp.models import UdpDefinitionDoc
 
@@ -46,9 +49,12 @@ def _now() -> str:
 def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
                 udp: list[dict] | None = None,
                 ddl_rules: list[dict] | None = None,
-                ddl_config: dict | None = None) -> dict:
+                ddl_config: dict | None = None,
+                themes: list[dict] | None = None) -> dict:
     """Snapshot limpio del estado de estándares. Puro."""
     return {
+        # Doc 109: themes de color (nombre + color + orden).
+        "themes": [{k: t.get(k) for k in ("id", "name", "color", "order")} for t in (themes or [])],
         "domains": [
             {k: d.get(k) for k in ("id", "name", "defaultDataType", "namingTerm", "description",
                                    "logicalDataType", "inheritsName",             # doc 69/79
@@ -88,14 +94,32 @@ def snapshot_of(domains: list[dict], terms: list[dict], naming: dict,
 
 def build_diff(body, before_domains: dict[str, dict], before_terms: dict[str, dict],
                before_udp: dict[str, dict] | None = None,
-               before_rules: dict[str, dict] | None = None) -> dict:
+               before_rules: dict[str, dict] | None = None,
+               before_themes: dict[str, dict] | None = None) -> dict:
     """Listas legibles de lo que el batch agrega/edita/quita (para el historial).
     `before_*` = mapas id→doc del estado PREVIO. Puro."""
     before_udp = before_udp or {}
     before_rules = before_rules or {}
+    before_themes = before_themes or {}
     added: list[str] = []
     edited: list[str] = []
     removed: list[str] = []
+
+    # Doc 109: themes de color.
+    for t in getattr(body, "themesUpsert", []) or []:
+        prev = before_themes.get(t.id or "")
+        if prev is None:
+            added.append(f"Theme {t.name} · {t.color.upper()}")
+            continue
+        parts = [f"Theme {t.name}"]
+        if (prev.get("name") or "") != t.name:
+            parts.append(f"renamed from {prev.get('name')}")
+        if (prev.get("color") or "").upper() != t.color.upper():
+            parts.append(f"{prev.get('color')} → {t.color.upper()}")
+        edited.append(" · ".join(parts))
+    for tid in getattr(body, "themesDelete", []) or []:
+        prev = before_themes.get(tid)
+        removed.append(f"Theme {prev['name']}" if prev else f"Theme {tid}")
 
     for u in getattr(body, "udpUpsert", []) or []:
         if u.id and u.id in before_udp:
@@ -288,7 +312,8 @@ def _title_for(body, diff: dict) -> str:
 NO_CHANGES = "There are no changes to apply."
 BATCH_META = ("kind", "title", "description")
 BATCH_CHANGES = ("termsUpsert", "termsDelete", "namingConfig", "domainsUpsert", "domainsDelete",
-                 "udpUpsert", "udpDelete", "rulesUpsert", "rulesDelete")
+                 "udpUpsert", "udpDelete", "rulesUpsert", "rulesDelete",
+                 "themesUpsert", "themesDelete")
 DDL_PATCH_BLOCKS = ("lookups", "functions", "output")
 
 
@@ -368,6 +393,37 @@ def same_udp(edit, prev: dict | None) -> bool:
     return _same_doc(UdpDefinitionDoc, prev, written)
 
 
+def same_theme(edit, prev: dict | None) -> bool:
+    """Doc 109: ¿el upsert deja el theme como está? (`order` ausente = se
+    conserva). Puro."""
+    written = {k: v for k, v in edit.model_dump(exclude_none=True).items() if k != "id"}
+    return _same_doc(ThemeDoc, prev, written)
+
+
+def theme_errors(upserts: list, deletes: list[str], before: dict[str, dict]) -> str | None:
+    """Doc 109: nombre y color válidos, y nombres ÚNICOS (sin distinguir
+    mayúsculas) en el estado que queda tras el lote. Mensaje o None. Puro."""
+    for t in upserts:
+        err = theme_name_error(t.name) or theme_color_error(t.color)
+        if err:
+            return err
+        # Un id elegido por el cliente tiene que caber en `theme:<id>` (si no, el
+        # theme existiría pero ninguna tabla podría usarlo).
+        if t.id is not None and t.id not in before and not theme_id_ok(t.id):
+            return f"'{t.id}' is not a valid theme id (letters, digits, '_', '.', ':' or '-', up to 64)."
+    gone = set(deletes)
+    post = {tid: (t.get("name") or "") for tid, t in before.items() if tid not in gone}
+    for i, t in enumerate(upserts):
+        post[t.id or f"__new__{i}"] = t.name
+    seen: set[str] = set()
+    for name in post.values():
+        key = name.strip().lower()
+        if key in seen:
+            return f"There is already a theme named '{name.strip()}'. Theme names must be unique."
+        seen.add(key)
+    return None
+
+
 def same_rule(edit, report: dict, state: str, prev: dict | None) -> bool:
     """Ídem para una regla DDL: se graba con la condición canónica, los udpRefs
     y la validación RECALCULADOS — si revalidar cambia el estado, es un cambio
@@ -395,7 +451,8 @@ def changed_config(patch, output: dict | None, current: dict):
 _OWNED_UPSERTS = (("termsUpsert", "glossary_terms", "term", "term"),
                   ("domainsUpsert", "parent_domains", "domain", "name"),
                   ("udpUpsert", "udp_definitions", "UDP", "name"),
-                  ("rulesUpsert", "ddl_rules", "rule", "name"))
+                  ("rulesUpsert", "ddl_rules", "rule", "name"),
+                  ("themesUpsert", "diagram_themes", "theme", "name"))
 
 
 async def _owned_elsewhere(project_id: str, body, before: dict[str, dict]) -> str | None:
@@ -499,7 +556,8 @@ async def current_snapshot(project_id: str) -> dict:
     udp = await udp_repo.list_udp(project_id)
     ddl_rules = await rules_repo.list_rules(project_id)
     ddl_config = await rules_repo.get_config(project_id)
-    return snapshot_of(domains, terms, naming, udp, ddl_rules, ddl_config)
+    themes = await themes_repo.list_themes(project_id)
+    return snapshot_of(domains, terms, naming, udp, ddl_rules, ddl_config, themes)
 
 
 async def history(project_id: str) -> list[dict]:
@@ -528,12 +586,13 @@ async def apply(actor: str, project_id: str, body) -> dict:
     before_terms = {t["id"]: t for t in await dict_repo.list_entries(project_id, None)}
     before_udp = {u["id"]: u for u in await udp_repo.list_udp(project_id)}
     before_rules = {r["id"]: r for r in await rules_repo.list_rules(project_id)}
+    before_themes = {t["id"]: t for t in await themes_repo.list_themes(project_id)}
 
     # Doc 105: un upsert con el id de algo que no es de este proyecto → 409
     # antes de escribir nada (antes: 500 con el lote a medias).
     foreign = await _owned_elsewhere(project_id, body, {
         "termsUpsert": before_terms, "domainsUpsert": before_domains,
-        "udpUpsert": before_udp, "rulesUpsert": before_rules})
+        "udpUpsert": before_udp, "rulesUpsert": before_rules, "themesUpsert": before_themes})
     if foreign:
         raise HTTPException(status_code=409, detail=foreign)
 
@@ -556,7 +615,11 @@ async def apply(actor: str, project_id: str, body) -> dict:
                "rulesDelete": existing_only(body.rulesDelete, before_rules),
                "domainsUpsert": [d for d in body.domainsUpsert
                                  if not same_domain(d, before_domains.get(d.id or ""))],
-               "udpUpsert": [u for u in body.udpUpsert if not same_udp(u, before_udp.get(u.id or ""))]}
+               "udpUpsert": [u for u in body.udpUpsert if not same_udp(u, before_udp.get(u.id or ""))],
+               # Doc 109: themes que se grabarían igual no cuentan.
+               "themesDelete": existing_only(body.themesDelete, before_themes),
+               "themesUpsert": [t for t in body.themesUpsert
+                                if not same_theme(t, before_themes.get(t.id or ""))]}
     if body.namingConfig:
         # Contra lo GUARDADO (no lo visible): regrabar el valor visible sobre uno
         # inválido guardado cuenta como cambio y lo limpia (doc 105, ronda 3).
@@ -564,6 +627,10 @@ async def apply(actor: str, project_id: str, body) -> dict:
     body = body.model_copy(update=updates)
     if _empty_batch(body):
         raise HTTPException(status_code=422, detail=NO_CHANGES)
+    # Doc 109: themes — nombre/color válidos y nombres únicos (fail-fast).
+    theme_err = theme_errors(body.themesUpsert, body.themesDelete, before_themes)
+    if theme_err:
+        raise HTTPException(status_code=422, detail=theme_err)
 
     # ── Guards de DDL Export Rules (doc 30) — fail-fast, sin estado a medias ──
     rules_upsert = getattr(body, "rulesUpsert", []) or []
@@ -780,6 +847,22 @@ async def apply(actor: str, project_id: str, body) -> dict:
         else:
             await udp_repo.create_udp(project_id, data)
 
+    # 4a) Themes de color (doc 109): las cajas los usan por referencia — cambiar
+    #     el color de un theme repinta todas las que lo usan; uno borrado = sin
+    #     color. Las altas sin `order` van al final.
+    next_order = max([t.get("order") or 0 for t in before_themes.values()] + [-1]) + 1
+    for tid in body.themesDelete:
+        await themes_repo.delete_theme(tid)
+    for t in body.themesUpsert:
+        data = {k: v for k, v in t.model_dump(exclude_none=True).items() if k != "id"}
+        if t.id and t.id in before_themes:
+            await themes_repo.update_theme(t.id, data)
+        else:
+            if "order" not in data:
+                data["order"] = next_order
+                next_order += 1
+            await themes_repo.create_theme(project_id, {**data, "id": t.id})
+
     # 4b) Reglas de DDL Export (doc 30). Tampoco cascadean nada del modelo: solo
     #     definen transformaciones del texto exportado. Se persiste el resultado
     #     de la validación autoritativa (estado, reporte, condición canonizada y
@@ -829,7 +912,7 @@ async def apply(actor: str, project_id: str, body) -> dict:
         rederived = (await dict_svc.rephysicalize(project_id))["updated"]
 
     impact = {"tables": rederived["tables"], "columns": rederived["columns"] + domain_cols}
-    diff = build_diff(body, before_domains, before_terms, before_udp, before_rules)
+    diff = build_diff(body, before_domains, before_terms, before_udp, before_rules, before_themes)
     # `kind` coaccionado al vocabulario conocido (el historial itera iconos por
     # kind; un valor arbitrario del cliente rompería el render).
     kind = body.kind if body.kind in KINDS else "batch"
@@ -889,6 +972,8 @@ async def rollback(actor: str, project_id: str, target_seq: int) -> dict | None:
     # snapshots pre-feature sin 'ddlRules'/'ddlConfig' dejan el catálogo vacío.
     await rules_repo.restore_rules(project_id, snap.get("ddlRules") or [])
     await rules_repo.restore_config(project_id, snap.get("ddlConfig") or {})
+    # Doc 109: themes de color (snapshots anteriores sin 'themes' → ninguno).
+    await themes_repo.restore_themes(project_id, snap.get("themes") or [])
 
     # Re-derivar SOLO lo que cambió: nombres físicos si cambió glosario/naming;
     # tipos solo de los dominios que cambiaron de tipo. Un rollback de solo-UDP no
@@ -944,7 +1029,7 @@ async def domain_history_of(project_id: str, domain_id: str) -> list[dict]:
 
 # ── Doc 75 D15: nacimiento de un proyecto (copia de bloques o baseline vacío) ──
 
-COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl")
+COPY_BLOCKS = ("glossary", "domains", "udp", "naming", "ddl", "themes")
 _UDP_KEYS = ("name", "level", "view", "dataType", "defaultValue", "allowedValues", "description")
 _DOMAIN_KEYS = ("name", "defaultDataType", "logicalDataType", "namingTerm", "description", "inheritsName",
                 "physicalName", "physicalDescription")   # doc 85 (`udpValues` se remapea aparte)
@@ -960,6 +1045,7 @@ async def summary(project_id: str) -> dict:
         "domains": len(await dom_repo.list_domains(project_id)),
         "udp": len(await udp_repo.list_udp(project_id)),
         "rules": len(await rules_repo.list_rules(project_id)),
+        "themes": len(await themes_repo.list_themes(project_id)),   # doc 109
         "naming": True,
     }
 
@@ -1010,6 +1096,9 @@ async def copy_standards(actor: str, target_project_id: str, source_project_id: 
                    for name, lk in (cfg.get("lookups") or {}).items()}
         await rules_repo.set_config(target_project_id, lookups=lookups,
                                     functions=cfg.get("functions") or [], output=cfg.get("output") or {})
+    if "themes" in wanted:       # doc 109: con ids nuevos (las tablas del destino no los usan aún)
+        for t in await themes_repo.list_themes(source_project_id):
+            await themes_repo.create_theme(target_project_id, {k: t.get(k) for k in ("name", "color", "order")})
     diff = {"added": [f"{b} copied from «{label}»" for b in wanted], "edited": [], "removed": []}
     version = await _record(actor, target_project_id, "copy",
                             f"Copied from «{label}»: {', '.join(wanted)}", None, diff,

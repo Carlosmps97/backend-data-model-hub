@@ -391,6 +391,35 @@ def test_bulk_write_updateone_fast_path(coll):
     assert d2["v"] == 5 and d2["createdAt"] == "T1"
 
 
+def test_bulk_write_updateone_una_sentencia_doc109(coll):
+    """Doc 109: el lote va en UNA sentencia. Misma semántica que antes:
+    existente = merge del $set (sin $setOnInsert); upsert nuevo = {_id} ∪
+    $setOnInsert ∪ $set; sin upsert y sin fila = no inserta nada."""
+    from pymongo import UpdateOne
+
+    seed(coll, [{"_id": "e1", "a": 1, "keep": "x", "createdAt": "T0", "projectId": "p"}])
+    ops = [
+        UpdateOne({"_id": "e1"}, {"$set": {"a": 2, "b": [1, {"c": "ñ"}]},
+                                  "$setOnInsert": {"createdAt": "T9", "flgactive": True}}, upsert=True),
+        UpdateOne({"_id": "n1"}, {"$set": {"a": 7, "projectId": "p"},
+                                  "$setOnInsert": {"createdAt": "T1", "flgactive": True}}, upsert=True),
+        UpdateOne({"_id": "n2"}, {"$set": {"flgactive": False}}),          # sin upsert
+    ]
+    res = run(coll.bulk_write(ops, ordered=False))
+    assert res.matched_count == 1
+    assert run(coll.find_one({"_id": "e1"})) == {"_id": "e1", "a": 2, "keep": "x", "createdAt": "T0",
+                                                 "projectId": "p", "b": [1, {"c": "ñ"}]}
+    assert run(coll.find_one({"_id": "n1"})) == {"_id": "n1", "a": 7, "projectId": "p",
+                                                 "createdAt": "T1", "flgactive": True}
+    assert run(coll.find_one({"_id": "n2"})) is None
+    # la columna generada de alcance se llena en la fila insertada
+    assert run(coll.count_documents({"projectId": "p"})) == 2
+    # re-correr el mismo lote: todo existe → sólo merge, nada se duplica
+    run(coll.bulk_write(ops, ordered=False))
+    assert run(coll.count_documents({})) == 2
+    assert run(coll.find_one({"_id": "n1"}))["createdAt"] == "T1"
+
+
 def test_bulk_write_replaceone_fast_path(coll):
     from pymongo import ReplaceOne
 
@@ -751,3 +780,25 @@ def test_project_column_generada_y_filtro(db, coll):
     # Un índice compuesto con la columna líder se crea sin error y con el nombre nuevo.
     assert run(db.create_field_index(coll.name, [("projectId", 1), ("name", 1)])) == \
         f"ix_{coll.name}_project_id_name"
+
+
+# ─── Doc 109: arranque sin DDL en los pasos del one-shot ────────────────
+
+
+def test_assume_base_solo_con_todas_las_tablas_propias(db):
+    """Un paso posterior a create_admin da por creadas las tablas con UNA
+    consulta; si falta alguna (BD de otra versión) pide el arranque completo."""
+    from app.core.db.lakebase.collection import KNOWN_COLLECTIONS
+
+    fresh = type(db)(db.pool, db.schema)
+    if not run(fresh.assume_base()):
+        run(fresh.ensure_base())
+    again = type(db)(db.pool, db.schema)
+    assert run(again.assume_base()) is True
+    assert set(KNOWN_COLLECTIONS) <= again._ensured
+
+    async def _drop_one():
+        async with db.pool.acquire() as conn:
+            await conn.execute(f'DROP TABLE "{db.schema}"."diagram_themes"')
+    run(_drop_one())
+    assert run(type(db)(db.pool, db.schema).assume_base()) is False

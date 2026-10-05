@@ -12,9 +12,16 @@ resueltas). Las decisiones (schemas faltantes, dedup, niveles UDP) viven en
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+
+# Doc 109: versión del modelo parseado — cambia cuando cambia lo que `parse`
+# entrega, así una caché vieja nunca se reusa.
+PARSER_VERSION = "109.2"
 
 # Separador del glosario NSM: 0x1F, que el export escapa como literal "\#x1F".
 _GLOSS_SEP = re.compile(r"\\#x1F|\x1f")
@@ -95,6 +102,9 @@ class ErwinEntity:
     # Doc 69 (facetas): la entidad existe en una sola vista de Erwin.
     logical_only: bool = False
     physical_only: bool = False
+    # Doc 109: theme puesto a la TABLA (EntityProps.Theme_Ref) — vale en todos
+    # sus diagramas salvo que la caja traiga el suyo.
+    theme_ref: str | None = None
 
 
 @dataclass
@@ -109,6 +119,7 @@ class ErwinView:
     # vista es Regular (Erwin genera el SQL desde sus columnas).
     user_defined_sql: str = ""
     attributes: list[ErwinAttribute] = field(default_factory=list)
+    theme_ref: str | None = None   # doc 109: ViewProps.Theme_Ref
 
 
 @dataclass
@@ -173,6 +184,59 @@ class ErwinUdpDef:
 
 
 @dataclass
+class ErwinTheme:
+    """Theme de Erwin (doc 109): preset de estilo con nombre. Sólo interesa el
+    relleno VISIBLE de las cajas de tabla y de vista (`#RRGGBB`)."""
+    id: str
+    name: str
+    entity_fill: str | None = None
+    view_fill: str | None = None
+
+
+@dataclass
+class ErwinTextStyle:
+    """Formato de un texto o dibujo de Erwin (props `Annotation_*`), ya
+    traducido: colores `#RRGGBB`, tamaño en puntos, alineación en palabras."""
+    font: str = ""
+    size: float = 10.0
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    color: str | None = None        # color del texto
+    fill: str | None = None         # relleno visible
+    outline: str | None = None      # color del borde
+    line: str | None = None         # color de la línea (dibujo de tipo línea)
+    align: str = "center"           # left | center | right
+    valign: str = "top"             # top | middle | bottom
+
+
+@dataclass
+class ErwinBox:
+    """Una caja dibujada en un diagrama (`ER_Model_Shape`): tabla, vista,
+    texto o símbolo de subcategoría, con su centro y su estilo resuelto."""
+    id: str                         # id del ER_Model_Shape (estable)
+    ref: str                        # Model_Object_Ref (el objeto dibujado)
+    center: tuple[float, float] | None
+    size: tuple[float, float] | None = None   # Fixed_Size_Point (si la caja lo trae)
+    theme_ref: str | None = None    # theme puesto a la CAJA en este diagrama
+    fill: str | None = None         # relleno VISIBLE de la caja (tabla/vista)
+    fill_explicit: bool = False     # el relleno lo eligió el modelador (sin Derived)
+    text: ErwinTextStyle | None = None   # estilo, si la caja es un texto
+
+
+@dataclass
+class ErwinDrawing:
+    """Objeto de dibujo de un diagrama (`Shape` en `Shape_Groups`)."""
+    id: str
+    kind: str                       # Type de Erwin: "0" rect · "1" rect de título · "15" línea
+    text: str
+    center: tuple[float, float] | None
+    size: tuple[float, float] | None
+    end: tuple[float, float] | None = None    # Anchor_Point_2 (líneas)
+    style: ErwinTextStyle = field(default_factory=ErwinTextStyle)
+
+
+@dataclass
 class ErwinDiagram:
     id: str
     name: str
@@ -180,6 +244,10 @@ class ErwinDiagram:
     owner_path: str
     shapes: list[tuple[str, str | None]] = field(default_factory=list)
     # (Model_Object_Ref, Anchor_Point crudo o None)
+    # Doc 109: cajas con geometría y estilo, dibujos y theme del diagrama.
+    boxes: list[ErwinBox] = field(default_factory=list)
+    drawings: list[ErwinDrawing] = field(default_factory=list)
+    theme_ref: str | None = None
 
 
 @dataclass
@@ -196,10 +264,15 @@ class ErwinModel:
     udp_values: list[tuple[str, str, str, str]] = field(default_factory=list)
     glossary: list[tuple[str, ...]] = field(default_factory=list)  # (palabra, abbrev, *alts)
     hive_dbs: dict[str, list[str]] = field(default_factory=dict)   # db name -> member refs
-    subject_areas: list[dict] = field(default_factory=list)        # {id,name,definition,order}
+    subject_areas: list[dict] = field(default_factory=list)        # {id,name,definition,order,theme_ref}
     diagrams: list[ErwinDiagram] = field(default_factory=list)
     annotations: int = 0
     subtype_udp_defs: int = 0
+    # Doc 109: themes del modelo, theme por defecto (ModelProps.Theme_Ref) y
+    # el texto de cada Annotation (el objeto; sus cajas van por diagrama).
+    themes: dict[str, ErwinTheme] = field(default_factory=dict)
+    model_theme_ref: str | None = None
+    annotation_text: dict[str, str] = field(default_factory=dict)
 
     # ---- derivados (post-parse) ----
     def owner_schema(self) -> dict[str, str]:
@@ -278,6 +351,109 @@ def _txt(p: ET.Element | None, name: str) -> str:
     return (p.findtext(f"./{{*}}{name}") or "") if p is not None else ""
 
 
+# ── Doc 109: estilo de cajas, textos y dibujos ──────────────────────────────
+
+# Props que se leen de un ER_Model_Shape o de un Shape de dibujo.
+_STYLE_KEYS = frozenset({
+    "Model_Object_Ref", "Anchor_Point", "Anchor_Point_2", "Owner_Path", "Fixed_Size_Point",
+    "Theme_Ref", "Type", "Text",
+    "Entity_Fill_Color1", "Entity_Fill_Color2", "Entity_Fill_Style",
+    "View_Fill_Color1", "View_Fill_Color2", "View_Fill_Style",
+    "General_Fill_Color1", "General_Fill_Color2", "General_Fill_Style",
+    "Annotation_Font_Name", "Annotation_Font_Size", "Annotation_Is_Font_Bold",
+    "Annotation_Is_Font_Italic", "Annotation_Font_Underscore", "Annotation_Font_Color",
+    "Annotation_Fill_Color1", "Annotation_Fill_Color2", "Annotation_Fill_Style",
+    "Annotation_Outline_Color", "Annotation_Line_Color", "Annotation_Text_Horizontal_Alignment",
+    "Annotation_Text_Vertical_Alignment",
+})
+_FILL_KEYS = {"Entity": ("Entity_Fill_Style", "Entity_Fill_Color1", "Entity_Fill_Color2"),
+              "View": ("View_Fill_Style", "View_Fill_Color1", "View_Fill_Color2")}
+# El relleno elegido a mano puede quedar explícito en las props `General_*`
+# (de las que derivan las de entidad/vista): también cuentan como «a mano».
+_GENERAL_FILL = {"General_Fill_Style", "General_Fill_Color1", "General_Fill_Color2"}
+# Alineación del texto. Validado con los XML del BCP: horizontal 1 = centrado
+# (títulos centrados en el PDF de Erwin) y vertical 2 = ARRIBA (en los marcos
+# con título las tablas dejan libre la franja superior: 13 de 13). El resto
+# de valores (0/4 horizontal, 0 vertical: 3 casos en 5 XML) es la lectura
+# más probable; lo desconocido cae al default de Erwin.
+_HALIGN = {"0": "left", "1": "center", "2": "right", "4": "left"}
+_VALIGN = {"0": "middle", "1": "bottom", "2": "top"}
+
+
+def colorref_hex(raw: str | None) -> str | None:
+    """COLORREF de Windows (entero BGR: `v & 255` es el rojo) → `#RRGGBB`.
+    None si no es un entero no negativo. Puro."""
+    try:
+        v = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if v < 0:
+        return None
+    v &= 0xFFFFFF
+    return "#%02X%02X%02X" % (v & 255, (v >> 8) & 255, (v >> 16) & 255)
+
+
+def visible_fill(style: str | None, color1: str | None, color2: str | None) -> str | None:
+    """Relleno que Erwin MUESTRA: `Color2` (o `Color1` si falta), con cualquier
+    estilo — 4 = degradado de `Color1` (blanco) a `Color2`, el de los themes del
+    BCP; 0 = sólido, también con `Color2`: en los XML el modelador que pinta una
+    caja sólida cambia `Color2` y deja `Color1` blanco heredado (y hay textos
+    blancos sobre ese `Color2` oscuro). `style` queda por documentación. Puro."""
+    first, second = colorref_hex(color1), colorref_hex(color2)
+    return second or first
+
+
+def parse_point(raw: str | None) -> tuple[float, float] | None:
+    """`"x y"` de Erwin → (x, y); None si no son dos números. Puro."""
+    parts = (raw or "").split()
+    if len(parts) != 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
+def _style_props(p: ET.Element) -> tuple[dict[str, str], set[str]]:
+    """Valores de `_STYLE_KEYS` de un Props y cuáles son EXPLÍCITOS (sin
+    `Derived="Y"`: los puso el modelador, no vienen del theme)."""
+    vals: dict[str, str] = {}
+    explicit: set[str] = set()
+    for c in p:
+        k = _t(c)
+        if k in _STYLE_KEYS and not len(c):
+            vals[k] = c.text or ""
+            if c.get("Derived") != "Y":
+                explicit.add(k)
+    return vals, explicit
+
+
+def _flag(v: str | None) -> bool:
+    return (v or "").strip().lower() == "true"
+
+
+def text_style(v: dict[str, str]) -> ErwinTextStyle:
+    """Formato de un texto/dibujo desde sus props `Annotation_*`. Puro."""
+    try:
+        size = float((v.get("Annotation_Font_Size") or "").strip() or 10)
+    except ValueError:
+        size = 10.0
+    return ErwinTextStyle(
+        font=(v.get("Annotation_Font_Name") or "").strip(),
+        size=size if size > 0 else 10.0,
+        bold=_flag(v.get("Annotation_Is_Font_Bold")),
+        italic=_flag(v.get("Annotation_Is_Font_Italic")),
+        underline=_flag(v.get("Annotation_Font_Underscore")),
+        color=colorref_hex(v.get("Annotation_Font_Color")),
+        fill=visible_fill(v.get("Annotation_Fill_Style"), v.get("Annotation_Fill_Color1"),
+                          v.get("Annotation_Fill_Color2")),
+        outline=colorref_hex(v.get("Annotation_Outline_Color")),
+        line=colorref_hex(v.get("Annotation_Line_Color")),
+        align=_HALIGN.get((v.get("Annotation_Text_Horizontal_Alignment") or "").strip(), "center"),
+        valign=_VALIGN.get((v.get("Annotation_Text_Vertical_Alignment") or "").strip(), "top"),
+    )
+
+
 def parse(xml_path: str) -> ErwinModel:
     """Parsea el XML completo a un ErwinModel (streaming, un pase)."""
     m = ErwinModel()
@@ -288,7 +464,10 @@ def parse(xml_path: str) -> ErwinModel:
     attrs_of: dict[int, list[ErwinAttribute]] = {}
     keys_of: dict[int, dict] = {}
     kg_member_attr: dict[str, str] = {}  # Key_Group_Member id → Attribute_Ref
-    raw_shapes: list[tuple[str, str | None, str]] = []
+    # Doc 109: (props, explícitas, id) de cada ER_Model_Shape y de cada Shape
+    # de dibujo; se reparten por diagrama al final (por Owner_Path).
+    raw_shapes: list[tuple[dict[str, str], set[str], str]] = []
+    raw_drawings: list[tuple[dict[str, str], str]] = []
 
     for ev, el in ET.iterparse(xml_path, events=("start", "end")):
         tag = _t(el)
@@ -397,6 +576,7 @@ def parse(xml_path: str) -> ErwinModel:
                 index_key_groups=keys["if"],
                 logical_only=_txt(p, "Is_Logical_Only").strip() == "true",
                 physical_only=_txt(p, "Is_Physical_Only").strip() == "true",
+                theme_ref=_txt(p, "Theme_Ref").strip() or None,
             )
             m.entities[ent.id] = ent
 
@@ -410,6 +590,7 @@ def parse(xml_path: str) -> ErwinModel:
                 sql=_txt(p, "SQL").strip(),
                 user_defined_sql=_txt(p, "User_Defined_SQL").strip(),
                 attributes=_phys_sorted(el, "ViewProps", attrs_of.pop(id(el), [])),
+                theme_ref=_txt(p, "Theme_Ref").strip() or None,
             )
             m.views[v.id] = v
 
@@ -500,15 +681,35 @@ def parse(xml_path: str) -> ErwinModel:
                 "name": el.get("name") or _txt(p, "Name"),
                 "definition": _txt(p, "Definition").strip(),
                 "order": int(_txt(p, "Object_Order") or 0),
+                "theme_ref": _txt(p, "Theme_Ref").strip() or None,   # doc 109
             })
 
         elif tag == "ER_Model_Shape":
             p = _props(el, "ER_Model_ShapeProps")
             if p is not None:
-                # se adjunta por Owner_Path al resolver diagramas (patrón probado)
-                raw_shapes.append((_txt(p, "Model_Object_Ref"),
-                                   _txt(p, "Anchor_Point").strip() or None,
-                                   _txt(p, "Owner_Path")))
+                # se adjunta por Owner_Path al resolver diagramas (patrón probado);
+                # doc 109: con su geometría y su estilo.
+                vals, explicit = _style_props(p)
+                raw_shapes.append((vals, explicit, el.get("id") or ""))
+
+        elif tag == "Shape":
+            # Doc 109: objeto de DIBUJO del diagrama (rectángulo, título, línea).
+            p = _props(el, "ShapeProps")
+            if p is not None:
+                raw_drawings.append((_style_props(p)[0], el.get("id") or ""))
+
+        elif tag == "Theme":
+            p = _props(el, "ThemeProps")
+            th = ErwinTheme(
+                id=el.get("id") or "",
+                name=clean_name(el.get("name") or _txt(p, "Name")),
+                entity_fill=visible_fill(_txt(p, "Entity_Fill_Style"), _txt(p, "Entity_Fill_Color1"),
+                                         _txt(p, "Entity_Fill_Color2")),
+                view_fill=visible_fill(_txt(p, "View_Fill_Style"), _txt(p, "View_Fill_Color1"),
+                                       _txt(p, "View_Fill_Color2")),
+            )
+            if th.id:
+                m.themes[th.id] = th
 
         elif tag == "ER_Diagram":
             p = _props(el, "ER_DiagramProps")
@@ -518,6 +719,7 @@ def parse(xml_path: str) -> ErwinModel:
                 name=el.get("name") or _txt(p, "Name"),
                 subject_area=op.split(".")[-1] if "." in op else op,
                 owner_path=op,
+                theme_ref=_txt(p, "Theme_Ref").strip() or None,
             ))
 
         elif tag == "Locator":
@@ -527,23 +729,60 @@ def parse(xml_path: str) -> ErwinModel:
 
         elif tag == "Annotation":
             m.annotations += 1
+            # Doc 109: el TEXTO vive en el objeto; cada diagrama lo dibuja con su caja.
+            p = _props(el, "AnnotationProps")
+            m.annotation_text[el.get("id") or ""] = _txt(p, "Text").replace("\r\n", "\n")
 
         elif tag == "Model":
             p = _props(el, "ModelProps")
             m.name = m.name or el.get("name") or _txt(p, "Name")
 
-        elif tag == "ModelProps" and not m.name:
-            m.name = _txt(el, "Name")
+        elif tag == "ModelProps":
+            if not m.name:
+                m.name = _txt(el, "Name")
+            # Doc 109: theme por defecto del modelo = el look base de Erwin.
+            m.model_theme_ref = m.model_theme_ref or (_txt(el, "Theme_Ref").strip() or None)
 
         if tag in _CLEAR_TAGS or tag.endswith("_Groups"):
             el.clear()
 
     # asociar shapes → diagramas por Owner_Path ("Modelo.SA.Diagrama")
     by_path = {f"{d.owner_path}.{d.name}": d for d in m.diagrams}
-    for ref, anchor, op in raw_shapes:
-        d = by_path.get(op)
-        if d is not None:
-            d.shapes.append((ref, anchor))
+    for vals, explicit, sid in raw_shapes:
+        d = by_path.get(vals.get("Owner_Path", ""))
+        if d is None:
+            continue
+        ref = vals.get("Model_Object_Ref", "")
+        anchor = (vals.get("Anchor_Point") or "").strip() or None
+        d.shapes.append((ref, anchor))
+        # Doc 109: caja con geometría y estilo — sólo de lo que se dibuja como
+        # bloque o texto (las relaciones no: son ~90 % de los shapes).
+        kind = ("Entity" if ref in m.entities else "View" if ref in m.views
+                else "Annotation" if ref in m.annotation_text
+                else "Subtype_Symbol" if ref in m.subtype_symbols else None)
+        if kind is None:
+            continue
+        box = ErwinBox(id=sid, ref=ref, center=parse_point(anchor),
+                       size=parse_point(vals.get("Fixed_Size_Point")),
+                       theme_ref=(vals.get("Theme_Ref") or "").strip() or None)
+        if kind in _FILL_KEYS:
+            style_k, c1_k, c2_k = _FILL_KEYS[kind]
+            box.fill = visible_fill(vals.get(style_k), vals.get(c1_k), vals.get(c2_k))
+            box.fill_explicit = bool(explicit & ({style_k, c1_k, c2_k} | _GENERAL_FILL))
+        elif kind == "Annotation":
+            box.text = text_style(vals)
+        d.boxes.append(box)
+    for vals, did in raw_drawings:
+        d = by_path.get(vals.get("Owner_Path", ""))
+        if d is None:
+            continue
+        d.drawings.append(ErwinDrawing(
+            id=did, kind=(vals.get("Type") or "0").strip() or "0",
+            text=(vals.get("Text") or "").replace("\r\n", "\n"),
+            center=parse_point(vals.get("Anchor_Point")),
+            size=parse_point(vals.get("Fixed_Size_Point")),
+            end=parse_point(vals.get("Anchor_Point_2")),
+            style=text_style(vals)))
 
     # SA dueña del diagrama por Owner_Path ("Modelo.SA"): el nombre de la SA
     # puede llevar puntos ("1. Party") y el split ingenuo del handler trunca
@@ -558,3 +797,32 @@ def parse(xml_path: str) -> ErwinModel:
                 d.subject_area = n
                 break
     return m
+
+
+def parse_cached(xml_path: str, cache_dir: str | None = None) -> ErwinModel:
+    """`parse` con caché en disco (doc 109): el gate del one-shot parsea cada
+    XML y deja el modelo en `cache_dir`; migrate lo reusa en vez de volver a
+    leer cientos de MB (~40 s menos en el archivo más grande). La clave es la
+    ruta + tamaño + fecha del archivo + `PARSER_VERSION`: un XML distinto, o un
+    parser distinto, nunca reusa la caché. Sin `cache_dir`, `parse` a secas."""
+    if not cache_dir:
+        return parse(xml_path)
+    st = os.stat(xml_path)
+    key = hashlib.sha1(f"{PARSER_VERSION}|{os.path.abspath(xml_path)}|{st.st_size}|{st.st_mtime_ns}"
+                       .encode("utf-8")).hexdigest()
+    path = os.path.join(cache_dir, f"{key}.pkl")
+    if os.path.isfile(path):
+        try:
+            with open(path, "rb") as fh:
+                model = pickle.load(fh)
+            if isinstance(model, ErwinModel):
+                return model
+        except Exception:  # noqa: BLE001 — caché ilegible: se vuelve a parsear
+            pass
+    model = parse(xml_path)
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "wb") as fh:
+        pickle.dump(model, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)
+    return model

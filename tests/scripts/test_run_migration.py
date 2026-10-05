@@ -127,7 +127,7 @@ def test_oneshot_stages_un_carril_por_proyecto_entre_reset_y_cierre():
         [_plan("a.xml", "PA"), _plan("b.xml", "PA"), _plan("c.xml", "PB")],
         force=True, base_title="Mi Base", quality_json="/r/q.json")
 
-    assert [s["kind"] for s in stages] == ["par", "seq", "par", "seq"]
+    assert [s["kind"] for s in stages] == ["par", "seq", "par", "par", "seq"]
 
     gates = stages[0]["lanes"]
     assert [g["lane"] for g in gates] == ["PA", "PB"]
@@ -149,11 +149,33 @@ def test_oneshot_stages_un_carril_por_proyecto_entre_reset_y_cierre():
                                                          str(Path("/x/b.xml"))]
     assert migr[0]["steps"][0]["cmd"][-4:] == ["--project", "PA", "--apply", "--force"]
 
-    cierre = stages[3]["steps"]
-    assert [st["klass"] for st in cierre] == ["check", "core", "core", "core", "info", "core"]
-    assert cierre[2]["cmd"][-3:] == ["scripts.seed_upload_profiles", "--all-projects", "--apply"]
+    # Doc 109: el cierre corre en paralelo (audit + 3 seeds, independientes) y
+    # después, sola, la versión base. Ya no hay auto-arrange.
+    cierre = [st for lane in stages[3]["lanes"] for st in lane["steps"]]
+    assert [st["klass"] for st in cierre] == ["check", "core", "core", "core"]
+    assert cierre[0]["cmd"][-1] == "scripts.audit_data_consistency"
     assert cierre[1]["cmd"][-3:] == ["scripts.seed_ddl_export_rules", "--all-projects", "--apply"]
-    assert cierre[-1]["cmd"][-2:] == ["--title", "Mi Base"]
+    assert cierre[2]["cmd"][-3:] == ["scripts.seed_upload_profiles", "--all-projects", "--apply"]
+    assert cierre[3]["cmd"][-3:] == ["scripts.seed_sheet_templates", "--all-projects", "--apply"]
+    assert [st["name"] for st in stages[4]["steps"]] == ["mark_base_version (v1 de cada proyecto)"]
+    assert stages[4]["steps"][0]["cmd"][-2:] == ["--title", "Mi Base"]
+    every = [st for s in stages for st in rm._stage_steps(s)]
+    assert not any("arrange_all" in " ".join(st["cmd"]) for st in every)
+    # los pasos posteriores a create_admin no repiten el DDL de arranque
+    after_admin = [st for s in stages[2:] for st in rm._stage_steps(s)]
+    assert all(st.get("env") == {"DMH_SKIP_STARTUP_DDL": "1"} for st in after_admin)
+    assert not any(st.get("env") for s in stages[:2] for st in rm._stage_steps(s))
+
+
+def test_oneshot_caché_de_parseo_del_gate_a_migrate():
+    """Doc 109: el gate deja el modelo parseado y migrate lo reusa (misma carpeta)."""
+    stages = oneshot_stages([_plan("a.xml", "PA")], force=False, base_title="T",
+                            quality_json="/r/q.json", parse_cache="/tmp/pc")
+    gate = stages[0]["lanes"][0]["steps"][0]["cmd"]
+    migr = stages[2]["lanes"][0]["steps"][0]["cmd"]
+    assert gate[-5:] == ["--parse-cache", "/tmp/pc", "--json", "/r/q-1.json", str(Path("/x/a.xml"))]
+    assert migr[3:6] == [str(Path("/x/a.xml")), "--parse-cache", "/tmp/pc"]
+    assert migr[-3:] == ["--project", "PA", "--apply"]
 
 
 def test_oneshot_sin_force_no_lo_propaga():
@@ -176,10 +198,11 @@ def test_append_stages_es_secuencial_de_punta_a_punta():
     stages = append_stages(_plan("m.xml", "Proy", source="archivo"), force=False)
     assert [s["kind"] for s in stages] == ["seq"]
     steps = stages[0]["steps"]
-    assert [st["klass"] for st in steps] == ["gate", "info", "core", "check", "info"]
+    # Doc 109: sin auto-arrange (re-armaba TODOS los canvases del proyecto).
+    assert [st["klass"] for st in steps] == ["gate", "info", "core", "check"]
     assert steps[1]["cmd"][-3:] == ["--project", "Proy", str(Path("/x/m.xml"))]   # crosscheck
     assert steps[2]["cmd"][-3:] == ["--project", "Proy", "--apply"]
-    assert steps[4]["cmd"][-2:] == ["--project", "Proy"]
+    assert not any(st.get("env") for st in steps)      # sin create_admin: el DDL de arranque sigue
 
 
 def test_quality_json_va_antes_de_los_xml():

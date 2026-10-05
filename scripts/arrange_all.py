@@ -39,6 +39,8 @@ for _s in (sys.stdout, sys.stderr):
 
 from pymongo import UpdateOne
 
+from scripts.erwin_migration.layout import APP_HEADER_H, APP_ROW_H, box_width, view_box, view_rows
+
 # Directorio temporal para el hand-off Python↔elkjs (estable, no acoplado a una
 # sesión). Override con la env var ARRANGE_SCRATCH si se quiere otro sitio.
 SCRATCH = os.environ.get("ARRANGE_SCRATCH", tempfile.gettempdir())
@@ -55,18 +57,14 @@ def table_size(dims: dict, meta: dict, tid: str) -> tuple[int, int]:
     name = max(phys, logical, key=len)
     header_chars = len(f"{schema}.{name}") if schema else len(name)
     chars = max(header_chars, maxcol + 3)
-    return min(880, max(240, round(chars * 8 + 72))), 32 + n * 28
+    # Doc 109: la MISMA métrica que usa la migración (erwin_migration/layout.py).
+    return box_width(chars), APP_HEADER_H + n * APP_ROW_H
 
 
-def view_size(v: dict) -> tuple[int, int]:
-    """Tamaño del nodo VISTA (`.wk-vnode`: header + 1 fila por source, sin
-    footer). Ancho por el naming/alias más largo, acotado 240..880."""
-    srcs = [s for s in (v.get("sources") or []) if s.get("column") or s.get("expression")]
-    schema, name = v.get("schema") or "", v.get("name") or ""
-    header = len(f"{schema}.{name}") if schema else len(name)
-    maxrow = max([len(s.get("outputAlias") or s.get("column") or "") for s in srcs] + [0])
-    chars = max(header, maxrow + 12)                 # +12 ≈ tipo + fx + gaps
-    return min(880, max(240, round(chars * 8 + 72))), 32 + max(1, len(srcs)) * 28
+def view_size(v: dict, col_types: dict[tuple[str, str], str]) -> tuple[int, int]:
+    """Tamaño del nodo VISTA (`.wk-vnode`: header + 1 fila por source con su
+    tipo). Doc 109: la MISMA métrica que la migración (`layout.view_box`)."""
+    return view_box(v.get("schema") or "", v.get("name") or "", view_rows(v.get("sources") or [], col_types))
 
 
 def view_src_ids(v: dict) -> list[str]:
@@ -138,6 +136,13 @@ async def main(project: str | None = None) -> None:
     sas = [(str(sa["_id"]), sa.get("tableIds") or [])
            async for sa in db["subject_areas"].find(sa_filter, {"tableIds": 1})]
     print(f"      {len(rels)} relaciones · {len(views)} vistas · {len(sas)} canvases")
+    # Doc 109: tipo de cada columna que muestran las vistas (mide la fila).
+    col_types: dict[tuple[str, str], str] = {}
+    src_tables = sorted({s.get("tableId") for v in views for s in (v.get("sources") or []) if s.get("tableId")})
+    for i in range(0, len(src_tables), 500):
+        async for c in db["canonical_columns"].find({**ACTIVE, "tableId": {"$in": src_tables[i:i + 500]}},
+                                                    {"tableId": 1, "physicalName": 1, "dataType": 1}):
+            col_types[(c["tableId"], (c.get("physicalName") or "").upper())] = c.get("dataType") or ""
 
     graphs: dict[str, dict] = {}
     for sa_id, tids in sas:
@@ -153,7 +158,7 @@ async def main(project: str | None = None) -> None:
             present = [tid for tid in view_src_ids(v) if tid in tset]
             if not present:
                 continue
-            vw, vh = view_size(v)
+            vw, vh = view_size(v, col_types)
             nodes.append({"id": v["_id"], "w": vw, "h": vh})
             for tid in present:
                 edges.append({"id": f"deriv__{v['_id']}__{tid}", "source": tid, "target": v["_id"]})

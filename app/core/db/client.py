@@ -12,6 +12,7 @@ handlers/repos, `disconnect()` en el teardown.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from app.core.config import settings
@@ -20,6 +21,10 @@ from app.core.db.indexes import ensure_indexes
 log = logging.getLogger(__name__)
 
 _pg_db: Any | None = None
+
+# Doc 109: variable con la que el orquestador del one-shot evita repetir el DDL
+# de arranque en los pasos que corren después de create_admin.
+SKIP_STARTUP_DDL_ENV = "DMH_SKIP_STARTUP_DDL"
 
 # Clave fija del advisory lock que serializa el DDL de arranque entre
 # workers uvicorn (procesos distintos). Cualquier bigint estable sirve.
@@ -38,6 +43,21 @@ async def connect() -> None:
 
     pool = await create_pool()
     db = LakebaseDatabase(pool, settings.LAKEBASE_PGSCHEMA)
+    if os.getenv(SKIP_STARTUP_DDL_ENV) == "1":
+        # Doc 109: un paso del one-shot posterior a create_admin (que acaba de
+        # crear tablas e índices) no repite el DDL de arranque: con la latencia
+        # de Lakebase eran ~7 s por proceso. Sólo lo setea el orquestador
+        # (`scripts/run_migration.py`), nunca la app. Si falta alguna tabla
+        # propia (BD de otra versión), cae al arranque completo.
+        try:
+            assumed = await db.assume_base()
+        except Exception:
+            await pool.close()
+            raise
+        if assumed:
+            _pg_db = db
+            log.info("lakebase connected (startup DDL skipped)", extra={"schema": settings.LAKEBASE_PGSCHEMA})
+            return
     try:
         # Con varios workers uvicorn (procesos separados) cada uno corre este
         # arranque a la vez; el _ddl_lock del adaptador es POR proceso y no

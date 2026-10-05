@@ -47,7 +47,7 @@ Paso a paso manual (lo mismo que encadena el orquestador):
 
 # 4) post-migración
 .venv/bin/python -m scripts.audit_data_consistency        # validación (16 chequeos)
-# layout ELK sobre los canvases migrados: scripts/arrange_all
+# el layout de Erwin ya queda en los canvases (doc 109); scripts/arrange_all lo REEMPLAZA (sólo a pedido)
 ```
 
 Acepta VARIOS .xml en una corrida (`migrate a.xml b.xml ... --project P`):

@@ -226,6 +226,8 @@ def _plan_row(r: TableRow, index: TableIndex, std: Standards, schemas, udp_map: 
         plan.doc["logicalOnly"] = bool(existing.get("logicalOnly"))
         plan.doc["physicalOnly"] = bool(existing.get("physicalOnly"))
         plan.doc["physicalNameOverridden"] = keep_override(existing, physical)   # doc 105 (R2)
+        # Doc 109: la hoja no trae color — el de la tabla se conserva.
+        plan.doc["color"] = normalized_existing(existing).get("color")
     if existing is None:
         plan.action = "create"
         return plan

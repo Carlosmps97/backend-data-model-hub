@@ -83,12 +83,17 @@ from app.core.scope import PROJECT_SCOPED, naming_id
 from app.features.settings.models import DEFAULTS as NAMING_DEFAULTS
 from app.features.settings.repository import _usable as _naming_usable
 
+from . import colors as col
+from . import drawings as drw
 from . import erwin_parser as ep
+from . import layout as lay
 from . import policies as pol
 from . import standard_udps as std_udps
 from .quality import analyze, summarize
 
 _STAMP = {"migratedFrom": "erwin"}
+# Doc 109: lado del símbolo de subcategoría en el canvas (`subtypeGraph.ts`).
+SYMBOL_SIZE = 28
 _ACTIVE = {"flgactive": {"$ne": False}}
 _BATCH = 1000
 
@@ -150,6 +155,8 @@ class Migrator:
             "domain_conflicts": [], "udp_values_unmatched": [],
             "deleted_in_app": [],        # doc 105: tablas borradas en la app que el XML aún trae
             "rels_deleted_in_app": [],   # doc 105: relaciones omitidas por una de esas tablas
+            "theme_conflicts": [],       # doc 109: mismo theme con otro color en la familia
+            "themes_deleted_in_app": [], # doc 109: theme sembrado y borrado en la app (no revive)
         }
         self.dead_entities: set[str] = set()   # entidades Erwin cuya tabla se borró en la app
         self._buf: dict[str, list[UpdateOne]] = defaultdict(list)
@@ -180,6 +187,23 @@ class Migrator:
         # columnas escritas/adoptadas por dueño Erwin: PHYS.upper → col pid
         self._cols_by_owner: dict[str, dict[str, str]] = {}
         self._stale_scope: dict[str, set[str]] = {}  # table pid escrito → cpids vigentes
+        # Doc 109: colores y tamaños en la app. `app_theme` = theme de Erwin →
+        # theme del proyecto; `obj_color` = color que QUEDA en el doc de cada
+        # tabla/vista (el de este archivo o el de otro de la familia);
+        # `box_size` = (ancho, alto) del bloque en la app; `symbol_pids` =
+        # símbolos de subcategoría que existen (relaciones escritas).
+        self.neutral = col.neutral_fills(model)
+        self.app_theme: dict[str, str] = {}
+        self.obj_color: dict[str, str | None] = {}
+        self.box_size: dict[str, tuple[int, int]] = {}
+        # Tipo de cada columna que escribe este archivo, por (tabla, FÍSICO) —
+        # con él se miden las filas de las vistas —, las tablas que escribe (por
+        # si ya existían: se miden con las columnas que la BD conserva) y las
+        # vistas que escribe; todo se mide al final como la app (`_measure_blocks`).
+        self.col_types: dict[tuple[str, str], str] = {}
+        self._table_meta: dict[str, tuple[str, str, str, list[tuple[str, str, str]]]] = {}
+        self._view_meta: dict[str, tuple[str, str, list[dict]]] = {}
+        self.symbol_pids: set[str] = set()
         self._xml_usage()
         self._prefetch()
 
@@ -293,12 +317,14 @@ class Migrator:
         # que los re-runs conserven el sufijo asignado (sin ratchet _DUPn+1).
         self.taken: set[str] = set()
         self.ex_by_erwin: dict[str, dict] = {}
+        self.ex_obj_color: dict[str, str | None] = {}   # doc 109: color vigente de tablas/vistas
         for t in db.canonical_tables.find(active, {"schema": 1, "physicalName": 1,
-                                                   "erwinLongId": 1}):
+                                                   "erwinLongId": 1, "color": 1}):
             phys = t.get("physicalName") or ""
             key = ((t.get("schema") or "").upper(), phys.upper())
             self.ex_tables[key] = {"_id": t["_id"]}
             self.ex_table_ids.add(t["_id"])
+            self.ex_obj_color[t["_id"]] = t.get("color")
             if phys:
                 self.taken.add(phys.upper())
             if t.get("erwinLongId"):
@@ -307,10 +333,11 @@ class Migrator:
                     "schema": t.get("schema") or ""}
         self.ex_views: dict[tuple[str, str], str] = {}
         self.ex_view_ids: set[str] = set()      # doc 105 (P7): vistas vivas del proyecto
-        for v in db.views.find(active, {"schema": 1, "name": 1}):
+        for v in db.views.find(active, {"schema": 1, "name": 1, "color": 1}):
             self.ex_views[((v.get("schema") or "").upper(),
                            (v.get("name") or "").upper())] = v["_id"]
             self.ex_view_ids.add(v["_id"])
+            self.ex_obj_color[v["_id"]] = v.get("color")
         # Doc 105 (R5): tablas y vistas BORRADAS en la app. El kit no las revive
         # (`flgactive` sólo al insertar: lo decide el owner) y, si el XML aún
         # las dibuja, su id no debe volver a un canvas (colgando = 409 al guardar).
@@ -409,7 +436,7 @@ class Migrator:
         # deciden si la re-corrida de un canvas es fusión.
         for sa in db.subject_areas.find(active, {"name": 1, "folderId": 1, "projectId": 1,
                                                  "tableIds": 1, "viewIds": 1, "layout": 1,
-                                                 "drawings": 1, "udpValues": 1,
+                                                 "drawings": 1, "colors": 1, "udpValues": 1,
                                                  "erwinLongId": 1, "erwinLongIds": 1}):
             for tid in set(sa.get("tableIds") or []):
                 self.db_canv_count[tid] += 1
@@ -424,6 +451,21 @@ class Migrator:
         for f in db.folders.find(active, {"projectId": 1, "parentFolderId": 1, "name": 1}):
             self.ex_folders[(f.get("projectId") or "", f.get("parentFolderId") or "",
                              (f.get("name") or "").upper())] = f["_id"]
+        # Doc 109: themes del proyecto — por nombre (los vivos: los de otro
+        # archivo de la familia se reusan; el mismo nombre con otro color no se
+        # pisa) y por id, también los borrados en la app (no se reviven).
+        self.ex_themes: dict[str, dict] = {}
+        self.ex_theme_ids: dict[str, dict] = {}        # id → {alive, color, erwin: color con que se sembró}
+        self.ex_theme_keys: dict[str, str] = {}        # nombre Erwin (MAYÚS) → id del theme que lo representa
+        for t in db.diagram_themes.find({"projectId": self.project_id},
+                                        {"name": 1, "color": 1, "flgactive": 1, "erwinColor": 1, "erwinTheme": 1}):
+            alive = t.get("flgactive") is not False
+            self.ex_theme_ids[t["_id"]] = {"alive": alive, "color": t.get("color"),
+                                           "erwin": t.get("erwinColor") or t.get("color")}
+            if t.get("erwinTheme") and (alive or t["erwinTheme"] not in self.ex_theme_keys):
+                self.ex_theme_keys[t["erwinTheme"]] = t["_id"]
+            if alive:
+                self.ex_themes[(t.get("name") or "").strip().upper()] = {"_id": t["_id"], "color": t.get("color")}
 
     # ---------- pasos ----------
     def standards(self) -> None:
@@ -621,6 +663,71 @@ class Migrator:
             self.stats[f"valores UDP asociados ({fx['view']})"] += 1
         return out
 
+    # ---------- themes de color (doc 109) ----------
+    def themes(self) -> None:
+        """Themes del XML que pintan tablas → themes del PROYECTO (Data
+        Standards), por nombre: el primero en llegar gana. El mismo nombre con
+        OTRO color en otro archivo de la familia no se pisa: va al reporte y las
+        cajas de este archivo quedan con su color exacto (fijo). El look base de
+        Erwin (theme por defecto del modelo y el blanco «Classic») no es theme:
+        en la app es «sin color».
+
+        Un theme que ya se sembró (su id determinista existe) es de la APP: si
+        este archivo trae el MISMO color con que se sembró (`erwinColor`), se
+        reusa aunque en Data Standards lo hayan renombrado o recoloreado (las
+        cajas siguen al theme); con otro color (otro archivo de la familia) es
+        un conflicto, como siempre. Uno borrado en la app no revive: sus cajas
+        quedan con el color fijo del XML (al reporte), salvo que exista otro
+        vivo con su nombre."""
+        order = len(self.ex_themes)
+        for t in col.colored_themes(self.m):
+            key = t.name.strip().upper()
+            tid = self.pid(f"theme|{key}")
+            # El theme que ya representa a este de Erwin: el sembrado (id
+            # determinista) o uno de la app que se adoptó por nombre (`erwinTheme`).
+            mine = tid if tid in self.ex_theme_ids else self.ex_theme_keys.get(key, tid)
+            known = self.ex_theme_ids.get(mine)
+            if known is not None and known["alive"]:
+                if (known["erwin"] or "").upper() == (t.entity_fill or "").upper():
+                    self.app_theme[t.id] = mine
+                    self.stats["themes reusados (ya sembrados; manda la app)"] += 1
+                else:
+                    self.report["theme_conflicts"].append(
+                        {"name": t.name, "kept": known["erwin"], "ignored": t.entity_fill})
+                    self.stats["themes en conflicto (mismo nombre, otro color → color fijo)"] += 1
+                continue
+            ex = self.ex_themes.get(key)
+            if ex is None and known is not None:
+                self.report["themes_deleted_in_app"].append({"name": t.name, "color": t.entity_fill})
+                self.stats["themes borrados en la app (no reviven → color fijo)"] += 1
+                continue
+            if ex:
+                if (ex.get("color") or "").upper() == (t.entity_fill or "").upper():
+                    self.app_theme[t.id] = ex["_id"]
+                    # Queda como el que representa a este theme de Erwin (con el
+                    # color con que se adoptó): si después lo recolorean o
+                    # renombran en la app, una re-corrida lo sigue reusando.
+                    self._upsert("diagram_themes", ex["_id"], {"erwinColor": t.entity_fill, "erwinTheme": key})
+                    self.ex_theme_ids[ex["_id"]] = {"alive": True, "color": ex.get("color"), "erwin": t.entity_fill}
+                    self.ex_theme_keys[key] = ex["_id"]
+                    self.stats["themes reusados (mismo nombre y color)"] += 1
+                else:
+                    self.report["theme_conflicts"].append(
+                        {"name": t.name, "kept": ex.get("color"), "ignored": t.entity_fill})
+                    self.stats["themes en conflicto (mismo nombre, otro color → color fijo)"] += 1
+                continue
+            self._upsert("diagram_themes", tid, {"name": t.name, "color": t.entity_fill,
+                                                 "order": order, "erwinLongId": t.id,
+                                                 "erwinColor": t.entity_fill, "erwinTheme": key})
+            self.ex_themes[key] = {"_id": tid, "color": t.entity_fill}
+            self.ex_theme_ids[tid] = {"alive": True, "color": t.entity_fill, "erwin": t.entity_fill}
+            self.app_theme[t.id] = tid
+            order += 1
+            self.stats["themes creados"] += 1
+
+    def _own_color(self, theme: str | None, kind: str) -> str | None:
+        return col.object_color(self.m, theme, kind, self.app_theme)
+
     # ---------- tablas (R1/R2/_DUPn/R5/R6) ----------
     def _dead_by_key(self, e, schema: str, eff_name: str) -> str | None:
         """Tabla borrada en la app que corresponde a la entidad por CLAVE natural
@@ -789,6 +896,9 @@ class Migrator:
                     self.report["adopted"].append(
                         {"key": nat_key, "columnsUnmapped": unmapped})
                     self.stats["tablas adoptadas (ya existían)"] += 1
+                    # Doc 109: la tabla viva conserva su color (y su bloque se
+                    # mide desde la BD: `_measure_blocks`).
+                    self.obj_color[existing_id] = self.ex_obj_color.get(existing_id)
                     continue
                 pid = existing_id  # gana el archivo → se actualiza EN SU SITIO
                 self.stats["tablas actualizadas (ganó el archivo por uso)"] += 1
@@ -822,7 +932,7 @@ class Migrator:
             t_override = self._physical_override(e.name, eff[e.id], "table")
             if t_override:
                 self.stats["tablas con físico custom (override)"] += 1
-            self._upsert("canonical_tables", pid, {
+            t_doc = {
                 "physicalName": eff[e.id], "logicalName": e.name,
                 "physicalNameOverridden": t_override,
                 # Doc 69: existencia en una sola faceta de Erwin.
@@ -830,7 +940,19 @@ class Migrator:
                 "schema": schema,
                 "description": e.definition or e.comment or None,
                 "udpValues": self._udp_values_for(e.id, "table"),
-                "erwinLongId": e.id})
+                "erwinLongId": e.id}
+            # Doc 109: el color de la TABLA (theme de la entidad en Erwin) lo pone
+            # el archivo que la crea o la re-corre; una tabla de otro archivo de la
+            # familia que este actualiza por uso conserva el suyo (las cajas de
+            # este archivo que se vean distinto llevan su excepción en el canvas).
+            if not existing_id or existing_id == own_pid:
+                t_doc["color"] = self._own_color(e.theme_ref, "Entity")
+                self.obj_color[pid] = t_doc["color"]
+                if t_doc["color"]:
+                    self.stats["tablas con color propio (todos sus canvases)"] += 1
+            else:
+                self.obj_color[pid] = self.ex_obj_color.get(pid)
+            self._upsert("canonical_tables", pid, t_doc)
             self.stats["tablas"] += 1
 
             cols, dropped = pol.dedupe_columns(
@@ -846,6 +968,9 @@ class Migrator:
             # orden de la llave de Erwin) + resto en el Column order; `ordinal`
             # = índice. No hay orden de llave aparte (pkPosition se retiró).
             cols = pol.column_order(cols, e.pk_attr_ids, e.pk_attr_order)
+            xml_cols = [(a.physical, a.name, _col_type(a.data_type)) for a in cols]
+            self.box_size[pid] = lay.table_box(schema, eff[e.id], e.name, xml_cols)
+            self._table_meta[pid] = (schema, eff[e.id], e.name, xml_cols)
             # Partición v2 (R6): PART_nn SIEMPRE marca; incongruencias =
             # reasignadas por el orden de columnas, al reporte.
             part_vals = [(a.id, corr) for a in cols
@@ -881,6 +1006,7 @@ class Migrator:
                 # Doc 96 D8: un complejo es el mismo en las dos facetas — Erwin deja el
                 # lógico en `Array` (sin estructura) o en su `CHAR(18)` por defecto.
                 stored_phys = _col_type(a.data_type)
+                self.col_types[(pid, a.physical.upper())] = stored_phys
                 col_log = mirror_complex(stored_phys, canonicalize_default_type(a.logical_type) or None)
                 overridden = bool(dom_pid and dom and dom_phys and col_phys != dom_phys)
                 log_overridden = bool(dom_pid and dom and dom_log and col_log and col_log != dom_log)
@@ -1017,6 +1143,7 @@ class Migrator:
                         f"relación de subtipo {r.name} sin Subtype_Symbol — "
                         f"se agrupa en símbolo sintético propio")
                     sym_eid = f"subsym|{r.id}"
+                self.symbol_pids.add(self.pid(sym_eid))
                 extra = {"subcategory": True,
                          "subtypeSymbolId": self.pid(sym_eid),
                          # ES-UN (doc 53): 1:1 estricto; la PK del padre migra
@@ -1094,6 +1221,7 @@ class Migrator:
                 self.stats["vistas omitidas (fuente borrada en la app)"] += 1
                 if existing_id:
                     self.view_pid[v.id] = existing_id
+                    self._keep_view_style(existing_id, schema, v)
                 continue
             rels = [r for r in all_rels if r.parent_ref in self.table_pid]
             source_pids = list(dict.fromkeys(self.table_pid[r.parent_ref] for r in rels))
@@ -1109,6 +1237,7 @@ class Migrator:
                 if verdict == "db":
                     self.view_pid[v.id] = existing_id
                     self.stats["vistas adoptadas (ya existían)"] += 1
+                    self._keep_view_style(existing_id, schema, v)
                     continue
                 pid = existing_id
                 self.stats["vistas actualizadas (ganó el archivo por uso)"] += 1
@@ -1128,9 +1257,7 @@ class Migrator:
                 origin = self.attr_idx.get(a.parent_attr_ref or "")
                 origin_tid = (self.table_pid.get(origin.owner_id)
                               if origin and origin.owner_kind == "Entity" else None)
-                cast = (_col_type(a.data_type) if origin
-                        and _norm_type(origin.data_type) != _norm_type(a.data_type)
-                        else None)
+                cast = self._view_cast(a, origin)
                 src = {
                     "tableId": origin_tid or source_pids[0],
                     "column": origin.physical if origin else a.physical,
@@ -1154,6 +1281,15 @@ class Migrator:
             # columnas) y el UDP fijo «Tipo de Vista» = Personalizada (dato de
             # Erwin). Las columnas son las que Erwin declara en la vista (S5).
             udp_values = self._udp_values_for(v.id, "view")
+            # Doc 109: color de la vista (mismo criterio que las tablas) y tamaño
+            # de su bloque (una fila por columna de salida).
+            v_color: dict = {}
+            if not existing_id or existing_id == own_pid:
+                v_color = {"color": self._own_color(v.theme_ref, "View")}
+                self.obj_color[pid] = v_color["color"]
+            else:
+                self.obj_color[pid] = self.ex_obj_color.get(pid)
+            self._view_meta[pid] = (schema, v.name, sources)
             custom_sql = (v.user_defined_sql or "").strip() or None
             if custom_sql:
                 tipo_pid = self.fixed_pid.get(("view", "physical", pol.norm_enum("Tipo de Vista")))
@@ -1176,12 +1312,25 @@ class Migrator:
                 "udpValues": udp_values,
                 # decisión owner: TODAS las vistas visibles en canvas
                 "showOnCanvas": True,
+                **v_color,
                 "erwinLongId": v.id})
             self.stats["vistas"] += 1
 
         for loser_id, winner_id in view_alias.items():
             if winner_id in self.view_pid:
                 self.view_pid[loser_id] = self.view_pid[winner_id]
+
+    def _keep_view_style(self, view_id: str, schema: str, v) -> None:
+        """Doc 109: vista viva que este archivo no reescribe — conserva su color
+        (y su bloque se mide desde la BD: `_measure_blocks`)."""
+        self.obj_color[view_id] = self.ex_obj_color.get(view_id)
+
+    @staticmethod
+    def _view_cast(a, origin) -> str | None:
+        """`castType` de una columna de vista: su tipo si difiere del de su origen."""
+        if origin and _norm_type(origin.data_type) != _norm_type(a.data_type):
+            return _col_type(a.data_type)
+        return None
 
     def schema_docs(self) -> None:
         """Entidad `schemas` (doc 18): un doc por nombre de schema usado EN EL
@@ -1257,6 +1406,17 @@ class Migrator:
         canvases_by_id = {c["_id"]: c for c in self.db_canvases}
         canvases_by_key = {((c.get("folderId") or ""), (c.get("name") or "").upper()): c
                            for c in self.db_canvases}
+        # Doc 109: medir los bloques (los de este archivo y los de los canvases
+        # que re-corre o fusiona) antes de ubicarlos.
+        touched = []
+        for d in self.m.diagrams:
+            if self.only_sa and d.subject_area != self.only_sa:
+                continue
+            hit = canvases_by_id.get(self.pid(d.id)) or canvases_by_key.get(
+                (folder_pid.get(d.subject_area) or "", d.name.upper()))
+            if hit is not None:
+                touched.append(hit)
+        self._measure_blocks(touched)
         # Doc 105 (P7): vistas VIVAS = activas del proyecto + las creadas o
         # adoptadas en esta corrida. La fusión no revive una vista borrada ni
         # deja un id colgando (el canvas quedaba sin poder editarse). R2: ídem
@@ -1268,7 +1428,8 @@ class Migrator:
         for d in self.m.diagrams:
             if self.only_sa and d.subject_area != self.only_sa:
                 continue
-            table_ids, view_ids, layout = [], [], {}
+            table_ids, view_ids = [], []
+            node_ref: dict[str, str] = {}     # bloque del canvas → objeto de Erwin que lo dibuja
             ordered = list(dict.fromkeys(ref for ref, _a in d.shapes))
             ents = [r for r in ordered if r in self.table_pid]
             vws = [r for r in ordered if r in self.view_pid]
@@ -1280,8 +1441,7 @@ class Migrator:
                 seen_nodes.add(pid)
                 if pid not in (live_tables if ref in self.table_pid else live_views):
                     continue               # R5: borrada en la app — no vuelve al canvas
-                n = len(layout)
-                layout[pid] = {"x": 40 + (n % 4) * 480, "y": 40 + (n // 4) * 360}
+                node_ref[pid] = ref
                 if ref in self.table_pid:
                     table_ids.append(pid)
                 else:
@@ -1314,34 +1474,273 @@ class Migrator:
                     [t for t in (existing.get("tableIds") or []) if t in live_tables] + table_ids))
                 view_ids = list(dict.fromkeys(
                     [v for v in (existing.get("viewIds") or []) if v in live_views] + view_ids))
-                layout = {**layout, **(existing.get("layout") or {})}
             else:
                 cid, existing = own_cid, prev or {}
-                # Re-runs NO pisan el layout ya trabajado (ELK/arreglos a mano):
-                # los nodos existentes conservan su posición; la grilla default
-                # solo aplica a nodos NUEVOS de esta corrida. R5: tampoco la de
-                # los símbolos de subcategoría del proyecto (no son nodos del XML).
-                if prev and prev.get("layout"):
-                    symbols = {k: v for k, v in prev["layout"].items() if k in self.symbol_ids}
-                    layout = {**symbols, **{k: prev["layout"].get(k, v) for k, v in layout.items()}}
-            # Doc 105 (A2-o2, decisión del owner: conservar): lo hecho en la app
-            # sobre un canvas que ya existe sobrevive a la fusión y a la
-            # re-corrida, como el layout — sus dibujos intactos (el XML no los
-            # trae) y sus UDP con los del XML encima.
+            # Doc 109: posiciones de Erwin (escaladas y separadas), sus textos y
+            # cuadros, y el color de cada caja. Lo que ya estaba en el canvas
+            # (re-corrida o fusión: posiciones, dibujos y colores hechos en la
+            # app) se conserva y no se mueve.
+            layout, drawings, colors = self._diagram_canvas(
+                d, node_ref, existing, merge=union_with is not None)
+            members = set(table_ids) | set(view_ids)
+            colors = {k: v for k, v in colors.items() if k in members}
             # R2: `erwinLongId` = el diagrama que CREÓ el canvas (la fusión lo
             # pisaba con el último archivo); `erwinLongIds` = todos sus aportes.
             self._upsert("subject_areas", cid, {
                 "projectId": proj_id,
                 "folderId": fid,
                 "name": d.name, "tableIds": table_ids, "viewIds": view_ids, "layout": layout,
-                "drawings": existing.get("drawings") or [],
+                "drawings": drawings, "colors": colors,
                 "udpValues": {**(existing.get("udpValues") or {}), **model_udp},
                 "erwinLongId": d.id if cid == own_cid else (existing.get("erwinLongId") or d.id),
                 "erwinLongIds": list(dict.fromkeys(_canvas_contributors(existing) + [d.id]))})
             self.stats["canvases"] += 1
 
+    # ---------- canvas: layout, dibujos y colores (doc 109) ----------
+    def _size_of(self, pid: str) -> tuple[int, int]:
+        """Tamaño del bloque en la app; uno típico si no es de este archivo."""
+        return self.box_size.get(pid) or (lay.MIN_W, lay.APP_HEADER_H + 8 * lay.APP_ROW_H)
+
+    def _measure_blocks(self, touched: list[dict]) -> None:
+        """Doc 109 (revisión): el tamaño de cada bloque que puede ir a un canvas,
+        medido como lo dibuja la app (`layout.table_box`/`view_box`, espejo de
+        `lodSize.ts`) y desde lo que la app va a LEER: lo que escribe este
+        archivo (en memoria) y lo que ya estaba desde la BD, en lote — tablas
+        adoptadas, vistas de otro archivo, miembros de los canvases que este
+        archivo re-corre o fusiona (`touched`) y las columnas que la BD CONSERVA
+        de una tabla que este archivo reescribe (las de otro archivo de la
+        familia, o las creadas en la app). Con una medida aproximada la
+        separación dejaba bloques pisándose."""
+        want = set(self.table_pid.values()) | set(self.view_pid.values())
+        for sa in touched:
+            want |= set((sa.get("layout") or {}).keys())
+        missing = sorted(p for p in want if p not in self.box_size and p not in self._view_meta
+                         and p not in self.symbol_pids and p not in self.symbol_ids)
+        tables: dict[str, dict] = {}
+        views: list[tuple[str, str, str, list[dict], str]] = []
+        for i in range(0, len(missing), 500):
+            chunk = missing[i:i + 500]
+            for t in self.db.canonical_tables.find({**_ACTIVE, "_id": {"$in": chunk}},
+                                                   {"schema": 1, "physicalName": 1, "logicalName": 1}):
+                tables[t["_id"]] = t
+            for v in self.db.views.find({**_ACTIVE, "_id": {"$in": chunk}},
+                                        {"schema": 1, "name": 1, "sources": 1, "sourceTableIds": 1, "tableId": 1}):
+                first = (v.get("sourceTableIds") or [v.get("tableId") or ""])[0]
+                views.append((v["_id"], v.get("schema") or "", v.get("name") or "", v.get("sources") or [], first))
+        views += [(pid, schema, name, srcs, "") for pid, (schema, name, srcs) in self._view_meta.items()]
+        # Tablas que este archivo reescribe y YA existían: la app muestra además
+        # las columnas que la BD conserva (todas, si el archivo ganó la tabla de
+        # otro de la familia; las hechas en la app, si es una re-corrida).
+        rewritten = sorted(p for p in self._table_meta if p in self.ex_table_ids)
+        written = {tid for tid, _phys in self.col_types}
+        need = set(tables) | set(rewritten) | {
+            src.get("tableId") or first for _p, _s, _n, srcs, first in views for src in srcs}
+        need_db = sorted(t for t in need if t and (t not in written or t in rewritten))
+        # Re-corrida del mismo archivo: de sus tablas sólo sobreviven las columnas
+        # hechas en la app (sin `erwinLongId`); las migradas ya se conocen.
+        rerun = [t for t in need_db if t in self._stale_scope]
+        whole_tables = [t for t in need_db if t not in self._stale_scope]
+        cols: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        proj = {"tableId": 1, "physicalName": 1, "logicalName": 1, "dataType": 1}
+        for ids, extra in ((whole_tables, {}), (rerun, {"erwinLongId": {"$exists": False}})):
+            for i in range(0, len(ids), 500):
+                for c in self.db.canonical_columns.find({**_ACTIVE, "tableId": {"$in": ids[i:i + 500]}, **extra}, proj):
+                    tid = c["tableId"]
+                    phys, dtype = c.get("physicalName") or "", c.get("dataType") or ""
+                    cols[tid].append((phys, c.get("logicalName") or "", dtype))
+                    self.col_types.setdefault((tid, phys.upper()), dtype)
+        for tid, t in tables.items():
+            self.box_size[tid] = lay.table_box(t.get("schema") or "", t.get("physicalName") or "",
+                                               t.get("logicalName") or "", cols.get(tid, []))
+        for tid in rewritten:
+            schema, phys, logical, xml_cols = self._table_meta[tid]
+            have = {c[0].upper() for c in xml_cols}
+            kept = [c for c in cols.get(tid, []) if c[0].upper() not in have]
+            if kept:
+                self.box_size[tid] = lay.table_box(schema, phys, logical, xml_cols + kept)
+        for pid, schema, name, srcs, first in views:
+            self.box_size[pid] = lay.view_box(schema, name, lay.view_rows(srcs, self.col_types, first))
+
+    def _diagram_canvas(self, d: ep.ErwinDiagram, node_ref: dict[str, str], existing: dict,
+                        merge: bool) -> tuple[dict, list[dict], dict[str, str]]:
+        """Layout, dibujos y colores del canvas de UN diagrama.
+
+        - Posición: centro de Erwin × `layout.SCALE` con el tamaño del bloque en
+          la app, y separación mínima de lo que se pisa (`layout.separate`).
+        - Lo que el canvas YA tenía (re-corrida del mismo archivo, o la parte de
+          otro archivo en una fusión) queda FIJO donde está; en una fusión, lo
+          que llega se ubica a la derecha de lo existente.
+        - Textos y cuadros de Erwin con la misma escala; los marcos crecen lo
+          justo para seguir encerrando sus bloques. Los dibujos que el canvas ya
+          tenía (por id) no se tocan.
+        - Color de cada caja (`colors.box_color`) guardado sólo si difiere del
+          color de su tabla/vista.
+        """
+        prev_layout = existing.get("layout") or {}
+        boxes: dict[str, ep.ErwinBox] = {}
+        for b in d.boxes:
+            boxes.setdefault(b.ref, b)
+
+        rects: dict[str, list[float]] = {}         # lo que llega del XML (px de la app)
+        loose: list[str] = []                       # sin posición en Erwin
+        for pid, ref in node_ref.items():
+            b = boxes.get(ref)
+            if b is not None and b.center is not None:
+                rects[pid] = lay.app_rect(b.center, self._size_of(pid))
+            else:
+                loose.append(pid)
+        for ref, b in boxes.items():
+            spid = self.pid(ref) if ref in self.m.subtype_symbols else None
+            if spid in self.symbol_pids and b.center is not None:
+                rects[spid] = lay.app_rect(b.center, (SYMBOL_SIZE, SYMBOL_SIZE))
+        frames_src = {k: list(v) for k, v in rects.items()}     # antes de mover (marcos)
+
+        # Fijos: en una fusión TODO lo que el canvas tenía; en una re-corrida, los
+        # bloques y símbolos de este diagrama que ya tenían posición, y los
+        # símbolos de subcategorías vivas del proyecto (R5: hechos en la app, no
+        # vienen en el XML).
+        fixed: dict[str, list[float]] = {}
+        for pid, pos in prev_layout.items():
+            if not isinstance(pos, dict) or not isinstance(pos.get("x"), (int, float)) \
+                    or not isinstance(pos.get("y"), (int, float)):
+                continue
+            if merge or pid in rects or pid in node_ref or pid in self.symbol_ids:
+                w, h = (SYMBOL_SIZE, SYMBOL_SIZE) if pid in self.symbol_pids or pid in self.symbol_ids \
+                    else self._size_of(pid)
+                fixed[pid] = [float(pos["x"]), float(pos["y"]), float(w), float(h)]
+        incoming = {k: v for k, v in rects.items() if k not in fixed}
+        shift = (0.0, 0.0)
+        if merge and fixed and incoming:
+            moved = lay.place_beside(incoming, fixed)
+            first = next(iter(incoming))
+            shift = (moved[first][0] - incoming[first][0], moved[first][1] - incoming[first][1])
+            incoming = moved
+        # sin posición en Erwin: grilla debajo de todo lo demás
+        others = list(incoming.values()) + list(fixed.values())
+        base_x = min((r[0] for r in others), default=0.0)
+        base_y = max((r[1] + r[3] for r in others), default=0.0) + 80
+        for n, pid in enumerate(p for p in loose if p not in fixed):
+            w, h = self._size_of(pid)
+            incoming[pid] = [base_x + (n % 4) * (lay.MAX_W / 2 + 120), base_y + (n // 4) * 400, w, h]
+        aside: list[str] = []
+        final = lay.separate({**fixed, **incoming}, pinned=fixed, set_aside=aside)
+        if aside:
+            self.stats["bloques ubicados aparte (la separación no alcanzó)"] += len(aside)
+            self.warnings.append(f"{d.name}: {len(aside)} bloques ubicados debajo del diagrama "
+                                 f"(se pisaban y la separación mínima no alcanzó)")
+        moved_n = sum(1 for k, r in incoming.items()
+                      if abs(final[k][0] - r[0]) > 1 or abs(final[k][1] - r[1]) > 1)
+        if moved_n:
+            self.stats["bloques corridos para no pisarse (separación mínima)"] += moved_n
+        if loose:
+            self.stats["bloques sin posición en Erwin (ubicados abajo)"] += len(loose)
+
+        if merge:
+            layout = {**{k: v for k, v in prev_layout.items()}, **{k: lay.whole(final[k]) for k in incoming}}
+        else:
+            layout = {k: lay.whole(r) for k, r in final.items()}
+
+        # Dibujos: los del canvas se conservan por id; los del XML se suman —
+        # salvo que ESTE diagrama ya haya aportado al canvas (re-corrida): lo que
+        # hoy tiene el canvas es lo hecho en la app (un dibujo borrado no vuelve).
+        drawings = [dict(x) for x in (existing.get("drawings") or []) if isinstance(x, dict)]
+        have = {x.get("id") for x in drawings}
+        again = d.id in _canvas_contributors(existing)
+
+        def rows_drawn(pid: str, r: list[float]) -> int:
+            # filas con que ESTE XML dibuja el bloque (la app puede mostrar más:
+            # columnas que la BD conserva de otro archivo)
+            obj = self.m.entities.get(node_ref.get(pid, "")) or self.m.views.get(node_ref.get(pid, ""))
+            return len(obj.attributes) if obj is not None else lay.app_rows(r[3])
+
+        def grow(out: dict) -> None:
+            # Marco (cuadro, o texto que encerraba bloques): crece lo justo para
+            # seguir encerrándolos después de separar. Encierra un bloque si
+            # contiene su centro Y le cabe a lo alto en la geometría de Erwin
+            # (un título angosto que cruza una tabla no es su marco).
+            src = [out["x"], out["y"], out["w"], out["h"]]
+            inner = [final[k] for k, r in frames_src.items() if k in final and k in incoming
+                     and lay.inside((r[0] + r[2] / 2, r[1] + r[3] / 2), src)
+                     and src[3] >= lay.erwin_height(rows_drawn(k, r))]
+            grown = lay.grow_frame(src, [[r[0] - shift[0], r[1] - shift[1], r[2], r[3]] for r in inner])
+            if grown != src:
+                self.stats["marcos agrandados para seguir encerrando sus tablas"] += 1
+            out.update({"x": int(round(grown[0])) or 0, "y": int(round(grown[1])) or 0,
+                        "w": int(round(grown[2])), "h": int(round(grown[3]))})
+
+        # Una fusión que no trae bloques nuevos (el mismo diagrama en otro
+        # archivo de la familia) tampoco trae dibujos: serían los mismos, encima.
+        skip = again or (merge and not incoming)
+        if skip:
+            n_skip = sum(1 for b in d.boxes if b.text is not None and b.center is not None and b.size is not None
+                         and self.pid(f"drawing|{b.id}") not in have) + sum(
+                1 for x in d.drawings if self.pid(f"drawing|{x.id}") not in have)
+            if n_skip:
+                self.stats["dibujos de Erwin no traídos (el canvas ya los tiene o ya los tuvo: manda la app)"] += n_skip
+        fresh: list[dict] = []
+        for b in ([] if skip else d.boxes):
+            if b.text is None or b.center is None or b.size is None:
+                continue
+            did = self.pid(f"drawing|{b.id}")
+            if did in have:
+                continue
+            out = drw.text_drawing(did, lay.scaled_rect(b.center, b.size),
+                                   self.m.annotation_text.get(b.ref, ""), b.text, self.neutral)
+            grow(out)
+            fresh.append(out)
+            self.stats["textos de Erwin migrados"] += 1
+        for x in ([] if skip else d.drawings):
+            did = self.pid(f"drawing|{x.id}")
+            if did in have:
+                continue
+            out = drw.shape_drawing(did, x, self.neutral)
+            if out is None:
+                self.stats["dibujos de Erwin sin geometría (omitidos)"] += 1
+                continue
+            if out["type"] == "rect":
+                grow(out)
+            fresh.append(out)
+            self.stats["dibujos de Erwin migrados (cuadros y líneas)"] += 1
+        if merge:
+            # el mismo dibujo (tipo, texto y tamaño) que el canvas ya tiene: es la
+            # copia de otro archivo de la familia, no uno nuevo
+            sig = lambda x: (x.get("type"), (x.get("text") or "").strip(), x.get("w"), x.get("h"))  # noqa: E731
+            seen = {sig(x) for x in drawings}
+            dup = [x for x in fresh if sig(x) in seen]
+            if dup:
+                self.stats["dibujos de Erwin repetidos en la fusión (no traídos)"] += len(dup)
+                fresh = [x for x in fresh if sig(x) not in seen]
+        for x in fresh:
+            x["x"] = int(round(x["x"] + shift[0])) or 0
+            x["y"] = int(round(x["y"] + shift[1])) or 0
+        # Orden de pintado = orden del arreglo: el más grande detrás (un marco no
+        # tapa los textos que tiene adentro). Estable: a igual área, el del XML.
+        fresh.sort(key=lambda x: -(x["w"] * x["h"]))
+        drawings += fresh
+
+        # Colores de las cajas de este diagrama (excepción sólo si difiere).
+        sa_theme = next((sa.get("theme_ref") for sa in self.m.subject_areas
+                         if sa["name"] == d.subject_area), None)
+        colors: dict[str, str] = {}
+        for pid, ref in node_ref.items():
+            b = boxes.get(ref)
+            # Una caja que el canvas ya tenía (re-corrida o fusión) conserva el
+            # color que tiene hoy: lo cambiado o quitado en la app no vuelve.
+            if b is None or pid in prev_layout:
+                continue
+            kind = "Entity" if ref in self.m.entities else "View"
+            obj = self.m.entities.get(ref) or self.m.views.get(ref)
+            chain = (getattr(obj, "theme_ref", None), d.theme_ref, sa_theme, self.m.model_theme_ref)
+            ov = col.canvas_override(col.box_color(self.m, b, kind, chain, self.app_theme, self.neutral),
+                                     self.obj_color.get(pid))
+            if ov is not None:
+                colors[pid] = ov
+                self.stats["cajas con color propio en su canvas"] += 1
+        return layout, drawings, {**colors, **(existing.get("colors") or {})}
+
     def run(self) -> None:
         self.standards()
+        self.themes()
         self.tables()
         self.relationships()
         self.views()
@@ -1396,6 +1795,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="continuar aunque el gate de calidad tenga ERRORs")
     ap.add_argument("--report", help="ruta del reporte JSON de decisiones "
                                      "(default: migration-reports/<xml>-<ts>.json)")
+    ap.add_argument("--parse-cache", dest="parse_cache",
+                    help="doc 109: carpeta con el modelo ya parseado por el gate (lo reusa)")
     ap.add_argument("--keep-unused-udp-defs", action="store_true",
                     help="crear también defs UDP sin uso observado (A4 off)")
     args = ap.parse_args(argv)
@@ -1404,7 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in args.xml:
         print(f"\n{'=' * 72}\nARCHIVO: {path}")
         t0 = time.perf_counter()
-        m = ep.parse(path)
+        m = ep.parse_cached(path, args.parse_cache)
         print(f"(parseado en {time.perf_counter() - t0:.1f}s)")
         s = summarize(m)
         print(f"Modelo: {s['modelo']} — " +
@@ -1476,8 +1877,9 @@ def main(argv: list[str] | None = None) -> int:
                        "stats": dict(mig.stats), "decisions": mig.report,
                        "warnings": mig.warnings}, fh, ensure_ascii=False, indent=1)
         print(f"\nReporte de decisiones: {out}")
-        print("Siguientes pasos: `python -m scripts.audit_data_consistency` "
-              "(validación) y `scripts/arrange_all` (layout ELK, acepta --project).")
+        print("Siguiente paso: `python -m scripts.audit_data_consistency` (validación). "
+              "El layout de Erwin ya quedó en los canvases: `scripts/arrange_all` lo REEMPLAZA "
+              "(sólo a pedido, con --project).")
     return rc
 
 

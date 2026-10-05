@@ -5,7 +5,7 @@
 # MAGIC Ejecuta el ORQUESTADOR `scripts/run_migration.py` (doc 54) sobre los XML
 # MAGIC bajados de ADLS. **No reimplementa nada**: el orquestador invoca los
 # MAGIC MISMOS scripts del repo (quality, reset, create_admin, migrate, audit,
-# MAGIC seed de data functions, arrange, mark_base_version) con las mismas
+# MAGIC seed de data functions, mark_base_version) con las mismas
 # MAGIC reglas de merge, `_DUPn` y glosario cruzado.
 # MAGIC
 # MAGIC Dos modos (widget `modo`):
@@ -14,8 +14,9 @@
 # MAGIC   deployment — borra TODO el schema, recrea los 4 roles de caja, la
 # MAGIC   cuenta local `admin` y la whitelist SSO (admins + Modeladores), migra
 # MAGIC   los proyectos en CARRILES paralelos (widget `jobs`; los archivos de un
-# MAGIC   mismo proyecto siempre en orden), siembra las data functions, hace el
-# MAGIC   layout y marca la version base v1 de cada proyecto.
+# MAGIC   mismo proyecto siempre en orden), siembra las data functions y marca
+# MAGIC   la version base v1 de cada proyecto. El layout de cada canvas, con sus
+# MAGIC   colores, textos y cuadros, viene del propio XML (doc 109).
 # MAGIC   El proyecto destino sale de la CONVENCION del doc 77, no de un archivo
 # MAGIC   declarativo: **cada subcarpeta es un proyecto** que se llama como ella y
 # MAGIC   fusiona sus `.xml` (p. ej. `MODELO DDV/` → proyecto «MODELO DDV»), y
@@ -366,43 +367,11 @@ print("listo | python:", sys.version.split()[0])
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. elkjs para el layout (opcional: necesita Node)
-# MAGIC El orquestador corre `arrange_all` (elkjs sobre Node) como paso
-# MAGIC INFORMATIVO: si no hay Node o no se pudo bajar el bundle, ese paso queda
-# MAGIC en WARNING y la carga sigue valida (la migracion deja layout en grilla).
-# MAGIC Los DBR suelen traer `node` PELADO (sin npm): se baja el tarball del
-# MAGIC registry y se apunta `ELKJS_PATH` a su `elk.bundled.js` (mismo bundle y
-# MAGIC version que el front -> mismo layout que "Autoarrange" de la web).
-
-# COMMAND ----------
-
-import shutil
-import tarfile
-import urllib.request
-
-ELKJS_VERSION = "0.11.1"     # = web-data-model-hub/package.json (mantener en sync)
-
-if not shutil.which("node"):
-    print("Node no esta disponible en el cluster: arrange_all quedara en WARNING.")
-else:
-    elk_dir = os.path.join(WORK, "elk")
-    os.makedirs(elk_dir, exist_ok=True)
-    bundle = os.path.join(elk_dir, "package", "lib", "elk.bundled.js")
-    if not os.path.isfile(bundle):
-        try:
-            tgz = os.path.join(elk_dir, f"elkjs-{ELKJS_VERSION}.tgz")
-            urllib.request.urlretrieve(
-                f"https://registry.npmjs.org/elkjs/-/elkjs-{ELKJS_VERSION}.tgz", tgz)
-            with tarfile.open(tgz) as t:
-                try:
-                    t.extractall(elk_dir, filter="data")
-                except TypeError:        # Python viejo sin `filter`
-                    t.extractall(elk_dir)
-        except Exception as exc:
-            print(f"No se pudo bajar elkjs del registry ({exc}): arrange en WARNING.")
-    if os.path.isfile(bundle):
-        ENV["ELKJS_PATH"] = bundle
-        print(f"ELKJS_PATH = {bundle}")
+# MAGIC ## 6. Layout de los canvases
+# MAGIC Doc 109: ya no se corre el auto-arrange (elkjs/Node no hacen falta). Cada
+# MAGIC canvas toma las posiciones de Erwin, agrandadas con la regla fija de la
+# MAGIC app (28 / 16.4) y separando solo los bloques que se pisan; trae tambien
+# MAGIC los colores, los textos y los cuadros del diagrama.
 
 # COMMAND ----------
 
