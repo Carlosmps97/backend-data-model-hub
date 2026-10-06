@@ -31,17 +31,19 @@ SKIP_STARTUP_DDL_ENV = "DMH_SKIP_STARTUP_DDL"
 _STARTUP_DDL_LOCK = 528491
 
 
-async def connect() -> None:
+async def connect(probe: bool = False) -> None:
     """Abre la conexión a Lakebase y asegura tablas/índices.
 
-    Idempotente: una segunda llamada es no-op si ya está conectado.
+    Idempotente: una segunda llamada es no-op si ya está conectado. `probe`
+    (doc 110, sólo el puente de scripts): cada conexión nueva se prueba y la
+    que va lenta se descarta (`lakebase/pool.probing_connect`).
     """
     global _pg_db
     if _pg_db is not None:
         return
     from app.core.db.lakebase import LakebaseDatabase, create_pool
 
-    pool = await create_pool()
+    pool = await create_pool(probe=probe)
     db = LakebaseDatabase(pool, settings.LAKEBASE_PGSCHEMA)
     if os.getenv(SKIP_STARTUP_DDL_ENV) == "1":
         # Doc 109: un paso del one-shot posterior a create_admin (que acaba de

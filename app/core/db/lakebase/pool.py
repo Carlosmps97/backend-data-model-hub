@@ -27,6 +27,56 @@ from app.core.db.lakebase.credentials import fresh_token, invalidate_token, pg_h
 
 log = logging.getLogger(__name__)
 
+# Red caída o lenta, o servidor que corta la sesión (reinicio, apagado,
+# cancelación): la conexión no sirve, pero otra sí puede.
+NETWORK_ERRORS = (
+    TimeoutError,
+    OSError,
+    asyncpg.exceptions.InterfaceError,
+    asyncpg.exceptions.PostgresConnectionError,
+    asyncpg.exceptions.OperatorInterventionError,
+)
+
+# El `DataError` del CLIENTE de asyncpg (un parámetro que no se puede codificar)
+# hereda de InterfaceError, pero no es la red: nunca se reintenta.
+CLIENT_DATA_ERROR = asyncpg.exceptions._base.DataError
+
+
+def is_network_error(exc: BaseException) -> bool:
+    return isinstance(exc, NETWORK_ERRORS) and not isinstance(exc, CLIENT_DATA_ERROR)
+
+
+# Doc 110: prueba de subida de cada conexión nueva de los scripts. Desde Lima,
+# una conexión en ruta buena sube 256 KB en ~0.3 s; en la ruta con pérdida
+# (50-70 KB/s) tarda 4-5 s. Dentro de Databricks, milisegundos.
+_PROBE_BYTES = 256 * 1024
+_PROBE_TIMEOUT_S = 2.0
+_PROBE_TRIES = 8
+PROBE_STATS = {"descartadas": 0}
+
+
+async def probing_connect(*args, **kwargs) -> asyncpg.Connection:
+    """Gancho `connect=` del pool de los scripts (doc 110): abre la conexión y
+    la prueba subiendo 256 KB; si no llega en 2 s (o se cae), la descarta y abre
+    otra. El último intento se acepta sin probar: una red pareja y lenta no
+    frena la carga, sólo queda avisada."""
+    for attempt in range(1, _PROBE_TRIES + 1):
+        conn = await asyncpg.connect(*args, **kwargs)
+        if attempt == _PROBE_TRIES:
+            log.warning("lakebase: %d conexiones lentas seguidas; se sigue con la última",
+                        _PROBE_TRIES - 1)
+            return conn
+        try:
+            await asyncio.wait_for(conn.fetchval("SELECT length($1::text)", "x" * _PROBE_BYTES),
+                                   _PROBE_TIMEOUT_S)
+            return conn
+        except NETWORK_ERRORS as exc:
+            PROBE_STATS["descartadas"] += 1
+            log.warning("lakebase: conexión lenta descartada (%s; intento %d/%d)",
+                        type(exc).__name__, attempt, _PROBE_TRIES)
+            conn.terminate()
+    raise AssertionError("inalcanzable")
+
 
 async def _password() -> str:
     # Escape hatch para scripts: password pegado a mano (el "OAuth token" que
@@ -55,11 +105,13 @@ def _ssl_arg(direct_tls: bool):
     return ctx
 
 
-async def _open_pool(host: str, direct_tls: bool) -> asyncpg.Pool:
+async def _open_pool(host: str, direct_tls: bool, probe: bool = False) -> asyncpg.Pool:
     """Crea el pool en UN modo de TLS y lo valida con un ping (con retry para
-    el wake del compute y para re-acuñar un token cacheado inválido)."""
+    el wake del compute y para re-acuñar un token cacheado inválido). Con
+    `probe` (sólo scripts, doc 110), cada conexión nueva se prueba."""
     kwargs = {"direct_tls": True} if direct_tls else {}
     pool = await asyncpg.create_pool(
+        connect=probing_connect if probe else None,
         host=host,
         port=settings.PGPORT,
         user=settings.PGUSER,
@@ -105,8 +157,9 @@ async def _open_pool(host: str, direct_tls: bool) -> asyncpg.Pool:
     raise last
 
 
-async def create_pool() -> asyncpg.Pool:
-    """Crea el pool probando el modo de TLS que corresponda.
+async def create_pool(probe: bool = False) -> asyncpg.Pool:
+    """Crea el pool probando el modo de TLS que corresponda. `probe` (doc 110):
+    conexiones probadas, sólo para los scripts (`app/core/db/sync.py`).
 
     Postgres negocia TLS en dos sabores y no todos los endpoints aceptan los
     dos: el CLÁSICO (paquete `SSLRequest` en texto plano y recién ahí TLS) y el
@@ -136,7 +189,7 @@ async def create_pool() -> asyncpg.Pool:
     last: Exception | None = None
     for direct_tls in modes:
         try:
-            pool = await _open_pool(host, direct_tls)
+            pool = await _open_pool(host, direct_tls, probe)
             if direct_tls:
                 log.info("lakebase: conectado con TLS directo (setea PGDIRECTTLS=true "
                          "para saltarte el intento clásico)")

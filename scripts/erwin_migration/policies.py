@@ -299,3 +299,14 @@ def parse_mart_locator(locator: str) -> dict | None:
         return None
     return {"project": segs[0], "domain": " / ".join(segs[1:-1]),
             "model": segs[-1]}
+
+
+def source_folder_name(xml_path: str) -> str:
+    """Doc 110: carpeta de ORIGEN del archivo (su subcarpeta en Models) = el
+    nombre del `.xml` sin extensión, como el proyecto de un XML suelto: la
+    decide quien nombra el archivo. Antes era el dominio del Mart (`<Locator>`)
+    y sólo sin él el archivo, así que dos XML de una misma carpeta quedaban
+    nombrados con reglas distintas."""
+    base = xml_path.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, dot, ext = base.rpartition(".")
+    return (stem if dot and ext.lower() == "xml" and stem.strip() else base).strip()

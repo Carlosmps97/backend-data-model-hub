@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
@@ -109,6 +110,76 @@ def _rowcount(status: str) -> int:
         return int(status.rsplit(" ", 1)[-1])
     except (ValueError, IndexError):
         return 0
+
+
+@dataclass(frozen=True)
+class BulkStatement:
+    """Doc 110: UNA sentencia del camino rápido de `bulk_write`, armada y sin
+    ejecutar (`run_statement` la corre en la conexión que se le dé)."""
+
+    sql: str
+    args: tuple          # columnas de `unnest`, en el orden de los `$n`
+    nbytes: int          # bytes de los parámetros ≈ lo que viaja a la BD
+    ndocs: int
+    fetch_row: bool      # upsert por `$set`: fila (updated, inserted); replace: status
+
+
+def fast_kind(ops: list) -> str | None:
+    """'replace' | 'update' si el lote ENTERO va por el camino rápido de
+    `bulk_write` (homogéneo por `_id`, idempotente); None si no."""
+    if not ops:
+        return None
+    kinds = {type(op).__name__ for op in ops}
+    def _id_only(op) -> bool:
+        f = op._filter
+        return isinstance(f, dict) and list(f) == ["_id"] and isinstance(f["_id"], str)
+    # Doc 105 (A2-o1): una sola sentencia exige banderas `upsert` IGUALES —
+    # con un lote mezclado, el replace por lote (decide con `all(...)`)
+    # perdía los upserts; el mezclado va por el camino general.
+    if (kinds == {"ReplaceOne"} and all(_id_only(op) for op in ops)
+            and len({bool(getattr(op, "_upsert", False)) for op in ops}) == 1):
+        return "replace"
+    if kinds == {"UpdateOne"} and all(
+        _id_only(op)
+        and set(op._doc) <= {"$set", "$setOnInsert"}
+        and all("." not in k for k in (op._doc.get("$set") or {}))
+        and all("." not in k for k in (op._doc.get("$setOnInsert") or {}))
+        for op in ops
+    ):
+        return "update"
+    return None
+
+
+def _row_bytes(row: tuple) -> int:
+    return sum(len(v) if isinstance(v, str) else 1 for v in row)
+
+
+def _chunk_rows(rows: list[tuple], max_bytes: int | None):
+    """(filas, bytes) en orden: sin tope, todo junto; con tope, cada tanda
+    hasta `max_bytes` sin partir una fila (una más grande que el tope va sola)."""
+    if max_bytes is None:
+        yield rows, sum(_row_bytes(r) for r in rows)
+        return
+    chunk: list[tuple] = []
+    size = 0
+    for row in rows:
+        n = _row_bytes(row)
+        if chunk and size + n > max_bytes:
+            yield chunk, size
+            chunk, size = [], 0
+        chunk.append(row)
+        size += n
+    if chunk:
+        yield chunk, size
+
+
+async def run_statement(conn, st: BulkStatement) -> int:
+    """Corre una sentencia del camino rápido; devuelve las filas que ya existían
+    y se actualizaron (el `matched` de pymongo)."""
+    if st.fetch_row:
+        row = await conn.fetchrow(st.sql, *st.args)
+        return int(row["updated"]) if row else 0
+    return _rowcount(await conn.execute(st.sql, *st.args))
 
 
 def _apply_projection(doc: dict, projection: dict | None) -> dict:
@@ -481,39 +552,39 @@ class PgCollection:
 
     def _bulk_fast_path(self, ops: list):
         """Lotes homogéneos por `_id` (seeds/backfills/apply del changeset) en
-        1-2 round-trips en vez de N:
+        UNA sentencia en vez de N (ver `bulk_statements`)."""
+        stmts = self.bulk_statements(ops)
+        return None if stmts is None else self._run_fast(stmts[0])
+
+    async def _run_fast(self, st: "BulkStatement") -> _WriteResult:
+        async with await self._conn() as conn:
+            n = await run_statement(conn, st)
+        return _WriteResult(matched=n, modified=n)
+
+    def bulk_statements(self, ops: list, max_bytes: int | None = None) -> "list[BulkStatement] | None":
+        """Sentencias del camino rápido, ARMADAS pero sin ejecutar; None si el
+        lote no es homogéneo por `_id`:
         - ReplaceOne({_id}, doc, upsert) → INSERT … ON CONFLICT DO UPDATE.
         - UpdateOne({_id}, {$set[, $setOnInsert]}[, upsert]) con paths simples
           → UPDATE … FROM unnest + INSERT de los upserts faltantes.
-        """
-        if not ops:
-            return None
-        kinds = {type(op).__name__ for op in ops}
-        def _id_only(op) -> bool:
-            f = op._filter
-            return isinstance(f, dict) and list(f) == ["_id"] and isinstance(f["_id"], str)
-        # Doc 105 (A2-o1): una sola sentencia exige banderas `upsert` IGUALES —
-        # con un lote mezclado, `_bulk_replace_by_id` (decide con `all(...)`)
-        # perdía los upserts; el mezclado va por el camino general.
-        if (kinds == {"ReplaceOne"} and all(_id_only(op) for op in ops)
-                and len({bool(getattr(op, "_upsert", False)) for op in ops}) == 1):
-            return self._bulk_replace_by_id(ops)
-        if kinds == {"UpdateOne"} and all(
-            _id_only(op)
-            and set(op._doc) <= {"$set", "$setOnInsert"}
-            and all("." not in k for k in (op._doc.get("$set") or {}))
-            and all("." not in k for k in (op._doc.get("$setOnInsert") or {}))
-            for op in ops
-        ):
-            return self._bulk_update_by_id(ops)
+
+        Ambas son idempotentes (repetirlas da lo mismo). Sin `max_bytes`, UNA
+        sentencia para todo el lote (la app). Doc 110: con `max_bytes`, se corta
+        en sentencias de hasta esos bytes de parámetros, en orden y sin partir un
+        documento — el escritor de los scripts las corre con tiempo máximo y
+        reintento en otra conexión (`writer.py`)."""
+        kind = fast_kind(ops)
+        if kind == "replace":
+            return self._replace_statements(ops, max_bytes)
+        if kind == "update":
+            return self._update_statements(ops, max_bytes)
         return None
 
-    async def _bulk_replace_by_id(self, ops: list) -> _WriteResult:
-        ids, docs = [], []
+    def _replace_statements(self, ops: list, max_bytes: int | None) -> "list[BulkStatement]":
+        rows = []
         for op in ops:
             _id = op._filter["_id"]
-            ids.append(_id)
-            docs.append(_dumps({**op._doc, "_id": _id}))
+            rows.append((_id, _dumps({**op._doc, "_id": _id})))
         upsert = all(bool(getattr(op, "_upsert", False)) for op in ops)
         if upsert:
             sql = (
@@ -526,11 +597,10 @@ class PgCollection:
                 f"UPDATE {self._table} AS t SET doc = u.udoc::jsonb "
                 f"FROM unnest($1::text[], $2::text[]) AS u(uid, udoc) WHERE t.id = u.uid"
             )
-        async with await self._conn() as conn:
-            status = await conn.execute(sql, ids, docs)
-        return _WriteResult(matched=_rowcount(status), modified=_rowcount(status))
+        return [BulkStatement(sql, tuple(map(list, zip(*chunk))), nbytes, len(chunk), fetch_row=False)
+                for chunk, nbytes in _chunk_rows(rows, max_bytes)]
 
-    async def _bulk_update_by_id(self, ops: list) -> _WriteResult:
+    def _update_statements(self, ops: list, max_bytes: int | None) -> "list[BulkStatement]":
         """`UpdateOne({_id}, {$set[, $setOnInsert]}[, upsert])` del lote en UNA
         sentencia: actualiza las filas que existen (merge del `$set`) e inserta,
         de los upserts, las que faltan (`{_id} ∪ $setOnInsert ∪ $set`).
@@ -543,12 +613,9 @@ class PgCollection:
 
         Doc 105 (P10): sólo los upserts insertan — la baja (sin upsert) de algo
         que producción nunca vio no deja una fila fantasma sin projectId."""
-        ids, patches, on_insert, upserts = [], [], [], []
-        for op in ops:
-            ids.append(op._filter["_id"])
-            patches.append(_dumps(op._doc.get("$set") or {}))
-            on_insert.append(_dumps(op._doc.get("$setOnInsert") or {}))
-            upserts.append(bool(getattr(op, "_upsert", False)))
+        rows = [(op._filter["_id"], _dumps(op._doc.get("$set") or {}),
+                 _dumps(op._doc.get("$setOnInsert") or {}), bool(getattr(op, "_upsert", False)))
+                for op in ops]
         sql = (
             f"WITH u AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::bool[]) "
             f"AS u(uid, patch, soi, ups)), "
@@ -560,10 +627,8 @@ class PgCollection:
             f"ON CONFLICT (id) DO NOTHING RETURNING id) "
             f"SELECT (SELECT count(*) FROM upd) AS updated, (SELECT count(*) FROM ins) AS inserted"
         )
-        async with await self._conn() as conn:
-            row = await conn.fetchrow(sql, ids, patches, on_insert, upserts)
-        n = int(row["updated"]) if row else 0
-        return _WriteResult(matched=n, modified=n)
+        return [BulkStatement(sql, tuple(map(list, zip(*chunk))), nbytes, len(chunk), fetch_row=True)
+                for chunk, nbytes in _chunk_rows(rows, max_bytes)]
 
     # ─── DDL ────────────────────────────────────────────────────────
 

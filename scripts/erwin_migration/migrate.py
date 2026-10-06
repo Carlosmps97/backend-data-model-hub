@@ -141,9 +141,9 @@ class Migrator:
         self.project_name = project_name or model.name or "Modelo Erwin"
         self.only_sa = only_sa
         self.keep_unused_udp_defs = keep_unused_udp_defs
-        # Doc 54 §9: capa de ORIGEN — carpeta raíz del proyecto (dominio del
-        # Mart o nombre del archivo) que agrupa las SAs de ESTE archivo.
-        # None = plano (comportamiento previo; lo usan los tests).
+        # Doc 54 §9 → doc 110: capa de ORIGEN — carpeta raíz del proyecto
+        # (nombre del archivo, `pol.source_folder_name`) que agrupa las SAs de
+        # ESTE archivo. None = plano (comportamiento previo; lo usan los tests).
         self.source_folder = (source_folder or "").strip() or None
         self.description = (description or "").strip() or None
         self.stats: Counter = Counter()
@@ -278,6 +278,11 @@ class Migrator:
     def flush_all(self) -> None:
         for coll in list(self._buf):
             self._flush(coll)
+        # Doc 110: con el puente en cola, el archivo sólo termina cuando TODO
+        # quedó escrito (y un error de la cola se propaga acá).
+        drain = getattr(type(self.db), "drain", None)
+        if drain is not None:
+            drain(self.db)
 
     # ---------- uso (score) ----------
     def _xml_usage(self) -> None:
@@ -1369,7 +1374,7 @@ class Migrator:
                     if mv is not None:
                         model_udp[self.udp_pid[key]] = mv
 
-        # Doc 54 §9: carpeta de ORIGEN (dominio del Mart / archivo) como capa
+        # Doc 54 §9 → doc 110: carpeta de ORIGEN (nombre del archivo) como capa
         # raíz del proyecto; las SAs del archivo cuelgan de ella. Reuso por
         # nombre en la raíz para que los re-runs no dupliquen.
         src_fid: str | None = None
@@ -1382,7 +1387,7 @@ class Migrator:
                 self._upsert("folders", src_fid, {
                     "projectId": proj_id, "parentFolderId": None,
                     "name": self.source_folder, "order": 0})
-                self.stats["carpeta de origen (dominio del Mart / archivo)"] += 1
+                self.stats["carpeta de origen (nombre del archivo)"] += 1
 
         folder_pid: dict[str, str] = {}
         for i, sa in enumerate(sorted(self.m.subject_areas, key=lambda s: s["order"])):
@@ -1831,6 +1836,12 @@ def main(argv: list[str] | None = None) -> int:
         from app.core.db.sync import get_sync_db
         load_dotenv()
         db = get_sync_db()
+        # Doc 110: escrituras en cola por varias conexiones probadas (un `_id`
+        # pendiente va siempre detrás de su conexión); `flush_all` espera que
+        # terminen.
+        pipeline = getattr(type(db), "pipeline", None)
+        if pipeline is not None:
+            pipeline(db)
 
         project_name = args.project or m.name or "Modelo Erwin"
         if not args.project and db.projects.find_one(
@@ -1843,11 +1854,9 @@ def main(argv: list[str] | None = None) -> int:
             rc = 1
             continue
 
-        # Doc 54 §9: capa de ORIGEN = dominio del Mart del propio XML; sin
-        # Locator (modelo nunca guardado en Mart), el nombre del archivo.
-        parsed_loc = pol.parse_mart_locator(m.locator) if m.locator else None
-        source = ((parsed_loc or {}).get("domain")
-                  or os.path.splitext(os.path.basename(path))[0])
+        # Doc 54 §9 → doc 110: capa de ORIGEN (subcarpeta en Models) = nombre
+        # del archivo, ya no el dominio del Mart del `<Locator>`.
+        source = pol.source_folder_name(path)
         print(f"Carpeta de origen (capa por archivo): {source}")
 
         t1 = time.perf_counter()

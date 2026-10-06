@@ -110,6 +110,11 @@ folder_data/
   mismo nombre ignorando mayúsculas — una subcarpeta y un `.xml` suelto
   homónimos, o dos archivos que sólo difieren en el casing.
 - Un `projects.json` residual se ignora con un aviso: ya no decide nada.
+- **Subcarpeta en Models = nombre del archivo** (doc 110): dentro de un
+  proyecto, los canvases de cada `.xml` cuelgan de una carpeta con el nombre
+  del archivo sin extensión (`MODELO DDV/Matriz Variables.xml` → «Matriz
+  Variables»). Antes era el dominio del Mart del `<Locator>`, y sólo sin él el
+  archivo; el plan del orquestador muestra la subcarpeta de cada archivo.
 - Con `folder_data/` (4 XML) el plan da **3 proyectos** y 4 etapas con 3
   carriles de gate y 3 de migrate.
 
@@ -122,6 +127,23 @@ a lo secuencial con la salida en vivo). Los carriles se despachan de mayor a
 menor peso (bytes del proyecto). En un carril la salida se captura y se
 imprime COMPLETA al terminar el paso — nada se resume. Con la foto de
 `folder_data/`: 12.3 → ~8.3 min.
+
+**Red a Lakebase (doc 110).** Lo que tarda un archivo es lo que SUBE (columnas
+y vistas: ~1 KB por columna, hasta ~1 MB por vista de DDV con su CREATE VIEW
+original) entre la velocidad de su conexión; el XML en sí pesa poco en eso.
+Desde fuera de Azure, parte de las conexiones a Lakebase cae en rutas con
+pérdida (50-70 KB/s contra varios MB/s de las buenas). Por eso:
+- cada conexión nueva de los scripts se PRUEBA (sube 256 KB; si tarda más de
+  2 s se descarta);
+- el migrate escribe por 3 conexiones con reparto dinámico (la lenta recibe
+  poco; cada documento conserva su orden) y cada sentencia (≤ 2 MB) tiene
+  tiempo máximo: si se pasa o la conexión se cae, se repite en otra (es
+  idempotente por `_id`);
+- el orquestador imprime cada 30 s el avance de cada paso y guarda su salida en
+  `migration-reports/run-<ts>/NN-<paso>.log` (el resumen JSON trae `log` y,
+  si falló, `tail`).
+Dentro de Databricks (misma región que Lakebase) todo esto pasa sin costo: la
+prueba tarda milisegundos y el reintento no se activa.
 
 **Secuencia manual equivalente** (lo que el orquestador hace por dentro; útil
 para diagnosticar o para el notebook corporativo):

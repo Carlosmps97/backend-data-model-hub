@@ -171,9 +171,18 @@ reglas DDL) y las versiones se siembran y se marcan **por proyecto**.
   FISICO»). Dos orígenes que caen al mismo nombre ignorando mayúsculas =
   `DiscoveryError` antes de tocar la BD. El manifiesto `projects.json` de la D9
   del doc 75 quedó DEROGADO (si aparece uno, se ignora con un aviso).
+- **Subcarpeta en Models = nombre del archivo** (doc 110): cada `.xml` de un
+  proyecto cuelga sus canvases de una carpeta con su nombre sin extensión
+  (antes, el dominio del Mart del `<Locator>`).
 - **Paralelismo por proyecto** (`--jobs`, default 4): gates y migrate corren en
   carriles, uno por proyecto; los archivos de un mismo proyecto siempre en
-  orden (el prefetch `_DUPn` lo exige). `--jobs 1` = todo secuencial.
+  orden (el prefetch `_DUPn` lo exige). `--jobs 1` = todo secuencial. El gate
+  de un proyecto parsea sus XML en paralelo (`DMH_PARSE_WORKERS`, default 4).
+- **Resistente a la red** (doc 110): el puente sync (`app/core/db/sync.py`)
+  abre conexiones probadas y escribe por el escritor de
+  `app/core/db/lakebase/writer.py` (tiempo máximo por sentencia, reintento en
+  otra conexión, 3 conexiones en el migrate). El orquestador imprime el avance
+  cada 30 s y deja la salida de cada paso en `migration-reports/run-<ts>/`.
 - **Estándares de un proyecto con varios archivos** = unión DISTINTA: el
   primero gana; abreviatura o tipo de dominio distinto en otro archivo → al
   reporte (`glossary_conflicts`, `domain_conflicts`; hoja «Dominios en

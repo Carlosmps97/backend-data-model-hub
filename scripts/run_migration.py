@@ -58,10 +58,18 @@ uno como subproceso propio (memoria liberada entre parses de cientos de MB)
 con la salida COMPLETA — nada se resume ni se oculta. En un carril paralelo no
 se puede streamear (varios procesos escribiendo a la vez es ilegible): la
 salida se captura y se imprime entera, en bloque, apenas termina el paso.
+
+Doc 110: mientras tanto, cada 30 s se imprime una línea por paso en curso con
+su avance (docs, MB, velocidad, reintentos, conexiones lentas descartadas: lo
+reporta el puente sync en `DMH_PROGRESS_FILE`), y la salida completa de cada
+paso queda en `migration-reports/run-<ts>/NN-<paso>.log`; el resumen JSON
+lleva el `log` de cada paso y, si falló, sus últimas líneas (`tail`). El plan
+muestra la subcarpeta en Models de cada archivo (= nombre del archivo).
 """
 from __future__ import annotations
 
 import argparse
+import codecs
 import glob
 import json
 import os
@@ -79,9 +87,26 @@ from pathlib import Path
 from xml.sax.saxutils import unescape
 
 from scripts.erwin_migration.policies import parse_mart_locator as parse_locator
+from scripts.erwin_migration.policies import source_folder_name
 
 ROOT = Path(__file__).resolve().parent.parent
 _PY = sys.executable
+
+# Doc 110: avance y logs de cada paso. `_RUN["dir"]` es la carpeta de logs del
+# run (la fija `execute`); `_RUNNING`, los pasos en curso que el latido lista.
+PROGRESS_ENV = "DMH_PROGRESS_FILE"     # = app.core.db.sync.PROGRESS_ENV
+HEARTBEAT_S = 30.0
+_TAIL_LINES = 40
+_RUN: dict = {"dir": None, "seq": 0}
+_RUNNING: dict[int, dict] = {}
+_RUNNING_LOCK = threading.Lock()
+_LINE_OPEN = [False]     # la salida en vivo dejó una línea a medias (sin «\n»)
+_STOP = threading.Event()  # Ctrl+C en una etapa paralela: los carriles no arrancan más pasos
+_COLL_LABEL = {
+    "canonical_columns": "columnas", "canonical_tables": "tablas", "views": "vistas",
+    "relationships": "relaciones", "subject_areas": "canvases", "folders": "carpetas",
+    "parent_domains": "dominios", "glossary_terms": "glosario", "udp_definitions": "UDP",
+}
 
 _LOCATOR_RE = re.compile(rb"<Locator>([^<]{1,600})</Locator>")
 _PEEK_CHUNK = 8 * 1024 * 1024
@@ -168,9 +193,12 @@ def plan_files(files: list[Path], root: Path,
         plans.append({
             "path": f, "rel": rel,
             "project": project_of(rel),
+            # Doc 110: subcarpeta del archivo en Models (la misma regla que migrate).
+            "folder": source_folder_name(rel),
             "size": f.stat().st_size if f.is_file() else 0,
             "domain": parsed["domain"] if parsed else "",
             "model": parsed["model"] if parsed else f.stem.strip(),
+            "mart": parsed is not None,      # el XML trae Locator del Mart
             "source": "carpeta" if "/" in rel else "archivo",
         })
     _check_collisions(plans)
@@ -327,29 +355,221 @@ def _dispatch_order(lanes: list[dict]) -> list[int]:
 def _run_step(step: dict, lane: str | None = None) -> tuple[int, float]:
     """Corre un paso. Sin carril, la salida se streamea en vivo; dentro de un
     carril paralelo se CAPTURA y se imprime COMPLETA al terminar (en bloque,
-    bajo lock) — nada se resume ni se oculta."""
+    bajo lock) — nada se resume ni se oculta.
+
+    Doc 110: con carpeta de logs (`execute(log_dir=…)`), la salida completa
+    queda también en `NN-<paso>.log` mientras el paso corre (`step["log"]`), las
+    últimas líneas de un paso fallido en `step["tail"]`, y el paso recibe su
+    archivo de progreso (`DMH_PROGRESS_FILE`) para el latido. El log es lo de
+    menos: si no se puede escribir, el paso sigue igual."""
     head = f"▶ {step['name']}" if lane is None else f"▶ [{lane}] {step['name']}"
     cmd = shlex.join(step["cmd"])
-    env = {**os.environ, **step["env"]} if step.get("env") else None
-    if lane is None:
-        print(f"\n{'━' * 72}\n{head}\n  $ {cmd}\n", flush=True)
-        t0 = time.perf_counter()
-        p = subprocess.run(step["cmd"], cwd=ROOT, env=env)
-        return p.returncode, time.perf_counter() - t0
+    step.pop("log", None)
+    step.pop("tail", None)
+    # Doc 110: el paso escribe en UTF-8 aunque su salida vaya por tubería (en
+    # Windows sería cp1252 y el «≠»/«→»/«⚠» de los resúmenes lo hacía caer).
+    env = {**os.environ, **(step.get("env") or {}), "PYTHONIOENCODING": "utf-8"}
+    log_path = progress = None
+    if _RUN["dir"]:
+        with _RUNNING_LOCK:
+            _RUN["seq"] += 1
+            seq = _RUN["seq"]
+        base = os.path.join(_RUN["dir"], f"{seq:02d}-" + re.sub(
+            r"[^A-Za-z0-9._-]+", "_", f"{lane + ' ' if lane else ''}{step['name']}")[:80].strip("_"))
+        log_path, progress = f"{base}.log", f"{base}.progress.json"
+        env = {**env, PROGRESS_ENV: progress, "PYTHONUNBUFFERED": "1"}
+    key = id(step)
+    with _RUNNING_LOCK:
+        _RUNNING[key] = {"head": head.removeprefix("▶ "), "t0": time.monotonic(), "progress": progress}
+    out = ""
+    try:
+        if lane is None:
+            print(f"\n{'━' * 72}\n{head}\n  $ {cmd}\n", flush=True)
+            t0 = time.perf_counter()
+            if log_path is None:
+                rc = subprocess.run(step["cmd"], cwd=ROOT, env=env).returncode
+            else:
+                rc, out, log_path = _pump(step["cmd"], env, log_path, echo=True)
+            secs = time.perf_counter() - t0
+        else:
+            with _PRINT:
+                print(f"\n{'┄' * 72}\n{head}\n  $ {cmd}\n  (en paralelo: su salida "
+                      f"completa se imprime cuando termine)", flush=True)
+            t0 = time.perf_counter()
+            rc, out, log_path = _pump(step["cmd"], env, log_path, echo=False)
+            secs = time.perf_counter() - t0
+            with _PRINT:
+                _forget(key)          # el latido ya no lo lista después de su «terminó»
+                print(f"\n{'━' * 72}\n{head} — terminó en {secs:.1f}s (rc={rc})\n"
+                      f"  $ {cmd}\n", flush=True)
+                print(out, end="", flush=True)
+                _LINE_OPEN[0] = bool(out) and not out.endswith("\n")
+    finally:
+        _forget(key)
+        if progress is not None:      # sólo sirve mientras el paso corre
+            for path in (progress, f"{progress}.tmp"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    if log_path is not None:
+        step["log"] = log_path
+    if rc != 0 and out:
+        step["tail"] = out.rstrip("\n").splitlines()[-_TAIL_LINES:]
+    return rc, secs
 
+
+def _forget(key: int) -> None:
+    with _RUNNING_LOCK:
+        _RUNNING.pop(key, None)
+
+
+def _pump(cmd: list[str], env: dict, log_path: str | None, *,
+          echo: bool) -> tuple[int, str, str | None]:
+    """Corre el paso leyendo su salida por trozos: cada trozo va al log en el
+    acto (se puede seguir con `tail -f`) y, con `echo`, a la pantalla (un
+    `input()` sin salto de línea también se ve). Si el log falla, se avisa y
+    se sigue sin él. Si el orquestador se interrumpe o falla, detiene al paso,
+    como `subprocess.run`. Devuelve (rc, salida, log o None)."""
+    log = None
+    if log_path is not None:
+        try:
+            log = open(log_path, "wb", buffering=0)
+        except OSError as exc:
+            _log_unavailable(log_path, exc)
+            log_path = None
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chunks: list[str] = []
+    try:
+        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except BaseException:
+        if log is not None:
+            log.close()
+        raise
+    assert p.stdout is not None
+    try:
+        fd = p.stdout.fileno()
+        while True:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            if log is not None:
+                try:
+                    log.write(data)
+                except OSError as exc:
+                    _log_unavailable(log_path, exc)
+                    log.close()
+                    log = None
+            text = decoder.decode(data)
+            chunks.append(text)
+            if echo:
+                _echo(text)
+        rc = p.wait()
+    except BaseException:
+        try:
+            p.wait(timeout=0.25)
+        except BaseException:       # no terminó, o un segundo Ctrl+C: igual se detiene
+            pass
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        # Lo que el paso alcanzó a imprimir al interrumpirse (rollback,
+        # traceback) también queda en el log y en pantalla.
+        for data in _leftover(p.stdout.fileno()):
+            try:
+                if log is not None:
+                    log.write(data)
+                if echo:
+                    _echo(decoder.decode(data))
+            except Exception:  # noqa: BLE001 — la pantalla o el log ya no responden
+                break
+        raise
+    finally:
+        p.stdout.close()
+        if log is not None:
+            log.close()
+    return rc, "".join(chunks) + decoder.decode(b"", final=True), log_path
+
+
+def _leftover(fd: int):
+    """Lo que quedó en la tubería de un paso ya detenido, sin bloquear (un
+    nieto que la mantenga abierta no cuelga al orquestador)."""
+    try:
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError):
+        return
+    while True:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:            # BlockingIOError: no hay más por ahora
+            return
+        if not data:
+            return
+        yield data
+
+
+def _echo(text: str) -> None:
+    """Salida en vivo de un paso, con el turno de impresión (el latido no se
+    mete a mitad de una línea suya)."""
+    if not text:
+        return
     with _PRINT:
-        print(f"\n{'┄' * 72}\n{head}\n  $ {cmd}\n  (en paralelo: su salida "
-              f"completa se imprime cuando termine)", flush=True)
-    t0 = time.perf_counter()
-    p = subprocess.run(step["cmd"], cwd=ROOT, env=env, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                       errors="replace")
-    secs = time.perf_counter() - t0
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        _LINE_OPEN[0] = not text.endswith("\n")
+
+
+def _log_unavailable(log_path: str | None, exc: OSError) -> None:
     with _PRINT:
-        print(f"\n{'━' * 72}\n{head} — terminó en {secs:.1f}s (rc={p.returncode})\n"
-              f"  $ {cmd}\n", flush=True)
-        print(p.stdout, end="", flush=True)
-    return p.returncode, secs
+        print(f"\n⚠ no se pudo escribir el log {log_path} ({exc}); el paso sigue sin él",
+              flush=True)
+
+
+def _progress_line(head: str, secs: float, progress: dict | None) -> str:
+    """Una línea del latido: tiempo del paso y lo que el paso reporta."""
+    m, s = divmod(int(secs), 60)
+    parts = [f"⏱ {m}:{s:02d}", head]
+    if progress:
+        coll = progress.get("coleccion")
+        if coll:
+            parts.append(_COLL_LABEL.get(coll, coll))
+        parts.append(f"{progress.get('docs', 0):,} docs")
+        parts.append(f"{progress.get('bytes', 0) / 1e6:,.0f} MB")
+        kbps = progress.get("kbps") or 0
+        rate = f"{kbps / 1000:.1f} MB/s" if kbps >= 1000 else f"{kbps:.0f} KB/s"
+        parts.append(rate + (" ⚠ red lenta" if 0 < kbps < 200 else ""))
+        if progress.get("reintentos"):
+            parts.append(f"{progress['reintentos']} reintentos")
+        if progress.get("descartadas"):
+            parts.append(f"{progress['descartadas']} conexiones lentas descartadas")
+    return " · ".join(parts)
+
+
+def _read_progress(path: str | None) -> dict | None:
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _heartbeat(stop: threading.Event, every: float) -> None:
+    """Cada `every` s, una línea por paso en curso: un paso que sube mucho (o
+    por una red lenta) ya no parece colgado."""
+    while not stop.wait(every):
+        # La foto se toma CON el turno de impresión: un carril que está
+        # imprimiendo su «terminó» ya no aparece.
+        with _PRINT:
+            now = time.monotonic()
+            with _RUNNING_LOCK:
+                running = list(_RUNNING.values())
+            lines = [_progress_line(r["head"], now - r["t0"], _read_progress(r["progress"]))
+                     for r in running]
+            if lines:
+                print(("\n" if _LINE_OPEN[0] else "") + "\n".join(lines), flush=True)
+                _LINE_OPEN[0] = False
 
 
 def _classify(step: dict, lane: str | None, rc: int, secs: float,
@@ -381,23 +601,52 @@ def _run_lanes(lanes: list[dict], *, force: bool, jobs: int) -> tuple[list[dict]
     """Corre los carriles a la vez (pasos de un carril en orden). Devuelve los
     resultados en orden de CARRIL —no de llegada— y si algo detiene lo que sigue."""
     def corre(lane: dict) -> list[tuple[dict, bool]]:
-        return [_classify(st, lane["lane"], *_run_step(st, lane["lane"]), force)
-                for st in lane["steps"]]
+        out = []
+        for st in lane["steps"]:
+            if _STOP.is_set():          # Ctrl+C: el resto del carril no arranca
+                out.append((_omitted(st, lane["lane"]), False))
+                continue
+            out.append(_classify(st, lane["lane"], *_run_step(st, lane["lane"]), force))
+        return out
 
     done: dict[int, list[tuple[dict, bool]]] = {}
     with ThreadPoolExecutor(max_workers=min(jobs, len(lanes))) as ex:
         futures = {ex.submit(corre, lanes[i]): i for i in _dispatch_order(lanes)}
-        for fut in as_completed(futures):
-            done[futures[fut]] = fut.result()
+        try:
+            for fut in as_completed(futures):
+                done[futures[fut]] = fut.result()
+        except BaseException:
+            # El Ctrl+C llega sólo a este hilo: sin esto, cada carril seguía
+            # arrancando sus pasos (migrates que escriben) hasta el final.
+            _STOP.set()
+            raise
     results = [r for i in range(len(lanes)) for r, _ in done[i]]
     stops = any(s for i in range(len(lanes)) for _, s in done[i])
     return results, stops
 
 
-def execute(stages: list[dict], *, force: bool, jobs: int = 1) -> list[dict]:
+def execute(stages: list[dict], *, force: bool, jobs: int = 1, log_dir: str | None = None,
+            heartbeat_s: float = HEARTBEAT_S) -> list[dict]:
     """Corre las etapas en orden con la política de fallas del docstring. Una
     etapa paralela se corre entera (sus carriles son independientes) y recién
-    después se evalúa si algo aborta lo que sigue."""
+    después se evalúa si algo aborta lo que sigue. Doc 110: con `log_dir`, la
+    salida de cada paso queda en un log; mientras tanto, un latido cada
+    `heartbeat_s` lista los pasos en curso con su avance."""
+    previous = dict(_RUN)
+    _RUN.update({"dir": log_dir, "seq": 0})
+    _STOP.clear()
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat, args=(stop, heartbeat_s), daemon=True)
+    beat.start()
+    try:
+        return _execute(stages, force=force, jobs=jobs)
+    finally:
+        stop.set()
+        beat.join(timeout=5)
+        _RUN.update(previous)
+
+
+def _execute(stages: list[dict], *, force: bool, jobs: int) -> list[dict]:
     results: list[dict] = []
     abort = False
     for stage in stages:
@@ -478,6 +727,11 @@ def _print_summary(results: list[dict], wall: float, jobs: int) -> None:
         secs = f"{r['secs']:7.1f}s" if r["rc"] is not None else "      —"
         lane = f"[{r['lane']}] " if r.get("lane") else ""
         print(f"  [{r['estado']:<32}] {secs}  {lane}{r['name']}")
+        if r.get("rc") not in (0, None) and r.get("log"):
+            # Doc 110: dónde está la salida completa y cómo terminó.
+            print(f"        log: {r['log']}")
+            for line in (r.get("tail") or [])[-6:]:
+                print(f"        │ {line}")
     total = sum(r["secs"] for r in results)
     print(f"\n  tiempo real {wall / 60:.1f} min · suma de los pasos {total / 60:.1f} min "
           f"(hasta {jobs} proyecto(s) en paralelo)")
@@ -492,11 +746,14 @@ def _write_summary(mode: str, plans: list[dict], results: list[dict],
         json.dump({
             "mode": mode, "startedAt": started, "jobs": jobs,
             "finishedAt": datetime.now(timezone.utc).isoformat(),
-            "files": [{"rel": p["rel"], "project": p["project"],
+            "files": [{"rel": p["rel"], "project": p["project"], "folder": p.get("folder"),
                        "domain": p["domain"], "model": p["model"],
                        "source": p["source"], "bytes": p.get("size")} for p in plans],
             "steps": [{"name": r["name"], "lane": r.get("lane"), "rc": r["rc"],
-                       "estado": r["estado"], "secs": round(r["secs"], 1)}
+                       "estado": r["estado"], "secs": round(r["secs"], 1),
+                       # Doc 110: salida completa del paso y, si falló, su final.
+                       **({"log": r["log"]} if r.get("log") else {}),
+                       **({"tail": r["tail"]} if r.get("tail") and r["rc"] not in (0, None) else {})}
                       for r in results],
         }, fh, ensure_ascii=False, indent=1)
     return out
@@ -523,10 +780,13 @@ def _print_plan(title: str, plans: list[dict], stages: list[dict], jobs: int) ->
           f"subcarpeta = 1 proyecto (fusiona sus .xml); .xml suelto = 1 proyecto:")
     for p in plans:
         mb = (p.get("size") or 0) / 1e6
-        origin = (f" · origen: {p['domain']} / {p['model']}" if p["domain"]
-                  else f" · origen: {p['model']}")
+        origin = ("" if not p.get("mart") else
+                  f" · Mart: {p['domain']} / {p['model']}" if p["domain"]
+                  else f" · Mart: {p['model']}")
         print(f"  {p['rel']}  ({mb:,.0f} MB)")
-        print(f"      → proyecto «{p['project']}» [{p['source']}]{origin}")
+        # Doc 110: la subcarpeta en Models es el nombre del archivo.
+        print(f"      → proyecto «{p['project']}» · subcarpeta «{p['folder']}» "
+              f"[{p['source']}]{origin}")
     groups = group_by_project(plans)
     print(f"\nPROYECTOS ({len(groups)}):")
     for project, group in groups:
@@ -622,9 +882,15 @@ def main(argv: list[str] | None = None) -> int:
             print("\nDRY-RUN — nada ejecutado. Repite con --apply.")
             return 0
 
+    # Doc 110: la salida completa de cada paso queda en su log (un error ya no
+    # se pierde con el scroll del terminal).
+    run_dir = os.path.join(str(ROOT), "migration-reports",
+                           f"run-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"\nLogs de cada paso: {run_dir}")
     t0 = time.perf_counter()
     try:
-        results = execute(stages, force=args.force, jobs=args.jobs)
+        results = execute(stages, force=args.force, jobs=args.jobs, log_dir=run_dir)
     finally:
         if parse_cache:
             shutil.rmtree(parse_cache, ignore_errors=True)

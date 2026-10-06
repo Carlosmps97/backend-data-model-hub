@@ -567,11 +567,22 @@ async def _resolve_owners(cs: dict, refs: dict[str, set[str]], pending: dict[str
 # Doc 88 §4: campos de MEMBRESÍA de un canvas → colección referida.
 _MEMBERSHIP_FIELDS = {"tableIds": "canonical_tables", "viewIds": "views"}
 _MEMBERSHIP_COLLS = frozenset(_MEMBERSHIP_FIELDS.values())
+# Lo que una caja tiene EN el canvas y sale con ella: su posición y (doc 112)
+# su color en ese canvas — si volviera, llega con el color de su tabla.
+_BOX_FIELDS = ("layout", "colors")
+
+
+def _without_boxes(doc: dict, gone: set[str]) -> None:
+    """Quita de `doc` (en sitio) la posición y el color de las cajas `gone`."""
+    for field in _BOX_FIELDS:
+        if isinstance(doc.get(field), dict):
+            doc[field] = {k: v for k, v in doc[field].items() if k not in gone}
 
 
 def prune_deleted_members(payload: dict | None, pending: dict[str, dict]) -> dict | None:
     """Doc 88 §4: un payload de canvas descarta de `tableIds` / `viewIds` (y de
-    `layout`) los ids cuyo cambio pendiente EN ESTE changeset es un delete.
+    `layout` y, doc 112, de `colors`) los ids cuyo cambio pendiente EN ESTE
+    changeset es un delete.
     Borrar una tabla o una vista es trabajo normal del modelador: su membresía
     residual en los canvases no puede convertirse en «View X doesn't exist in
     this project» al mover una tabla o al publicar. Un id que no existe o es de
@@ -592,8 +603,7 @@ def prune_deleted_members(payload: dict | None, pending: dict[str, dict]) -> dic
     for field in _MEMBERSHIP_FIELDS:
         if isinstance(out.get(field), list):
             out[field] = [i for i in out[field] if str(i) not in gone]
-    if isinstance(out.get("layout"), dict):
-        out["layout"] = {k: v for k, v in out["layout"].items() if k not in gone}
+    _without_boxes(out, gone)
     return out
 
 
@@ -635,14 +645,13 @@ async def _cross_project_check(cs: dict, collection: str, entity_id: str, op: st
 
 
 def _without_members(payload: dict, ids: list[str]) -> dict:
-    """Canvas sin esos miembros (membresía + layout). Puro."""
+    """Canvas sin esos miembros (membresía + posición + color, doc 112). Puro."""
     gone = set(ids)
     out = dict(payload)
     for field in _MEMBERSHIP_FIELDS:
         if isinstance(out.get(field), list):
             out[field] = [i for i in out[field] if i not in gone]
-    if isinstance(out.get("layout"), dict):
-        out["layout"] = {k: v for k, v in out["layout"].items() if k not in gone}
+    _without_boxes(out, gone)
     return out
 
 
@@ -650,10 +659,10 @@ async def _membership_cascade(cs: dict, collection: str, entity_id: str,
                               pending_sas: dict[str, dict] | None = None) -> list[dict]:
     """Doc 88 §4: al BORRAR una tabla o una vista, los canvases del proyecto que
     la listan — publicados y/o con upsert pendiente en este changeset — reciben
-    un upsert de su doc EFECTIVO sin el id (membresía + `layout`). Devuelve los
-    ítems `{collection, entityId, op, payload}` a grabar en el MISMO request,
-    antes del delete. El borrado de tabla ya lo cascadeaba el front canvas por
-    canvas; el de vista no tenía cascada alguna."""
+    un upsert de su doc EFECTIVO sin el id (membresía + `layout` + `colors`,
+    doc 112). Devuelve los ítems `{collection, entityId, op, payload}` a grabar
+    en el MISMO request, antes del delete. El borrado de tabla ya lo cascadeaba
+    el front canvas por canvas; el de vista no tenía cascada alguna."""
     field = next((f for f, c in _MEMBERSHIP_FIELDS.items() if c == collection), None)
     if field is None:
         return []
@@ -673,8 +682,7 @@ async def _membership_cascade(cs: dict, collection: str, entity_id: str,
             continue
         payload = {k: v for k, v in doc.items() if k not in ("flgactive", "deletedAt")}
         payload[field] = [i for i in payload[field] if i != entity_id]
-        if isinstance(payload.get("layout"), dict):
-            payload["layout"] = {k: v for k, v in payload["layout"].items() if k != entity_id}
+        _without_boxes(payload, {entity_id})
         items.append({"collection": "subject_areas", "entityId": sid, "op": "upsert", "payload": payload})
     return items
 

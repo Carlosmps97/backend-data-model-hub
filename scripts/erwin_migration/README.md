@@ -32,6 +32,20 @@ Los proyectos migran en **carriles paralelos** (`--jobs`, default 4; los
 archivos de un mismo proyecto siempre en orden). En Databricks:
 `scripts/databricks/carga_erwin_notebook.py`.
 
+**Subcarpeta en Models = nombre del archivo** (doc 110; antes era el dominio
+del Mart). Dentro de un proyecto, cada `.xml` cuelga sus canvases de una
+carpeta que se llama como el archivo sin extensión: para ver «Matriz
+Variables», el archivo se llama `Matriz Variables.xml`. El plan del
+orquestador muestra la subcarpeta de cada archivo antes de correr.
+
+**Red (doc 110).** Los scripts abren conexiones PROBADAS (las que suben lento
+se descartan) y el migrate escribe por 3 conexiones con tiempo máximo por
+sentencia y reintento en otra conexión: una ruta mala a Lakebase ya no deja un
+archivo 40 min ni lo mata. Mientras corre, el orquestador imprime cada 30 s el
+avance de cada paso (docs, MB, velocidad, reintentos) y guarda la salida de
+cada paso en `migration-reports/run-<ts>/`; si algo falla, el resumen trae el
+log y sus últimas líneas.
+
 Paso a paso manual (lo mismo que encadena el orquestador):
 
 ```bash

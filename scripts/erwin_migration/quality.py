@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor
 
 from . import erwin_parser as ep
 from . import policies as pol
@@ -375,6 +376,33 @@ def summarize(m: ep.ErwinModel) -> dict:
     }
 
 
+def _warm_one(path: str, cache_dir: str) -> None:
+    try:
+        ep.parse_cached(path, cache_dir)
+    except Exception:  # noqa: BLE001 — el recorrido del gate lo reporta con su archivo
+        pass
+
+
+def prewarm_parse(paths: list[str], cache_dir: str, workers: int | None = None) -> None:
+    """Doc 110: parsea EN PARALELO (un proceso por XML, el más pesado primero)
+    y deja cada modelo en la caché; el recorrido del gate y el migrate lo leen
+    de ahí. `DMH_PARSE_WORKERS` fija los procesos (por defecto hasta 4). Si el
+    paralelo falla, el recorrido parsea como siempre."""
+    default = min(4, os.cpu_count() or 1)
+    try:
+        workers = workers or int(os.environ.get("DMH_PARSE_WORKERS") or default)
+    except ValueError:                     # «auto», «2.5»…: el valor por defecto
+        workers = default
+    if workers < 2 or len(paths) < 2:
+        return
+    ordered = sorted(paths, key=lambda p: -os.path.getsize(p) if os.path.exists(p) else 0)
+    try:
+        with ProcessPoolExecutor(max_workers=min(workers, len(ordered))) as ex:
+            list(ex.map(_warm_one, ordered, [cache_dir] * len(ordered)))
+    except Exception as exc:  # noqa: BLE001 — p. ej. un proceso sin memoria
+        print(f"(parseo en paralelo no disponible: {exc}; se parsea de a uno)")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Gate de calidad sobre exports .xml de Erwin (solo lectura)")
@@ -387,6 +415,9 @@ def main(argv: list[str] | None = None) -> int:
                          "se imprime TODO lo encontrado (política 2026-08-22: "
                          "la validación es transparente, sin resumir)")
     args = ap.parse_args(argv)
+
+    if args.parse_cache and len(args.xml) > 1:
+        prewarm_parse(args.xml, args.parse_cache)
 
     all_reports = []
     glossaries: list[tuple[str, list[tuple[str, ...]]]] = []

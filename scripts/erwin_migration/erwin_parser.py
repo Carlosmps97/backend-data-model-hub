@@ -723,7 +723,8 @@ def parse(xml_path: str) -> ErwinModel:
             ))
 
         elif tag == "Locator":
-            # Ruta del Mart del modelo — capa de origen de carpetas (doc 54 §9).
+            # Ruta del Mart del modelo (informativa; desde el doc 110 la capa
+            # de origen de carpetas es el nombre del archivo).
             if not m.locator:
                 m.locator = (el.text or "").strip()
 

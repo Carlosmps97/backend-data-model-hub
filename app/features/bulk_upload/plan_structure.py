@@ -297,6 +297,12 @@ class StructurePlanner:
             layout = {k: dict(v) for k, v in (doc.get("layout") or {}).items()}
             layout.update(_grid_positions(layout, list(state["added"]) + list(state["added_views"])))
             fields = {**doc, "tableIds": list(doc.get("tableIds") or []) + list(state["added"]), "layout": layout}
+            # Doc 112: lo que ENTRA al canvas llega con el color de su tabla — un
+            # color guardado de antes para ese id (la caja salió antes del doc
+            # 112, que ya lo quita al salir) no revive.
+            entering = set(state["added"]) | set(state["added_views"])
+            if isinstance(doc.get("colors"), dict):
+                fields["colors"] = {k: v for k, v in doc["colors"].items() if k not in entering}
             # Doc 87 S9: la lista de vistas se materializa solo cuando hay vistas
             # que agregar (canvas nuevo o lista ya existente); un canvas legacy
             # (`viewIds` None) sin vistas nuevas sigue con la regla vieja.
